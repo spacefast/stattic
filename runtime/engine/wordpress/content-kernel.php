@@ -45,10 +45,6 @@ if (function_exists('add_action')) {
         add_action('plugins_loaded', '_stattic_runtime_bootstrap_config', 0);
     }
     add_action('init', 'spacefast_content_model_register_wordpress_projection', 5);
-    // The Abilities API refuses a registration made on any other action, so
-    // these two are separate hooks rather than part of the projection above.
-    add_action('wp_abilities_api_categories_init', 'spacefast_content_model_register_ability_category');
-    add_action('wp_abilities_api_init', 'spacefast_content_model_register_active_abilities');
     add_action('acf/init', 'spacefast_content_model_register_scf_field_groups', 5);
     add_action('init', 'spacefast_content_source_journal_install', 4);
     remove_action('publish_future_post', 'check_and_publish_future_post');

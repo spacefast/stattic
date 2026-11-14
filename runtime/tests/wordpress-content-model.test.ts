@@ -30,11 +30,6 @@ function spaceDigest(spaceId: string, length: number): string {
   return new Bun.CryptoHasher("sha256").update(spaceId).digest("hex").slice(0, length);
 }
 
-// wp_ + zero_ + the 16-character Space digest the kernel scopes physical Tables
-// with. Two Spaces on one wp.cloud site both declaring `reactions` must not
-// meet in the same table.
-const alphaTablePrefix = `wp_zero_${spaceDigest("spc_alpha", 16)}_`;
-
 /**
  * The WordPress a release meets on a box: the registries it writes into, the
  * hook system it fires through, and a $wpdb faithful enough to refuse a second
@@ -296,7 +291,7 @@ class WP_Error {
 
 `;
 
-test("a generated PHP ContentModelRelease activates as native WordPress content, Tables, and Abilities", async () => {
+test("a generated PHP ContentModelRelease activates as native WordPress content", async () => {
   const contentModel = fixtureContentModel();
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wordpress-content-model-"));
   const storage = path.join(root, ".stattic/storage");
@@ -320,37 +315,18 @@ require $argv[1];
 
 $staged = spacefast_content_model_stage_release($argv[3], $argv[4], $argv[5]);
 $activation = spacefast_content_model_activate_release($argv[3]);
-// Publish, promote and rollback all activate again. Nothing may break, and the
-// migration ledger must not gain a second row for the same revision.
+// Publish, promote and rollback all activate again, and nothing may break.
 $reactivation = spacefast_content_model_activate_release($argv[3]);
 $releaseRoot = $argv[2] . '/spaces/spc_alpha/content-model/releases/' . substr($argv[3], 7);
 $GLOBALS['SPACEFAST_CONTENT_MODEL_RELEASE_ROOT'] = $releaseRoot;
 $GLOBALS['SPACEFAST_CONTENT_MODEL_REVISION'] = $argv[3];
-// The kernel's own wiring, fired in WordPress's order. The init action must
-// leave the Abilities registry empty: registration belongs to the API's own
-// actions.
+// The kernel's own wiring, fired in WordPress's order.
 do_action('init');
-$abilitiesAfterInit = array_keys($registered['abilities']);
 do_action('wp_abilities_api_categories_init');
 do_action('wp_abilities_api_init');
 spacefast_content_model_register_scf_field_groups();
 
 $projects = spacefast_content_model_collection_projection('projects');
-$alphaReactions = spacefast_content_model_table_name($wpdb, 'reactions');
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_beta';
-$betaReactions = spacefast_content_model_table_name($wpdb, 'reactions');
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-
-$ability = $registered['abilities']['zero/endpoint-preview'];
-$denial = null;
-try { $ability['execute_callback'](['limit' => 1]); }
-catch (Spacefast_Content_Error $error) { $denial = $error->codeName; }
-$GLOBALS['SPACEFAST_CONTENT_GRANTED_CAPABILITIES'] = ['page.view'];
-$GLOBALS['SPACEFAST_CONTENT_ABILITY_AUTHORIZER'] = static fn (array $descriptor, mixed $input, string $spaceId): bool =>
-  $spaceId === 'spc_alpha' && $descriptor['reads'] === ['content.projects', 'table.reactions'];
-$GLOBALS['SPACEFAST_CONTENT_ABILITY_DISPATCHER'] = static fn (array $descriptor, mixed $input): array =>
-  ['ability' => $descriptor['id'], 'input' => $input];
-$abilityResult = $ability['execute_callback'](['limit' => 1]);
 $renderedBlock = $registered['blocks']['zero/component']['render_callback']([
   'sourceKey' => 'client/components/projects.tsx',
   'componentId' => 'project-grid',
@@ -439,20 +415,12 @@ echo json_encode([
   ],
   'taxonomy' => array_keys($registered['taxonomies']),
   'collection_term' => $projects['collection_term'],
-  'tables' => [$alphaReactions, $betaReactions],
-  'ledger' => $wpdb->ledger,
   'created_tables' => array_keys($wpdb->created),
   'rest_meta' => array_keys($registered['meta']),
   'scf_target' => $registered['scf'][0]['location'][0][0],
-  'ability' => [$denial, $abilityResult],
   'ability_names' => array_keys($registered['abilities']),
   'ability_categories' => $registered['ability_categories'],
-  'abilities_after_init' => $abilitiesAfterInit,
   'refused' => $refused,
-  'ability_label' => $ability['label'],
-  'ability_category' => $ability['category'],
-  'ability_meta' => $ability['meta'],
-  'write_ability_meta' => $registered['abilities']['zero/mutation-react']['meta'],
   'rendered_block' => $renderedBlock,
   'references' => $references,
   'sync_binding' => spacefast_content_model_sync_binding('sync.projects-body'),
@@ -490,7 +458,7 @@ echo json_encode([
       artifactDigest: generated.sha256,
       staged: true,
     });
-    expect(output.activation).toMatchObject({ revision: contentModel.revision, tables: 1 });
+    expect(output.activation).toMatchObject({ revision: contentModel.revision, tables: 0 });
 
     // One template per resource a reader can land on, each opening in the site
     // editor with exactly the markup the theme already renders — so a Space that
@@ -580,71 +548,25 @@ echo json_encode([
     });
     expect(output.rest_meta).toContain("post:_zero_projects_deck");
 
-    // Tables carry the Space, and the same revision applies exactly once.
-    expect(output.tables[0]).toBe(`${alphaTablePrefix}reactions`);
-    expect(output.tables[1]).toBe(`wp_zero_${spaceDigest("spc_beta", 16)}_reactions`);
-    expect(output.created_tables).toEqual([
-      `${alphaTablePrefix}migrations`,
-      `${alphaTablePrefix}reactions`,
-      // The release declares a sync binding, so `init` installs the journal the
-      // binding writes through. It is listed here because the fixture now holds
-      // WordPress's option store: the install gates on get_option/update_option,
-      // which a real site always has and this stub previously did not.
-      "spacefast_content_source_journal",
-    ]);
-    expect(output.ledger).toEqual({ [`${alphaTablePrefix}migrations`]: [contentModel.revision] });
+    // Custom Tables are retired, so activation creates only the source journal
+    // the release's sync binding writes through.
+    expect(output.created_tables).toEqual(["spacefast_content_source_journal"]);
 
     expect(output.rendered_block).toContain('data-zero-component="project-grid"');
     expect(output.rendered_block).toContain('data-zero-source="client/components/projects.tsx"');
 
-    // Registration lands where the Abilities API accepts it, under names its
-    // registry admits, and nowhere else: nothing registers on `init`, and no
-    // registration is refused.
+    // Custom content-model Abilities are retired: only the platform sets the
+    // users and storage features register reach the registry, and nothing is
+    // refused.
     expect({
-      afterInit: output.abilities_after_init,
       refused: output.refused,
       categories: output.ability_categories,
       names: output.ability_names.toSorted(),
     }).toEqual({
-      afterInit: [],
       refused: [],
-      // The users and storage features register on the same kernel hooks, so
-      // their categories and abilities land in the same registry pass as the
-      // content model's.
-      categories: ["zero-wp-users", "zero-storage", "zero-content"],
-      names: [
-        ...platformAbilityNames,
-        "zero/content-projects-list",
-        "zero/query-featured-projects",
-        "zero/mutation-react",
-        "zero/endpoint-webhook",
-        "zero/endpoint-preview",
-      ].toSorted(),
+      categories: ["zero-wp-users", "zero-storage"],
+      names: platformAbilityNames.toSorted(),
     });
-    // The wire name is the registry's key alone. The content model id stays the
-    // Ability's label, and stays what the dispatcher is addressed by.
-    expect(output.ability_label).toBe("endpoint.preview");
-    expect(output.ability_category).toBe("zero-content");
-    // `public` is what carries a compiled Ability to the REST surface and, via
-    // the MCP adapter, to agents; the annotations tell an agent whether calling
-    // it changes anything. Both follow the content model's own read/write mode.
-    expect(output.ability_meta).toEqual({
-      public: true,
-      kind: "endpoint",
-      mode: "read",
-      reads: ["content.projects", "table.reactions"],
-      writes: [],
-      annotations: { readonly: true, destructive: false, idempotent: true },
-    });
-    expect(output.write_ability_meta.annotations).toEqual({
-      readonly: false,
-      destructive: true,
-      idempotent: false,
-    });
-    expect(output.ability).toEqual([
-      "content_ability_denied",
-      { ability: "endpoint.preview", input: { limit: 1 } },
-    ]);
     expect(output.references).toEqual([
       true,
       "The referenced content does not belong to this Space or resource.",
@@ -790,6 +712,49 @@ catch (Spacefast_Content_Error $error) { echo $error->codeName; }
     expect(result.stdout.toString()).toBe("content_model_digest_mismatch");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Custom Tables, Abilities and hooks are retired. A correctly digested release
+// that still declares one is refused rather than activated without it, so a
+// Space can never look live while silently missing what its release names.
+test("activation refuses a release that declares a retired Table, Ability or hook", async () => {
+  const contentModel = fixtureContentModel();
+  const generated = await generateContentModelPhp(contentModel);
+  for (const key of ["tables", "abilities", "hooks"]) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wordpress-content-model-retired-"));
+    const storage = path.join(root, ".stattic/storage");
+    const releaseRoot = path.join(
+      storage,
+      "spaces/spc_alpha/content-model/releases",
+      contentModel.revision.slice("sha256:".length),
+    );
+    mkdirSync(releaseRoot, { recursive: true });
+    const php = generated.php.replace(`'${key}' => [],`, `'${key}' => [['id' => 'retired']],`);
+    expect(php).not.toBe(generated.php);
+    writeFileSync(path.join(releaseRoot, "content-model.php"), php);
+    writeFileSync(
+      path.join(releaseRoot, "content-model.sha256"),
+      `sha256:${new Bun.CryptoHasher("sha256").update(php).digest("hex")}\n`,
+    );
+    const script = String.raw`
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
+$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
+require $argv[1];
+try { spacefast_content_model_activate_release($argv[3]); }
+catch (Spacefast_Content_Error $error) { echo $error->codeName; }
+`;
+    try {
+      const result = Bun.spawnSync(["php", "-r", script, kernel, storage, contentModel.revision], {
+        cwd: repoRoot,
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
+      expect(result.stdout.toString()).toBe("content_model_invalid");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -25,9 +25,6 @@ const SPACEFAST_CONTENT_MODEL_PERMALINK_STRUCTURE = '/%postname%/';
 // The theme the engine installs, and the only one a managed site renders through.
 const SPACEFAST_CONTENT_MODEL_MANAGED_THEME = 'spacefast-managed';
 const SPACEFAST_CONTENT_MODEL_PAGE_SOURCE_META = '_zero_page_source_key';
-// Ability category slugs admit `^[a-z0-9]+(?:-[a-z0-9]+)*$`, and every
-// WordPress-visible identifier this kernel mints is Zero-branded.
-const SPACEFAST_CONTENT_MODEL_ABILITY_CATEGORY = 'zero-content';
 
 function spacefast_content_model_root(string $privateRoot, string $spaceId): string
 {
@@ -96,10 +93,13 @@ function spacefast_content_model_read_release(string $releaseRoot, ?string $expe
         || preg_match(SPACEFAST_CONTENT_MODEL_REVISION_PATTERN, $contentModel['revision']) !== 1
         || !is_array($contentModel['postTypes'] ?? null)
         || !is_array($contentModel['scfFieldGroups'] ?? null)
-        || !is_array($contentModel['tables'] ?? null)
+        // Custom Tables, Abilities and hooks are retired. A release still
+        // carries the three fields, always empty; one that fills them is refused
+        // rather than activated without them.
+        || ($contentModel['tables'] ?? null) !== []
         || !is_array($contentModel['pages'] ?? null)
-        || !is_array($contentModel['abilities'] ?? null)
-        || !is_array($contentModel['hooks'] ?? null)
+        || ($contentModel['abilities'] ?? null) !== []
+        || ($contentModel['hooks'] ?? null) !== []
         || !is_array($contentModel['syncBindings'] ?? null)
     ) {
         throw new Spacefast_Content_Error(422, 'content_model_invalid', 'The generated PHP ContentModelRelease is invalid.');
@@ -270,9 +270,6 @@ function spacefast_content_model_register_wordpress_projection(): void
         return;
     }
     spacefast_content_model_register_rest_meta($contentModel);
-    // Abilities are NOT registered here. The Abilities API only accepts
-    // registrations during `wp_abilities_api_init`; see
-    // spacefast_content_model_register_active_abilities().
 }
 
 function spacefast_content_model_render_component_block(array $attributes): string
@@ -463,284 +460,6 @@ function spacefast_content_model_register_scf_field_groups(): void
             'show_in_rest' => 1,
             'allow_ai_access' => 0,
             'active' => true,
-        ]);
-    }
-}
-
-function spacefast_content_model_sql_identifier(string $identifier): string
-{
-    $normalized = str_replace(['.', '-'], '_', $identifier);
-    // 58 characters leaves room for the `zero_` index prefix inside MySQL's
-    // 64-character identifier ceiling.
-    if (preg_match('/^[a-z][a-z0-9_]{0,57}$/', $normalized) !== 1) {
-        throw new Spacefast_Content_Error(422, 'content_model_invalid', 'A Table SQL identifier is invalid.');
-    }
-    return $normalized;
-}
-
-/**
- * Tables are per Space, like every other projection here. One wp.cloud site
- * hosts many Spaces, and two of them may both declare a `reactions` table, so
- * the physical name carries the Space: an unscoped name would hand Space B
- * Space A's rows. The migration ledger is scoped the same way, because each
- * Space activates its own revision.
- */
-function spacefast_content_model_table_name(object $wpdb, string $name): string
-{
-    $prefix = (string) ($wpdb->prefix ?? '');
-    if (preg_match('/^[A-Za-z0-9_]*$/', $prefix) !== 1) {
-        throw new Spacefast_Content_Error(503, 'content_tables_unavailable', 'The WordPress Table prefix is invalid.');
-    }
-    $scoped = $prefix . 'zero_'
-        . substr(hash('sha256', spacefast_content_require_space_id()), 0, 16)
-        . '_' . spacefast_content_model_sql_identifier($name);
-    // MySQL's hard ceiling. The Space digest and prefix are fixed width, so this
-    // only ever rejects a content model that authored an unusably long Table name.
-    if (strlen($scoped) > 64) {
-        throw new Spacefast_Content_Error(422, 'content_model_invalid', 'A Table name is too long for MySQL.');
-    }
-    return $scoped;
-}
-
-function spacefast_content_model_column_sql(array $column): string
-{
-    $type = match ($column['value']['kind']) {
-        'string' => isset($column['value']['maxLength']) && is_int($column['value']['maxLength'])
-            && $column['value']['maxLength'] > 0 && $column['value']['maxLength'] <= 16_383
-                ? 'VARCHAR(' . $column['value']['maxLength'] . ')'
-                : 'LONGTEXT',
-        'number' => 'DOUBLE',
-        'boolean' => 'TINYINT(1)',
-        'datetime' => 'DATETIME(6)',
-        'json' => 'LONGTEXT',
-        default => throw new Spacefast_Content_Error(422, 'content_model_invalid', 'A Table column type is invalid.'),
-    };
-    return '`' . spacefast_content_model_sql_identifier($column['name']) . '` ' . $type
-        . ($column['nullable'] ? ' NULL' : ' NOT NULL');
-}
-
-function spacefast_content_model_apply_tables(array $contentModel): void
-{
-    // A release that declares no Tables has nothing to migrate, so it never
-    // needs the ledger either.
-    if ($contentModel['tables'] === []) {
-        return;
-    }
-    global $wpdb;
-    if (!is_object($wpdb) || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'query') || !method_exists($wpdb, 'get_var')) {
-        throw new Spacefast_Content_Error(503, 'content_tables_unavailable', 'WordPress Tables are unavailable.');
-    }
-    $ledger = spacefast_content_model_table_name($wpdb, 'migrations');
-    $ledgerSql = "CREATE TABLE `{$ledger}` (revision VARCHAR(71) NOT NULL PRIMARY KEY, applied_at DATETIME(6) NOT NULL)";
-    spacefast_content_model_apply_ddl($ledgerSql);
-    $revision = $contentModel['revision'];
-    $present = $wpdb->get_var($wpdb->prepare("SELECT revision FROM `{$ledger}` WHERE revision = %s", $revision));
-    if ($present === $revision) {
-        return;
-    }
-    foreach ($contentModel['tables'] as $table) {
-        $tableName = spacefast_content_model_table_name($wpdb, $table['name']);
-        $columns = ['`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT'];
-        $columnNames = [];
-        foreach ($table['columns'] as $column) {
-            $columns[] = spacefast_content_model_column_sql($column);
-            $columnNames[$column['id']] = spacefast_content_model_sql_identifier($column['name']);
-        }
-        $columns[] = 'PRIMARY KEY (`id`)';
-        foreach ($table['indexes'] as $index) {
-            $indexed = array_map(static fn (string $field): string => '`' . $columnNames[$field] . '`', $index['fields']);
-            $columns[] = (!empty($index['unique']) ? 'UNIQUE ' : '') . 'KEY `zero_'
-                . spacefast_content_model_sql_identifier($index['id']) . '` (' . implode(', ', $indexed) . ')';
-        }
-        spacefast_content_model_apply_ddl("CREATE TABLE `{$tableName}` (" . implode(', ', $columns) . ')');
-    }
-    $inserted = $wpdb->query($wpdb->prepare(
-        "INSERT INTO `{$ledger}` (revision, applied_at) VALUES (%s, UTC_TIMESTAMP(6))",
-        $revision
-    ));
-    if ($inserted === false) {
-        throw new Spacefast_Content_Error(500, 'content_table_migration_failed', 'The Table migration ledger could not be advanced.');
-    }
-}
-
-/**
- * Activation re-runs on every publish, promote and rollback, so every statement
- * here has to survive meeting its own tables again.
- *
- * dbDelta is the tool that does that AND carries a column change from one
- * revision to the next, but it does not exist in an ordinary request: WordPress
- * only defines it once wp-admin/includes/upgrade.php is loaded. Loading it is
- * the whole reason this used to fail on the second activation and reach the
- * raw fallback, which cannot re-create an existing table.
- */
-function spacefast_content_model_apply_ddl(string $sql): void
-{
-    global $wpdb;
-    if (!function_exists('dbDelta') && defined('ABSPATH') && is_file(ABSPATH . 'wp-admin/includes/upgrade.php')) {
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-    }
-    if (function_exists('dbDelta')) {
-        $result = dbDelta($sql);
-        if ($result === false) {
-            throw new Spacefast_Content_Error(500, 'content_table_migration_failed', 'A Table migration failed.');
-        }
-        return;
-    }
-    // Without dbDelta the best this can promise is creation, not evolution, so
-    // it must at least be repeatable. dbDelta itself cannot parse IF NOT EXISTS.
-    $result = $wpdb->query(preg_replace('/^CREATE TABLE /i', 'CREATE TABLE IF NOT EXISTS ', $sql, 1));
-    if ($result === false) {
-        throw new Spacefast_Content_Error(500, 'content_table_migration_failed', 'A Table migration failed.');
-    }
-}
-
-function spacefast_content_model_admit_ability(array $ability): bool
-{
-    $granted = $GLOBALS['SPACEFAST_CONTENT_GRANTED_CAPABILITIES'] ?? [];
-    if (!is_array($granted)) {
-        return false;
-    }
-    foreach ($ability['permits'] as $capability) {
-        if (!is_string($capability) || !in_array($capability, $granted, true)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-function spacefast_content_model_authorize_ability(array $ability, mixed $input): bool
-{
-    if (!spacefast_content_model_admit_ability($ability)) {
-        return false;
-    }
-    $authorizer = $GLOBALS['SPACEFAST_CONTENT_ABILITY_AUTHORIZER'] ?? null;
-    return !is_callable($authorizer) || $authorizer($ability, $input, spacefast_content_require_space_id()) === true;
-}
-
-function spacefast_content_model_dispatch_ability(string $abilityId, mixed $input): mixed
-{
-    $contentModel = spacefast_content_model_active_release();
-    foreach (is_array($contentModel['abilities'] ?? null) ? $contentModel['abilities'] : [] as $ability) {
-        if (!is_array($ability) || ($ability['id'] ?? null) !== $abilityId) {
-            continue;
-        }
-        if (!spacefast_content_model_authorize_ability($ability, $input)) {
-            throw new Spacefast_Content_Error(403, 'content_ability_denied', 'The content Ability denied this request.');
-        }
-        $dispatcher = $GLOBALS['SPACEFAST_CONTENT_ABILITY_DISPATCHER'] ?? null;
-        if (!is_callable($dispatcher)) {
-            throw new Spacefast_Content_Error(503, 'content_ability_unavailable', 'The content Ability dispatcher is unavailable.');
-        }
-        return $dispatcher($ability, $input);
-    }
-    throw new Spacefast_Content_Error(404, 'content_ability_not_found', 'The content Ability was not found.');
-}
-
-/**
- * The name the WordPress Abilities API publishes a compiled Ability under.
- *
- * A content model id is the compiler's vocabulary — `content.projects.list`,
- * `mutation.react` — and stays exactly that everywhere Spacefast addresses an
- * Ability: route contributions, SDK descriptors, executables, decisions,
- * receipts, invalidations. Only the WordPress registry needs another spelling,
- * because WP_Abilities_Registry::register() admits `^[a-z0-9-]+/[a-z0-9-]+$`:
- * one namespace, one slug, and no dots or underscores. A name outside it is
- * refused with `_doing_it_wrong` and registers nothing.
- *
- * So the id flattens onto a single Zero-branded slug — `content.projects.list`
- * becomes `zero/content-projects-list` — which the MCP adapter in turn
- * publishes to agents as `zero-content-projects-list`.
- *
- * Flattening is many-to-one: `a.b` and `a_b` reach the same name. The contentModel
- * contract rejects that collision at compile
- * (`contentModelReleaseV1Schema`'s "ability WordPress names must be unique" in
- * packages/common/src/contracts/content-model.ts), and this derivation and
- * that one must change together.
- */
-function spacefast_content_model_ability_name(string $id): string
-{
-    return 'zero/' . str_replace(['.', '_'], '-', $id);
-}
-
-function spacefast_content_model_register_ability_category(): void
-{
-    // wp_register_ability_category() checks doing_action() for its own hook and
-    // returns null anywhere else, so this only ever runs from that action.
-    if (function_exists('wp_register_ability_category')) {
-        wp_register_ability_category(SPACEFAST_CONTENT_MODEL_ABILITY_CATEGORY, [
-            'label' => 'Zero content',
-            'description' => 'Abilities projected from the active Spacefast ContentModelRelease.',
-        ]);
-    }
-}
-
-/**
- * The `wp_abilities_api_init` entry. wp_register_ability() refuses every call
- * made outside that action, so registration cannot ride along with the rest of
- * the WordPress projection on `init` — it has to be its own hook.
- *
- * A Space with no active release registers nothing, and a release the kernel
- * cannot project leaves the site serving: a broken content model costs its Abilities,
- * never the page.
- */
-function spacefast_content_model_register_active_abilities(): void
-{
-    $contentModel = spacefast_content_model_active_release();
-    if ($contentModel === null) {
-        return;
-    }
-    try {
-        spacefast_content_model_register_abilities($contentModel);
-    } catch (Spacefast_Content_Error $error) {
-        error_log('spacefast content model abilities unregistered code=' . $error->codeName);
-    }
-}
-
-function spacefast_content_model_register_abilities(array $contentModel): void
-{
-    if (!function_exists('wp_register_ability')) {
-        return;
-    }
-    $names = [];
-    foreach ($contentModel['abilities'] as $ability) {
-        $id = $ability['id'];
-        $inputSchema = $ability['inputSchema'] ?? null;
-        $outputSchema = $ability['outputSchema'] ?? null;
-        if ($inputSchema === null || $outputSchema === null) {
-            throw new Spacefast_Content_Error(422, 'content_model_invalid', 'An Ability schema reference is invalid.');
-        }
-        $name = spacefast_content_model_ability_name($id);
-        // The registry answers a repeat name with _doing_it_wrong and keeps the
-        // first registration, which would silently drop the second Ability.
-        if (isset($names[$name])) {
-            throw new Spacefast_Content_Error(422, 'content_model_ability_name_conflict', 'Two Abilities compile to one WordPress Ability name.');
-        }
-        $names[$name] = true;
-        wp_register_ability($name, [
-            'label' => $id,
-            'description' => 'Generated from the active Spacefast ContentModelRelease.',
-            'category' => SPACEFAST_CONTENT_MODEL_ABILITY_CATEGORY,
-            'input_schema' => $inputSchema,
-            'output_schema' => $outputSchema,
-            'permission_callback' => static fn (): bool => spacefast_content_model_admit_ability($ability),
-            'execute_callback' => static fn (mixed $input): mixed => spacefast_content_model_dispatch_ability($id, $input),
-            // `public` is what carries a compiled Ability to clients — the REST
-            // surface and, through the MCP adapter, agents. It is the same
-            // registration the Space's users Abilities use, so the generated
-            // content model SDK and an agent's tool list name the same set. Admission
-            // stays with permission_callback; publishing is not permitting.
-            'meta' => [
-                'public' => true,
-                'kind' => $ability['kind'],
-                'mode' => $ability['mode'],
-                'reads' => $ability['reads'],
-                'writes' => $ability['writes'],
-                'annotations' => [
-                    'readonly' => $ability['mode'] === 'read',
-                    'destructive' => $ability['mode'] === 'write',
-                    'idempotent' => $ability['mode'] === 'read',
-                ],
-            ],
         ]);
     }
 }
@@ -1073,7 +792,6 @@ function spacefast_content_model_activate_release(mixed $revision): array
     spacefast_content_model_ensure_flat_permalinks();
     spacefast_content_model_ensure_managed_theme();
     spacefast_content_model_ensure_collection_terms($contentModel);
-    spacefast_content_model_apply_tables($contentModel);
     return spacefast_content_sync_locked(static function () use ($contentModel, $contentModelRoot, $revision): array {
         $previous = spacefast_content_model_current_release($contentModelRoot);
         $previousPaths = [];
@@ -1099,6 +817,6 @@ function spacefast_content_model_activate_release(mixed $revision): array
                 }
             }
         }
-        return ['revision' => $revision, 'tables' => count($contentModel['tables']), 'pages' => count($documents)];
+        return ['revision' => $revision, 'tables' => 0, 'pages' => count($documents)];
     });
 }

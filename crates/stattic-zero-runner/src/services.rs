@@ -420,7 +420,7 @@ fn connectors_call(
 fn content_query_retired() -> BrokerRefusal {
     BrokerRefusal::new(
         "content_query_retired",
-        "ctx.content.query is retired. This Space serves its content model as Abilities; call the generated content Ability instead.",
+        "ctx.content.query is retired. Read content through the Space's WordPress REST API, or move the app to First.",
     )
 }
 
@@ -1214,7 +1214,7 @@ mod tests {
             json!({ "queries": { "posts": { "collection": "posts" } } }),
         ));
         assert_eq!(code, "content_query_retired");
-        assert!(message.contains("Abilities"), "{message}");
+        assert!(message.contains("WordPress REST API"), "{message}");
     }
 
     #[test]

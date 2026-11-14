@@ -235,7 +235,8 @@ impl Fixture {
             "context": {
                 "spaceId": "spc_test",
                 "versionId": "ver_test",
-                "schemaHash": null
+                "schemaHash": null,
+                "egressScope": "trusted"
             },
             "auth": {
                 "userId": "usr_test",

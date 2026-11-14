@@ -210,19 +210,7 @@ fn retained_files(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let retention = match session.get("retention") {
-        // A session record written before retention was stated carries its own
-        // list and nothing to materialize.
-        None | Some(Value::Null) => None,
-        Some(Value::String(mode)) => Some(mode.as_str()),
-        Some(_) => {
-            return invalid(
-                "retention_invalid",
-                "Retention must be one of: all, list, none.",
-            )
-        }
-    };
-    match retention {
+    match session.get("retention").and_then(Value::as_str) {
         Some("all") => {
             if !declared.is_empty() {
                 return invalid(
@@ -239,8 +227,8 @@ fn retained_files(
             validate_id(reusable, "reusable_version_id")?;
             retained_from_catalog(private_root, space_id, reusable)
         }
-        None | Some("list") | Some("none") => Ok(declared),
-        Some(_) => invalid(
+        Some("list" | "none") => Ok(declared),
+        _ => invalid(
             "retention_invalid",
             "Retention must be one of: all, list, none.",
         ),
@@ -713,6 +701,7 @@ mod tests {
         json!({
             "manifest": manifest,
             "accepted": accepted.into_iter().collect::<serde_json::Map<_, _>>(),
+            "retention": "none",
         })
     }
 
@@ -765,6 +754,7 @@ mod tests {
         let mut files = BTreeMap::new();
         let mut record = session(vec![entry], vec![accepted]);
         record["reusable_version_id"] = json!("prev");
+        record["retention"] = json!("list");
         record["retained_files"] = json!(retained.clone());
         let result = commit_session_files("s", &record, &private, &stage, &mut files);
 
@@ -944,6 +934,7 @@ mod tests {
             vec![new_accepted, kept_accepted, new_heavy_accepted],
         );
         record["reusable_version_id"] = json!("prev");
+        record["retention"] = json!("list");
         record["retained_files"] = json!([base_entry.clone(), kept_entry.clone(), base_heavy]);
 
         let mut files = BTreeMap::new();
@@ -987,8 +978,8 @@ mod tests {
     /// whole path set comes from that version's catalog, at SOURCE identity —
     /// the uploaded object, so substitution re-runs, rather than the byte the
     /// last publish substituted. An unreadable catalog is refused, and so is a
-    /// retention value that cannot be read: taking either as retain-nothing
-    /// drops every path the base version held.
+    /// retention value that is missing or cannot be read: taking either as
+    /// retain-nothing drops every path the base version held.
     #[test]
     fn retain_all_materializes_the_reusable_versions_path_set_from_the_catalog() {
         use crate::catalog::{
@@ -1074,11 +1065,15 @@ mod tests {
         assert_eq!(files["index.html"].sha256, sha256(uploaded));
         assert_eq!(fs::read(stage.join("files/assets/app.js")).unwrap(), script);
 
-        // Each refusal for its own reason: a mode nothing can read, and a list
-        // sent alongside the mode that says there is no list.
+        // Each refusal for its own reason: a mode nothing can read, no mode at
+        // all, and a list sent alongside the mode that says there is no list.
         for (session, expected) in [
             (
                 json!({"retention": "everything", "reusable_version_id": "prev"}),
+                "retention_invalid",
+            ),
+            (
+                json!({"reusable_version_id": "prev", "retained_files": []}),
                 "retention_invalid",
             ),
             (
@@ -1117,6 +1112,7 @@ mod tests {
             "s",
             &json!({
                 "reusable_version_id": "prev",
+                "retention": "list",
                 "retained_files": retained.clone(),
             }),
             &private,
@@ -1143,6 +1139,7 @@ mod tests {
             "s",
             &json!({
                 "reusable_version_id": "prev",
+                "retention": "list",
                 "retained_files": broken,
             }),
             &private,
@@ -1186,6 +1183,7 @@ mod tests {
             "s",
             &json!({
                 "reusable_version_id": "prev",
+                "retention": "list",
                 "retained_files": [{
                     "path": "index.html",
                     "size": VERSION_MAX_TOTAL_BYTES + 1,
@@ -1391,8 +1389,8 @@ mod tests {
         let private = temp.path().join("storage");
         let stage = private.join("spaces/s/versions/.v.rust-finalizing");
         for record in [
-            json!({ "manifest": "index.html" }),
-            json!({ "manifest": [], "accepted": [] }),
+            json!({ "manifest": "index.html", "retention": "none" }),
+            json!({ "manifest": [], "accepted": [], "retention": "none" }),
         ] {
             let error = commit_session_files("s", &record, &private, &stage, &mut BTreeMap::new())
                 .unwrap_err();
@@ -1414,7 +1412,7 @@ mod tests {
         let mut files = BTreeMap::new();
         commit_session_files(
             "s",
-            &json!({ "manifest": [], "accepted": {} }),
+            &json!({ "manifest": [], "accepted": {}, "retention": "none" }),
             &private,
             &stage,
             &mut files,

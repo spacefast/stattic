@@ -44,30 +44,11 @@ function spacefast_content_model_is_stable_id(mixed $value): bool
         && preg_match('/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/', $value) === 1;
 }
 
-function spacefast_content_model_legacy_release_present(string $releaseRoot): bool
-{
-    return is_file($releaseRoot . '/schema.json')
-        || is_file($releaseRoot . '/payloadwp.php')
-        || is_file($releaseRoot . '/content-model.json');
-}
-
-function spacefast_content_model_republish_required(): never
-{
-    throw new Spacefast_Content_Error(
-        409,
-        'content_model_republish_required',
-        'This content release uses the retired Payload format. Republish the Space to activate its WordPress content model.'
-    );
-}
-
 /** @return array<string,mixed> */
 function spacefast_content_model_read_release(string $releaseRoot, ?string $expectedRevision = null): array
 {
     $contentModelFile = $releaseRoot . '/content-model.php';
     if (!is_file($contentModelFile)) {
-        if (spacefast_content_model_legacy_release_present($releaseRoot)) {
-            spacefast_content_model_republish_required();
-        }
         throw new Spacefast_Content_Error(409, 'content_model_not_found', 'The content ContentModelRelease is incomplete.');
     }
     $artifactDigest = _stattic_private_tree_read_pointer($releaseRoot . '/content-model.sha256', 72);

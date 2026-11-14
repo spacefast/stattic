@@ -31,7 +31,6 @@ const SPACEFAST_RUNTIME_ENGINE_REVISION = 'source-tree';
 // service may inspect their signed URLs. The runtime owns this response so an
 // engine promotion also upgrades route bundles compiled by an older engine.
 const STATTIC_NOINDEX_ROBOTS_BODY = "User-agent: WordPress.com mShots\nAllow: /\n\nUser-agent: *\nDisallow: /\n";
-const STATTIC_LEGACY_NOINDEX_ROBOTS_BODY = "User-agent: *\nDisallow: /\n";
 
 function _stattic_runtime_install_root(string $engineRoot): string
 {

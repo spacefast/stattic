@@ -193,14 +193,12 @@ function spacefast_content_sync_source_media_urls(string $text): string
 /** Comparison-only view for a ledger written before media URLs were relative. */
 function spacefast_content_sync_normalize_ledger_media(array $ledger): array
 {
-    foreach ([['baseText', 'textDigest'], ['baseMarkdown', 'markdownDigest']] as [$textKey, $digestKey]) {
-        if (!is_string($ledger[$textKey] ?? null)) continue;
-        $document = spacefast_content_sync_document($ledger[$textKey]);
-        $document['body'] = spacefast_content_sync_source_media_urls($document['body']);
-        $ledger[$textKey] = spacefast_content_sync_envelope($document['metadata'], $document['body']);
-        if (is_string($ledger[$digestKey] ?? null)) {
-            $ledger[$digestKey] = spacefast_content_sync_digest_text($ledger[$textKey]);
-        }
+    if (!is_string($ledger['baseText'] ?? null)) return $ledger;
+    $document = spacefast_content_sync_document($ledger['baseText']);
+    $document['body'] = spacefast_content_sync_source_media_urls($document['body']);
+    $ledger['baseText'] = spacefast_content_sync_envelope($document['metadata'], $document['body']);
+    if (is_string($ledger['textDigest'] ?? null)) {
+        $ledger['textDigest'] = spacefast_content_sync_digest_text($ledger['baseText']);
     }
     return $ledger;
 }
@@ -1118,13 +1116,6 @@ function spacefast_content_sync_reconcile_bound(array $input, ?object $post): ar
     if (($ledger['fieldStorage'] ?? $binding['field_storage']) !== $binding['field_storage']) {
         throw new Spacefast_Content_Error(409, 'content_sync_binding_conflict', 'The binding storage changed.');
     }
-    // A ledger written before the HTML sync format named the common base
-    // `baseMarkdown`/`markdownDigest`. Read it under the format-neutral names so
-    // an already-bound Markdown space is not misread as fully changed (which
-    // would spuriously re-push) on its first reconcile after the deploy. The
-    // stored `revision` is untouched, so the compare-and-swap below still holds.
-    $ledger['baseText'] ??= $ledger['baseMarkdown'] ?? '';
-    $ledger['textDigest'] ??= $ledger['markdownDigest'] ?? '';
     $postId = (int) $post->ID;
     $wordpressBlocks = spacefast_content_sync_read_blocks($post, $binding);
     $wordpressRevisionId = spacefast_content_sync_current_revision_id($postId);

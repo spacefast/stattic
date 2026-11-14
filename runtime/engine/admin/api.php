@@ -222,8 +222,6 @@ function _stattic_runtime_admin_management_routes(): array
         ['POST', '#^/jobs/tick$#', 'tick_engine_jobs', [], 'none', false, '_stattic_runtime_jobs_tick_route'],
         ['GET', '#^/jobs/([^/]+)$#', 'get_engine_job', ['job_id' => 1], 'none', false, '_stattic_runtime_jobs_get_route'],
         ['POST', '#^/engine/update$#', 'update_engine', [], 'none', false, '_stattic_engine_update_route'],
-        ['POST', '#^/components/stage$#', 'stage_components', [], 'site', false, '_stattic_runtime_stage_components'],
-        ['POST', '#^/spaces/([^/]+)/components/stage$#', 'stage_components', ['space_id' => 1], 'site', false, '_stattic_runtime_stage_space_components'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/dump$#', 'zero_db_dump', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_dump'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/export$#', 'zero_db_export', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_export'],
         ['GET', '#^/spaces/([^/]+)/storage$#', 'storage_list', ['space_id' => 1], 'none', false, '_stattic_storage_list'],

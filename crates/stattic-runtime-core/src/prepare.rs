@@ -106,11 +106,9 @@ pub struct VariableScope {
 pub struct Channel {
     /// Product channel name used to select a channel value.
     pub name: String,
-    /// Runtime route name under which variant bytes are stored.
-    // The runtime HTTP contract is snake_case; the in-process/WASI prepare
-    // protocol historically used camelCase. Accept both at this shared type
-    // without asking either boundary to translate the other one's wire.
-    #[serde(rename = "route_name", alias = "routeName")]
+    /// Runtime route name under which variant bytes are stored. Snake case on
+    /// every wire, like the runtime HTTP contract.
+    #[serde(rename = "route_name")]
     pub route_name: String,
 }
 

@@ -1565,8 +1565,8 @@ test("template variants select per-channel bytes; a version host serves the comm
         },
       ],
       channels: [
-        { name: "production", routeName: "production" },
-        { name: "preview", routeName: "preview" },
+        { name: "production", route_name: "production" },
+        { name: "preview", route_name: "preview" },
       ],
     },
     activate: {

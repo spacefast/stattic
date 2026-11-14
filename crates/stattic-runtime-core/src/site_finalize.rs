@@ -2399,6 +2399,7 @@ mod tests {
             session: json!({
                 "manifest": manifest,
                 "accepted": accepted,
+                "retention": "none",
                 "metadata": metadata,
             }),
             body,
@@ -3729,6 +3730,7 @@ mod tests {
                     "manifest":[],
                     "accepted":{},
                     "reusable_version_id":"v",
+                    "retention":"list",
                     "retained_files":[{"path":"page.html","size":source.len(),"sha256":original_hash,"contentType":"text/html"}],
                     "metadata":{"mode":"files","content":{"format":"gutenberg-blocks"}}
                 }),
@@ -3994,7 +3996,8 @@ mod tests {
             "context": {
                 "spaceId": "spc_zero_all_features",
                 "versionId": "ver_zero_all_features",
-                "schemaHash": null
+                "schemaHash": null,
+                "egressScope": "trusted"
             },
             "auth": {
                 "userId": "usr_zero_fixture",

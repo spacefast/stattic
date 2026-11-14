@@ -240,34 +240,6 @@ test("serves and proves the chroot revision the site selected", async () => {
 });
 
 /**
- * Component staging's check of the content mu-plugin, a loader copy, against
- * the chroot revision's own lock: the problems it reports.
- */
-function chrootLoaderComponentProblems(): unknown[] {
-  const command = Bun.spawnSync({
-    cmd: [
-      "php",
-      "-d",
-      "auto_prepend_file=",
-      "-r",
-      String.raw`require $argv[1];
-$lock = _stattic_component_lock($argv[2]);
-if (!is_array($lock)) { fwrite(STDERR, "invalid lock\n"); exit(1); }
-$problems = [];
-_stattic_component_check_embedded($lock, 'immutable-loader', $argv[3], $problems);
-echo json_encode($problems);`,
-      path.join(chrootEngine(), "engine/admin/components.php"),
-      path.join(chrootEngine(), "engine"),
-      path.join(rt.root, "wp-content/mu-plugins/spacefast-content.php"),
-    ],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  expect(command.exitCode, command.stderr.toString()).toBe(0);
-  return JSON.parse(command.stdout.toString());
-}
-
-/**
  * Gives the chroot revision a loader with these bytes, and a lock that digests
  * them, as a build of that loader would.
  */
@@ -299,20 +271,13 @@ file_put_contents($argv[2], json_encode($lock, JSON_UNESCAPED_SLASHES | JSON_PRE
   expect(command.exitCode, command.stderr.toString()).toBe(0);
 }
 
-test("the chroot receipt and component staging agree on the site's loader bytes", async () => {
-  const digestMismatch = [
-    {
-      componentId: "immutable-loader",
-      code: "component_digest_mismatch",
-      detail: "Installed component bytes do not match the platform lock.",
-    },
-  ];
+test("the chroot receipt accepts only the site's own loader bytes", async () => {
   const updateRequired = async () => {
     const response = await update(CHROOT_REVISION);
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       code: "runtime_engine_update_required",
-      details: { active_revision: CHROOT_REVISION, layout: "release", engine_source: "chroot" },
+      details: { active_revision: CHROOT_REVISION, engine_source: "chroot" },
     });
   };
   // Every path the engine installs the loader at, as the installer reads them.
@@ -332,21 +297,19 @@ test("the chroot receipt and component staging agree on the site's loader bytes"
   const chrootLockBytes = readFileSync(chrootLock);
 
   // The site carries the chroot revision's loader: a chroot move that keeps
-  // the loader needs no install, and the component stage accepts it too.
+  // the loader needs no install.
   expect((await update(CHROOT_REVISION)).status).toBe(200);
-  expect(chrootLoaderComponentProblems()).toEqual([]);
 
   // A loader copy with other bytes is not this revision's, whatever it says.
   writeFileSync(muPlugin, `${loader}// a loader with other bytes\n`);
   try {
     await updateRequired();
-    expect(chrootLoaderComponentProblems()).toEqual(digestMismatch);
   } finally {
     writeFileSync(muPlugin, loader);
   }
 
-  // A chroot revision whose loader adds a managed HTTPS apex: neither proof
-  // accepts the site until its install lays the new loader down, so the apex
+  // A chroot revision whose loader adds a managed HTTPS apex: the receipt
+  // doesn't accept the site until its install lays the new loader down, so the apex
   // reaches every site the revision serves.
   const withApex = loader.replace(
     "$httpsApexes = ['space.fast', 'view.fast'];",
@@ -356,17 +319,14 @@ test("the chroot receipt and component staging agree on the site's loader bytes"
   try {
     setChrootLoader(withApex);
     await updateRequired();
-    expect(chrootLoaderComponentProblems()).toEqual(digestMismatch);
     for (const copy of loaderCopies) writeFileSync(copy, withApex);
     expect((await update(CHROOT_REVISION)).status).toBe(200);
-    expect(chrootLoaderComponentProblems()).toEqual([]);
   } finally {
     for (const copy of loaderCopies) writeFileSync(copy, loader);
     writeFileSync(chrootLoader, loader);
     writeFileSync(chrootLock, chrootLockBytes);
   }
   expect((await update(CHROOT_REVISION)).status).toBe(200);
-  expect(chrootLoaderComponentProblems()).toEqual([]);
 });
 
 test("a request before a first install publishes the release pointer is retried", () => {

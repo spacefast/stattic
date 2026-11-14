@@ -116,7 +116,6 @@ test("reports that a divergent release needs a provider install", async () => {
   expect(body.code).toBe("runtime_engine_update_required");
   expect(body.details).toEqual({
     active_revision: "source-tree",
-    layout: "release",
     engine_source: "site",
   });
 });

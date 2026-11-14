@@ -51,10 +51,8 @@ pub(crate) struct InvokeContext {
     #[serde(default)]
     pub visitor_ip: Option<String>,
     /// How far this space's code may reach: `open` once the space is claimed,
-    /// `trusted` while it is anonymous. An engine that predates the scope sends
-    /// none, and the serde default is the narrow one — a frozen envelope must
-    /// not be the way out of the trusted list.
-    #[serde(default)]
+    /// `trusted` while it is anonymous. Required: an envelope that does not
+    /// state its scope is refused, never read as either one.
     pub egress_scope: EgressScope,
 }
 
@@ -62,7 +60,7 @@ pub(crate) struct InvokeContext {
 mod tests {
     use super::*;
 
-    fn envelope(context: serde_json::Value) -> InvokeEnvelope {
+    fn envelope(context: serde_json::Value) -> serde_json::Result<InvokeEnvelope> {
         serde_json::from_value(serde_json::json!({
             "protocol": "stattic.zero.invoke.v1",
             "versionRoot": "/versions/ver_1",
@@ -80,21 +78,15 @@ mod tests {
             },
             "context": context,
         }))
-        .expect("envelope")
     }
 
     #[test]
-    fn an_envelope_without_a_scope_reaches_the_trusted_list_only() {
+    fn an_envelope_must_state_its_egress_scope() {
         let base = serde_json::json!({
             "spaceId": "spc_1",
             "versionId": "ver_1",
         });
-        // An engine that predates the scope sends none, and a frozen capsule is
-        // not a way out of the trusted list.
-        assert_eq!(
-            envelope(base.clone()).context.egress_scope,
-            EgressScope::Trusted
-        );
+        assert!(envelope(base.clone()).is_err());
         for (declared, expected) in [
             ("open", EgressScope::Open),
             ("trusted", EgressScope::Trusted),
@@ -102,7 +94,7 @@ mod tests {
             let mut context = base.clone();
             context["egressScope"] = serde_json::json!(declared);
             assert_eq!(
-                envelope(context).context.egress_scope,
+                envelope(context).expect("envelope").context.egress_scope,
                 expected,
                 "{declared}"
             );

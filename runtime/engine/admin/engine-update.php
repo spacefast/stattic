@@ -436,7 +436,6 @@ function _stattic_engine_update_route(string $privateRoot, array $_claims): void
     _stattic_problem_response(409, 'runtime_engine_update_required', 'The requested runtime release is not active.', [
         'details' => [
             'active_revision' => SPACEFAST_RUNTIME_ENGINE_REVISION,
-            'layout' => _stattic_engine_serves_from_chroot() || _stattic_engine_release_layout_active($privateRoot) ? 'release' : 'legacy',
             'engine_source' => _stattic_engine_serves_from_chroot() ? 'chroot' : 'site',
         ],
     ]);

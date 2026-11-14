@@ -408,9 +408,8 @@ fn connectors_call(
 /// `ctx.content.query` sent `spacefast.content.query` to the Space's content
 /// endpoint, which answered it out of a compiled content schema. That schema
 /// format and the WordPress projection that executed against it were both
-/// retired: the engine now serves content models as Abilities, and a release in
-/// the old format is answered with `content_model_republish_required` rather
-/// than read. There is nothing left upstream to forward this frame to, so the
+/// retired: the engine now serves content models as Abilities. There is
+/// nothing left upstream to forward this frame to, so the
 /// runner answers it here instead of spending a round trip to collect a generic
 /// upstream refusal that names no cause.
 ///

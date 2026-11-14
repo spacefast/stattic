@@ -758,47 +758,6 @@ catch (Spacefast_Content_Error $error) { echo $error->codeName; }
   }
 });
 
-// content.managed is an internal, default-off beta, so there is no compat shim
-// for the retired Payload release shape: activation stops with one stable code
-// that tells the operator the only fix.
-test("activation refuses a Payload-shaped release with a republish instruction", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-wordpress-content-model-legacy-"));
-  const storage = path.join(root, ".stattic/storage");
-  const revision = `sha256:${"d".repeat(64)}`;
-  const releaseRoot = path.join(
-    storage,
-    "spaces/spc_alpha/content-model/releases",
-    revision.slice("sha256:".length),
-  );
-  mkdirSync(releaseRoot, { recursive: true });
-  writeFileSync(path.join(releaseRoot, "schema.json"), '{"schema_version":3}');
-  writeFileSync(path.join(releaseRoot, "payloadwp.php"), "<?php");
-  const script = String.raw`
-$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
-$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $argv[2];
-require $argv[1];
-try { spacefast_content_model_activate_release($argv[3]); }
-catch (Spacefast_Content_Error $error) {
-  echo json_encode([$error->status, $error->codeName, $error->getMessage()]);
-}
-`;
-  try {
-    const result = Bun.spawnSync(["php", "-r", script, kernel, storage, revision], {
-      cwd: repoRoot,
-      stderr: "pipe",
-      stdout: "pipe",
-    });
-    expect(result.exitCode, result.stderr.toString() + result.stdout.toString()).toBe(0);
-    expect(JSON.parse(result.stdout.toString())).toEqual([
-      409,
-      "content_model_republish_required",
-      "This content release uses the retired Payload format. Republish the Space to activate its WordPress content model.",
-    ]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 /**
  * The producer end of the lane, proved against the same WordPress.
  *

@@ -638,8 +638,9 @@ test("noindex hosts own X-Robots-Tag, and robots.txt is only crawl control", asy
     responseEntry(rt, "spc_robots_hdr", "ver_robots_hdr_1", RESPONSES.specialKeys.robots),
   ).not.toBeNull();
 
-  // Existing sites have this route body compiled into their current shard.
-  // An engine promotion must upgrade it without requiring a republish.
+  // A shard carrying the pre-mShots deny-all body is no longer valid: reading
+  // it rebuilds the host's routes, so it serves the current body without a
+  // republish.
   installLegacyNoindexRobotsRoute(rt, "noindex.test");
   const platformRobots = await get(rt, "noindex.test", "/robots.txt");
   expect(platformRobots.status).toBe(200);

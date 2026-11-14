@@ -190,6 +190,7 @@ fn self_test_finalize(root: &Path) -> Result<(), CliError> {
                     "contentType": "text/html",
                 }],
                 "accepted": { sha256: SELF_TEST_DOCUMENT.len() },
+                "retention": "none",
                 "metadata": { "mode": "website" },
             }),
             body: serde_json::json!({ "serving": { "config": {} } }),

@@ -1576,13 +1576,6 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
             'acquire_url' => is_string($authorization['acquireUrl'] ?? null) ? $authorization['acquireUrl'] : null,
             'issuer' => is_string($config['visitor_issuer'] ?? null) ? $config['visitor_issuer'] : null,
             'jwks' => is_array($config['visitor_jwks'] ?? null) ? $config['visitor_jwks'] : null,
-            // The runtime's own server-to-server credential, mirrored out of the
-            // access-page descriptor so a caller holding only `exchange` (the
-            // legacy serving shape) can still derive the session key.
-            'credential' => is_array($authorization['accessPage']['exchange'] ?? null)
-                && is_string($authorization['accessPage']['exchange']['credential'] ?? null)
-                ? $authorization['accessPage']['exchange']['credential']
-                : null,
         ],
         'anonymous_expires_at' => is_string($config['anonymous_expires_at'] ?? null) ? $config['anonymous_expires_at'] : null,
         // The live version's compiled page pointers, so a publisher's own access
@@ -1717,11 +1710,7 @@ function _stattic_runtime_route_action_valid(mixed $action, bool $allowTombstone
         return _stattic_runtime_proxy_route_policy_valid($action);
     }
     if ($action['action'] === 'robots_txt') {
-        return in_array(
-            $action['body'] ?? null,
-            [STATTIC_NOINDEX_ROBOTS_BODY, STATTIC_LEGACY_NOINDEX_ROBOTS_BODY],
-            true
-        )
+        return ($action['body'] ?? null) === STATTIC_NOINDEX_ROBOTS_BODY
             && ($action['content_type'] ?? null) === 'text/plain; charset=utf-8'
             && is_string($action['cache_control'] ?? null)
             && $action['cache_control'] !== ''

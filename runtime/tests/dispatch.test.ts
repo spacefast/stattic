@@ -249,6 +249,8 @@ test("replay-guard storage failure answers 503 retryable, never a false 403 repl
       body: {
         code: "runtime_replay_guard_unavailable",
         detail: "Runtime token replay guard storage is unavailable.",
+        // The control plane classifies the fault from these, not from a guess.
+        details: { phase: "directory", operation: "mkdir", reason: "File exists" },
       },
     });
     expect(diagnostics(blocked.stderr)).toEqual([

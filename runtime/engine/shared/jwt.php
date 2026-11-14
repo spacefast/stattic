@@ -579,9 +579,10 @@ function _stattic_jwt_replay_store(string $privateRoot): array
     ]);
 }
 
-// Keep native paths and token identifiers out of the platform diagnostic.
-// Returns the classified reason so the caller can name a full disk.
-function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): string
+// Keep native paths and token identifiers out of the platform diagnostic. The
+// same three fields ride on the 503 so the control plane can tell a full disk
+// from any other storage fault without guessing.
+function _stattic_jwt_replay_storage_failure(string $phase, ?array $error): array
 {
     $message = (string) ($error['message'] ?? '');
     $operation = 'unknown';
@@ -602,10 +603,9 @@ function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): 
             break;
         }
     }
-    error_log('spacefast runtime replay_guard_unavailable ' . json_encode([
-        'phase' => $phase, 'operation' => $operation, 'reason' => $reason,
-    ], JSON_UNESCAPED_SLASHES));
-    return $reason;
+    $failure = ['phase' => $phase, 'operation' => $operation, 'reason' => $reason];
+    error_log('spacefast runtime replay_guard_unavailable ' . json_encode($failure, JSON_UNESCAPED_SLASHES));
+    return $failure;
 }
 
 // Returns 'ok' (first to claim), 'replayed' (live marker exists),
@@ -614,15 +614,17 @@ function _stattic_jwt_log_replay_storage_failure(string $phase, ?array $error): 
 // evidence: reporting a storage outage as a replay would turn a full disk into
 // a permanent-looking auth failure, so callers answer retryable.
 // `$namespace` keeps the visitor and management id spaces from colliding.
-function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now): string
+// `$failure` receives the classified storage fault on 'storage_full' and
+// 'unavailable'.
+function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string $jti, int $exp, int $now, ?array &$failure = null): string
 {
+    $failure = null;
     // Soft mkdir, NOT _stattic_runtime_mkdir: that helper hard-fails 500, which
     // would hide a storage outage behind a generic runtime error.
     error_clear_last();
     if (!_stattic_runtime_mkdir_soft($privateRoot . '/runtime/jti')) {
-        return _stattic_jwt_replay_storage_verdict(
-            _stattic_jwt_log_replay_storage_failure('directory', error_get_last()),
-        );
+        $failure = _stattic_jwt_replay_storage_failure('directory', error_get_last());
+        return _stattic_jwt_replay_storage_verdict($failure['reason']);
     }
     $store = _stattic_jwt_replay_store($privateRoot);
     _stattic_defer(static function () use ($store, $now): void {
@@ -652,9 +654,8 @@ function _stattic_jwt_consume_jti(string $privateRoot, string $namespace, string
     }
 
     if (!file_exists($path)) {
-        return _stattic_jwt_replay_storage_verdict(
-            _stattic_jwt_log_replay_storage_failure('claim', $claimError),
-        );
+        $failure = _stattic_jwt_replay_storage_failure('claim', $claimError);
+        return _stattic_jwt_replay_storage_verdict($failure['reason']);
     }
     return 'replayed';
 }
@@ -673,14 +674,14 @@ function _stattic_jwt_reject_replayed_jti(string $privateRoot, string $audience,
         _stattic_problem_response(403, 'runtime_jti_missing', 'Runtime token id is required.');
     }
     $exp = isset($claims['exp']) ? (int) $claims['exp'] : $now;
-    $status = _stattic_jwt_consume_jti($privateRoot, $audience, $jti, $exp, $now);
+    $status = _stattic_jwt_consume_jti($privateRoot, $audience, $jti, $exp, $now, $failure);
     // Storage outage, not a replay: retryable, never a permanent auth failure.
     // A full disk gets the same code the finalizer uses, so the alert says so.
     if ($status === 'storage_full') {
-        _stattic_problem_response(503, 'runtime_storage_full', "The site's disk is full.");
+        _stattic_problem_response(503, 'runtime_storage_full', "The site's disk is full.", ['details' => $failure]);
     }
     if ($status === 'unavailable') {
-        _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable.');
+        _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable.', ['details' => $failure]);
     }
     if ($status !== 'ok') {
         _stattic_problem_response(403, 'runtime_jti_replayed', 'Runtime token id was already used.');

@@ -440,13 +440,13 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       expect(responseHtml.match(/data-spacefast-sdk="v1"/g)).toHaveLength(1);
       return { id: result.data.id, operation: result.operation, html: responseHtml };
     };
-    const refreshed = await restore({ refreshRewrites: true });
+    const refreshed = await restore({});
     expect(refreshed.id).not.toBe(receipt.data.version.id);
     expect(refreshed.html.match(/name="baked-demo"/g)).toHaveLength(1);
     expect(refreshed.html).toContain('name="baked-demo" content="current"');
     expect(refreshed.html).not.toContain('content="saved"');
     // Exact restoration uses the existing pointer-promotion job, without recompiling the saved version.
-    const exact = await restore({});
+    const exact = await restore({ refreshRewrites: false });
     expect(exact.id).toBe(receipt.data.version.id);
     expect(exact.operation.kind).toBe("version_promote_live");
     expect(exact.operation.resources).toContainEqual({

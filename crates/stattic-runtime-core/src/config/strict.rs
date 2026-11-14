@@ -8,7 +8,7 @@ use super::suggest::nearest;
 use super::system;
 use super::traffic_rules;
 use crate::protocol::{
-    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
+    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES,
     CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS, CONFIG_FILE_MAX_BYTES,
     CONFIG_META_DESCRIPTION_MAX_CHARS, CONFIG_META_IMAGE_MAX_CHARS, CONFIG_META_TITLE_MAX_CHARS,
     CONFIG_TEMPLATE_LIMIT,
@@ -228,7 +228,7 @@ pub fn public_json_schema() -> Value {
                                 "items": {
                                     "type": "string",
                                     "minLength": 1,
-                                    "maxLength": CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS + 1,
+                                    "maxLength": CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES + 1,
                                     "description": "Absolute path pattern; prefix an exclusion with !. Wildcards are whole * or ** path segments."
                                 }
                             }
@@ -610,7 +610,9 @@ fn validate_shape(
                     locations,
                     "config_invalid",
                     "$.build.timeoutSeconds",
-                    &format!("build.timeoutSeconds must be an integer from {CONFIG_BUILD_TIMEOUT_MIN_SECONDS} to {CONFIG_BUILD_TIMEOUT_MAX_SECONDS}."),
+                    &format!(
+                        "build.timeoutSeconds must be an integer from {CONFIG_BUILD_TIMEOUT_MIN_SECONDS} to {CONFIG_BUILD_TIMEOUT_MAX_SECONDS}."
+                    ),
                     None,
                 );
             }
@@ -1940,6 +1942,7 @@ mod tests {
     use serde_json::json;
 
     use super::{compile, public_json_schema, Input, SCHEMA};
+    use crate::protocol::CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES;
 
     fn compile_source(source: &str) -> super::Output {
         compile(Input {
@@ -1964,7 +1967,7 @@ mod tests {
         );
         assert_eq!(
             schema.pointer("/properties/access/anyOf/1/properties/public/items/maxLength"),
-            Some(&json!(1025))
+            Some(&json!(CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES + 1))
         );
     }
 

@@ -4,7 +4,7 @@ use super::access::normalized_public_patterns;
 use super::diagnostics::{diagnostic, DiagnosticSeverity, PrepareDiagnostic};
 use super::jsonc::parse as parse_jsonc;
 use crate::protocol::{
-    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
+    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES,
     CONFIG_BUILD_TIMEOUT_MAX_SECONDS, CONFIG_BUILD_TIMEOUT_MIN_SECONDS, CONFIG_FALLBACK_STATUS_MAX,
     CONFIG_FALLBACK_STATUS_MIN, CONFIG_FILE_MAX_BYTES, CONFIG_INJECT_SNIPPET_LIMIT,
     CONFIG_INJECT_SNIPPET_MAX_BYTES, CONFIG_META_DESCRIPTION_MAX_CHARS,
@@ -1370,7 +1370,7 @@ pub fn public_json_schema() -> Value {
                             "public": {
                                 "type": "array",
                                 "maxItems": CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT,
-                                "items": { "type": "string", "minLength": 1, "maxLength": CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS + 1 }
+                                "items": { "type": "string", "minLength": 1, "maxLength": CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES + 1 }
                             }
                         },
                         "additionalProperties": false

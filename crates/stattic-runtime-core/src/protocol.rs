@@ -28,7 +28,9 @@ pub const CONFIG_CRON_PATH_MAX_CHARS: usize = 512;
 /// request. Written only when a version declares at least one cron.
 pub const CRONS_ARTIFACT_PATH: &str = "__spacefast/crons.json";
 pub const CRONS_ARTIFACT_VERSION: u32 = 1;
-pub const CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS: usize = 1_024;
+pub const CONFIG_ACCESS_RESOURCE_PATTERN_MAX_BYTES: usize = 2_051;
+pub const CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES: usize =
+    CONFIG_ACCESS_RESOURCE_PATTERN_MAX_BYTES * 3;
 pub const CONFIG_META_TITLE_MAX_CHARS: usize = 300;
 pub const CONFIG_META_DESCRIPTION_MAX_CHARS: usize = 1_000;
 /// Browser-facing metadata asset paths/URLs need ample room for signed URLs;

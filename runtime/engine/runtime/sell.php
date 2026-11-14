@@ -49,7 +49,7 @@ function _stattic_sell_handle_exchange(string $privateRoot, array $serving, stri
         }
     }
     $pagePath = _stattic_scope_path($input['pagePath']);
-    if ($pagePath === null || strlen($pagePath) > 1024) {
+    if ($pagePath === null || strlen($pagePath) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
         _stattic_sell_refuse(422, 'validation_error', 'Checkout page path is invalid.');
     }
     _stattic_admission_acquire_access_lane($privateRoot, $serving);

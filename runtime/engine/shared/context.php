@@ -81,6 +81,12 @@ const STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . 
 const STATTIC_SPACEFAST_COLLAB_THEME_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/collab.css';
 const STATTIC_COMMENTS_TICKET_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/ticket';
 const STATTIC_COMMENTS_VERSION_URLS_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/version-urls';
+const STATTIC_COMMENTS_MENTIONABLE_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/comments/mentionable';
+// BEGIN GENERATED access path budget — DO NOT EDIT
+// Source: packages/common/src/contracts/access-core.ts.
+// Regenerate: bun --filter @spacefast/control-plane runtime:codegen-policy
+const STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES = 2048;
+// END GENERATED access path budget
 // Mirrors COLLAB_VERSION_URLS_MAX_IDS in packages/common.
 const STATTIC_COMMENTS_VERSION_URLS_MAX_IDS = 50;
 // url => [family, weight, preload]; emission order is CSS order, and preload
@@ -1483,7 +1489,7 @@ function _stattic_canonical_request_path(string $path): ?string
         $path === ''
         || $path[0] !== '/'
         || str_starts_with($path, '//')
-        || strlen($path) > 2048
+        || strlen($path) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES * 3
         || preg_match('/[\\x00-\\x1F\\x7F\\\\?#]/', $path) === 1
         || preg_match('/%(?![0-9A-Fa-f]{2})/', $path) === 1
         || preg_match('/%(?:2f|5c)/i', $path) === 1
@@ -1503,7 +1509,9 @@ function _stattic_canonical_request_path(string $path): ?string
         }
     }
     $normalized = _stattic_nfc_string($decoded);
-    return is_string($normalized) ? $normalized : null;
+    return is_string($normalized) && strlen($normalized) <= STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES
+        ? $normalized
+        : null;
 }
 
 function _stattic_path_has_residual_dot_segment(string $path): bool

@@ -4,7 +4,8 @@ use serde_json::Value;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::protocol::{
-    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS,
+    CONFIG_ACCESS_PUBLIC_PATTERN_LIMIT, CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES,
+    CONFIG_ACCESS_RESOURCE_PATTERN_MAX_BYTES,
 };
 
 pub const CONFIG_ACCESS_PUBLIC_SOURCE_REFERENCE: &str = "sf.jsonc#$.access.public";
@@ -46,7 +47,7 @@ fn percent_decode(input: &str) -> Result<String, &'static str> {
 }
 
 pub fn normalize_resource_pattern(input: &str) -> Result<String, &'static str> {
-    if input.chars().count() > CONFIG_ACCESS_RESOURCE_PATTERN_MAX_CHARS {
+    if input.len() > CONFIG_ACCESS_RESOURCE_PATTERN_INPUT_MAX_BYTES {
         return Err("resource pattern exceeds the maximum length");
     }
     if !input.starts_with('/') || input.starts_with("//") || input.chars().any(unsafe_character) {
@@ -84,11 +85,15 @@ pub fn normalize_resource_pattern(input: &str) -> Result<String, &'static str> {
         }
         segments.push(segment);
     }
-    Ok(if segments.is_empty() {
+    let normalized: String = if segments.is_empty() {
         "/".into()
     } else {
         format!("/{}", segments.join("/"))
-    })
+    };
+    if normalized.len() > CONFIG_ACCESS_RESOURCE_PATTERN_MAX_BYTES {
+        return Err("resource pattern exceeds the maximum length");
+    }
+    Ok(normalized)
 }
 
 const ACCESS_SHAPE_MESSAGE: &str =
@@ -191,6 +196,17 @@ mod tests {
         let canonical = normalize_resource_pattern("/docs/%2e/guide/%2e%2e/api/**").unwrap();
         assert_eq!(canonical, "/docs/api/**");
         assert_eq!(normalize_resource_pattern(&canonical), Ok(canonical));
+        assert_eq!(
+            normalize_resource_pattern(&format!("/{}", "%C3%A9".repeat(500))),
+            Ok(format!("/{}", "é".repeat(500)))
+        );
+        let full_scope_pattern = format!("/{}abc/**", "😀".repeat(511));
+        assert_eq!(
+            normalize_resource_pattern(&full_scope_pattern),
+            Ok(full_scope_pattern.clone())
+        );
+        assert!(normalize_resource_pattern(&format!("{full_scope_pattern}x")).is_err());
+        assert!(normalize_resource_pattern(&format!("/{}", "\u{0344}".repeat(513))).is_err());
         for invalid in [
             "/docs/*.html",
             "/docs/%2f/private",

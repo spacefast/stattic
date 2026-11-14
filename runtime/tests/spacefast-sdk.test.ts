@@ -1000,6 +1000,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
       resourceKey: "resource_local",
     },
     ticketUrl: "http://local-sdk.site.test/__spacefast/comments/ticket",
+    mentionableUrl: "http://local-sdk.site.test/__spacefast/comments/mentionable",
     // Configuration and nothing else: this runtime names an API base that is
     // not a `cast.` sibling of its relay, and that is what the manifest carries.
     apiBase: "https://api.example.test",
@@ -1418,6 +1419,9 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
         credential: request.headers.get("spacefast-runtime-exchange"),
         payload: JSON.parse(fields.get("payload") ?? "{}") as Record<string, unknown>,
       });
+      if (new URL(request.url).pathname.endsWith("/mentionable")) {
+        return Response.json({ data: [{ userId: "usr_zebra", name: "Zebra", avatarUrl: null }] });
+      }
       if (new URL(request.url).pathname.endsWith("/version-urls")) {
         return Response.json({
           data: [{ id: "ver_other", url: "https://other.view.test/", number: 4, createdAt: null }],
@@ -1473,6 +1477,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
           requestUrl: `${central.url}acquire/runtime-comments/request`,
           commentsTicketUrl: `${central.url}runtime/comments/runtime-comments/ticket`,
           commentsVersionUrlsUrl: `${central.url}runtime/comments/runtime-comments/version-urls`,
+          commentsMentionableUrl: `${central.url}runtime/comments/runtime-comments/mentionable`,
           zeroRealtimeTicketUrl: `${central.url}acquire/runtime-comments/zero/realtime-ticket`,
           sellCheckoutUrl: `${central.url}sell/runtime/spc_sdk_exchange/checkout`,
           sellProductUrl: `${central.url}sell/runtime/spc_sdk_exchange/product`,
@@ -1492,7 +1497,11 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     await deploy(runtime, {
       spaceId: "spc_sdk_exchange",
       versionId: "ver_sdk_exchange_1",
-      files: { "docs/index.html": "<h1>Docs</h1>\n" },
+      files: {
+        "docs/index.html": "<h1>Docs</h1>\n",
+        [`${Array.from({ length: 5 }, () => "界".repeat(50)).join("/")}/index.html`]:
+          "<h1>Unicode route</h1>\n",
+      },
       activate: {
         route_name: "production",
         config,
@@ -1680,6 +1689,77 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     expect(emptyLookup.status).toBe(401);
     expect(await errorCode(emptyLookup)).toBe("comments_versions_invalid");
     expect(exchanges.length).toBe(before);
+
+    const unicodeRequestPath = `/${Array.from({ length: 5 }, () => "界".repeat(50)).join("/")}`;
+    const encodedRequestPath = `${unicodeRequestPath.split("/").map(encodeURIComponent).join("/")}/`;
+    expect(new TextEncoder().encode(encodedRequestPath).length).toBeGreaterThan(2_048);
+    const unicodePage = await get(runtime, "comments-exchange.site.test", encodedRequestPath);
+    expect(unicodePage.status).toBe(200);
+    expect(await unicodePage.text()).toContain("<h1>Unicode route</h1>");
+
+    const byteBoundary = `/docs/${"😀".repeat(510)}ab`;
+    expect(new TextEncoder().encode(byteBoundary).length).toBe(2_048);
+    const boundaryTicket = (pagePath: string) =>
+      get(runtime, "comments-exchange.site.test", "/__spacefast/comments/ticket", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://comments-exchange.site.test",
+          "sec-fetch-site": "same-origin",
+        },
+        body: JSON.stringify({
+          pagePath,
+          identity: { anonymousId: "anon_browser_chosen", name: "Page visitor", namedByUser: true },
+        }),
+      });
+    const boundaryResponse = await boundaryTicket(byteBoundary);
+    expect(boundaryResponse.status, await boundaryResponse.clone().text()).toBe(200);
+    expect(exchanges.at(-1)?.payload["pagePath"]).toBe(byteBoundary);
+    const encodedBoundary = await boundaryTicket(encodedRequestPath);
+    expect(encodedBoundary.status, await encodedBoundary.clone().text()).toBe(200);
+    expect(exchanges.at(-1)?.payload["pagePath"]).toBe(unicodeRequestPath);
+    const beforeOverflow = exchanges.length;
+    const overflowTicket = await boundaryTicket(`${byteBoundary}x`);
+    expect(overflowTicket.status).toBe(401);
+    expect(await errorCode(overflowTicket)).toBe("comments_path_invalid");
+    expect(exchanges.length).toBe(beforeOverflow);
+    // `%2541` decodes to `%41` here; forwarding it would let the control plane
+    // decode it again into `A` and sign a ticket for another page's room.
+    const nestedPercent = await boundaryTicket("/docs/a%2541");
+    expect(nestedPercent.status).toBe(401);
+    expect(await errorCode(nestedPercent)).toBe("comments_path_invalid");
+    expect(exchanges.length).toBe(beforeOverflow);
+
+    const mentionSearch = await get(
+      runtime,
+      "comments-exchange.site.test",
+      "/__spacefast/comments/mentionable",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://comments-exchange.site.test",
+          "sec-fetch-site": "same-origin",
+          cookie: commentsCookie,
+        },
+        body: JSON.stringify({ pagePath: "/docs", query: "Zebra" }),
+      },
+    );
+    expect(mentionSearch.status).toBe(200);
+    expect(await mentionSearch.json()).toEqual({
+      data: [{ userId: "usr_zebra", name: "Zebra", avatarUrl: null }],
+    });
+    expect(exchanges.at(-1)).toMatchObject({
+      credential: "runtime-comments-credential-0000000000000000000000000000",
+      payload: {
+        origin: "http://comments-exchange.site.test",
+        pagePath: "/docs",
+        query: "Zebra",
+        principal: "anonymous",
+        visitorSessionId: firstSessionId,
+        authorities: [],
+      },
+    });
 
     // The lane is POST-only and fetch-only: a GET is refused outright and a
     // cross-site POST never reaches the exchange.

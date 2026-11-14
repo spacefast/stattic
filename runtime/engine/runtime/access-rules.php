@@ -1098,7 +1098,7 @@ function _stattic_grant_pattern_segments(mixed $value): ?array
 {
     if (
         !is_string($value)
-        || strlen($value) > 1024
+        || strlen($value) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES + 3
         || $value === ''
         || $value[0] !== '/'
         || str_starts_with($value, '//')
@@ -3046,6 +3046,7 @@ function _stattic_access_page_descriptor(array $serving): ?array
             'logoutUrl',
             'commentsTicketUrl',
             'commentsVersionUrlsUrl',
+            'commentsMentionableUrl',
             'zeroRealtimeTicketUrl',
             'sellCheckoutUrl',
             'sellProductUrl',

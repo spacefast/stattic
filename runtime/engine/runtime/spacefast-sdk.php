@@ -162,11 +162,16 @@ function _stattic_comments_handle_exchange(
     // re-encoding against the control plane's 16 KiB payload cap.
     $raw = _stattic_request_body_contents();
     $input = is_string($raw) && strlen($raw) <= 8192 ? json_decode($raw, true) : null;
-    $pagePath = is_array($input) && is_string($input['pagePath'] ?? null)
-        ? _stattic_scope_path($input['pagePath'])
+    $rawPath = is_array($input) && is_string($input['pagePath'] ?? null)
+        ? _stattic_canonical_request_path($input['pagePath'])
         : null;
-    // 1024 matches the control plane's accessScopePathSchema ceiling.
-    if ($pagePath === null || strlen($pagePath) > 1024) {
+    // The control plane decodes the forwarded path once more. A percent sign
+    // left after this decode would name a different room there, so refuse it.
+    $pagePath = is_string($rawPath) && !str_contains($rawPath, '%')
+        ? _stattic_scope_path($rawPath)
+        : null;
+    // The canonical route budget is 2048 UTF-8 bytes on every Comments lane.
+    if ($pagePath === null || strlen($pagePath) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
         _stattic_render_json_unauthenticated('comments_path_invalid');
     }
     _stattic_admission_acquire_access_lane($privateRoot, $serving);
@@ -178,6 +183,7 @@ function _stattic_comments_handle_exchange(
     // — it is served as the collaboration manifest.
     $isTicket = $requestPath === STATTIC_COMMENTS_TICKET_PATH;
     $isVersionUrls = $requestPath === STATTIC_COMMENTS_VERSION_URLS_PATH;
+    $isMentionable = $requestPath === STATTIC_COMMENTS_MENTIONABLE_PATH;
     // Both spellings identify the same mint: the config response advertises the
     // canonical `/__zero` path, while frozen capsule clients baked the legacy
     // one. Missing either sends the request down the Comments ticket lane and
@@ -188,6 +194,7 @@ function _stattic_comments_handle_exchange(
     $exchangeKey = match (true) {
         $isZeroRealtimeTicket => 'zeroRealtimeTicketUrl',
         $isVersionUrls => 'commentsVersionUrlsUrl',
+        $isMentionable => 'commentsMentionableUrl',
         default => 'commentsTicketUrl',
     };
     $exchangeUrl = is_array($exchange) ? (string) ($exchange[$exchangeKey] ?? '') : '';
@@ -243,6 +250,13 @@ function _stattic_comments_handle_exchange(
             _stattic_render_json_unauthenticated('comments_versions_invalid');
         }
         $payload['ids'] = array_keys($ids);
+    }
+    if ($isMentionable) {
+        $query = is_array($input) && is_string($input['query'] ?? null) ? trim($input['query']) : '';
+        if (strlen($query) > 160) {
+            _stattic_render_json_unauthenticated('comments_query_invalid');
+        }
+        $payload['query'] = $query;
     }
     if ($isTicket) {
         $browserIdentity = is_array($input) && is_array($input['identity'] ?? null)
@@ -998,6 +1012,9 @@ function _stattic_spacefast_collab_manifest(
         // own exchange lane, never by the page reaching the control plane.
         'ticketUrl' => $available && is_string($overlay['endpoints']['ticket'] ?? null)
             ? $overlay['endpoints']['ticket']
+            : null,
+        'mentionableUrl' => $available && $origin !== null
+            ? $origin . STATTIC_COMMENTS_MENTIONABLE_PATH
             : null,
         // The control plane itself, for the one lane the page pulls on its own
         // behalf with its own bearer (reply-email consent). Null when a

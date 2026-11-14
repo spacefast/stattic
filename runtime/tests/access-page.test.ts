@@ -2191,6 +2191,23 @@ test("a share token that opens nothing serves the gate, not content", async () =
   expect(refused.headers.get("referrer-policy")).toBe("no-referrer");
 });
 
+// A system view names no Grant, so the Space's access generation has nothing to
+// revoke: a token minted after a Grant edit the box has not received yet (or
+// before one it has) opens the page all the same. The session version, the
+// emergency lever, still refuses (see systemViewRefusals).
+test("a system view token minted at another access generation still opens the page", async () => {
+  for (const generation of [7, undefined]) {
+    const opened = await get(
+      runtime,
+      LANES_HOST,
+      `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ generation })}`,
+    );
+    expect(opened.status).toBe(200);
+    expect(await opened.text()).toContain("docs of spc_access_page_lanes");
+    expect(sessionCookie(opened)).toBe("");
+  }
+});
+
 // The system lane: same param, different kind of secret.
 test("a system view token serves the page and its same-origin assets without a session", async () => {
   const before = exchangeRequests.length;

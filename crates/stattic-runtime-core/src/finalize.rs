@@ -526,7 +526,7 @@ pub(crate) use crate::serving_paths::php_like;
 /// and the shell's import map names that exact directory. The digest changes
 /// when the bytes do, which is the whole invalidation story; without immutable
 /// caching here the browser re-validates platform code on every navigation and
-/// the point of hosting it separately is lost. Kept in step with
+/// the point of serving it separately is lost. Kept in step with
 /// `ZERO_PLATFORM_ASSET_ROOT` in `packages/common/src/contracts/zero.ts`.
 pub(crate) fn immutable_path(path: &str) -> bool {
     let normalized = path.trim_start_matches('/');

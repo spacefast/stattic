@@ -491,10 +491,15 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     ) {
         return null;
     }
-    $generation = (int) ($options['generation'] ?? 0);
-    $tokenGeneration = isset($claims['generation']) ? (int) $claims['generation'] : -1;
-    if ($tokenGeneration !== $generation) {
-        return null;
+    // `generation` pins a token to the access generation this engine serves:
+    // present, the claim must equal it; null, the lane does not depend on it
+    // (platform system-view tokens, see _stattic_access_verify_system_view_token).
+    if (array_key_exists('generation', $options) && $options['generation'] !== null) {
+        $generation = (int) $options['generation'];
+        $tokenGeneration = isset($claims['generation']) ? (int) $claims['generation'] : -1;
+        if ($tokenGeneration !== $generation) {
+            return null;
+        }
     }
     $spaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
     if (

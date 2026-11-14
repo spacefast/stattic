@@ -4723,6 +4723,12 @@ function _stattic_system_view_expiry(?int $expiresAt = null): ?int
     return $admitted;
 }
 
+// A system view token is Spacefast reading its own customer's Space (a
+// thumbnail fetcher, an operator link, a framed preview). It names no Grant, so
+// the Space's access generation has nothing to say about it and is not
+// compared: a Grant edit the box has not received yet must not turn every
+// thumbnail into a gate page. Revocation is the session version (the emergency
+// logout-all lever), expiry, and signing-key rotation.
 function _stattic_access_verify_system_view_token(
     array $serving,
     string $host,
@@ -4730,7 +4736,10 @@ function _stattic_access_verify_system_view_token(
 ): bool {
     $verified = _stattic_visitor_verify(
         $token,
-        _stattic_visitor_verify_options($serving, $host, null, ['requireJti' => false])
+        _stattic_visitor_verify_options($serving, $host, null, [
+            'requireJti' => false,
+            'generation' => null,
+        ])
     );
     if ($verified === null) {
         return false;

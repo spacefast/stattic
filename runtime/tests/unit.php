@@ -1165,6 +1165,7 @@ check(_stattic_visitor_verify($jwtForged, $jwtOptionsA) === null, 'wrong-key tok
 
 // Time/session checks stay outside the signature memo.
 check(_stattic_visitor_verify($jwtToken, [...$jwtOptionsA, 'generation' => 3]) === null, 'generation mismatch rejects despite a warm signature memo');
+check(_stattic_visitor_verify($jwtToken, [...$jwtOptionsA, 'generation' => null]) !== null, 'a lane that passes a null generation does not compare the claim');
 $jwtExpired = $mintEdDSA(
     ['sub' => 'user:carol', 'grants' => ['user:carol'], 'spaceId' => 'spc_unit', 'generation' => 0, 'iss' => 'spacefast-api', 'aud' => 'spc_unit', 'host' => 'unit.test', 'exp' => time() - 3600],
     sodium_crypto_sign_secretkey($jwtSignKeypair),

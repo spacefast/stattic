@@ -117,7 +117,8 @@ const STATTIC_SESSION_DEV_COOKIE = 'spacefast_session_dev';
 // System view URLs briefly echo their already host-bound JWT into a separate
 // host-only cookie so a renderer can fetch the page's same-origin subresources.
 // This is not a visitor session: it has no server record and is re-verified on
-// every request against the token's Space, host, generation, scope and expiry.
+// every request against the token's Space, host, session version, scope and
+// expiry.
 const STATTIC_SYSTEM_VIEW_COOKIE = '__Host-spacefast_system_view';
 const STATTIC_SYSTEM_VIEW_DEV_COOKIE = 'spacefast_system_view_dev';
 const STATTIC_SYSTEM_VIEW_COOKIE_SECONDS = 5 * 60;

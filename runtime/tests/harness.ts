@@ -575,7 +575,7 @@ function installEngine(root: string, sourceRoot = RUNTIME_DIR): void {
   const release = "releases/test";
   const releaseRoot = path.join(root, ".stattic", release);
   for (const file of manifest.files) {
-    // Generic runtime cases need no compiler. The source-hosting proof supplies
+    // Generic runtime cases need no compiler. The source-serving proof supplies
     // the real compiler explicitly, and release builds require verified assets.
     if (file.startsWith("bin/zero") && !existsSync(path.join(sourceRoot, file))) continue;
     const target = path.join(releaseRoot, file);

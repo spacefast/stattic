@@ -243,6 +243,23 @@ beforeAll(async () => {
       return;
     }
 
+    if (requestPath === "/html-missing") {
+      // A framework's own not-found page.
+      response.statusCode = 404;
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end("<html><head><title>Not found</title></head><body>gone</body></html>");
+      return;
+    }
+
+    if (requestPath === "/html-range") {
+      // The first bytes of a page, as a Function or origin answers `Range`.
+      response.statusCode = 206;
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.setHeader("Content-Range", "bytes 0-24/60");
+      response.end("<html><head></head><body>");
+      return;
+    }
+
     if (requestPath === "/relay/content-encoding") {
       // curl is never given CURLOPT_ENCODING, so these bytes reach the visitor
       // still compressed. Content-Encoding is what makes them readable.
@@ -390,6 +407,8 @@ beforeAll(async () => {
         proxyRule("/visitor/unshared", `${upstreamBaseUrl}/visitor-ip`, null),
         // Unshared, so the route forwards the visitor's own headers.
         proxyRule("/html", `${upstreamBaseUrl}/html`, null),
+        proxyRule("/html-range", `${upstreamBaseUrl}/html-range`, null),
+        proxyRule("/html-missing", `${upstreamBaseUrl}/html-missing`, null),
         "",
       ].join("\n"),
     },
@@ -925,6 +944,28 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
       expect(await revalidated.text()).toContain('content="saved"');
       expect(htmlValidators).toEqual([[undefined, undefined]]);
     }
+  });
+
+  test("a partial HTML response passes through unchanged", async () => {
+    // Anything spliced into a byte range would no longer match its
+    // Content-Range, so a range never gets the SDK tag.
+    const ranged = await get(rt, PUBLIC_HOST, "/html-range", {
+      headers: { accept: "text/html", range: "bytes=0-24" },
+    });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("content-range")).toBe("bytes 0-24/60");
+    expect(await ranged.text()).toBe("<html><head></head><body>");
+  });
+
+  test("an HTML error page carries the SDK tag like any whole page", async () => {
+    // A Space's 404 reads the same on every lane: the tag is not only for 200s.
+    const missing = await get(rt, PUBLIC_HOST, "/html-missing", {
+      headers: { accept: "text/html" },
+    });
+    expect(missing.status).toBe(404);
+    expect(await missing.text()).toContain(
+      '<head><script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+    );
   });
 
   test("a truncated cache candidate is withheld and converted to an uncacheable error", async () => {

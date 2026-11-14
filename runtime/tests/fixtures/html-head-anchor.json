@@ -1,0 +1,93 @@
+{
+  "description": "Where head markup goes in a page. The runtime's filter (_stattic_html_head_anchor, runtime/tests/unit.php) and the finalizer (head_anchor_matches_the_shared_fixture, crates/stattic-runtime-core/src/content/mod.rs) both read these cases. Markup goes right after `before`, so the page with it is before + markup + after. A case without `after` is one with no anchor: nothing is added to it. A case with `authoredHead` declares its own title, description, og:title, og:description, twitter:title, icon and theme stylesheet in the document's head, explicit or implied (an explicit `<head>` runs to `</head>` or `<body>` whatever it holds; a page without `<head>` still has one, up to its first body content element): the finalizer adds none of them again.",
+  "cases": [
+    {
+      "name": "the first head start tag",
+      "before": "<!doctype html><html lang=\"en\"><head>",
+      "after": "<title>Home</title></head><body><p>Hi</p></body></html>"
+    },
+    {
+      "name": "uppercase tags with a quoted angle bracket",
+      "before": "<!DOCTYPE html><HTML><HEAD data-note=\"a > b\">",
+      "after": "</HEAD><BODY></BODY></HTML>"
+    },
+    {
+      "name": "a head in a comment or a script is not one",
+      "before": "<!--<head>--><html><script>const x = \"<head>\";</script><head>",
+      "after": "</head><body></body></html>"
+    },
+    {
+      "name": "no head: just past the html start tag",
+      "before": "<!doctype html><html lang=\"en\">",
+      "after": "<body><p>Hi</p></body></html>"
+    },
+    {
+      "name": "a head inside a template is inert",
+      "before": "<template><head></head></template><html><head>",
+      "after": "</head><body></body></html>"
+    },
+    {
+      "name": "an explicit head keeps the author's own tags",
+      "before": "<!doctype html><html><head>",
+      "after": "<title>My Page</title><meta name=\"description\" content=\"Mine\"><meta property=\"og:title\" content=\"Mine\"><meta property=\"og:description\" content=\"Mine\"><meta name=\"twitter:title\" content=\"Mine\"><link rel=\"icon\" href=\"/mine.png\"><link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\"></head><body><p>Hi</p></body></html>",
+      "authoredHead": true
+    },
+    {
+      "name": "no head: the author's title and meta are still head markup",
+      "before": "<!doctype html><html lang=\"en\">",
+      "after": "<title>My Page</title><meta name=\"description\" content=\"Mine\"><meta property=\"og:title\" content=\"Mine\"><meta property=\"og:description\" content=\"Mine\"><meta name=\"twitter:title\" content=\"Mine\"><link rel=\"icon\" href=\"/mine.png\"><link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\"><body><p>Hi</p></body></html>",
+      "authoredHead": true
+    },
+    {
+      "name": "no head or body tags: the head ends at the first body element",
+      "before": "<html>",
+      "after": "<title>My Page</title><meta name=\"description\" content=\"Mine\"><meta property=\"og:title\" content=\"Mine\"><meta property=\"og:description\" content=\"Mine\"><meta name=\"twitter:title\" content=\"Mine\"><link rel=\"icon\" href=\"/mine.png\"><link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\"><p>Hi</p><svg><title>Not the page title</title></svg></html>",
+      "authoredHead": true
+    },
+    {
+      "name": "an explicit head runs to its end tag past an inline svg sprite",
+      "before": "<html><head>",
+      "after": "<svg><symbol id=\"i\"></symbol></svg><title>Mine</title><meta name=\"description\" content=\"Mine\"><meta property=\"og:title\" content=\"Mine\"><meta property=\"og:description\" content=\"Mine\"><meta name=\"twitter:title\" content=\"Mine\"><link rel=\"icon\" href=\"/mine.png\"><link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\"></head><body><p>Hi</p></body></html>",
+      "authoredHead": true
+    },
+    {
+      "name": "an explicit head runs to its end tag past a div, a pixel and an iframe",
+      "before": "<html><head>",
+      "after": "<div></div><img src=\"/pixel.gif\"><iframe src=\"/gtm.html\"></iframe><title>Mine</title><meta name=\"description\" content=\"Mine\"><meta property=\"og:title\" content=\"Mine\"><meta property=\"og:description\" content=\"Mine\"><meta name=\"twitter:title\" content=\"Mine\"><link rel=\"icon\" href=\"/mine.png\"><link rel=\"stylesheet\" href=\"/__spacefast_generated/theme.css\"></head><body><p>Hi</p></body></html>",
+      "authoredHead": true
+    },
+    {
+      "name": "a template head does not stand in for a missing head",
+      "before": "<html>",
+      "after": "<template><head><title>Inert</title></head></template><body></body></html>"
+    },
+    {
+      "name": "a head inside svg is not the document's",
+      "before": "<html>",
+      "after": "<body><svg><head></head></svg></body></html>"
+    },
+    {
+      "name": "a head inside svg before the real one",
+      "before": "<svg><head></head></svg><html><head>",
+      "after": "</head><body></body></html>"
+    },
+    {
+      "name": "a head inside math is not the document's",
+      "before": "<math><head></head></math><html><head>",
+      "after": "</head><body></body></html>"
+    },
+    {
+      "name": "a self-closing svg opens nothing",
+      "before": "<svg/><html><head>",
+      "after": "</head><body></body></html>"
+    },
+    {
+      "name": "a fragment has no anchor",
+      "html": "<main>Hello</main>"
+    },
+    {
+      "name": "a body alone has no anchor",
+      "html": "<body><p>Hi</p></body>"
+    }
+  ]
+}

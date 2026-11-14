@@ -25,11 +25,14 @@ declare(strict_types=1);
 // older version injected.
 //
 // The rules that make it safe to run on a stream:
-//   * Uncompressed text/html only, never an event stream (D46/D77).
+//   * Uncompressed text/html with a whole body, whatever its status, never an
+//     event stream or a byte range (D46/D77).
 //   * The head snippets and the SDK tag go after the first `<head` start tag
-//     (or `<html` with no head) inside the first 16 KiB, and bytes are held
-//     only until that is settled (D94). With neither, the response is a
-//     fragment: nothing is inserted, as on main, and the miss is journaled.
+//     (or `<html` with no head) inside the first 16 KiB, never one inside
+//     `<template>`, `<svg>` or `<math>`, and bytes are held only until that
+//     is settled (D94). With neither, the response is a fragment: nothing is
+//     inserted, as on main, and the miss is journaled. Bytes are lexed once
+//     however the body is chunked.
 //   * Past the head, bytes stream through and only a bounded partial token is
 //     held for the bodyStart and bodyEnd anchors. A token longer than 64 KiB
 //     ends that search: the rest is relayed as it is, and the SDK tag, when it
@@ -53,27 +56,52 @@ const STATTIC_HTML_RAW_TEXT_ELEMENTS = ['script', 'style', 'textarea', 'title', 
  * never markup. Calls `$visit($kind, $name, $token, $offset)` per tag, where
  * kind is `start` or `end`; returning false stops the walk.
  *
- * Resumable over a stream: `$state` carries the raw-text element still open,
- * and the return value is the offset of the first byte not yet consumed (an
- * unfinished token, which the caller keeps and feeds again with more bytes).
- * With `$final` the unfinished tail is consumed as text.
+ * Resumable over a stream: `$state` carries the raw-text element still open
+ * and how far into an unfinished token the walk already looked, and the
+ * return value is the offset of the first byte not yet consumed. The caller
+ * keeps the bytes from there and calls again with more appended, passing that
+ * offset as `$offset` when the bytes before it stay in the buffer. Each call
+ * examines only bytes no earlier call did, plus a few at the boundary, so a
+ * body trickled a few bytes at a time costs what one write does.
+ * `$state['scanned']` adds up how far each search step moved, the bytes the
+ * walk actually read. With `$final` the unfinished tail is consumed as text.
  */
-function _stattic_html_lex(string $html, array &$state, bool $final, callable $visit): int
+function _stattic_html_lex(string $html, array &$state, bool $final, callable $visit, int $offset = 0): int
 {
     $length = strlen($html);
-    $offset = 0;
+    // How many bytes of the token at `$offset` an earlier call already scanned
+    // without finding its end, and the quote it stopped inside, if any.
+    $partial = $state['partial'] ?? 0;
+    $partialQuote = $state['quote'] ?? null;
+    $state['partial'] = 0;
+    $state['quote'] = null;
+    $resumeAt = $offset;
+    $unfinished = static function (int $lt, int $through, ?string $quote = null) use (&$state, $final, $length): int {
+        if ($final) {
+            return $length;
+        }
+        $state['partial'] = $through - $lt;
+        $state['quote'] = $quote;
+        return $lt;
+    };
+    // Every search below adds the distance it moved (to what it found, or to
+    // the end): the bytes the walk actually read.
+    $state['scanned'] ??= 0;
     while ($offset < $length) {
         $raw = $state['raw'] ?? null;
         if ($raw !== null) {
             if (preg_match('~</' . $raw . '(?=[\s/>])~i', $html, $match, PREG_OFFSET_CAPTURE, $offset) !== 1) {
+                $state['scanned'] += $length - $offset;
                 // The raw text continues past this buffer; keep only enough to
                 // recognize a closing tag that straddles the boundary.
                 return $final ? $length : max($offset, $length - (strlen($raw) + 3));
             }
+            $state['scanned'] += $match[0][1] - $offset;
             $offset = $match[0][1];
             $state['raw'] = null;
         }
         $lt = strpos($html, '<', $offset);
+        $state['scanned'] += ($lt === false ? $length : $lt) - $offset;
         if ($lt === false) {
             return $length;
         }
@@ -85,6 +113,7 @@ function _stattic_html_lex(string $html, array &$state, bool $final, callable $v
             if (!$final && $next === '!' && $length - $lt < 4 && str_starts_with('<!--', substr($html, $lt))) {
                 return $lt;
             }
+            $from = $lt === $resumeAt ? $lt + $partial : $lt;
             if (substr($html, $lt, 4) === '<!--') {
                 // `<!-->` and `<!--->` end a comment at once, as browsers do.
                 foreach (['<!-->', '<!--->'] as $abrupt) {
@@ -93,16 +122,21 @@ function _stattic_html_lex(string $html, array &$state, bool $final, callable $v
                         continue 2;
                     }
                 }
-                $close = strpos($html, '-->', $lt + 4);
+                $start = max($lt + 4, $from);
+                $close = strpos($html, '-->', $start);
+                $state['scanned'] += ($close === false ? $length : $close) - $start;
                 if ($close === false) {
-                    return $final ? $length : $lt;
+                    // The last two bytes may begin a `-->` the next write ends.
+                    return $unfinished($lt, max($lt + 4, $length - 2));
                 }
                 $offset = $close + 3;
                 continue;
             }
-            $close = strpos($html, '>', $lt + 2);
+            $start = max($lt + 2, $from);
+            $close = strpos($html, '>', $start);
+            $state['scanned'] += ($close === false ? $length : $close) - $start;
             if ($close === false) {
-                return $final ? $length : $lt;
+                return $unfinished($lt, $length);
             }
             $offset = $close + 1;
             continue;
@@ -112,8 +146,23 @@ function _stattic_html_lex(string $html, array &$state, bool $final, callable $v
             continue;
         }
         $end = null;
-        for ($i = $lt + 1; $i < $length;) {
-            $i += strcspn($html, '"\'>', $i);
+        $resumed = $lt === $resumeAt && $partial > 0;
+        $i = $resumed ? $lt + $partial : $lt + 1;
+        $quote = $resumed ? $partialQuote : null;
+        while (true) {
+            if ($quote !== null) {
+                $close = strpos($html, $quote, $i);
+                $state['scanned'] += ($close === false ? $length : $close) - $i;
+                if ($close === false) {
+                    $i = $length;
+                    break;
+                }
+                $i = $close + 1;
+                $quote = null;
+            }
+            $run = strcspn($html, '"\'>', $i);
+            $state['scanned'] += $run;
+            $i += $run;
             if ($i >= $length) {
                 break;
             }
@@ -121,14 +170,10 @@ function _stattic_html_lex(string $html, array &$state, bool $final, callable $v
                 $end = $i + 1;
                 break;
             }
-            $close = strpos($html, $html[$i], $i + 1);
-            if ($close === false) {
-                break;
-            }
-            $i = $close + 1;
+            $quote = $html[$i++];
         }
         if ($end === null) {
-            return $final ? $length : $lt;
+            return $unfinished($lt, $length, $quote);
         }
         $token = substr($html, $lt, $end - $lt);
         if (preg_match('~^<(/?)([a-z][^\s/>]*)~i', $token, $parsed) !== 1) {
@@ -153,30 +198,52 @@ function _stattic_html_lex(string $html, array &$state, bool $final, callable $v
  * first `<html` one, among tokens starting in the first `$limit` bytes. Null
  * when there is neither; false while the bytes held so far cannot settle it
  * (a `<head` may still arrive inside the window).
+ *
+ * Neither tag counts inside `<template>`, `<svg>` or `<math>`: a browser
+ * never makes one there the document's head, so markup placed after it would
+ * never run. The finalizer applies the same rule to the pages it decorates
+ * (`head_anchor` in crates/stattic-runtime-core/src/content/mod.rs); the
+ * cases both suites read are in runtime/tests/fixtures/html-head-anchor.json.
+ *
+ * Resumable: `$scan` keeps where the previous call over the same, growing
+ * buffer stopped, so a body that arrives in small chunks is lexed once, not
+ * once per chunk.
  */
-function _stattic_html_head_anchor(string $html, bool $final, int $limit = STATTIC_HTML_INSERT_SCAN_LIMIT_BYTES): int|false|null
+function _stattic_html_head_anchor(string $html, bool $final, int $limit, array &$scan): int|false|null
 {
+    $scan += ['offset' => 0, 'lex' => [], 'inert' => 0, 'root' => null];
     $head = null;
-    $root = null;
-    $state = ['raw' => null];
-    $consumed = _stattic_html_lex($html, $state, $final, static function (string $kind, string $name, string $token, int $offset) use (&$head, &$root, $limit): bool {
+    $consumed = _stattic_html_lex($html, $scan['lex'], $final, static function (string $kind, string $name, string $token, int $offset) use (&$head, &$scan, $limit): bool {
         if ($offset >= $limit) {
             return false;
         }
-        if ($kind === 'start' && $name === 'head') {
+        if ($name === 'template' || $name === 'svg' || $name === 'math') {
+            if ($kind === 'end') {
+                $scan['inert'] = max(0, $scan['inert'] - 1);
+            } elseif ($name === 'template' || !str_ends_with($token, '/>')) {
+                // `<svg/>` is empty; `<template/>` still opens, as in a browser.
+                $scan['inert']++;
+            }
+            return true;
+        }
+        if ($kind !== 'start' || $scan['inert'] > 0) {
+            return true;
+        }
+        if ($name === 'head') {
             $head = $offset + strlen($token);
             return false;
         }
-        if ($kind === 'start' && $name === 'html') {
-            $root ??= $offset + strlen($token);
+        if ($name === 'html') {
+            $scan['root'] ??= $offset + strlen($token);
         }
         return true;
-    });
+    }, $scan['offset']);
+    $scan['offset'] = $consumed;
     $settled = $head !== null
         || $final
         || $consumed >= $limit
         || strlen($html) >= $limit + STATTIC_HTML_INSERT_TOKEN_LIMIT_BYTES;
-    return $settled ? ($head ?? $root) : false;
+    return $settled ? ($head ?? $scan['root']) : false;
 }
 
 /**
@@ -378,7 +445,8 @@ function _stattic_splice_head_markup(string $html, string $markup): string
         return $html;
     }
     // The static lane's head window is the compiler's 64 KiB, all of it held.
-    $at = _stattic_html_head_anchor($html, true, 65536);
+    $scan = [];
+    $at = _stattic_html_head_anchor($html, true, 65536, $scan);
     return !is_int($at) ? $html : substr($html, 0, $at) . $markup . substr($html, $at);
 }
 
@@ -399,7 +467,7 @@ function _stattic_html_insert_stream_begin(array $payload): void
     if (headers_sent()) {
         return;
     }
-    $state = ['mode' => 'probe', 'held' => '', 'raw' => null, 'journaled' => false];
+    $state = ['mode' => 'probe', 'held' => '', 'lex' => [], 'scan' => [], 'journaled' => false];
     $GLOBALS['SPACEFAST_HTML_INSERT_ACTIVE'] = true;
     // chunk_size 1: hand every write to the callback instead of buffering the
     // whole response, which is what makes this a streaming filter.
@@ -446,7 +514,7 @@ function _stattic_html_insert_filter(array &$state, array &$payload, string $chu
     $state['held'] .= $chunk;
     if ($state['mode'] === 'head') {
         $held = $state['held'];
-        $anchor = _stattic_html_head_anchor($held, $final);
+        $anchor = _stattic_html_head_anchor($held, $final, STATTIC_HTML_INSERT_SCAN_LIMIT_BYTES, $state['scan']);
         if ($anchor === false) {
             return '';
         }
@@ -494,10 +562,9 @@ function _stattic_html_insert_body(array &$state, array &$payload, bool $final):
     $held = $state['held'];
     $out = '';
     $cursor = 0;
-    $lexState = ['raw' => $state['raw']];
     $consumed = _stattic_html_lex(
         $held,
-        $lexState,
+        $state['lex'],
         $final,
         static function (string $kind, string $name, string $token, int $offset) use (&$payload, &$out, &$cursor, $held): bool {
             if ($name !== 'body') {
@@ -516,7 +583,6 @@ function _stattic_html_insert_body(array &$state, array &$payload, bool $final):
             return $payload['bodyStart'] !== '' || $payload['bodyEnd'] !== '';
         }
     );
-    $state['raw'] = $lexState['raw'];
     $out .= substr($held, $cursor, $consumed - $cursor);
     $rest = substr($held, $consumed);
     $state['held'] = $rest;
@@ -543,9 +609,13 @@ function _stattic_html_insert_body(array &$state, array &$payload, bool $final):
 
 // D46/D77. Decided at the first written byte, not at install time: the proxy
 // and function lanes register their response headers between the two.
+// Every whole HTML document is changed, a 404 or 500 page as much as a 200,
+// so a Space's error page reads the same on every lane. A byte range never
+// is: a 206, or any response with Content-Range, would no longer match the
+// range it declares. A 204 or 304 has no body to change.
 function _stattic_html_insert_eligible(): bool
 {
-    if (headers_sent()) {
+    if (headers_sent() || in_array(http_response_code(), [204, 206, 304], true)) {
         return false;
     }
     $contentType = null;
@@ -564,6 +634,9 @@ function _stattic_html_insert_eligible(): bool
         }
         if ($name === 'content-encoding' && $value !== '' && $value !== 'identity') {
             return false; // Compressed bytes: no anchor can be found in them.
+        }
+        if ($name === 'content-range') {
+            return false; // Part of a document, whatever its status says.
         }
     }
     // No declared type is not HTML as far as this filter is concerned: the

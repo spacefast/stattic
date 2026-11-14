@@ -4035,7 +4035,7 @@ check(_stattic_functions_response_cache_policy(false, $publicWorker)['cache_cont
 // Streaming insertion keeps lexical state across writes and never targets markup in raw text.
 require_once __DIR__ . '/../engine/shared/html-insert.php';
 $streamThrough = static function (string $html, array $payload) {
-    $state = ['mode' => 'body', 'held' => '', 'raw' => null];
+    $state = ['mode' => 'body', 'held' => '', 'lex' => []];
     $payload += ['head' => '', 'bodyStart' => '', 'bodyEnd' => '', 'sdk' => ''];
     $output = '';
     foreach (str_split($html, 3) as $chunk) {
@@ -4061,6 +4061,84 @@ $relayed = $streamThrough($huge, $bodyPayload + ['sdk' => $sdkTag]);
 check(str_ends_with($relayed, '</body></html>' . $sdkTag) && substr_count($relayed, $sdkTag) === 1, 'an oversized token still leaves the response with one engine SDK tag');
 $headProbe = '<!--<head>fake--><script>"<head>"</script><html><head data-value=">">';
 check(_stattic_splice_head_markup($headProbe, '<meta name="insert">') === $headProbe . '<meta name="insert">', 'head insertion skips comments, raw text, and quoted angle brackets');
+// One head anchor rule for the runtime and the finalizer: both suites read
+// these cases (crates/stattic-runtime-core/src/content/mod.rs reads them too).
+$anchorFixture = json_decode((string) file_get_contents(__DIR__ . '/fixtures/html-head-anchor.json'), true, 512, JSON_THROW_ON_ERROR);
+// The head filter over a whole stream written `$size` bytes at a time.
+$filterHead = static function (string $html, int $size, string $head = '<meta name="injected">'): array {
+    $state = ['mode' => 'head', 'held' => '', 'lex' => [], 'scan' => [], 'journaled' => true];
+    $payload = ['head' => $head, 'bodyStart' => '', 'bodyEnd' => '', 'sdk' => ''];
+    $chunks = str_split($html, $size);
+    $output = '';
+    foreach ($chunks as $index => $chunk) {
+        $output .= _stattic_html_insert_filter($state, $payload, $chunk, $index === count($chunks) - 1 ? PHP_OUTPUT_HANDLER_FINAL : 0);
+    }
+    return [$output, $state];
+};
+foreach ($anchorFixture['cases'] as $case) {
+    $source = $case['html'] ?? $case['before'] . $case['after'];
+    $expected = isset($case['html']) ? $case['html'] : $case['before'] . '<meta name="injected">' . $case['after'];
+    check(_stattic_splice_head_markup($source, '<meta name="injected">') === $expected, "head anchor (static lane): {$case['name']}");
+    check($filterHead($source, 3)[0] === $expected, "head anchor (streamed in 3-byte writes): {$case['name']}");
+}
+// A body trickled in small writes is lexed once, not once per write: the head
+// pass and the body pass each read a byte about once, so the bytes their
+// searches actually move over stay within a small multiple of the body's
+// length however the writes are cut. Each body keeps the anchor search open
+// as long as it can. Rescanning an unfinished token from its start on every
+// write reads it once per write and fails this.
+foreach ([
+    // 16 KiB of tags, then an attribute quote that never closes.
+    'an unclosed quote after many tags' => str_repeat('<a>', 5400) . '<a title="' . str_repeat('x', 65536) . '">',
+    // One tag whose attribute list fills the hold limit.
+    'one long attribute list' => '<a ' . str_repeat("b='' ", 13000) . '>',
+    // A comment with a dash every other byte.
+    'a long comment of dashes' => '<html><head></head><body><!--' . str_repeat('-x', 32000) . '--></body></html>',
+] as $label => $trickled) {
+    $results = [];
+    foreach ([16, 1024, strlen($trickled)] as $size) {
+        $state = ['mode' => 'head', 'held' => '', 'lex' => [], 'scan' => [], 'journaled' => true];
+        $payload = ['head' => '<meta name="injected">', 'bodyStart' => '<i>', 'bodyEnd' => '<b>', 'sdk' => $sdkTag];
+        $chunks = str_split($trickled, $size);
+        $output = '';
+        foreach ($chunks as $index => $chunk) {
+            $output .= _stattic_html_insert_filter($state, $payload, $chunk, $index === count($chunks) - 1 ? PHP_OUTPUT_HANDLER_FINAL : 0);
+        }
+        $scanned = ($state['scan']['lex']['scanned'] ?? 0) + ($state['lex']['scanned'] ?? 0);
+        $results[] = $output;
+        check($scanned > 0 && $scanned <= 3 * strlen($trickled), "the filter reads {$label} a bounded number of times in " . $size . "-byte writes ({$scanned} bytes for " . strlen($trickled) . ')');
+    }
+    check(count(array_unique($results)) === 1, "{$label}: the output does not depend on how the writes are cut");
+}
+// A tag preview token opens the owner's draft tags, so no log keeps it: not on
+// a page URL, and not as the SDK loader's own `preview` parameter.
+check(
+    _stattic_redact_access_secrets('/docs/?a=1&spacefast_tag_preview=tok123&b=2#top') === '/docs/?a=1&spacefast_tag_preview=[redacted]&b=2#top',
+    'a page URL keeps no tag preview token'
+);
+check(
+    _stattic_redact_access_secrets('/__spacefast/sdk.js?v=1&preview=tok123') === '/__spacefast/sdk.js?v=1&preview=[redacted]',
+    'the SDK loader URL keeps no tag preview token'
+);
+check(_stattic_redact_access_secrets('/blog/?preview=true') === '/blog/?preview=true', "a page's own preview parameter is not a token");
+// A name is matched as PHP reads it into $_GET, so an encoded spelling that
+// still opens the drafts is redacted too, and so is every repeat of it.
+check(
+    _stattic_redact_access_secrets('/p?spacefast%5Ftag%5Fpreview=tok1&spacefast.tag+preview=tok2&x=1') === '/p?spacefast%5Ftag%5Fpreview=[redacted]&spacefast.tag+preview=[redacted]&x=1',
+    'an encoded tag preview parameter name keeps no token'
+);
+check(
+    _stattic_redact_access_secrets('/__spacefast/sdk.js?preview=tok1&preview=tok2&%70review=tok3') === '/__spacefast/sdk.js?preview=[redacted]&preview=[redacted]&%70review=[redacted]',
+    'every repeat of the SDK loader preview parameter is redacted'
+);
+check(
+    _stattic_redact_access_secrets('/a?__=one&b=2&__=two#frag&__=three') === '/a?__=[redacted]&b=2&__=[redacted]#frag&__=[redacted]',
+    'every repeat of a share token is redacted, in the query and the fragment'
+);
+check(
+    _stattic_redact_access_secrets('/a#token=x') === '/a#token=[redacted]' && _stattic_redact_access_secrets('/plain/path') === '/plain/path',
+    'a fragment alone is scrubbed and a URL with no pairs is unchanged'
+);
 // The static lane decides from the version's record alone: a page it lists as
 // undecorated gets the engine's tag, any other page and any version without
 // the record get none, and nothing is read to find out.

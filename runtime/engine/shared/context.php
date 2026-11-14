@@ -497,14 +497,40 @@ function _stattic_strip_access_query_token(string $query): string
 // token was presented.
 function _stattic_redact_access_secrets(string $uri): string
 {
-    $redacted = preg_replace('~([?&](?:purchaseToken|token)=)[^&#]*~', '$1[redacted]', $uri);
-    $uri = is_string($redacted) ? $redacted : $uri;
-    $redacted = preg_replace(
-        '~(^|[?&])' . preg_quote(STATTIC_ACCESS_QUERY_TOKEN_PARAM, '~') . '=[^&#]*~',
-        '$1' . STATTIC_ACCESS_QUERY_TOKEN_PARAM . '=[redacted]',
-        $uri
-    );
-    $uri = is_string($redacted) ? $redacted : $uri;
+    // Each parameter is named as PHP reads it into `$_GET` (percent-decoded,
+    // with `.` and spaces as `_`), so a spelling the runtime would honor is a
+    // spelling it redacts, every time it appears, in the query and in a
+    // fragment that carries pairs. A tag preview token opens the owner's
+    // draft tags: on a page URL, and as the SDK loader's own `preview`
+    // parameter.
+    $queryStart = strpos($uri, '?');
+    $fragmentStart = strpos($uri, '#');
+    $pairsStart = match (true) {
+        $queryStart === false => $fragmentStart,
+        $fragmentStart === false => $queryStart,
+        default => min($queryStart, $fragmentStart),
+    };
+    if ($pairsStart !== false) {
+        $secretNames = ['purchaseToken', 'token', STATTIC_TAG_PREVIEW_QUERY_NAME, STATTIC_ACCESS_QUERY_TOKEN_PARAM];
+        if (substr($uri, 0, $pairsStart) === STATTIC_SPACEFAST_SDK_PATH) {
+            $secretNames[] = 'preview';
+        }
+        $redactPairs = static function (string $pairs) use ($secretNames): string {
+            $parts = [];
+            foreach (_stattic_runtime_query_pairs($pairs) as [$name, $rawValue, $rawPart]) {
+                $parts[] = $rawValue !== null && in_array(strtr(ltrim($name, ' '), ' .', '__'), $secretNames, true)
+                    ? substr($rawPart, 0, strlen($rawPart) - strlen($rawValue)) . '[redacted]'
+                    : $rawPart;
+            }
+            return implode('&', $parts);
+        };
+        $tail = substr($uri, $pairsStart);
+        $hash = strpos($tail, '#', 1);
+        $uri = substr($uri, 0, $pairsStart)
+            . ($hash === false
+                ? $tail[0] . $redactPairs(substr($tail, 1))
+                : $tail[0] . $redactPairs(substr($tail, 1, $hash - 1)) . '#' . $redactPairs(substr($tail, $hash + 1)));
+    }
     // The frame shell shares the prefix and is not a secret; everything else
     // under it is one.
     $redacted = preg_replace(

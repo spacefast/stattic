@@ -1398,6 +1398,7 @@ fn pipeline_context_digest(
         "engine": env!("CARGO_PKG_VERSION"),
         "previewMetadata": 1,
         "providerIconAlias": 1,
+        "headAnchor": 1,
         "autoShareImage": 4,
         "shareImageOrigin": share_image_origin.map(Url::as_str),
         "config": config,

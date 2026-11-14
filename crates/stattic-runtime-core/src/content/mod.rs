@@ -1079,6 +1079,14 @@ fn mshots_image_url(origin: &url::Url, path: &str) -> String {
     )
 }
 
+/// Elements a browser keeps in the document's head: the head ends at the
+/// first element outside this list, whether or not the page wrote `<head>`
+/// (HTML parsing, the "in head" and "after head" insertion modes).
+const HEAD_ELEMENTS: &[&str] = &[
+    "html", "head", "base", "basefont", "bgsound", "link", "meta", "noscript", "script", "style",
+    "template", "title",
+];
+
 /// The decorated document, and whether it carries the bodyEnd snippets (false
 /// only for a document with no `<body>` while there were some to place).
 fn decorate_html(
@@ -1101,6 +1109,25 @@ fn decorate_html(
     } else {
         source.to_string()
     };
+    // The head anchor follows one rule with the runtime's streaming filter
+    // (`_stattic_html_head_anchor` in runtime/engine/shared/html-insert.php),
+    // pinned by runtime/tests/fixtures/html-head-anchor.json: the first
+    // `<head>` outside `<template>`, `<svg>` and `<math>`, else the first
+    // `<html>` start tag. A browser never makes a head inside those, so markup
+    // placed there would never run.
+    //
+    // What the author already declared is read from the head they wrote. An
+    // explicit `<head>` runs to `</head>` or `<body>`, whatever it holds: an
+    // inline svg sprite, a tracking pixel or a GTM iframe in it does not end
+    // it, and document.title and crawlers still take a `<title>` or `<meta>`
+    // after one. Outside an explicit `<head>`, the head is what a browser
+    // builds: everything before the first body content element (a `<title>`
+    // after `</head>` still lands in it). So neither page's own `<title>` and
+    // `<meta>` are duplicated.
+    let inert = Rc::new(Cell::new(0usize));
+    let in_head = Rc::new(Cell::new(true));
+    let explicit_head_open = Rc::new(Cell::new(false));
+    let root_start = Rc::new(Cell::new(None::<usize>));
     let has_head = Rc::new(Cell::new(false));
     let has_body = Rc::new(Cell::new(false));
     let has_title = Rc::new(Cell::new(false));
@@ -1117,28 +1144,88 @@ fn decorate_html(
     let analysis = rewrite_str(
         &html,
         RewriteStrSettings::new()
+            // Without an explicit `<head>`, the head ends at the first element
+            // a browser puts in the body. Registered first, so an `<svg>` or
+            // `<math>` that starts the body ends the head before it counts as
+            // inert.
+            .append_element_content_handler(element!("*", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
+                let explicit_head_open = Rc::clone(&explicit_head_open);
+                move |element| {
+                    if inert.get() == 0
+                        && !explicit_head_open.get()
+                        && !HEAD_ELEMENTS.contains(&element.tag_name().as_str())
+                    {
+                        in_head.set(false);
+                    }
+                    Ok(())
+                }
+            }))
+            .append_element_content_handler(element!("template, svg, math", {
+                let inert = Rc::clone(&inert);
+                move |element| {
+                    // `<svg/>` is empty; `<template/>` still opens.
+                    if !element.can_have_content() {
+                        return Ok(());
+                    }
+                    inert.set(inert.get() + 1);
+                    let inert = Rc::clone(&inert);
+                    element.on_end_tag(end_tag!(move |_| {
+                        inert.set(inert.get().saturating_sub(1));
+                        Ok(())
+                    }))?;
+                    Ok(())
+                }
+            }))
+            .append_element_content_handler(element!("html", {
+                let inert = Rc::clone(&inert);
+                let root_start = Rc::clone(&root_start);
+                move |element| {
+                    if inert.get() == 0 && root_start.get().is_none() {
+                        root_start.set(Some(element.source_location().bytes().end));
+                    }
+                    Ok(())
+                }
+            }))
             .append_element_content_handler(element!("head", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
+                let explicit_head_open = Rc::clone(&explicit_head_open);
                 let has_head = Rc::clone(&has_head);
                 let head_start = Rc::clone(&head_start);
                 let head_end = Rc::clone(&head_end);
                 move |element| {
-                    if has_head.replace(true) {
+                    if inert.get() > 0 || has_head.replace(true) {
                         return Ok(());
                     }
                     head_start.set(Some(element.source_location().bytes().end));
+                    // A `<head>` after body content is not the document's head.
+                    explicit_head_open.set(in_head.get());
+                    // After `</head>` the browser's rule applies again: a
+                    // `<title>` there still lands in the head.
+                    let explicit_head_open = Rc::clone(&explicit_head_open);
                     let head_end = Rc::clone(&head_end);
                     element.on_end_tag(end_tag!(move |end| {
                         head_end.set(Some(end.source_location().bytes().start));
+                        explicit_head_open.set(false);
                         Ok(())
                     }))?;
                     Ok(())
                 }
             }))
             .append_element_content_handler(element!("body", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
+                let explicit_head_open = Rc::clone(&explicit_head_open);
                 let has_body = Rc::clone(&has_body);
                 let body_start_offset = Rc::clone(&body_start_offset);
                 let body_end_offset = Rc::clone(&body_end_offset);
                 move |element| {
+                    if inert.get() == 0 {
+                        explicit_head_open.set(false);
+                        in_head.set(false);
+                    }
                     if has_body.replace(true) {
                         return Ok(());
                     }
@@ -1151,35 +1238,55 @@ fn decorate_html(
                     Ok(())
                 }
             }))
-            .append_element_content_handler(element!("head title", {
+            // Only the document's head counts: never a `<head>` inside
+            // `<template>`, nor anything inert inside the head.
+            .append_element_content_handler(element!("title", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
                 let has_title = Rc::clone(&has_title);
                 move |_| {
-                    has_title.set(true);
+                    if in_head.get() && inert.get() == 0 {
+                        has_title.set(true);
+                    }
                     Ok(())
                 }
             }))
-            .append_element_content_handler(element!("head link[href]", {
+            .append_element_content_handler(element!("link[href]", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
                 let has_theme_stylesheet = Rc::clone(&has_theme_stylesheet);
                 move |element| {
-                    if element.get_attribute("href").is_some_and(|href| {
-                        href.split(['?', '#']).next() == Some(THEME_STYLESHEET_URL)
-                    }) {
+                    if in_head.get()
+                        && inert.get() == 0
+                        && element.get_attribute("href").is_some_and(|href| {
+                            href.split(['?', '#']).next() == Some(THEME_STYLESHEET_URL)
+                        })
+                    {
                         has_theme_stylesheet.set(true);
                     }
                     Ok(())
                 }
             }))
-            .append_element_content_handler(text!("head title", {
+            .append_element_content_handler(text!("title", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
                 let title_text = Rc::clone(&title_text);
                 move |chunk| {
-                    title_text.borrow_mut().push_str(chunk.as_str());
+                    if in_head.get() && inert.get() == 0 {
+                        title_text.borrow_mut().push_str(chunk.as_str());
+                    }
                     Ok(())
                 }
             }))
-            .append_element_content_handler(element!("head meta", {
+            .append_element_content_handler(element!("meta", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
                 let meta_names = Rc::clone(&meta_names);
                 let meta_properties = Rc::clone(&meta_properties);
                 move |element| {
+                    if !in_head.get() || inert.get() > 0 {
+                        return Ok(());
+                    }
                     if let Some(name) = element.get_attribute("name") {
                         meta_names
                             .borrow_mut()
@@ -1208,12 +1315,16 @@ fn decorate_html(
                     Ok(())
                 }
             }))
-            .append_element_content_handler(element!("head link", {
+            .append_element_content_handler(element!("link", {
+                let inert = Rc::clone(&inert);
+                let in_head = Rc::clone(&in_head);
                 let has_favicon = Rc::clone(&has_favicon);
                 move |element| {
-                    if element
-                        .get_attribute("rel")
-                        .is_some_and(|rel| rel.split_ascii_whitespace().any(is_icon_rel_token))
+                    if in_head.get()
+                        && inert.get() == 0
+                        && element
+                            .get_attribute("rel")
+                            .is_some_and(|rel| rel.split_ascii_whitespace().any(is_icon_rel_token))
                     {
                         has_favicon.set(true);
                     }
@@ -1289,20 +1400,25 @@ fn decorate_html(
                 head.push(format!("<title>{}</title>", escape_html(value)));
             }
         }
+        // An authored `<title>` is already HTML text, and its character
+        // references decode the same in an attribute: it is carried as written
+        // with only its quotes escaped, or `A &amp; B` would read
+        // `A &amp;amp; B`. Every other source is plain text.
+        let title_attribute = title.as_deref().map(|value| {
+            if page.is_none() && existing_title.is_some() {
+                value.replace('"', "&quot;")
+            } else {
+                escape_attr(value)
+            }
+        });
         if !meta_properties.borrow().contains("og:title") {
-            if let Some(value) = &title {
-                head.push(format!(
-                    "<meta property=\"og:title\" content=\"{}\">",
-                    escape_attr(value)
-                ));
+            if let Some(value) = &title_attribute {
+                head.push(format!("<meta property=\"og:title\" content=\"{value}\">"));
             }
         }
         if !meta_names.borrow().contains("twitter:title") {
-            if let Some(value) = &title {
-                head.push(format!(
-                    "<meta name=\"twitter:title\" content=\"{}\">",
-                    escape_attr(value)
-                ));
+            if let Some(value) = &title_attribute {
+                head.push(format!("<meta name=\"twitter:title\" content=\"{value}\">"));
             }
         }
         if !meta_names.borrow().contains("description") {
@@ -1355,12 +1471,20 @@ fn decorate_html(
         }
     }
     head.extend(inject_snippets(config, "head"));
+    // Head markup goes inside the anchor head, at its end; a page with no
+    // head gets it just past `<html>`, where the runtime places it too.
+    let head_anchor = head_start.get().or(root_start.get());
+    let head_close = if has_head.get() {
+        head_end.get()
+    } else {
+        root_start.get()
+    };
     let head_block = if head.is_empty() {
         String::new()
-    } else if has_head.get() {
+    } else if head_anchor.is_some() {
         marked_block("head", &head)
     } else {
-        diagnostics.push(json!({"code":"html_no_head","severity":"warning","message":"An HTML file has no head element; head decoration was skipped.","path":path}));
+        diagnostics.push(json!({"code":"html_no_head","severity":"warning","message":"An HTML file has no head or html element; head decoration was skipped.","path":path}));
         String::new()
     };
     let mut body_start = Vec::new();
@@ -1384,14 +1508,15 @@ fn decorate_html(
         diagnostics.push(json!({"code":"html_no_body","severity":"warning","message":"An HTML file has no body element; body decoration was skipped.","path":path}));
     }
     let mut insertions = Vec::<(usize, String)>::new();
-    if !share_image.is_empty() {
-        if let Some(offset) = head_start.get() {
-            insertions.push((offset, marked_block("share-image", &share_image)));
+    if !head_block.is_empty() {
+        if let Some(offset) = head_close {
+            insertions.push((offset, head_block));
         }
     }
-    if !head_block.is_empty() {
-        if let Some(offset) = head_end.get() {
-            insertions.push((offset, head_block));
+    // Pushed second so that at a shared offset (no head) it lands first.
+    if !share_image.is_empty() {
+        if let Some(offset) = head_anchor {
+            insertions.push((offset, marked_block("share-image", &share_image)));
         }
     }
     if !body_start.is_empty() {
@@ -1524,6 +1649,141 @@ mod tests {
         run.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.get("code") == Some(&json!(code)))
+    }
+
+    fn decorate_for_test(source: &str, config: Value) -> (String, Vec<Value>) {
+        let config = config.as_object().cloned().unwrap_or_default();
+        let viewer = Map::new();
+        let files = BTreeMap::new();
+        let mut diagnostics = Vec::new();
+        let (html, _) = decorate_html(
+            source,
+            HtmlDecorationContext {
+                page: None,
+                config: &config,
+                viewer: &viewer,
+                files: &files,
+                meta_tags: true,
+                theme_available: true,
+                path: "index.html",
+                share_image_origin: None,
+            },
+            &mut diagnostics,
+        )
+        .unwrap();
+        (html, diagnostics)
+    }
+
+    #[test]
+    fn head_anchor_matches_the_shared_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../runtime/tests/fixtures/html-head-anchor.json"
+        )))
+        .expect("the shared head anchor fixture must be valid JSON");
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let (html, diagnostics) = decorate_for_test(
+                &case.get("html").map_or_else(
+                    || {
+                        format!(
+                            "{}{}",
+                            case["before"].as_str().unwrap(),
+                            case["after"].as_str().unwrap()
+                        )
+                    },
+                    |html| html.as_str().unwrap().to_string(),
+                ),
+                json!({
+                    "inject":{"head":["<meta name=\"injected\">"]},
+                    "meta":{"title":"Configured","description":"Configured","favicon":"/configured.png"},
+                }),
+            );
+            // The author's own head tags, with or without a `<head>` around
+            // them, are never declared a second time.
+            if case.get("authoredHead") == Some(&json!(true)) {
+                // Up to the page's first body content; an `<svg><title>` in
+                // the body is not a page title.
+                let lower = html[..html.find("<p>").unwrap()].to_ascii_lowercase();
+                for (needle, label) in [
+                    ("<title", "title"),
+                    ("name=\"description\"", "description"),
+                    ("property=\"og:title\"", "og:title"),
+                    ("property=\"og:description\"", "og:description"),
+                    ("name=\"twitter:title\"", "twitter:title"),
+                    ("rel=\"icon\"", "icon"),
+                    (THEME_STYLESHEET_URL, "theme stylesheet"),
+                ] {
+                    assert_eq!(
+                        lower.matches(needle).count(),
+                        1,
+                        "{name}: one {label}: {html}"
+                    );
+                }
+                assert!(!html.contains("Configured"), "{name}: {html}");
+            }
+            match case.get("html").and_then(Value::as_str) {
+                // No anchor: the page keeps every byte.
+                Some(source) => {
+                    assert_eq!(html, source, "{name}");
+                    assert!(
+                        diagnostics.iter().any(|d| d["code"] == "html_no_head"),
+                        "{name}"
+                    );
+                }
+                // The anchor is where the platform's share-image block lands,
+                // and the head block goes in that same head, never inside an
+                // element a browser keeps inert.
+                None => {
+                    let before = case["before"].as_str().unwrap();
+                    let after = case["after"].as_str().unwrap();
+                    assert!(
+                        html.starts_with(&format!("{before}<!-- spacefast:share-image -->")),
+                        "{name}: {html}"
+                    );
+                    let head_block = html.find("<!-- spacefast:head -->").unwrap();
+                    let preceding = html[..head_block].to_ascii_lowercase();
+                    for element in ["template", "svg", "math"] {
+                        assert_eq!(
+                            preceding.matches(&format!("<{element}>")).count(),
+                            preceding.matches(&format!("</{element}>")).count(),
+                            "{name}: the head block is inside <{element}>: {html}"
+                        );
+                    }
+                    assert_eq!(
+                        strip_generated_html_blocks(&html),
+                        format!("{before}{after}"),
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn authored_titles_are_not_escaped_twice() {
+        let (html, _) = decorate_for_test(
+            "<html><head><title>A &amp; B \"quoted\"</title></head><body></body></html>",
+            json!({}),
+        );
+        assert!(
+            html.contains("<meta property=\"og:title\" content=\"A &amp; B &quot;quoted&quot;\">"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<meta name=\"twitter:title\" content=\"A &amp; B &quot;quoted&quot;\">"),
+            "{html}"
+        );
+        // A configured title is plain text and is escaped once.
+        let (html, _) = decorate_for_test(
+            "<html><head></head><body></body></html>",
+            json!({"meta":{"title":"A & B"}}),
+        );
+        assert!(
+            html.contains("<meta property=\"og:title\" content=\"A &amp; B\">"),
+            "{html}"
+        );
+        assert!(html.contains("<title>A &amp; B</title>"), "{html}");
     }
 
     #[test]

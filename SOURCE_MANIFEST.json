@@ -1,7 +1,7 @@
 {
-  "revision": "bcdcdd5126c6b8af3f4f5c7aadf3cfeb1a865a1c",
-  "sourceHash": "79a22cef147a6f4b3991fe4afaec0a8349ccc4787ee69bc675a64320344039d4",
-  "manifestSha256": "6b38f9fa0b30373fa407a0af13c8cb02ffad20aedceb7302c67dff46b961b565",
+  "revision": "2c7e4db1bf0c966b21962c0ed20b0064722d8510",
+  "sourceHash": "f4b80a236bb29fc14d9e86fc585afb146687e109bf792737a9ca7e172ecdd8ee",
+  "manifestSha256": "2281d137b614e64063cd44efbe11476f8b4a3b61e5718d358463ec66d9cf9ca0",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "aec3ad7e697a179f0f614c34915e5c54af4e3eb06c30ea1103e3528d521a6592"
+      "sha256": "5af9a56284c8fd334c0aa4464144fdd373c7bc1d37b4f76fa9ba658e24038928"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "2f54c0f3b20b7cacd56657c06bc3c4d1b33d0dd9b3b800792567675bb64230bb"
+      "sha256": "81c214f61c60f76f47374c09d01e6b0423eadf147a1819f710c6650c7d66a7e0"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -109,7 +109,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "962f3743e8e2df8c5fa9d27739ca362f9b572f984b8b58d6456c72e382648f27"
+      "sha256": "d9261b328cecaabfb57f205fcb9e2a3ad1b005642babe1ff766feee90291164b"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -233,7 +233,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "5533d1fdb7b1192bb4a02144d9c53a5199a65c981274913d9989209a11d4cfe2"
+      "sha256": "b4d357f0d65112d6225a3a2d6a8f6bd88de262de093e60462ae7824a5ff7762c"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -13877,7 +13877,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "a74d6446f7536e5a4bb1d581cfa902a6d27f451273ddb77b1e9786acb44d9b94"
+      "sha256": "ee5a939c8576c29c4977960e6503c8ef6e392bd766b712a06cc04b2292e490b6"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",
@@ -13921,7 +13921,7 @@
     },
     {
       "path": "runtime/engine/shared/html-insert.php",
-      "sha256": "8553819b3e48edf020936c6413d956a5c8c00e857f58738febbe778073ea5aea"
+      "sha256": "be7c56d9a3fe337f0a733db860d38ec2fd989c02d460f1598da9845a56526a4e"
     },
     {
       "path": "runtime/engine/shared/http.php",
@@ -14408,6 +14408,10 @@
       "sha256": "7fb308d8db483201ed7b6f78e11309a4e4fb93806758582c703ff637bfb73d8b"
     },
     {
+      "path": "runtime/tests/fixtures/html-head-anchor.json",
+      "sha256": "bfb7c73fe84a19ef11956694484e5fe3747b0cce54ba2ccc3526e48c94a8a05f"
+    },
+    {
       "path": "runtime/tests/fixtures/tenant-prelude-probe.php",
       "sha256": "b032e8a4da3cca4ea3deb7ab72a6265b4720abf6c2bfd6b549a2c8c6a6f65617"
     },
@@ -14537,7 +14541,7 @@
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
-      "sha256": "9f6e775a78385ac47a918dd6f323ec26a4808b1b37e243d07ec2ea21caf843bc"
+      "sha256": "60df98425b3a04a3772fd6965ae8120c02e6c7970819145048b2bbcead6e69a1"
     },
     {
       "path": "runtime/tests/request-body.test.ts",
@@ -14621,7 +14625,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "dcef28325f1491b814200c2a247cbe102ebbd2b130041cefac2fa60adf9ef338"
+      "sha256": "805ff2212f27585687dfa2f8b7519a503da5a8c10b31ac6e479f6ab4434f637c"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

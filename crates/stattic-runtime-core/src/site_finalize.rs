@@ -2529,6 +2529,73 @@ mod tests {
     }
 
     #[test]
+    fn first_public_assets_replace_root_files() {
+        let (_temp, private, initial) = finalize_fixture(
+            &[("index.html", b"static v1")],
+            json!({"mode":"website"}),
+            json!({}),
+        );
+        initial.unwrap();
+        let base_index = catalog_at(&private, "v").paths["index.html"]
+            .source
+            .sha256
+            .clone();
+        let first = [
+            ("zero.config.ts", br#"import { defineConfig } from "zero"; export default defineConfig({ name: "hosted" });"#.as_slice()),
+            ("public/index.html", b"first app".as_slice()),
+        ];
+        let mut next = fixture_input(
+            &private,
+            accept_blobs(&private, &first),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        next.version_id = "v2".into();
+        next.session["retention"] = json!("all");
+        next.session["reusable_version_id"] = json!("v");
+        finalize_site(next, false).unwrap();
+        let catalog = catalog_at(&private, "v2");
+        assert!(catalog.paths["index.html"].public);
+        assert!(!catalog.paths["public/index.html"].public);
+        assert_eq!(served_body(&private, "v2", "index.html"), b"first app");
+        // The base version still serves its own bytes from the shared CAS.
+        assert_eq!(served_body(&private, "v", "index.html"), b"static v1");
+        assert_eq!(
+            fs::read(private.join(format!("spaces/s/blobs/{}/{base_index}", &base_index[..2])))
+                .unwrap(),
+            b"static v1"
+        );
+
+        // The same holds when one upload carries both: public/ is what serves.
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                first[0],
+                first[1],
+                ("index.html", b"root source".as_slice()),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        result.unwrap();
+        assert_eq!(served_body(&private, "v", "index.html"), b"first app");
+
+        // public/public/x would replace public/x before x copies from it.
+        let (_temp, _private, nested) = finalize_fixture(
+            &[
+                first[0],
+                ("public/x", b"outer".as_slice()),
+                ("public/public/x", b"inner".as_slice()),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        match nested.unwrap_err() {
+            FinalizeError::Invalid { code, .. } => assert_eq!(code, "zero_v2_source_layout"),
+            other => panic!("expected a layout refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn finalize_compiles_captured_zero_bundle_with_snapshot_revision() {
         let project = tempdir().unwrap();
         fs::write(

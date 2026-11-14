@@ -110,7 +110,7 @@ pub(crate) fn compile(
     .map_err(|error| invalid_error("zero_v2_manifest_write_failed", error.to_string()))?;
     let mut private_paths = BTreeSet::new();
     if !captured {
-        private_paths.extend(files.keys().cloned());
+        let mut copies = BTreeSet::new();
         let public: Vec<_> = files
             .iter()
             .filter_map(|(name, meta)| {
@@ -119,23 +119,44 @@ pub(crate) fn compile(
             })
             .collect();
         for (name, meta) in public {
-            if files.contains_key(&name)
-                || name.starts_with(".zero-source/")
-                || name.starts_with(".zero-compiled/")
-            {
+            if name.starts_with(".zero-source/") || name.starts_with(".zero-compiled/") {
                 return invalid(
                     "zero_v2_source_layout",
-                    "A public asset conflicts with the hosted project layout.",
+                    format!("public/{name} would overwrite a directory the engine owns."),
+                );
+            }
+            // A nested public/public/x would replace public/x before x is
+            // copied from it, so x would serve bytes its catalog entry
+            // doesn't describe.
+            if name.starts_with("public/") {
+                return invalid(
+                    "zero_v2_source_layout",
+                    format!("public/{name} nests public/ inside public/."),
                 );
             }
             let destination = stage.join("files").join(&name);
+            if files.contains_key(&name) {
+                // In a First project the root is private source, so the
+                // public asset wins. That covers both a static page the base
+                // version served and the copy an earlier First version made.
+                // The staged file is a hardlink into the CAS, which earlier
+                // versions still serve. Unlink it; copying over it would
+                // rewrite their bytes.
+                std::fs::remove_file(&destination).map_err(|error| {
+                    invalid_error("zero_v2_asset_write_failed", error.to_string())
+                })?;
+                files.remove(&name);
+            }
             std::fs::create_dir_all(destination.parent().unwrap())
                 .and_then(|()| {
                     std::fs::copy(stage.join("files/public").join(&name), &destination).map(|_| ())
                 })
                 .map_err(|error| invalid_error("zero_v2_asset_write_failed", error.to_string()))?;
-            files.insert(name, meta);
+            files.insert(name.clone(), meta);
+            copies.insert(name);
         }
+        // Everything but the public copies is project source.
+        private_paths.extend(files.keys().filter(|path| !copies.contains(*path)).cloned());
     }
     Ok(Some(Compiled {
         manifest,

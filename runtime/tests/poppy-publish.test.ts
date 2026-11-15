@@ -57,10 +57,9 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
     spaces,
     versions,
     versionDiagnostics,
-    spacefastTagSets,
-    spacefastTagRevisions,
-    spacefastTagReleases,
   } = await import("../../apps/control-plane/src/db/schema/core.js");
+  const { reseedReleasedTagGraph, seedReleasedTagGraph } =
+    await import("../../apps/control-plane/src/test/tags.js");
   const { createId } = await import("../../apps/control-plane/src/lib/ids.js");
   const { runtimeJwks } = await import("../../apps/control-plane/src/runtime/auth.js");
   const { createPoppyTestAgent } = await import("../../apps/control-plane/src/test/poppy-agent.js");
@@ -214,37 +213,17 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       });
     const space = await db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
     if (!space) throw new Error("Created Space is missing");
-    await db.insert(spacefastTagSets).values({
-      id: tagSetId,
+    await seedReleasedTagGraph({
+      setId: tagSetId,
+      revisionId: tagRevisionId,
       tenantId: space.tenantId,
       teamId,
       scopeType: "space",
       scopeId: spaceId,
       name: "Baked demo",
-    });
-    await db.insert(spacefastTagRevisions).values({
-      id: tagRevisionId,
-      tagSetId,
-      revisionNumber: 1,
-      status: "published",
-      title: "Baked demo",
-      createdByActorJson: {},
-      validationJson: { valid: true, diagnostics: [], requiredApprovals: [], graphRevision: 1 },
-      graphJson: graphFor("saved"),
-      graphRevision: 1,
-      effectiveInputDigest: "effective:saved",
-      staticDigest: "static:saved",
-      dynamicDigest: "dynamic:saved",
-      sdkRevision: "sdk:saved",
-    });
-    await db.insert(spacefastTagReleases).values({
-      id: createId("tgr"),
-      tagSetId,
-      environment: "production",
-      revisionId: tagRevisionId,
+      graph: graphFor("saved"),
       sdkRevision: "sdk:saved",
       staticDigest: "static:saved",
-      releasedByActorJson: {},
     });
     const marker = `poppy-published-${randomUUID()}`;
     const html = `<!doctype html><html><head><title>Poppy publishing demo</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f5f8;color:#17213a;font:18px system-ui}main{max-width:700px;padding:64px;background:white;border-radius:20px;box-shadow:0 12px 50px #17213a12}small{color:#6752d5;font-weight:700}h1{font-size:48px;line-height:1.1;letter-spacing:-2px}p{line-height:1.7;color:#586277}code{font-size:12px;overflow-wrap:anywhere}</style></head><body><main><small>SPACEFAST × POPPY</small><h1>Published by a personal agent.</h1><p>Discovery → Sign in → Create a Space → Publish → Serve</p><p>This page was uploaded through the Spacefast API with a DPoP session token, finalized by the runtime worker, and served by the real PHP runtime.</p><code>${marker}</code></main></body></html>`;
@@ -403,10 +382,15 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       body: newer,
     });
     expect(second.status, await second.clone().text()).toBe(201);
-    await db
-      .update(spacefastTagRevisions)
-      .set({ graphJson: graphFor("current"), graphRevision: 2 })
-      .where(eq(spacefastTagRevisions.id, tagRevisionId));
+    // The released graph changes after the first publish; the restore must
+    // serve the graph released now, not the one the version was built with.
+    await reseedReleasedTagGraph(
+      { setId: tagSetId, tenantId: space.tenantId },
+      graphFor("current"),
+      {
+        sdkRevision: "sdk:saved",
+      },
+    );
     const rollbackUrl = `${API}/v1/spaces/${spaceId}/versions/${receipt.data.version.id}/promote?async=1`;
     const restore = async (body: { refreshRewrites?: boolean }) => {
       const response = await app.request(rollbackUrl, {
@@ -469,14 +453,6 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
     await db.delete(authOAuthClients).where(eq(authOAuthClients.clientId, agent.clientId));
     if (spaceId) {
       await db.delete(safetyReviewItems).where(eq(safetyReviewItems.spaceId, spaceId));
-      const tagSet = await db.query.spacefastTagSets.findFirst({
-        where: eq(spacefastTagSets.scopeId, spaceId),
-      });
-      if (tagSet) {
-        await db.delete(spacefastTagReleases).where(eq(spacefastTagReleases.tagSetId, tagSet.id));
-        await db.delete(spacefastTagRevisions).where(eq(spacefastTagRevisions.tagSetId, tagSet.id));
-        await db.delete(spacefastTagSets).where(eq(spacefastTagSets.id, tagSet.id));
-      }
       await db.delete(runtimeBoxes).where(eq(runtimeBoxes.spaceId, spaceId));
       await db.delete(spaceHostnames).where(eq(spaceHostnames.spaceId, spaceId));
       await db.delete(spaces).where(eq(spaces.id, spaceId));

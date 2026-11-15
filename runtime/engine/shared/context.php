@@ -107,12 +107,11 @@ const STATTIC_VISITOR_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'
 // `X-Spacefast-Runtime: 1` is emitted from init.php before ANY gate can exit, so
 // it rides every response shape including denials. On a denial it is the only
 // thing separating our access wall from an upstream proxy/CDN 401.
-function _stattic_emit_runtime_identity(?string $versionId = null): void
+// No response names the version it selected: health.php?v= is the one answer
+// to which version a hostname serves.
+function _stattic_emit_runtime_identity(): void
 {
     header('X-Spacefast-Runtime: 1', true);
-    if (is_string($versionId) && $versionId !== '') {
-        header('X-Spacefast-Version: ' . $versionId, true);
-    }
 }
 
 // The __Host- prefix forbids Domain and requires Secure + Path=/ in conforming

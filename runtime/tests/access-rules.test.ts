@@ -27,6 +27,7 @@ import {
   edgePurgeCalls,
   errorCode,
   get,
+  healthServing,
   journalRecords,
   PHP_BINARY,
   postAccessCallback,
@@ -955,7 +956,11 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const anonymous = await get(runtime, PRIVATE_HOST, "/docs/");
   expect(anonymous.status).toBe(403);
   expect(anonymous.headers.get("cache-control")).toBe("private, no-store");
-  expect(anonymous.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
+  // The wall is this version's: health answers for it without admitting anyone.
+  expect(await healthServing(runtime, PRIVATE_HOST, PRIVATE_VERSION)).toMatchObject({
+    state: "serving",
+    version_match: true,
+  });
   expect(await anonymous.text()).not.toContain("<h1>docs</h1>");
 
   // The noindex policy is platform-owned and reveals no customer content.
@@ -1377,7 +1382,9 @@ test("a team-shaped Grant activated with the version serves its Space", async ()
   // already names a team must still admit, refuse and render normally.
   const anonymous = await get(runtime, TEAM_ACTIVATION_HOST, "/");
   expect(anonymous.status).toBe(403);
-  expect(anonymous.headers.get("x-spacefast-version")).toBe(TEAM_ACTIVATION_VERSION);
+  expect(await healthServing(runtime, TEAM_ACTIVATION_HOST, TEAM_ACTIVATION_VERSION)).toMatchObject(
+    { state: "serving", version_match: true },
+  );
 
   const cookie = await openAuthorities(TEAM_ACTIVATION_HOST, ["member:mem_activation"]);
   const admitted = await get(runtime, TEAM_ACTIVATION_HOST, "/", { headers: { cookie } });

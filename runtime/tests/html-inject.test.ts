@@ -9,6 +9,7 @@ import {
   blobPath,
   deploy,
   get,
+  healthServing,
   PHP_BINARY,
   putRoute,
   publicAccessConfig,
@@ -89,6 +90,9 @@ test("declared icons select exact version bytes through runtime-safe URLs across
       [hosts[0], "a"],
       [hosts[1], "b"],
     ]) {
+      expect(await healthServing(rt, host, `ver_icons_${expected}`)).toMatchObject({
+        version_match: true,
+      });
       const implicit = await (await get(rt, host, "/")).text();
       const declared = implicit.match(/<link rel="icon" href="([^"]+)"/);
       if (!declared) throw new Error("missing compiled implicit icon declaration");
@@ -106,7 +110,6 @@ test("declared icons select exact version bytes through runtime-safe URLs across
         const response = await get(rt, host, url);
         expect(response.status).toBe(200);
         expect(await response.text()).toBe(`${icon}-${expected}\n`);
-        expect(response.headers.get("x-spacefast-version")).toBe(`ver_icons_${expected}`);
         // The accel fallback owns its validator format; the alias retains it.
         expect(response.headers.get("etag")).toMatch(/^"[a-f0-9-]+"$/);
         expect(response.headers.get("content-type")).toBe(

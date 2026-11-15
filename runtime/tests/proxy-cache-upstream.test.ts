@@ -211,6 +211,9 @@ beforeAll(async () => {
     if (requestPath.startsWith("/sendfile/")) {
       const name = requestPath.slice("/sendfile/".length);
       response.setHeader(name, INTERNAL_REDIRECT_HEADERS[name] ?? "");
+      // The runtime's own signature, which no upstream may speak in.
+      response.setHeader("X-Spacefast-Version", "ver_forged");
+      response.setHeader("X-Stattic-Internal", "forged");
       response.setHeader("Content-Type", "text/html");
       response.setHeader("Origin-Agent-Cluster", "?0");
       response.setHeader("Permissions-Policy", [
@@ -549,7 +552,6 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     const publicProxy = await get(rt, PUBLIC_HOST_ROUTE, "/upstream/public");
     expect(publicProxy.status).toBe(200);
     expect(await publicProxy.text()).toBe("GET /upstream/public\n");
-    expect(publicProxy.headers.get("x-spacefast-version")).toBeNull();
 
     // These paths are exempt from customer edge fences, so a host proxy must
     // never turn an unauthenticated machine request into visitor content.
@@ -568,7 +570,6 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     const denied = await get(rt, ACCESS_HOST_ROUTE, "/access/token");
     expect(denied.status).toBe(403);
     expect(denied.headers.get("cache-control")).toBe("private, no-store");
-    expect(denied.headers.get("x-spacefast-version")).toBeNull();
 
     const callback = await postAccessCallback(
       rt,
@@ -589,7 +590,6 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(identity.sub).toBeNull();
     expect(identity.grants).toBeNull();
     expect(admitted.headers.get("cache-control")).toBe(PROTECTED);
-    expect(admitted.headers.get("x-spacefast-version")).toBeNull();
   });
 
   test("an unclaimed Space's proxy routes reach the trusted list only", async () => {
@@ -843,7 +843,7 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(revalidationHeaders).toEqual([undefined, ETAG]);
   });
 
-  test("no spelling of the internal-redirect/sendfile family relays from an upstream", async () => {
+  test("no internal-redirect/sendfile header and no runtime signature header relays from an upstream", async () => {
     // php -S honours none of these headers, so this proves the runtime never puts them
     // back on the wire — it cannot prove nginx would have served the private tree. That
     // half needs the real provider (e2e-tests/direct).
@@ -852,6 +852,9 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
         const response = await get(rt, PUBLIC_HOST, `/sendfile/${name}`);
         expect(response.status, name).toBe(200);
         expect(response.headers.get(name), name).toBeNull();
+        expect(response.headers.get("x-spacefast-version")).toBeNull();
+        expect(response.headers.get("x-stattic-internal")).toBeNull();
+        expect(response.headers.get("x-spacefast-runtime")).toBe("1");
         expect(response.headers.get("origin-agent-cluster")).toBe("?1");
         expect(response.headers.get("permissions-policy")).toBe(
           "document-domain=(), camera=(), microphone=(self)",

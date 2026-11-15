@@ -50,9 +50,8 @@ if ($expectedVersion !== null) {
     require_once $engineRoot . '/shared/artifacts.php';
     require_once $engineRoot . '/shared/zero-v2.php';
     $serving = _stattic_health_serving($storageRoot, $body['request_hostname']);
-    // Only a yes/no for the version the caller already names: the visitor lane
-    // withholds the selected version on redirects and platform answers, so
-    // health never names it either.
+    // Only a yes/no for the version the caller already names: no response
+    // names the version a hostname selects, so health never names it either.
     $body['serving'] = [
         'state' => $serving['state'],
         'version_match' => $serving['version_id'] === $expectedVersion,

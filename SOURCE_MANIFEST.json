@@ -1,7 +1,7 @@
 {
-  "revision": "7ac25ddf5adda52092c2890eaf5d2d5cc190c70b",
-  "sourceHash": "df89948e062c13f35bcf7b5ce35a5eb0440e1403db8f006bce816162daedba00",
-  "manifestSha256": "0d89ddd21abd39865084def1655604405c08c8e2ad6f05a4bc55df9ec13b89e7",
+  "revision": "6d900b12a56d473270258ec57d3cbe69459eb621",
+  "sourceHash": "6f32709f9ac5901a55f219b78f0e7bc157ba99cbf33cba7e1fdf13eaea038136",
+  "manifestSha256": "53e76d62d83c5ca3a12443cffaf3e4e6dcf29d7f53ecd2c00149db916f4c87a5",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a30f3b1d5d4f7a88fde6865522f229747ffd65cfaf3cf201eabb999349cb976a"
+      "sha256": "5c39b2a356b9dcd3885594360497029529928f7de40d2a7026a16746d179df43"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "976769ab365fd7d65d5ebe0a004e93e865f1ee1f5aa82e5a651803d7b1b1be38"
+      "sha256": "87443973d8134e0f92058886d5b0c861dc86e78833ec84fffba9d60055e939f4"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13461,7 +13461,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "69b7aac40f26482c8db1b73307b8705bf82cd64c68f39e1ebc0e0b9345e7af79"
+      "sha256": "3dca0f75ea5fd682e2be5ac95cc8c1ea9641e25486095690aa83f8a989d8e7a6"
     },
     {
       "path": "runtime/SKILL.md",
@@ -13621,7 +13621,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
-      "sha256": "3257714e4940403d147822884bd8e425467519a74ce7fb6a263ea743f0f61b46"
+      "sha256": "b3fe50d1b2e4b8d0b811287e982674317c1bdc911880ac0ff015f2119396c8d1"
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
@@ -13765,7 +13765,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "5f544f5e80e22ea3613b7fe31a6639819d900ceea276341f52f75557b664ab90"
+      "sha256": "c7aaabded054882dc7c6e28e82b84e840b638bb0d6cfb3e3266d4c8eff9ae196"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-V6LI4NW2.js",
@@ -13877,7 +13877,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "ee5a939c8576c29c4977960e6503c8ef6e392bd766b712a06cc04b2292e490b6"
+      "sha256": "5720fa72f92489d9175cfd4ecda6761a8d839c6bd72d5f418fc9a3c292545596"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",
@@ -13989,7 +13989,7 @@
     },
     {
       "path": "runtime/engine/shared/safety.php",
-      "sha256": "58ad66f022e567491e080bc1837375bf3b6af668af4dea780763973ad1dd558f"
+      "sha256": "3de3ae5624f12364e2c56e4c41a05a99ae18be91a6074b6282107567ba1765d4"
     },
     {
       "path": "runtime/engine/shared/security-telemetry.php",
@@ -14025,7 +14025,7 @@
     },
     {
       "path": "runtime/engine/shared/upstream-relay.php",
-      "sha256": "e4d990499eb39bd199df87866100377bc45372c9c4f06c4940f06bad9d1bf3c1"
+      "sha256": "164d914b6b29697330abe806f1bfb7582d83b8fd4e20a6c30a6bc7683f730eac"
     },
     {
       "path": "runtime/engine/shared/wordpress-rest.php",
@@ -14169,7 +14169,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "83b39cb93b6acc1dccdb614ecd10c144307aa4e457d1402f05b7b470e7b74f24"
+      "sha256": "c78ec24639a2638875a6c2d103729075e2d8cc9991f5bc4ce246ab8e368e6b2a"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -14469,7 +14469,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "44d79db545a72978cd321b1dec939f9efb5cb1a93a20d867bbd8ac10d1ece9fd"
+      "sha256": "d378de49e42c967529a9b23880d2b9bd07d00da38f5864d40690fc4ab18590d9"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -14477,7 +14477,7 @@
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "46e8ec458daba63c96a8620b0f7f43a6c232385eab854d609eab9be3adc0cd0a"
+      "sha256": "266cf80be52ae7a93bbabab9b43cccae2a3827c88da31e76bf979dbb89cd13d6"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",
@@ -14541,11 +14541,11 @@
     },
     {
       "path": "runtime/tests/provenance-serving.test.ts",
-      "sha256": "5dee161fed3752d2fd2679d7e09103b3f10bc63e606b5237016d71afb9d0712a"
+      "sha256": "86e21daef57839533eb3af412627eac78c3841d35a26d1b9c47668ead1691679"
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
-      "sha256": "24a99a449c03aa59199316ff5c4d4b99de44164b3b8fe125f070127ffb9bded6"
+      "sha256": "e1f231943ad8c4c55aedc17730e4ef0914ffbb3c46824bf88c88332f1e433cbb"
     },
     {
       "path": "runtime/tests/request-body.test.ts",
@@ -14553,11 +14553,11 @@
     },
     {
       "path": "runtime/tests/route-index.test.ts",
-      "sha256": "bca39cf528dee310224da18cda62af02b87c66ee9ad1ca51496ddcff7d18094c"
+      "sha256": "152aad1dc2c77a2d5b3c0fca6bfcd1b417f1c034104275130b7a1bc570f6d0ac"
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "a2b57437f923d7dcbb3b491f48f9cb6dda2a09c87693a3fb9df2b1fa438cec7f"
+      "sha256": "8f4baed9f1aa4e80586e5c028b8ffbae88358ddc33b74369278430c661feab8a"
     },
     {
       "path": "runtime/tests/run-ci.sh",

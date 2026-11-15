@@ -21,6 +21,11 @@ const STATTIC_RELAY_HOP_BY_HOP_RESPONSE_HEADERS = ['connection', 'keep-alive', '
 // Upstream cache metadata must not replace the platform policy the lane decided.
 const STATTIC_RELAY_STRIPPED_RESPONSE_HEADERS = ['pragma', 'surrogate-control', 'cdn-cache-control'];
 
+// The runtime's own response signature. No upstream may speak in it: readers
+// trust `x-spacefast-runtime`, and readers of an engine older than health.php's
+// serving report trust `x-spacefast-version`.
+const STATTIC_RELAY_RUNTIME_SIGNATURE_PREFIXES = ['x-spacefast-', 'x-stattic-'];
+
 // A proxy origin must not plant state on the space hostname. The Functions host
 // is different: it executes the space's own application, so its cookies are the
 // application's response state and must reach the browser.
@@ -507,6 +512,7 @@ function _stattic_relay_response_header_lines(array $upstreamHeaders, array $cac
             || isset(SPACEFAST_INTERNAL_REDIRECT_HEADERS[$lowerName])
             || isset(SPACEFAST_SPACE_CONTROLLED_HEADERS[$lowerName])
             || isset($suppress[$lowerName])
+            || _stattic_relay_header_prefixed($lowerName, STATTIC_RELAY_RUNTIME_SIGNATURE_PREFIXES)
             || _stattic_relay_header_prefixed($lowerName, $denyPrefixes)
         ) {
             continue;

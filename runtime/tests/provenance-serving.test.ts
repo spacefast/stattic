@@ -3,10 +3,10 @@
 // Two claims live here, and nothing else:
 //
 //  * every response the visitor lane produces — object, redirect, 404, denial,
-//    probe — carries `X-Spacefast-Runtime` and, once a version is selected,
-//    `X-Spacefast-Version` (shared/context.php `_stattic_emit_runtime_identity`).
-//    On a denial that pair is the only thing separating our access wall from an
-//    upstream proxy's;
+//    probe — carries `X-Spacefast-Runtime` (shared/context.php
+//    `_stattic_emit_runtime_identity`); on a denial it is the only thing
+//    separating our access wall from an upstream proxy's. No response names the
+//    version it selected: `health.php?v=` answers whether a hostname serves one;
 //  * the readiness target finalize hands back (`metadata.readinessTarget`, read
 //    by admin/management.php) is a promise about what the serving lane will
 //    answer for one path. This file is where that promise is checked against the
@@ -27,6 +27,8 @@ import {
   finalize,
   finalizeRaw,
   get,
+  type HealthServing,
+  healthServing,
   publicAccessConfig,
   putRoute,
   type Runtime,
@@ -49,9 +51,11 @@ const PROBE_HOST = "probe-redirect.test";
 const PAGE = "<h1>public provenance</h1>\n";
 const ASSET = new Uint8Array(Array.from({ length: 65_536 }, (_, index) => index % 251));
 
-function expectProvenance(response: Response, versionId: string, label = ""): void {
+function expectRuntime(response: Response, label = ""): void {
   expect(response.headers.get("x-spacefast-runtime"), label).toBe("1");
-  expect(response.headers.get("x-spacefast-version"), label).toBe(versionId);
+  // No response names the version it selected; health.php?v= is the one answer.
+  // Released CLIs still read this header directly.
+  expect(response.headers.get("x-spacefast-version"), label).toBeNull();
 }
 
 beforeAll(async () => {
@@ -93,45 +97,55 @@ beforeAll(async () => {
 
 afterAll(() => rt?.stop());
 
-test("public objects carry exact provenance and bytes on every hostname", async () => {
+test("public objects carry the runtime's identity and exact bytes, and health names their version, on every hostname", async () => {
   const page = await get(rt, HOST, "/");
   expect(page.status).toBe(200);
   expect(await page.text()).toBe(PAGE);
-  expectProvenance(page, VERSION);
+  expectRuntime(page);
 
   // The bytes come out of the CAS through the compiled entry, so a whole-object
   // read is also the proof that the blob the table names is the blob served.
   for (const host of [HOST, VERSION_HOST]) {
     const asset = await get(rt, host, "/assets/public.bin");
     expect(asset.status, host).toBe(200);
-    expectProvenance(asset, VERSION, host);
+    expectRuntime(asset, host);
     expect(new Uint8Array(await asset.arrayBuffer()), host).toEqual(ASSET);
+    // Which version those bytes are is health's answer for the hostname: yes
+    // for the one it serves, no for any other.
+    expect(await healthServing(rt, host, VERSION), host).toEqual({
+      state: "serving",
+      version_match: true,
+      edge_purge_pending: false,
+    });
+    expect(await healthServing(rt, host, PROBE_VERSION), host).toMatchObject({
+      state: "serving",
+      version_match: false,
+    });
   }
 
   // HEAD advertises what the GET would send, without a body.
   const head = await get(rt, HOST, "/assets/public.bin", { method: "HEAD" });
   expect(head.status).toBe(200);
   expect(head.headers.get("content-length")).toBe(String(ASSET.byteLength));
-  expectProvenance(head, VERSION);
+  expectRuntime(head);
   expect((await head.arrayBuffer()).byteLength).toBe(0);
 
   const proof = await get(rt, HOST, "/spacefast-readiness/*");
   expect(proof.status).toBe(404);
-  expectProvenance(proof, VERSION);
+  expectRuntime(proof);
 });
 
 test("the production probe answers before any route action, with runtime identity only", async () => {
   const redirected = await get(rt, PROBE_HOST, "/spacefast-readiness/*");
   expect(redirected.status).toBe(302);
   expect(redirected.headers.get("location")).toBe("/elsewhere");
-  expectProvenance(redirected, PROBE_VERSION);
+  expectRuntime(redirected);
 
   const probe = await get(rt, PROBE_HOST, "/__stattic_probe", { method: "HEAD" });
   expect(probe.status).toBe(204);
   // The probe proves the route pointer itself, so it terminates before the host
-  // entry and overlay are resolved: there is no selected version to name.
-  expect(probe.headers.get("x-spacefast-runtime")).toBe("1");
-  expect(probe.headers.get("x-spacefast-version")).toBeNull();
+  // entry and overlay are resolved.
+  expectRuntime(probe);
   expect((await probe.arrayBuffer()).byteLength).toBe(0);
 });
 
@@ -139,7 +153,7 @@ type HealthBody = {
   ok: boolean;
   engine_revision: string;
   request_hostname: string;
-  serving?: { state: string; version_match: boolean; edge_purge_pending: boolean };
+  serving?: HealthServing;
 };
 
 async function health(host: string, query = ""): Promise<{ response: Response; body: HealthBody }> {
@@ -160,7 +174,6 @@ test("health with a version says whether the hostname serves it, before any rout
   expect(matched.response.headers.get("cache-control")).toBe("no-store");
   // A yes/no for the version the caller names; health never names one itself.
   expect(matched.response.headers.get("x-spacefast-runtime")).toBe("1");
-  expect(matched.response.headers.get("x-spacefast-version")).toBeNull();
   expect(matched.body).toMatchObject({ ok: true, request_hostname: PROBE_HOST });
   expect(matched.body.engine_revision).toEqual(expect.any(String));
   expect(matched.body.serving).toEqual({
@@ -177,7 +190,6 @@ test("health with a version says whether the hostname serves it, before any rout
   // A hostname no Space claims serves nothing.
   const unknown = await health("unclaimed.test", `?v=${VERSION}`);
   expect(unknown.response.status).toBe(200);
-  expect(unknown.response.headers.get("x-spacefast-version")).toBeNull();
   expect(unknown.body.serving).toMatchObject({ state: "undeployed", version_match: false });
 
   const invalid = await get(rt, PROBE_HOST, "/__spacefast/health.php?v=..%2Fescape");
@@ -214,14 +226,11 @@ test("the control plane proves this engine's hostnames through health.php alone"
     async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       requests.push(`${url.host}${url.pathname}`);
-      const response = await realFetch(`${rt.baseUrl}${url.pathname}${url.search}`, {
+      return await realFetch(`${rt.baseUrl}${url.pathname}${url.search}`, {
         method: init?.method ?? "GET",
         redirect: "manual",
         headers: { Connection: "close", Host: url.host },
       });
-      // No answer it read named a version in a header.
-      expect(response.headers.get("x-spacefast-version")).toBeNull();
-      return response;
     },
     { preconnect: realFetch.preconnect },
   );
@@ -315,7 +324,6 @@ test("health without a version loads no serving state", async () => {
   const plain = await health(PROBE_HOST);
   expect(plain.response.status).toBe(200);
   expect(plain.response.headers.get("x-spacefast-runtime")).toBe("1");
-  expect(plain.response.headers.get("x-spacefast-version")).toBeNull();
   expect(plain.body.serving).toBeUndefined();
 });
 
@@ -536,7 +544,11 @@ test("every finalized readiness target names a status the serving lane answers",
     expect(response.status, row.suffix).toBe(row.status);
     expect(body.readiness_target.expected_statuses, row.suffix).toContain(response.status);
     expect(response.headers.get("location"), row.suffix).toBe(row.location);
-    expectProvenance(response, versionId, row.suffix);
+    expectRuntime(response, row.suffix);
+    // The target is this version's promise: the hostname serves it.
+    expect(await healthServing(rt, hostname, versionId), row.suffix).toMatchObject({
+      version_match: true,
+    });
   }
 });
 

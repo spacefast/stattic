@@ -1073,6 +1073,22 @@ export async function get(
   });
 }
 
+export type HealthServing = { state: string; version_match: boolean; edge_purge_pending: boolean };
+
+/**
+ * What `health.php?v=` reports for a virtual host: the one place the engine
+ * says whether a hostname serves a version. Undefined when it reports nothing.
+ */
+export async function healthServing(
+  rt: Runtime,
+  host: string,
+  versionId: string,
+): Promise<HealthServing | undefined> {
+  const response = await get(rt, host, `/__spacefast/health.php?v=${versionId}`);
+  // SAFETY: Callers assert the fields they read.
+  return ((await response.json()) as { serving?: HealthServing }).serving;
+}
+
 /** One blob-gate fetch. The token IS the path segment (contracts §7). */
 export async function getBlob(
   rt: Runtime,

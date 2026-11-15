@@ -27,6 +27,7 @@ import {
   deploy,
   edgePurgeCalls,
   get,
+  healthServing,
   hostEntry,
   previousRoutePointer,
   problemDocument,
@@ -205,7 +206,7 @@ test("deleting production restores undeployed serving and retains immutable arti
       // policy came from the deleted route, so the preview fails closed.
       const preview = await get(rt, immutable, "/");
       expect(preview.status).toBe(403);
-      expect(preview.headers.get("x-spacefast-version")).toBe(versionId);
+      expect(await healthServing(rt, immutable, versionId)).toMatchObject({ version_match: true });
     }
     expect(
       edgePurgeCalls(rt)

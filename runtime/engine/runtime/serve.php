@@ -335,9 +335,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
     require_once __DIR__ . '/../shared/zero-v2.php';
     _stattic_zero_generation_serve($versionDir, $serving);
-    // The first point at which a version is the answer, so the first at which the
-    // response may name one: naming it above leaks which version a host points at.
-    _stattic_emit_runtime_identity($versionId);
 
     // A worker reading its own files through its assets binding (set by
     // functions-relay.php after the relay credential verified). The host must

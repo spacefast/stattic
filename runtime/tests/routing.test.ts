@@ -44,6 +44,7 @@ import {
   finalize,
   finalizeRaw,
   get,
+  healthServing,
   getBlob,
   publicAccessConfig,
   putRoute,
@@ -223,7 +224,7 @@ test("a published path serves its compiled entry and precomputed validator", asy
   // Compiled once at finalize and quoted exactly once at send time (D121/D132).
   expect(response.headers.get("etag")).toBe(`"${sha256(APP_JS)}"`);
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-  expect(response.headers.get("x-spacefast-version")).toBe("ver_site_1");
+  expect(await healthServing(rt, SITE, "ver_site_1")).toMatchObject({ version_match: true });
   // Nothing in this runtime compresses or negotiates: no sidecar is consulted,
   // and no lane invents a Content-Encoding.
   expect(response.headers.get("content-encoding")).toBeNull();
@@ -816,8 +817,6 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
   expect(canonical.headers.get("location")).toBe(
     "https://site.test/blog/post.html?from=www&return=%2Fdocs%3Fa%3D1",
   );
-  // No version was selected, so the response names none.
-  expect(canonical.headers.get("x-spacefast-version")).toBeNull();
   // A 308 keeps the method, so a POST is redirected too, never answered 405.
   const posted = await get(rt, WWW, "/blog/post.html?from=www", { method: "POST" });
   expect(posted.status).toBe(308);
@@ -838,7 +837,9 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
   const pinned = await get(rt, VERSION_HOST, "/");
   expect(pinned.status).toBe(200);
   expect(await pinned.text()).toBe(INDEX);
-  expect(pinned.headers.get("x-spacefast-version")).toBe("ver_site_1");
+  expect(await healthServing(rt, VERSION_HOST, "ver_site_1")).toMatchObject({
+    version_match: true,
+  });
 });
 
 test("unknown hosts get the undeployed platform page", async () => {
@@ -1680,10 +1681,8 @@ test("tombstoned hostnames return the removed platform page", async () => {
   const tombstoned = await get(rt, "gone.tomb.test", "/");
   expect(tombstoned.status).toBe(404);
   // A tombstone still names the runtime that produced it — otherwise it is
-  // indistinguishable from the provider's 404 for a host we never served. It
-  // names no version, because the point of a tombstone is that none is servable.
+  // indistinguishable from the provider's 404 for a host we never served.
   expect(tombstoned.headers.get("x-spacefast-runtime")).toBe("1");
-  expect(tombstoned.headers.get("x-spacefast-version")).toBeNull();
 
   // An incremental tombstone write is a read-modify-write. If the existing
   // document cannot be read, abort instead of replacing every prior legal or
@@ -1771,7 +1770,9 @@ test("finalize activation atomically releases immutable version tombstones", asy
 
   const released = await get(rt, versionHost, "/");
   expect(released.status).toBe(200);
-  expect(released.headers.get("x-spacefast-version")).toBe(secondVersionId);
+  expect(await healthServing(rt, versionHost, secondVersionId)).toMatchObject({
+    version_match: true,
+  });
   expect(await released.text()).toBe("<h1>second</h1>\n");
   expect((await get(rt, retainedVersionHost, "/")).status).toBe(404);
 

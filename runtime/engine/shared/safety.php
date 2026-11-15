@@ -15,7 +15,9 @@ const SPACEFAST_PHP_LIKE_EXTENSIONS = ['php', 'php3', 'php4', 'php5', 'php7', 'p
 // remove these. The X-Accel-Redirect/X-Sendfile family is here because under
 // nginx+php-fpm those headers are a server-side file-disclosure primitive. The
 // `x-spacefast-`/`x-stattic-` prefixes are the runtime's own response signature
-// (X-Spacefast-Runtime, X-Spacefast-Version, …) and can never be forged by user rules.
+// (X-Spacefast-Runtime, …) and can never be forged by user rules. That covers
+// X-Spacefast-Version, which this engine no longer sends: readers of an engine
+// older than health.php's serving report still trust it.
 // The compilers reject both at publish; the runtime refuses them again at artifact
 // validation and apply time. Always ask _stattic_platform_managed_header() — the
 // literal map alone is only half the policy.

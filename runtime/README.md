@@ -230,6 +230,10 @@ PUT  /__spacefast/upload.php?route=/spaces/{spaceId}/blobs/{sha256}
 POST /__spacefast/upload.php?op=fetch&upload_id={deploySessionId}&path={canonicalObjectPath}   stage a file fetched from an HTTPS URL
 ```
 
+`health.php?v=` is the only place the runtime says which version a hostname serves:
+its `serving` report carries `state`, `version_match`, and `edge_purge_pending`. Every
+response carries `X-Spacefast-Runtime: 1`; none names its version in a header.
+
 Management JWTs (`aud = "stattic-runtime-management"`) carry `runtime_instance_id`,
 `operation_id`, `action`, `exp`, `nbf`, `jti`, and action-specific scope (`space_id`,
 `version_id`, `route_name`). Upload JWTs (`aud = "stattic-runtime-upload"`) are

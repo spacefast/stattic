@@ -2,11 +2,12 @@ import { expect, test } from "bun:test";
 // The route index and its pointer swap (contracts §3). v4 has no route
 // generations directory and no hardlink forwarding: shard files are immutable
 // and content-addressed, so an untouched shard keeps its NAME across a pointer
-// write (same content -> same sha16 -> same file) and dedupe falls out of the
-// addressing rather than a reuse pass. What is left to pin is the swap itself:
+// write (same content -> same sha16 -> same file). A shard with the same
+// entries under different bytes keeps the previous pointer's name too. What is
+// left to pin is the swap itself:
 // gen monotonicity, which shards a mutation rewrites, previous.json as the
-// grace anchor, shard GC by (unreferenced AND aged), and the cross-space
-// correctness the incremental update's owners map preserves.
+// grace anchor, that superseded shards are kept, and that a directory a deleted
+// Space left behind never takes a hostname from the Space serving it.
 import {
   chmodSync,
   existsSync,
@@ -59,9 +60,9 @@ function hostOutsideShard(prefix: string, shard: string): string {
   }
 }
 
-/** Every artifact a pointer names: host shards, the wildcard shard, the owners map. */
+/** Every artifact a pointer names: host shards and the wildcard shard. */
 function pointerFiles(pointer: RoutePointer): string[] {
-  return [...Object.values(pointer.shards), pointer.wildcards, pointer.owners].filter(
+  return [...Object.values(pointer.shards), pointer.wildcards].filter(
     (name): name is string => typeof name === "string" && name !== "",
   );
 }
@@ -430,7 +431,7 @@ test("a hostname change rewrites only the owning shard and keeps the retired poi
   }
 });
 
-test("cross-space hostname collisions stay correct through incremental pointer swaps", async () => {
+test("a deleted Space's tombstone yields to the Space serving the hostname and returns when it lets go", async () => {
   const rt = await startRuntime();
   const sharedHost = "shared-claim.test";
   try {
@@ -505,9 +506,8 @@ test("cross-space hostname collisions stay correct through incremental pointer s
     expect(claimed.status).toBe(200);
     expect(await claimed.text()).toBe("s1");
 
-    // Space S releases the hostname: T's tombstone must resurface. The owners
-    // map is what makes the incremental update recompute the host from BOTH
-    // spaces instead of only the mutating one.
+    // Space S releases the hostname: T's tombstone must resurface, because the
+    // index is recomputed from every Space directory on disk.
     await putRoute(rt, "spc_idx_s", "production", productionRoute([], "ver_idx_s1"));
     const resurfaced = await get(rt, sharedHost, "/");
     expect(resurfaced.status).toBe(404);
@@ -519,7 +519,7 @@ test("cross-space hostname collisions stay correct through incremental pointer s
 test("a takedown removes only its space's live claim regardless of space-id ordering", async () => {
   const rt = await startRuntime();
   try {
-    // Both orderings, because the merge walks contributors by space id: each row
+    // Both orderings, because the index walks Space directories by id: each row
     // fails on its own if the tombstone is applied by position rather than by
     // which space owns the claim.
     for (const [suffix, tombstonedSpace, survivingSpace] of [
@@ -711,6 +711,8 @@ test("intent-only hostname updates purge changed mappings and repair the route i
     expect(rewritten.status).toBe(200);
     expect(await rewritten.json()).toEqual({ space_id: "spc_idx_intent", route_count: 5 });
     expect(edgePurgeCalls(rt).length).toBe(purgesAfterChange);
+    // The same entries under another name are not an index change.
+    expect(readPointer(rt)).toEqual(equivalentIndex);
     expect(await (await get(rt, "unrelated-intent.test", "/")).text()).toBe("unrelated space");
 
     // The earlier purge has completed, but the old index survived a process
@@ -764,7 +766,7 @@ test("intent-only hostname updates purge changed mappings and repair the route i
   }
 });
 
-test("site repair persists invalidation for every Space before replacing the shared index", async () => {
+test("repair persists invalidation for every indexed and declared hostname before replacing the index", async () => {
   const rt = await startRuntime({ captureEdgePurges: true });
   const hostA = "repair-a.test";
   const movedHostA = "repair-a-new.test";
@@ -959,7 +961,7 @@ test("an invalid fresh shard leaves the active route pointer and served version 
         "define('STATTIC_RUNTIME_DISPATCH_CLI', true);",
         "require $argv[2] . '/shared/storage.php';",
         "require $argv[2] . '/admin/generate.php';",
-        "_stattic_runtime_write_route_index($argv[1], ['3f' => ['hostnames' => ['invalid-shard-entry.test' => []], 'host_routes' => []]], [], ['fresh' => ['hostnames' => [], 'host_routes' => []]], []);",
+        "_stattic_runtime_write_route_index($argv[1], ['3f' => ['hostnames' => ['invalid-shard-entry.test' => []], 'host_routes' => []]], ['hostnames' => [], 'host_routes' => []]);",
       ].join(" "),
       rt.storageRoot,
       rt.engineRoot,

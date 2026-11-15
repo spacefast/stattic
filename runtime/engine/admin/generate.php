@@ -468,175 +468,45 @@ function _stattic_runtime_route_path_prefix(array $route): string
         : '/';
 }
 
-// All route-index writes serialize on routes/index.lock (innermost lock;
-// site -> space -> index ordering, see admin/management.php), so no two
-// mutations interleave a read-modify-write of the pointer. Callers already
-// holding the lock use the _unlocked variant.
+// A box serves one Space, so every route-index write recomputes the whole index
+// from the Space directories on disk; nothing is patched per hostname. A
+// deleted Space's directory keeps its tombstones, so the directories are still
+// enumerated, and a write for one of them recomputes state another may be
+// mutating. Overlay sync, composition and the pointer swap therefore serialize
+// on routes/index.lock (innermost lock; site -> space -> index ordering, see
+// admin/management.php).
 function _stattic_runtime_rebuild_route_index(string $privateRoot): void
 {
     _stattic_runtime_with_route_index_lock($privateRoot, static function () use ($privateRoot): void {
-        _stattic_runtime_rebuild_route_index_unlocked($privateRoot);
+        foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+            _stattic_runtime_sync_space_overlay($privateRoot, basename((string) $spaceRoot));
+        }
+        _stattic_runtime_publish_route_index($privateRoot);
     });
 }
 
-function _stattic_runtime_rebuild_route_index_unlocked(string $privateRoot, ?callable $beforePublish = null): void
-{
-    $contributions = [];
-    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
-        $spaceId = basename((string) $spaceRoot);
-        _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
-        $contribution = _stattic_runtime_space_index_contribution($privateRoot, $spaceId);
-        if (_stattic_runtime_contribution_hostnames($contribution) !== []) {
-            $contributions[] = $contribution;
-        }
-    }
-    $merged = _stattic_runtime_merge_host_contributions($contributions);
-    $split = _stattic_runtime_split_route_index($merged['hostnames'], $merged['host_routes']);
-    _stattic_runtime_write_route_index(
-        $privateRoot,
-        $split['shards'],
-        [],
-        ['fresh' => $split['wildcards']],
-        _stattic_runtime_contribution_owners($contributions),
-        $beforePublish
-    );
-}
-
-// Any unexpected on-disk state falls back to a full rebuild.
 function _stattic_runtime_update_route_index(string $privateRoot, string $spaceId, ?callable $beforePublish = null): void
 {
     _stattic_runtime_with_route_index_lock($privateRoot, static function () use ($privateRoot, $spaceId, $beforePublish): void {
-        _stattic_runtime_update_route_index_unlocked($privateRoot, $spaceId, $beforePublish);
+        // The overlay carries this Space's access state and route->version map,
+        // and is what the serve path reads for both; it swaps before the route
+        // pointer so a host that becomes reachable already has its access
+        // answer on disk.
+        _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
+        _stattic_runtime_publish_route_index($privateRoot, $beforePublish);
     });
 }
 
-function _stattic_runtime_update_route_index_unlocked(string $privateRoot, string $spaceId, ?callable $beforePublish = null): void
+// Callers hold the index lock.
+function _stattic_runtime_publish_route_index(string $privateRoot, ?callable $beforePublish = null): void
 {
-    // The overlay carries this Space's access state and route->version map, and
-    // is what the serve path reads for both; it swaps before the route pointer
-    // so a host that becomes reachable already has its access answer on disk.
-    _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
-
-    $current = _stattic_runtime_read_route_pointer($privateRoot);
-    if ($current === false) {
-        throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
+    $contributions = [];
+    foreach (_stattic_runtime_space_roots_strict($privateRoot) as $spaceRoot) {
+        $contributions[] = _stattic_runtime_space_index_contribution($privateRoot, basename((string) $spaceRoot));
     }
-    $shardManifest = is_array($current['shards'] ?? null) ? $current['shards'] : null;
-    $wildcardsName = is_string($current['wildcards'] ?? null) ? $current['wildcards'] : null;
-    $owners = _stattic_runtime_read_route_owners($privateRoot, $current);
-    if ($current === null || $shardManifest === null || $wildcardsName === null || $owners === null) {
-        _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
-        return;
-    }
-
-    $contributions = [$spaceId => _stattic_runtime_space_index_contribution($privateRoot, $spaceId)];
-    $affected = array_fill_keys(_stattic_runtime_contribution_hostnames($contributions[$spaceId]), true);
-    foreach ($owners as $hostname => $owningSpaces) {
-        if (is_string($hostname) && is_array($owningSpaces) && in_array($spaceId, $owningSpaces, true)) {
-            $affected[$hostname] = true;
-        }
-    }
-    if ($affected === []) {
-        return;
-    }
-
-    // The merge sorts contributors by space id (the full rebuild's glob order) so
-    // cross-space results (serve-wins, tombstone fallback) are identical.
-    $updatedHostnames = [];
-    $updatedHostRoutes = [];
-    foreach (array_keys($affected) as $hostname) {
-        $hostname = (string) $hostname;
-        $contributors = [$spaceId => true];
-        foreach (($owners[$hostname] ?? []) as $owner) {
-            if (is_string($owner)) {
-                $contributors[$owner] = true;
-            }
-        }
-        $hostContributions = [];
-        foreach (array_keys($contributors) as $contributor) {
-            $contributor = (string) $contributor;
-            $contributions[$contributor] ??= _stattic_runtime_space_index_contribution($privateRoot, $contributor);
-            $hostContributions[] = _stattic_runtime_filter_contribution_to_hostname($contributions[$contributor], $hostname);
-        }
-        $merged = _stattic_runtime_merge_host_contributions($hostContributions);
-        if (isset($merged['hostnames'][$hostname])) {
-            $updatedHostnames[$hostname] = $merged['hostnames'][$hostname];
-        }
-        if (($merged['host_routes'][$hostname] ?? []) !== []) {
-            $updatedHostRoutes[$hostname] = $merged['host_routes'][$hostname];
-        }
-    }
-
-    $affectedShards = [];
-    $wildcardAffected = false;
-    foreach (array_keys($affected) as $hostname) {
-        if (str_contains((string) $hostname, '*')) {
-            $wildcardAffected = true;
-        } else {
-            $affectedShards[_stattic_runtime_route_host_shard((string) $hostname)] = true;
-        }
-    }
-
-    $freshShards = [];
-    $reusedShards = [];
-    foreach ($shardManifest as $shard => $shardFile) {
-        // PHP normalizes numeric-string array keys (e.g. shard "36") to ints.
-        $shard = (string) $shard;
-        if (
-            preg_match('/^[a-f0-9]{2}$/', $shard) !== 1
-            || !is_string($shardFile)
-            || !is_file($privateRoot . '/routes/' . $shardFile)
-        ) {
-            _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
-            return;
-        }
-        if (!isset($affectedShards[$shard])) {
-            $reusedShards[$shard] = $shardFile;
-        }
-    }
-    foreach (array_keys($affectedShards) as $shard) {
-        $shard = (string) $shard;
-        $contents = ['hostnames' => [], 'host_routes' => []];
-        if (isset($shardManifest[$shard])) {
-            $existing = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $shardManifest[$shard]);
-            if ($existing === null) {
-                _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
-                return;
-            }
-            $contents = $existing;
-        }
-        $freshShards[$shard] = _stattic_runtime_apply_host_updates($contents, $shard, $affected, $updatedHostnames, $updatedHostRoutes);
-    }
-
-    if ($wildcardAffected) {
-        $contents = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $wildcardsName);
-        if ($contents === null) {
-            _stattic_runtime_rebuild_route_index_unlocked($privateRoot, $beforePublish);
-            return;
-        }
-        $wildcards = ['fresh' => _stattic_runtime_apply_host_updates($contents, null, $affected, $updatedHostnames, $updatedHostRoutes)];
-    } else {
-        $wildcards = ['reuse' => $wildcardsName, 'has_wildcards' => !empty($current['has_wildcards'])];
-    }
-
-    $newOwners = [];
-    foreach ($owners as $hostname => $owningSpaces) {
-        if (!is_string($hostname) || !is_array($owningSpaces)) {
-            continue;
-        }
-        $kept = array_values(array_filter($owningSpaces, static fn ($owner): bool => is_string($owner) && $owner !== $spaceId));
-        if ($kept !== []) {
-            $newOwners[$hostname] = $kept;
-        }
-    }
-    foreach (_stattic_runtime_contribution_hostnames($contributions[$spaceId]) as $hostname) {
-        $merged = array_unique([...($newOwners[$hostname] ?? []), $spaceId]);
-        sort($merged);
-        $newOwners[$hostname] = array_values($merged);
-    }
-    ksort($newOwners);
-
-    _stattic_runtime_write_route_index($privateRoot, $freshShards, $reusedShards, $wildcards, $newOwners, $beforePublish);
+    $index = _stattic_runtime_index_from_contributions($contributions);
+    $split = _stattic_runtime_split_route_index($index['hostnames'], $index['host_routes']);
+    _stattic_runtime_write_route_index($privateRoot, $split['shards'], $split['wildcards'], $beforePublish);
 }
 
 // Read under the index lock: this is the read half of a read-modify-write.
@@ -651,25 +521,8 @@ function _stattic_runtime_read_route_pointer(string $privateRoot): array|false|n
     return is_array($pointer) && is_int($pointer['gen'] ?? null) ? $pointer : null;
 }
 
-function _stattic_runtime_read_route_owners(string $privateRoot, ?array $pointer): ?array
-{
-    if (!is_array($pointer) || !is_string($pointer['owners'] ?? null)) {
-        return null;
-    }
-    $path = $privateRoot . '/routes/' . $pointer['owners'];
-    $loaded = include $path;
-    if (!is_array($loaded)) {
-        clearstatcache(true, $path);
-        if (!_sf_path_verifiably_absent($path)) {
-            throw new RuntimeException('route index read failed: ' . $path);
-        }
-    }
-    return is_array($loaded) && is_array($loaded['owners'] ?? null) ? $loaded['owners'] : null;
-}
-
-// Any unexpected on-disk SHAPE returns null. The caller falls back to a full
-// rebuild. A failed include of an existing shard aborts instead: the shard's
-// bytes are fine, this read is not, and a rebuild would drop its hosts.
+// Any unexpected on-disk SHAPE returns null. A failed include of an existing
+// shard aborts instead: the shard's bytes are fine, this read is not.
 function _stattic_runtime_read_route_shard(string $path): ?array
 {
     $existing = include $path;
@@ -688,26 +541,6 @@ function _stattic_runtime_read_route_shard(string $path): ?array
         return null;
     }
     return ['hostnames' => $existing['hostnames'], 'host_routes' => $existing['host_routes']];
-}
-
-// $shard null selects the wildcard payload.
-function _stattic_runtime_apply_host_updates(array $contents, ?string $shard, array $affected, array $updatedHostnames, array $updatedHostRoutes): array
-{
-    foreach (array_keys($affected) as $hostname) {
-        $hostname = (string) $hostname;
-        $isWildcard = str_contains($hostname, '*');
-        if ($shard === null ? !$isWildcard : ($isWildcard || _stattic_runtime_route_host_shard($hostname) !== $shard)) {
-            continue;
-        }
-        unset($contents['hostnames'][$hostname], $contents['host_routes'][$hostname]);
-        if (isset($updatedHostnames[$hostname])) {
-            $contents['hostnames'][$hostname] = $updatedHostnames[$hostname];
-        }
-        if (isset($updatedHostRoutes[$hostname])) {
-            $contents['host_routes'][$hostname] = $updatedHostRoutes[$hostname];
-        }
-    }
-    return $contents;
 }
 
 function _stattic_runtime_space_index_contribution(string $privateRoot, string $spaceId): array
@@ -765,71 +598,22 @@ function _stattic_runtime_contribution_hostnames(array $contribution): array
     return array_keys($hostnames);
 }
 
-// hostname => sorted owning space ids; persisted per generation so the
-// incremental update can resolve cross-space collisions (a serve entry wins over
-// a tombstone, and releasing a hostname must resurface another space's claim).
-function _stattic_runtime_contribution_owners(array $contributions): array
+// The hostnames and per-host routes the index serves, in directory order. A
+// tombstone replaces its Space's own live claim on that hostname: a takedown is
+// authoritative at once.
+function _stattic_runtime_index_from_contributions(array $contributions): array
 {
-    $owners = [];
-    foreach ($contributions as $contribution) {
-        $spaceId = (string) $contribution['space_id'];
-        foreach (_stattic_runtime_contribution_hostnames($contribution) as $hostname) {
-            $owners[$hostname][$spaceId] = true;
-        }
-    }
-    ksort($owners);
-    $sorted = [];
-    foreach ($owners as $hostname => $owningSpaces) {
-        $spaceIds = array_keys($owningSpaces);
-        sort($spaceIds);
-        $sorted[$hostname] = $spaceIds;
-    }
-    return $sorted;
-}
-
-function _stattic_runtime_filter_contribution_to_hostname(array $contribution, string $hostname): array
-{
-    $filtered = [
-        'space_id' => $contribution['space_id'],
-        'hostnames' => [],
-        'routes' => [],
-        'canonical' => [],
-        'tombstones' => [],
-        'tombstone_metadata' => $contribution['tombstone_metadata'] ?? [],
-        'tombstone_reason' => $contribution['tombstone_reason'] ?? null,
-        'tombstone_category' => $contribution['tombstone_category'] ?? null,
-    ];
-    foreach (['hostnames', 'routes', 'canonical'] as $field) {
-        if (isset($contribution[$field][$hostname])) {
-            $filtered[$field][$hostname] = $contribution[$field][$hostname];
-        }
-    }
-    if (in_array($hostname, $contribution['tombstones'], true)) {
-        $filtered['tombstones'][] = $hostname;
-    }
-    return $filtered;
-}
-
-// Contributions merge in space-id order (the full rebuild's glob order); intent
-// entries merge first across all spaces, tombstones after. A tombstone overrides
-// a serve entry owned by the same space (takedown authority), while another
-// space's current serve entry wins over the stale tombstone.
-function _stattic_runtime_merge_host_contributions(array $contributions): array
-{
-    usort($contributions, static fn (array $left, array $right): int => strcmp((string) $left['space_id'], (string) $right['space_id']));
     $hostnames = [];
     $hostRoutes = [];
     $hostCanonicalRoutes = [];
     foreach ($contributions as $contribution) {
-        // Drop the space's own live claim before collision resolution so another
-        // space's claim wins regardless of which space id sorts last.
         $tombstonedHostnames = array_fill_keys($contribution['tombstones'], true);
         foreach ($contribution['hostnames'] as $hostname => $entries) {
             if (isset($tombstonedHostnames[$hostname])) {
                 continue;
             }
             foreach ($entries as $entry) {
-                _stattic_runtime_set_host_entry($hostnames, (string) $hostname, $entry);
+                $hostnames[(string) $hostname] = $entry;
                 if (!empty($entry['noindex'])) {
                     $hostRoutes[$hostname][] = _stattic_runtime_noindex_robots_route();
                 }
@@ -1075,29 +859,12 @@ function _stattic_runtime_resolve_route_target(string $privateRoot, string $spac
     return null;
 }
 
-// A host entry that serves a Space wins over one that does not; among serving
-// entries the last contributor in space-id order takes the host.
-function _stattic_runtime_host_entry_serves(mixed $entry): bool
-{
-    return is_array($entry)
-        && is_string($entry['space_id'] ?? null)
-        && $entry['space_id'] !== ''
-        && !isset($entry['route_action']);
-}
-
-function _stattic_runtime_set_host_entry(array &$hostnames, string $hostname, array $entry): void
-{
-    if (_stattic_runtime_host_entry_serves($hostnames[$hostname] ?? null) && !_stattic_runtime_host_entry_serves($entry)) {
-        return;
-    }
-    $hostnames[$hostname] = $entry;
-}
-
 function _stattic_runtime_set_tombstone_host_entry(array &$hostnames, string $hostname, string $spaceId, ?string $reason = null, ?string $category = null): void
 {
     $existing = $hostnames[$hostname] ?? null;
-    if (_stattic_runtime_host_entry_serves($existing) && ($existing['space_id'] ?? null) !== $spaceId) {
-        // Another Space's live claim outranks this Space's stale tombstone.
+    if (is_array($existing) && !isset($existing['route_action']) && ($existing['space_id'] ?? null) !== $spaceId) {
+        // A directory left behind by a deleted Space keeps its tombstones. They
+        // never replace a hostname the box's Space serves now.
         return;
     }
     $variant = _stattic_runtime_tombstone_variant($reason, $category);
@@ -1218,29 +985,55 @@ function _stattic_runtime_index_changed_hostnames(string $privateRoot, ?array $b
     return array_keys($changed);
 }
 
-/** @return list<string> */
-function _stattic_runtime_overlay_hostnames(string $privateRoot, string $spaceId): array
+/**
+ * Hostnames the current route index answers, for one Space or for all of them.
+ *
+ * @return list<string>
+ */
+function _stattic_runtime_route_index_hostnames(string $privateRoot, ?string $spaceId = null): array
 {
-    $hostnames = array_fill_keys(_stattic_runtime_contribution_hostnames(
-        _stattic_runtime_space_index_contribution($privateRoot, $spaceId)
-    ), true);
     $pointer = _stattic_runtime_read_route_pointer($privateRoot);
     if ($pointer === false) {
         throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
     }
-    $owners = is_array($pointer) ? _stattic_runtime_read_route_owners($privateRoot, $pointer) : null;
-    foreach ($owners ?? [] as $hostname => $spaces) {
-        if (in_array($spaceId, $spaces, true)) {
-            $hostnames[(string) $hostname] = true;
+    if (!is_array($pointer)) {
+        return [];
+    }
+    $names = [...array_values(is_array($pointer['shards'] ?? null) ? $pointer['shards'] : []), $pointer['wildcards'] ?? null];
+    $hostnames = [];
+    foreach ($names as $name) {
+        $shard = is_string($name) ? _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $name) : null;
+        if ($shard === null) {
+            continue;
+        }
+        foreach ($shard['hostnames'] as $hostname => $entry) {
+            if ($spaceId === null || ($entry['space_id'] ?? null) === $spaceId) {
+                $hostnames[(string) $hostname] = true;
+            }
+        }
+        foreach ($shard['host_routes'] as $hostname => $routes) {
+            foreach ($routes as $route) {
+                if ($spaceId === null || ($route['space_id'] ?? null) === $spaceId) {
+                    $hostnames[(string) $hostname] = true;
+                }
+            }
         }
     }
     return array_keys($hostnames);
 }
 
-function _stattic_runtime_write_route_index(string $privateRoot, array $freshShards, array $reusedShards, array $wildcards, array $owners, ?callable $beforePublish = null): void
+/** @return list<string> */
+function _stattic_runtime_overlay_hostnames(string $privateRoot, string $spaceId): array
+{
+    return array_values(array_unique([
+        ..._stattic_runtime_contribution_hostnames(_stattic_runtime_space_index_contribution($privateRoot, $spaceId)),
+        ..._stattic_runtime_route_index_hostnames($privateRoot, $spaceId),
+    ]));
+}
+
+function _stattic_runtime_write_route_index(string $privateRoot, array $shards, array $wildcards, ?callable $beforePublish = null): void
 {
     $routesRoot = $privateRoot . '/routes';
-    $shardsRoot = $routesRoot . '/shards';
     $previous = _stattic_runtime_read_route_pointer($privateRoot);
     if ($previous === false) {
         // Never treat a failed read of an existing pointer as generation zero:
@@ -1248,37 +1041,23 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
         throw new RuntimeException('route index read failed: ' . $routesRoot . '/current.json');
     }
 
+    $previousShards = is_array($previous) && is_array($previous['shards'] ?? null) ? $previous['shards'] : [];
     $manifest = [];
-    foreach ($freshShards as $shard => $contents) {
+    foreach ($shards as $shard => $contents) {
         $shard = (string) $shard;
         $hostnames = is_array($contents['hostnames'] ?? null) ? $contents['hostnames'] : [];
         $hostRoutes = is_array($contents['host_routes'] ?? null) ? $contents['host_routes'] : [];
         if ($hostnames === [] && $hostRoutes === []) {
             continue;
         }
-        $manifest[$shard] = 'shards/' . _stattic_runtime_write_route_shard('hosts-' . $shard, $shardsRoot, $hostnames, $hostRoutes);
-    }
-    foreach ($reusedShards as $shard => $shardFile) {
-        $manifest[(string) $shard] = (string) $shardFile;
+        $manifest[$shard] = _stattic_runtime_route_shard_file($routesRoot, $previousShards[$shard] ?? null, 'hosts-' . $shard, $hostnames, $hostRoutes);
     }
     ksort($manifest);
 
-    if (is_string($wildcards['reuse'] ?? null)) {
-        $wildcardsFile = $wildcards['reuse'];
-        $hasWildcards = !empty($wildcards['has_wildcards']);
-    } else {
-        $payload = is_array($wildcards['fresh'] ?? null) ? $wildcards['fresh'] : [];
-        $hostnames = is_array($payload['hostnames'] ?? null) ? $payload['hostnames'] : [];
-        $hostRoutes = is_array($payload['host_routes'] ?? null) ? $payload['host_routes'] : [];
-        $hasWildcards = $hostnames !== [] || $hostRoutes !== [];
-        $wildcardsFile = 'shards/' . _stattic_runtime_write_route_shard('wildcards', $shardsRoot, $hostnames, $hostRoutes);
-    }
-
-    $ownersFile = 'shards/' . _sf_php_artifact_write(
-        $shardsRoot,
-        'owners',
-        _sf_php_artifact_source(['owners' => $owners])
-    );
+    $wildcardHostnames = is_array($wildcards['hostnames'] ?? null) ? $wildcards['hostnames'] : [];
+    $wildcardRoutes = is_array($wildcards['host_routes'] ?? null) ? $wildcards['host_routes'] : [];
+    $hasWildcards = $wildcardHostnames !== [] || $wildcardRoutes !== [];
+    $wildcardsFile = _stattic_runtime_route_shard_file($routesRoot, is_array($previous) ? ($previous['wildcards'] ?? null) : null, 'wildcards', $wildcardHostnames, $wildcardRoutes);
 
     // Content-addressed names make this a content comparison: an identical
     // index skips the whole write. Gen stays put and previous.json keeps its
@@ -1289,7 +1068,6 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
         && (bool) ($previous['has_wildcards'] ?? false) === $hasWildcards
         && ($previous['shards'] ?? null) == $manifest
         && ($previous['wildcards'] ?? null) === $wildcardsFile
-        && ($previous['owners'] ?? null) === $ownersFile
     ) {
         return;
     }
@@ -1300,7 +1078,6 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
         'has_wildcards' => $hasWildcards,
         'shards' => $manifest,
         'wildcards' => $wildcardsFile,
-        'owners' => $ownersFile,
     ];
 
     // Replays can repair a stale projection. Persist their invalidation before
@@ -1316,6 +1093,22 @@ function _stattic_runtime_write_route_index(string $privateRoot, array $freshSha
         _sf_json_write($routesRoot . '/previous.json', $previous);
     }
     _sf_json_write($routesRoot . '/current.json', $pointer);
+}
+
+// The file a pointer names for one shard. A shard whose content the previous
+// pointer already serves keeps that name, so `gen` moves only when an entry
+// changed: an engine that built the same entries in another key order, or
+// rendered them to different bytes, wrote a different content address.
+function _stattic_runtime_route_shard_file(string $routesRoot, mixed $previousName, string $base, array $hostnames, array $hostRoutes): string
+{
+    $name = 'shards/' . _stattic_runtime_write_route_shard($base, $routesRoot . '/shards', $hostnames, $hostRoutes);
+    if (!is_string($previousName) || $previousName === $name || !is_file($routesRoot . '/' . $previousName)) {
+        return $name;
+    }
+    $existing = _stattic_runtime_read_route_shard($routesRoot . '/' . $previousName);
+    return $existing !== null && _stattic_runtime_projection_equal($existing, ['hostnames' => $hostnames, 'host_routes' => $hostRoutes])
+        ? $previousName
+        : $name;
 }
 
 function _stattic_runtime_write_route_shard(string $base, string $shardsRoot, array $hostnames, array $hostRoutes): string

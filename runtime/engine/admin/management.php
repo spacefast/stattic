@@ -1732,26 +1732,10 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
 /** @return list<string> */
 function _stattic_runtime_repair_hostnames(string $privateRoot): array
 {
-    $hostnames = array_fill_keys(_stattic_runtime_all_space_sweep_hostnames($privateRoot), true);
-    $pointer = _stattic_runtime_read_route_pointer($privateRoot);
-    if ($pointer === false) {
-        throw new RuntimeException('route index read failed: ' . $privateRoot . '/routes/current.json');
-    }
-    if (is_array($pointer)) {
-        foreach ([...array_values(is_array($pointer['shards'] ?? null) ? $pointer['shards'] : []), $pointer['wildcards'] ?? null] as $name) {
-            if (!is_string($name)) {
-                continue;
-            }
-            $shard = _stattic_runtime_read_route_shard($privateRoot . '/routes/' . $name);
-            if ($shard === null) {
-                continue;
-            }
-            foreach (array_keys($shard['hostnames'] + $shard['host_routes']) as $hostname) {
-                $hostnames[(string) $hostname] = true;
-            }
-        }
-    }
-    return _stattic_runtime_purge_hostname_list(array_keys($hostnames));
+    return _stattic_runtime_purge_hostname_list([
+        ..._stattic_runtime_all_space_sweep_hostnames($privateRoot),
+        ..._stattic_runtime_route_index_hostnames($privateRoot),
+    ]);
 }
 
 function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, array $claims): void

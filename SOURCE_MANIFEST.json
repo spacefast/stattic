@@ -1,7 +1,7 @@
 {
-  "revision": "69f9e17cca9b63092a0c01d2006a190eac602883",
-  "sourceHash": "e0a53b4e9b89c58871446b61c8db4a8ead2366cd00e21a4122041b693f3a4ba6",
-  "manifestSha256": "36e252ecda8d823413347dacfba6b4a54f4ce1b56c8c77f3bbc9a62ba3ab3f64",
+  "revision": "7ac25ddf5adda52092c2890eaf5d2d5cc190c70b",
+  "sourceHash": "df89948e062c13f35bcf7b5ce35a5eb0440e1403db8f006bce816162daedba00",
+  "manifestSha256": "0d89ddd21abd39865084def1655604405c08c8e2ad6f05a4bc55df9ec13b89e7",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4d8da5eaebad87962f811a8a0dbcbfe39ffbbfbdb9dbc3d276f814f4cc7718ba"
+      "sha256": "a30f3b1d5d4f7a88fde6865522f229747ffd65cfaf3cf201eabb999349cb976a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "9591738e7cb3fde0d0f831a4c390a7dcbe76eea4afec8b50085de4b9991bcc3a"
+      "sha256": "976769ab365fd7d65d5ebe0a004e93e865f1ee1f5aa82e5a651803d7b1b1be38"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13557,7 +13557,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "e1d2c1012384fb0940e544ed4aada3950f37d3c16f780f78d5393e74645cc7a1"
+      "sha256": "f52f63f63d629c288d1e0e5de275a9c352be6628a2c1ec4d005f1193dda60f86"
     },
     {
       "path": "runtime/engine/admin/generated-blob.php",
@@ -13573,7 +13573,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "a412c121b73d1301426b671c17274bef9be781ceb7bdd2c649dffceff92874f4"
+      "sha256": "f4b791314937e690ff42eedf913c444f83d880f31b87868ed8efff045e09a18e"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -14469,7 +14469,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "87cb1ae24a6d49c87a7eb609fb78197c2011caac11889fdcaacac719708a19a0"
+      "sha256": "44d79db545a72978cd321b1dec939f9efb5cb1a93a20d867bbd8ac10d1ece9fd"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -14553,7 +14553,7 @@
     },
     {
       "path": "runtime/tests/route-index.test.ts",
-      "sha256": "d12dcf8b4fe67c116d51a179e0feac61385c6d2d10d055f05da157452bdd55b2"
+      "sha256": "bca39cf528dee310224da18cda62af02b87c66ee9ad1ca51496ddcff7d18094c"
     },
     {
       "path": "runtime/tests/routing.test.ts",

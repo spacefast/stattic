@@ -1667,7 +1667,6 @@ export type RoutePointer = {
   has_wildcards: boolean;
   shards: Record<string, string>;
   wildcards: string;
-  owners?: string;
 };
 
 export function routePointer(rt: Runtime): RoutePointer | null {

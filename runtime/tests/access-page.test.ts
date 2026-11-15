@@ -2251,12 +2251,13 @@ test("a system view token serves the page and its same-origin assets without a s
   });
   expect(followed.status).toBe(200);
   expect(await followed.text()).toContain(`docs of ${LANES_SPACE}`);
-  // A token in its last seconds still gets the short echo, so the redirect to
-  // the clean URL lands on the page, not the gate.
+  // A token closer to its end than the short echo still gets that echo, so the
+  // redirect to the clean URL lands on the page, not the gate. 30 seconds keeps
+  // it valid on a loaded machine; 1 second expired mid-request (403).
   const ending = await get(
     runtime,
     LANES_HOST,
-    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ exp: Math.floor(Date.now() / 1000) + 1 })}`,
+    `/docs/?__=${SYSTEM_VIEW_PREFIX}${systemViewToken({ exp: Math.floor(Date.now() / 1000) + 30 })}`,
     { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
   );
   expect(ending.status).toBe(302);

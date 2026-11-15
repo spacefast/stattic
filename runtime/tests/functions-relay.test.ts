@@ -1220,7 +1220,7 @@ test("a worker's HTML carries the SDK tag; a multipart form reaches it whole, an
     // A Space that set `disable_all_injection` gets an SDK section saying so,
     // and its worker's page leaves the relay with no platform tag: only the
     // author's own snippets, as its static pages carry them.
-    const route = (sdk: { revision: string; injection?: boolean; config: object }) =>
+    const route = (sdk: { revision: string; injection?: boolean; config: object; plan?: object }) =>
       putRoute(edgeRt, "spc_fx_multipart", "production", {
         version_id: "ver_fx_multipart_1",
         config: { ...publicAccessConfig({ mode: "website", site_title: "multipart" }), sdk },
@@ -1228,13 +1228,25 @@ test("a worker's HTML carries the SDK tag; a multipart form reaches it whole, an
         noindex_production_hostnames: [],
         version_hostnames: [],
       });
-    await route({ revision: "sdk-1", injection: false, config: {} });
-    expect(await (await visit("/api/page")).text()).toBe(
-      pageHtml.replace(
-        '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
-        "",
-      ),
+    const withoutTag = pageHtml.replace(
+      '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>',
+      "",
     );
+    await route({ revision: "sdk-1", injection: false, config: {} });
+    expect(await (await visit("/api/page")).text()).toBe(withoutTag);
+    // A plan off for this version does the same while the legacy switch still
+    // says on: the plan decides.
+    await route({
+      revision: "sdk-1",
+      injection: true,
+      config: {},
+      plan: {
+        v: 1,
+        default: { mode: "on", items: { "sdk-tag": true } },
+        versions: { ver_fx_multipart_1: { mode: "off", items: {} } },
+      },
+    });
+    expect(await (await visit("/api/page")).text()).toBe(withoutTag);
     await route({ revision: "sdk-1", config: {} });
 
     // Exactly max_input_vars fields and max_file_uploads files: at a limit is

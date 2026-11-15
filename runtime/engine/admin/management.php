@@ -1923,6 +1923,7 @@ function _stattic_runtime_route_config(mixed $raw): array
                 'config' => $sdk['config'],
                 'body' => is_string($body) ? $body : null,
             ] + (is_bool($sdk['injection'] ?? null) ? ['injection' => $sdk['injection']] : [])
+                + _stattic_runtime_sdk_plan_field($sdk)
             : null;
     }
     return $config;

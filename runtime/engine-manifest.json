@@ -82,6 +82,7 @@
     "engine/shared/finalizer-protocol.generated.php",
     "engine/shared/functions-wire.generated.php",
     "engine/shared/html-insert.php",
+    "engine/shared/injection-plan.php",
     "engine/shared/http.php",
     "engine/shared/jwt.php",
     "engine/shared/lock.php",

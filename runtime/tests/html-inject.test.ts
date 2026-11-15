@@ -3,6 +3,8 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 
+import type { RouteInjectionPlan } from "../../packages/common/src/contracts/injection.ts";
+import { RUNTIME_TRACKER_SCRIPT_PATH } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
   blobPath,
   deploy,
@@ -13,6 +15,7 @@ import {
   readBlob,
   RESPONSES,
   responseEntry,
+  selfSignedCertificate,
   sha256,
   startRuntime,
   versionRoot,
@@ -21,6 +24,11 @@ import {
 } from "./harness.ts";
 
 const HOST = "html-inject.test";
+// The real binary a fake Zero 0.8 runner hands every non-invoke command to.
+const RUNTIME_BIN = path.resolve(
+  process.env.SPACEFAST_RUNTIME_BIN ??
+    path.join(import.meta.dir, "../../target/debug/stattic-runtime"),
+);
 const META_HOST = "platform-meta.test";
 
 let rt: Runtime;
@@ -509,3 +517,363 @@ test("platform_meta bakes metadata and authored images keep their published URLs
   );
   expect(based).toContain('<base href="https://cdn.example.test/images/">');
 });
+
+// THE bypass test. Every page type and endpoint the engine serves, with
+// injection off from each place it can be turned off: the Space (`sdk.injection:
+// false` from a control plane that sends no plan), the version's own sf.jsonc
+// (its root's `platform: false`), and a plan that says off. The answer must
+// carry nothing Spacefast adds beyond what the plan never turns off, and every
+// snippet the author wrote. A new engine injection that skips the plan adds
+// bytes to one of these responses and fails here.
+test("injection off reaches every engine page type and endpoint, from every source", async () => {
+  const SPACE = "spc_inject_off";
+  const LIVE = "inject-off.test";
+  const VERSION_HOST = "inject-off--v.test";
+  // A hostname the Space proxies whole, which serves its live version's plan.
+  const WHOLE_PROXY = "inject-off-proxy.test";
+  // A WordPress content page: the document the engine builds from a Page.
+  const pageId = `page.${"d".repeat(32)}`;
+  const bindingId = `sync.pages.${"d".repeat(32)}`;
+  const seedText = "<p>Document</p>";
+  const seed = JSON.stringify({
+    bindingId,
+    format: "tsx",
+    modelRevision: `sha256:${"a".repeat(64)}`,
+    text: seedText,
+    sha256: `sha256:${sha256(seedText)}`,
+  });
+  const BAKED_SDK = '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+  // What finalize records for a static GA tag beside the author's snippets.
+  const STATIC_GA =
+    '<!--spacefast-static:ga:head:start--><script async src="https://www.googletagmanager.com/gtag/js?id=G-OFF"></script><!--spacefast-static:ga:head:end-->';
+  const AUTHOR = {
+    head: ['<meta name="author-head" content="kept">'],
+    bodyStart: ['<div id="author-start"></div>'],
+    bodyEnd: ["<script>window.authorEnd=1;</script>"],
+    noscript: ['<noscript><img src="/author-noscript.gif"></noscript>'],
+  };
+  const authorSnippets = Object.values(AUTHOR).flat();
+  // Every byte the engine itself writes into a page, by what it is.
+  const PLATFORM_MARKERS = [
+    "data-spacefast-sdk",
+    "__spacefast/sdk.js",
+    "spacefast-static:",
+    "googletagmanager.com",
+    "data-spacefast-auto-image",
+    "s0.wp.com/mshots",
+  ];
+  const TAG_BODY = "window.__spacefastTagBody=1;";
+  const beaconBody = "window.__beaconTracker=1;\n";
+  const beacon = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response(beaconBody, { headers: { "content-type": "text/javascript" } }),
+  });
+  const upstreamPage = "<html><head><title>Up</title></head><body>upstream</body></html>";
+  const upstream = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response(upstreamPage, { headers: { "content-type": "text/html" } }),
+  });
+  const workerPage = "<html><head><title>Worker</title></head><body>worker</body></html>";
+  const { certificate, key } = selfSignedCertificate(rt.root, "inject-off-edge");
+  const edge = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    tls: { cert: Bun.file(certificate), key: Bun.file(key) },
+    fetch: () => new Response(workerPage, { headers: { "content-type": "text/html" } }),
+  });
+  // A Zero 0.8 runner that answers an HTML page; every other runner command
+  // goes to the real binary.
+  const zeroRunner = path.join(rt.root, "inject-off-runner.php");
+  const zeroPage = "<html><head><title>Zero</title></head><body>zero</body></html>";
+  writeFileSync(
+    zeroRunner,
+    `#!${PHP_BINARY}
+<?php
+if (($argv[1] ?? '') !== 'invoke') {
+    $process = proc_open(array_merge([${JSON.stringify(RUNTIME_BIN)}], array_slice($argv, 1)), [0 => STDIN, 1 => STDOUT, 2 => STDERR], $pipes);
+    exit(is_resource($process) ? proc_close($process) : 1);
+}
+stream_get_contents(STDIN);
+echo json_encode(['status' => 200, 'headers' => ['content-type' => 'text/html; charset=utf-8'], 'body' => ${JSON.stringify(zeroPage)}]);
+`,
+  );
+  chmodSync(zeroRunner, 0o755);
+  // The WordPress boundary the content page lane calls, as content-page.test.ts
+  // stands it in: one published page owned by this Space.
+  const wordpressPage = "<p>WordPress document</p>";
+  const off = await startRuntime({
+    env: {
+      SPACEFAST_EGRESS_TEST_ALLOWLIST: `127.0.0.1:${upstream.port}`,
+      SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "inject-off-dispatch",
+      SPACEFAST_RUNTIME_BIN: zeroRunner,
+      SPACEFAST_API_BASE_URL: "https://api.spacefast.test",
+    },
+    phpIni: { "curl.cainfo": certificate },
+  });
+  writeFileSync(
+    path.join(off.root, "wp-load.php"),
+    `<?php
+function spacefast_content_model_sync_binding($id) { return ['post_type' => 'page', 'format' => 'tsx', 'documentSeed' => ['sha256' => ${JSON.stringify(`sha256:${sha256(seedText)}`)}]]; }
+function spacefast_content_sync_find_post($id, $binding, $adopt) { return (object) ['ID' => 7, 'post_status' => 'publish', 'post_title' => 'Doc', 'post_content' => ${JSON.stringify(wordpressPage)}]; }
+function get_post_meta($id, $key, $single) { return ${JSON.stringify(SPACE)}; }
+`,
+  );
+  try {
+    const versionId = (name: string) => `ver_inject_off_${name}`;
+    const tracker = {
+      src: RUNTIME_TRACKER_SCRIPT_PATH,
+      endpoint: `http://127.0.0.1:${beacon.port}`,
+      key: "pk_inject_off",
+    };
+    // A section that is on in every way the engine reads one, so whatever
+    // turns it off is the only difference.
+    // The two switches a section can carry beside its contents.
+    type SectionSwitches = { injection?: boolean; plan?: RouteInjectionPlan };
+    type Section = ReturnType<typeof section>;
+    const section = (extra: SectionSwitches) => ({
+      revision: "sdk-off",
+      config: {
+        tracker,
+        comments: { live: true, preview: true, ui: "default", features: {} },
+        cast_api_base: "https://cast.example.test",
+      },
+      body: TAG_BODY,
+      ...extra,
+    });
+    const route = (live: string, sdk: Section) => ({
+      version_id: live,
+      config: {
+        ...publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+        entitlements: { externalProxy: true },
+        sdk,
+      },
+      production_hostnames: [LIVE],
+      noindex_production_hostnames: [],
+      version_hostnames: [{ hostname: VERSION_HOST, version_id: live }],
+      proxy_host_routes: [
+        {
+          hostname: LIVE,
+          path_prefix: "/host-proxy",
+          upstream: `http://127.0.0.1:${upstream.port}`,
+        },
+        { hostname: WHOLE_PROXY, upstream: `http://127.0.0.1:${upstream.port}` },
+      ],
+    });
+    const deployVersion = (name: string, sdk: Section, fileOff = false) => {
+      const decorated = {
+        platform_meta: true,
+        inject: {
+          ...AUTHOR,
+          head: [...AUTHOR.head, STATIC_GA],
+          bodyEnd: [...AUTHOR.bodyEnd, BAKED_SDK],
+        },
+      };
+      // The version's own sf.jsonc turning injection off.
+      const config = fileOff ? { ...decorated, platform_injection: false } : decorated;
+      return deploy(off, {
+        spaceId: SPACE,
+        versionId: versionId(name),
+        metadata: { mode: "website", title: "Off" },
+        files: {
+          // Decorated at finalize: the baked SDK and GA are in its bytes.
+          "index.html": "<html><head><title>Home</title></head><body>home</body></html>",
+          // No `<body>`: the one static page the engine adds its own tag to.
+          "bare.html": "<html><head><title>Bare</title></head><div>bare</div></html>",
+          _redirects: `/proxy http://127.0.0.1:${upstream.port}/proxy 200\n`,
+          "zero.config.json": "{}",
+          [`_spacefast/pages/documents/${pageId}.json`]: seed,
+        },
+        serving: {
+          config,
+          pages: [{ id: pageId, path: "/doc", params: [], render: "document", bindingId }],
+          zero_endpoints: [
+            {
+              execution_mode: "read",
+              method: "GET",
+              path: "/zero-page",
+              source: "globalThis.__statticZeroResult = '{}';",
+              endpoint_id: "GET /zero-page",
+              capabilities: { db: false },
+            },
+          ],
+        },
+        functions: {
+          artifact: {
+            appName: "inject-off",
+            entry: "worker.js",
+            mainModule: "index.js",
+            compatibilityDate: "2026-07-01",
+            compatibilityFlags: [],
+            routes: [{ method: "GET", path: "/fn", subtree: false }],
+          },
+          host: { hostname: `127.0.0.1:${edge.port}`, bundleUrl: "https://bundle.invalid/b.json" },
+          grantedCapabilities: [],
+        },
+        activate: { route_name: "production", ...route(versionId(name), sdk) },
+      });
+    };
+
+    // The bytes finalize stored for a static page, or null for a dynamic one.
+    const staticBlob = (name: string, page: string) => {
+      const key = { "/": "/", "/bare": "/bare.html" }[page];
+      if (!key) return null;
+      const blob = responseEntry(off, SPACE, versionId(name), key)?.[RESPONSES.entryKeys.blob];
+      return readBlob(off, SPACE, String(blob))?.toString("utf8") ?? null;
+    };
+    const PLAN_ON = { mode: "on", items: { "sdk-tag": true, meta: true, tracker: ["live"] } };
+    const planOff = (target: "default" | "version", name: string) => ({
+      v: 1,
+      default: target === "default" ? { mode: "off", items: {} } : PLAN_ON,
+      versions: target === "version" ? { [versionId(name)]: { mode: "off", items: {} } } : {},
+    });
+    // What the same Space serves with injection on: the baseline each off
+    // response is compared against, so this test also proves every lane it
+    // reads really adds something when on.
+    await deployVersion("on", section({}));
+    const read = async (host: string, requestPath: string) => {
+      const response = await get(off, host, requestPath, { headers: { accept: "text/html" } });
+      return {
+        status: response.status,
+        type: response.headers.get("content-type"),
+        body: await response.text(),
+      };
+    };
+    const pages = ["/", "/bare", "/proxy", "/host-proxy/x", "/fn", "/zero-page", "/doc"];
+    const on = Object.fromEntries(
+      await Promise.all(pages.map(async (page) => [page, await read(LIVE, page)] as const)),
+    );
+    for (const page of pages) {
+      expect(on[page]?.status, page).toBeLessThan(300);
+      expect(
+        PLATFORM_MARKERS.some((marker) => on[page]?.body.includes(marker)),
+        `${page} carries a Spacefast addition when on`,
+      ).toBe(true);
+    }
+    // The static home's share image is the serve-time rewrite of a baked
+    // fallback, so it is there only when on.
+    expect(on["/"]?.body).toContain("s0.wp.com/mshots");
+    expect(staticBlob("on", "/")).toContain("data-spacefast-auto-image");
+    expect(on["/doc"]?.body).toContain(wordpressPage);
+    const wholeProxyOn = await read(WHOLE_PROXY, "/");
+    expect(wholeProxyOn.body).toContain("data-spacefast-sdk");
+    // The stub keeps the cache policy the on answer has on each host.
+    const sdkOnCache: Record<string, string | null> = {};
+    for (const host of [LIVE, VERSION_HOST]) {
+      sdkOnCache[host] = (await get(off, host, "/__spacefast/sdk.js")).headers.get("cache-control");
+    }
+    const sdkOn = await read(LIVE, "/__spacefast/sdk.js");
+    expect(sdkOn.body).toContain(TAG_BODY);
+    expect(sdkOn.body).toContain("trackerLoader");
+    expect((await read(LIVE, RUNTIME_TRACKER_SCRIPT_PATH)).body).toBe(beaconBody);
+
+    for (const [source, sdk, fileOff] of [
+      ["Space off, no plan", section({ injection: false }), false],
+      ["sf.jsonc off, no plan", section({}), true],
+      [
+        "plan default off",
+        section({ injection: true, plan: planOff("default", "plan_default") }),
+        false,
+      ],
+      [
+        "plan off for this version",
+        section({ injection: true, plan: planOff("version", "plan_version") }),
+        false,
+      ],
+    ] as const) {
+      const name = source.startsWith("plan default")
+        ? "plan_default"
+        : source.startsWith("plan off")
+          ? "plan_version"
+          : source.startsWith("Space")
+            ? "space"
+            : "file";
+      await deployVersion(name, sdk, fileOff);
+      for (const host of [LIVE, VERSION_HOST]) {
+        for (const page of pages) {
+          if (host === VERSION_HOST && page === "/host-proxy/x") continue;
+          const served = await read(host, page);
+          const label = `${source}, ${host}${page}`;
+          expect(served.status, label).toBeLessThan(300);
+          // The author's snippets all stay where the page has a place for them.
+          if (page === "/" || page === "/bare") {
+            for (const snippet of authorSnippets) {
+              if (page === "/bare" && snippet !== AUTHOR.head[0]) continue;
+              expect(served.body, label).toContain(snippet);
+            }
+          } else {
+            for (const snippet of authorSnippets) expect(served.body, label).toContain(snippet);
+          }
+          // Nothing Spacefast adds at serve time. A static page keeps what
+          // finalize baked into that version's bytes (baked bytes stay with
+          // their version), so it may carry a marker only as often as its
+          // stored blob does, and never the serve-time share image. Every
+          // other lane starts from bytes Spacefast never touched.
+          const count = (text: string, marker: string) => text.split(marker).length - 1;
+          const stored = staticBlob(name, page);
+          for (const marker of PLATFORM_MARKERS) {
+            const allowed =
+              stored === null ||
+              marker === "data-spacefast-auto-image" ||
+              marker === "s0.wp.com/mshots"
+                ? 0
+                : count(stored, marker);
+            expect(count(served.body, marker), `${label}: ${marker}`).toBeLessThanOrEqual(allowed);
+          }
+          // Dynamic pages are the upstream's bytes plus the author's snippets.
+          const upstreamBytes = {
+            "/proxy": upstreamPage,
+            "/host-proxy/x": upstreamPage,
+            "/fn": workerPage,
+            "/zero-page": zeroPage,
+          }[page];
+          if (upstreamBytes) {
+            let stripped = served.body;
+            for (const snippet of authorSnippets) stripped = stripped.replace(snippet, "");
+            stripped = stripped.replaceAll(/<!-- \/?spacefast:[a-z-]+ -->/g, "");
+            expect(stripped, label).toBe(upstreamBytes);
+          }
+        }
+        if (host === LIVE) {
+          // A whole-hostname proxy answers before any version is resolved and
+          // serves the live version's answer.
+          const wholeProxy = await read(WHOLE_PROXY, "/");
+          let stripped = wholeProxy.body;
+          for (const snippet of authorSnippets) stripped = stripped.replace(snippet, "");
+          expect(
+            stripped.replaceAll(/<!-- \/?spacefast:[a-z-]+ -->/g, ""),
+            `${source}, whole proxy`,
+          ).toBe(upstreamPage);
+        }
+        // sdk.js still answers 200 with the same type, and runs nothing.
+        const sdkResponse = await get(off, host, "/__spacefast/sdk.js");
+        expect(sdkResponse.status).toBe(200);
+        expect(sdkResponse.headers.get("content-type")).toBe(
+          "application/javascript; charset=utf-8",
+        );
+        expect(sdkResponse.headers.get("cache-control")).toBe(sdkOnCache[host]);
+        expect(await sdkResponse.text(), `${source}, ${host} sdk.js`).toBe(
+          "/* spacefast: injection off */\n",
+        );
+        // A tag preview, a review frame and a draft token load nothing either.
+        for (const query of ["?preview=tok_off", "?review=1"]) {
+          expect(
+            await (await get(off, host, `/__spacefast/sdk.js${query}`)).text(),
+            `${source} ${query}`,
+          ).toBe("/* spacefast: injection off */\n");
+        }
+        const trackerResponse = await get(off, host, RUNTIME_TRACKER_SCRIPT_PATH);
+        expect(trackerResponse.status).toBe(200);
+        expect(await trackerResponse.text(), `${source}, ${host} t.js`).not.toContain(
+          "__beaconTracker",
+        );
+      }
+    }
+  } finally {
+    off.stop();
+    beacon.stop(true);
+    upstream.stop(true);
+    edge.stop(true);
+  }
+}, 120000);

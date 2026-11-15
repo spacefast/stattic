@@ -14,6 +14,7 @@ import { canonicalPagePath, commentRoomKey } from "../../packages/collab-sdk/src
 import { ICON_PATHS } from "../../packages/collab-sdk/src/theme/icons.ts";
 import { SPACEFAST_MARK_PATH } from "../../packages/common/src/brand-assets.ts";
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
+import type { RouteInjectionPlan } from "../../packages/common/src/contracts/injection.ts";
 import {
   sellRuntimeCheckoutRequestSchema,
   type SellRuntimeCheckoutRequest,
@@ -36,6 +37,7 @@ import {
   errorCode,
   get,
   postAccessCallback,
+  prependHostRoutes,
   problemDocument,
   publicAccessConfig,
   putRoute,
@@ -2550,4 +2552,243 @@ test("a routing rule cannot rewrite the reserved SDK route onto tenant bytes", a
   const moved = await get(runtime, SITE, "/moved");
   expect(moved.status).toBe(301);
   expect(moved.headers.get("location")).toBe("/index.html");
+});
+
+test("sdk.js and t.js carry each module only while the plan has it on, per version and surface", async () => {
+  const runtime = await startRuntime();
+  runtimes.push(runtime);
+  const host = "plan.site.test";
+  const versionHost = "plan--v1.site.test";
+  const TAG_BODY = "window.__planTagBody=1;";
+  const tracker = {
+    src: RUNTIME_TRACKER_SCRIPT_PATH,
+    endpoint: "https://beacon.example.test",
+    key: "pk_plan",
+  };
+  const routeBody = (plan: RouteInjectionPlan | undefined) => {
+    const config = publicAccessConfig(
+      { mode: "website", site_title: "Plan" },
+      "live_and_all_versions",
+    );
+    const section = {
+      revision: `sdk-plan-${JSON.stringify(plan ?? null).length}`,
+      config: { tracker },
+      body: TAG_BODY,
+    };
+    // A route without a plan is what every control plane sends today.
+    config.sdk = plan ? { ...section, injection: true, plan } : section;
+    return {
+      version_id: "ver_plan_1",
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [{ hostname: versionHost, version_id: "ver_plan_1" }],
+    };
+  };
+  await deploy(runtime, {
+    spaceId: "spc_plan",
+    versionId: "ver_plan_1",
+    files: { "index.html": "<h1>Plan</h1>\n" },
+    activate: { route_name: "production", ...routeBody(undefined) },
+  });
+  const sdk = async (on: string, query = "") =>
+    (await get(runtime, on, `/__spacefast/sdk.js${query}`)).text();
+
+  // A plan that keeps the tag body and the live-only tracker, and leaves the
+  // review and tag-preview modules out: only what it names is written. That
+  // these answers follow it at all proves the route PUT and the overlay it
+  // builds kept the plan.
+  await putRoute(
+    runtime,
+    "spc_plan",
+    "production",
+    routeBody({
+      v: 1,
+      default: { mode: "on", items: { "tags-dynamic": true, tracker: ["live"] } },
+      versions: {},
+    }),
+  );
+  const live = await sdk(host);
+  expect(live).toContain(TAG_BODY);
+  expect(live).toContain("trackerLoader");
+  expect(live).not.toContain("spacefast-review:");
+  expect(live).not.toContain("spacefast_tag_preview");
+  expect(await sdk(host, "?preview=tok_plan")).not.toContain("/tags/sdk.js?host=");
+  // The tracker is live-only: a version host loads the tag body but no tracker.
+  const version = await sdk(versionHost);
+  expect(version).toContain(TAG_BODY);
+  expect(version).not.toContain("trackerLoader");
+
+  // The served version's own entry wins over the default, on every host.
+  await putRoute(
+    runtime,
+    "spc_plan",
+    "production",
+    routeBody({
+      v: 1,
+      default: { mode: "on", items: { "tags-dynamic": true, tracker: ["live"], review: true } },
+      versions: { ver_plan_1: { mode: "off", items: {} } },
+    }),
+  );
+  for (const on of [host, versionHost]) {
+    const response = await get(runtime, on, "/__spacefast/sdk.js");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/javascript; charset=utf-8");
+    expect(await response.text()).toBe("/* spacefast: injection off */\n");
+  }
+  // t.js answers with the empty script rather than Beacon's, without asking
+  // Beacon (its endpoint here does not resolve).
+  const trackerScript = await get(runtime, host, RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(trackerScript.status).toBe(200);
+  expect(await trackerScript.text()).toBe("/* No Spacefast analytics here. */\n");
+
+  // A control plane that sends no plan keeps today's answers.
+  await putRoute(runtime, "spc_plan", "production", routeBody(undefined));
+  const legacy = await sdk(host);
+  expect(legacy).toContain(TAG_BODY);
+  expect(legacy).toContain("trackerLoader");
+  expect(legacy).toContain("spacefast-review:");
+  expect(legacy).toContain("spacefast_tag_preview");
+});
+
+test("Comments boots only while the plan has it on", async () => {
+  const runtime = await startRuntime();
+  runtimes.push(runtime);
+  const host = "plan-comments.site.test";
+  // Everything Comments needs to be available, so the plan is the only thing
+  // that decides: a ticket URL, and a Cast base a visitor can reach.
+  const accessPage = {
+    displayName: "Plan comments",
+    accountUrl: null,
+    connections: [],
+    // A usable exchange needs its password and request lanes too.
+    exchange: {
+      passwordUrl: "https://api.spacefast.com/acquire/plan-comments/password",
+      requestUrl: "https://api.spacefast.com/acquire/plan-comments/request",
+      commentsTicketUrl: "https://api.spacefast.com/runtime/comments/plan-comments/ticket",
+      credential: "runtime-comments-credential-0000000000000000000000000000",
+    },
+  };
+  const routeBody = (items: Record<string, boolean>) => {
+    const { authorization, ...config } = publicAccessConfig({}, "live_and_all_versions");
+    const plan: RouteInjectionPlan = { v: 1, default: { mode: "on", items }, versions: {} };
+    const sdk = {
+      revision: `sdk-plan-comments-${Object.keys(items).length}`,
+      config: {
+        cast_api_base: "https://cast.example.test",
+        cast_ws_url: "wss://cast.example.test/socket/websocket",
+        cast_resource_key: "resource_plan",
+        comments: LOCAL_COMMENTS,
+      },
+      injection: true,
+      plan,
+    };
+    return {
+      version_id: "ver_plan_comments_1",
+      config: { ...config, authorization: Object.assign({}, authorization, { accessPage }), sdk },
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    };
+  };
+  await deploy(runtime, {
+    spaceId: "spc_plan_comments",
+    versionId: "ver_plan_comments_1",
+    files: { "index.html": "<h1>Comments</h1>\n" },
+    activate: { route_name: "production", ...routeBody({ comments: true }) },
+  });
+  const comments = async () => {
+    const sdk = await (await get(runtime, host, "/__spacefast/sdk.js")).text();
+    const manifest = collabManifestSchema.parse(
+      await (await get(runtime, host, RUNTIME_COLLAB_MANIFEST_PATH)).json(),
+    );
+    return {
+      loader: sdk.includes("https://cast.example.test/sdk/v1/collab.js"),
+      cast: manifest.cast,
+      ticketUrl: manifest.ticketUrl,
+    };
+  };
+
+  expect(await comments()).toEqual({
+    loader: true,
+    cast: { wsUrl: "wss://cast.example.test/socket/websocket", resourceKey: "resource_plan" },
+    ticketUrl: `http://${host}/__spacefast/comments/ticket`,
+  });
+
+  // The same route with `comments` left out of the plan: no loader in sdk.js,
+  // and a manifest that names nowhere to join.
+  await putRoute(runtime, "spc_plan_comments", "production", routeBody({ "tags-dynamic": true }));
+  expect(await comments()).toEqual({ loader: false, cast: null, ticketUrl: null });
+});
+
+test("a pinned mount's page follows its own version, while sdk.js and t.js follow the host's", async () => {
+  // No control plane compiles a sub-path version mount today (version targets
+  // are whole-host routes), so this pins the behavior for a hand-written shard
+  // rather than a reachable state. sdk.js and t.js are absolute paths outside
+  // the mount, so they answer for the version the host serves; the mounted
+  // page answers for its own. A page baked while its version was on keeps its
+  // tag either way, since the tag names no version.
+  const runtime = await startRuntime();
+  runtimes.push(runtime);
+  const host = "pinned-mount.site.test";
+  const hostVersion = "ver_pinned_host";
+  const pinnedVersion = "ver_pinned_mount";
+  const BAKED_SDK = '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+  const config = publicAccessConfig({ mode: "website" }, "live_and_all_versions");
+  config.sdk = {
+    revision: "sdk-pinned-1",
+    config: {
+      tracker: {
+        src: RUNTIME_TRACKER_SCRIPT_PATH,
+        endpoint: "https://beacon.example.test",
+        key: "pk_pinned",
+      },
+    },
+    body: "window.__pinnedTagBody=1;",
+  };
+  const page = (versionId: string) => ({
+    "index.html": `<html><head><title>${versionId}</title></head><body>${versionId}</body></html>`,
+  });
+  // The pinned version was published with injection on; the host's own
+  // version turned it off in its sf.jsonc.
+  await deploy(runtime, {
+    spaceId: "spc_pinned",
+    versionId: pinnedVersion,
+    files: page(pinnedVersion),
+    serving: { config: { inject: { bodyEnd: [BAKED_SDK] } } },
+  });
+  await deploy(runtime, {
+    spaceId: "spc_pinned",
+    versionId: hostVersion,
+    files: page(hostVersion),
+    serving: { config: { inject: {}, platform_injection: false } },
+    activate: {
+      route_name: "production",
+      version_id: hostVersion,
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  prependHostRoutes(runtime, host, [
+    {
+      location: "/pinned",
+      route_action: { action: "serve", version_id: pinnedVersion, target_prefix: "/" },
+    },
+  ]);
+
+  const mounted = await (await get(runtime, host, "/pinned/")).text();
+  expect(mounted).toContain(pinnedVersion);
+  expect(mounted).toContain('data-spacefast-sdk="v1"');
+  const root = await (await get(runtime, host, "/")).text();
+  expect(root).toContain(hostVersion);
+  expect(root).not.toContain("data-spacefast-sdk");
+
+  expect(await (await get(runtime, host, "/__spacefast/sdk.js")).text()).toBe(
+    "/* spacefast: injection off */\n",
+  );
+  expect(await (await get(runtime, host, RUNTIME_TRACKER_SCRIPT_PATH)).text()).toBe(
+    "/* No Spacefast analytics here. */\n",
+  );
 });

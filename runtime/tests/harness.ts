@@ -1450,6 +1450,65 @@ export async function putRoute(
   return response;
 }
 
+/**
+ * Put `routes` ahead of `host`'s compiled host routes, for a route the
+ * compiler cannot emit from a route PUT (a configured proxy header, a pinned
+ * sub-path `serve` mount). Written the way the compiler writes a shard: a new
+ * content-addressed artifact plus a pointer swap (contracts §1/§3), never a
+ * rewrite in place, since a shard's name is the hash of its bytes.
+ */
+export type HostRouteFixture = {
+  location: string;
+  route_action:
+    | { action: "serve"; version_id: string; target_prefix: string }
+    | {
+        action: "proxy";
+        upstream: string;
+        target_prefix: string;
+        methods: string[];
+        headers: Record<string, string>;
+        forwardHeaders: string[];
+        cache?: "shared";
+        bodySizeLimitBytes: number;
+        timeoutSeconds: number;
+        connectTimeoutSeconds: number;
+      };
+};
+
+export function prependHostRoutes(rt: Runtime, host: string, routes: HostRouteFixture[]): void {
+  const write = Bun.spawnSync([
+    PHP_BINARY,
+    "-r",
+    [
+      "require $argv[1];",
+      "$routesRoot = $argv[2] . '/routes';",
+      "$host = $argv[3];",
+      "$fixtures = json_decode($argv[4], true, 512, JSON_THROW_ON_ERROR);",
+      "$pointer = json_decode((string) file_get_contents($routesRoot . '/current.json'), true, 512, JSON_THROW_ON_ERROR);",
+      "$shard = substr(hash('sha256', $host), 0, 2);",
+      "$name = $pointer['shards'][$shard] ?? null;",
+      "if (!is_string($name)) { fwrite(STDERR, 'no shard owns ' . $host); exit(1); }",
+      "$artifact = include $routesRoot . '/' . $name;",
+      "$spaceId = $artifact['hostnames'][$host]['space_id'] ?? '';",
+      "foreach ($fixtures as &$route) { $route['space_id'] = $spaceId; }",
+      "unset($route);",
+      "$artifact['host_routes'][$host] = array_merge($fixtures, $artifact['host_routes'][$host] ?? []);",
+      "$written = _sf_php_artifact_write($routesRoot . '/shards', 'hosts-' . $shard, _sf_php_artifact_source($artifact));",
+      "_sf_json_write($routesRoot . '/previous.json', $pointer);",
+      "$pointer['shards'][$shard] = 'shards/' . $written;",
+      "$pointer['gen'] = ((int) $pointer['gen']) + 1;",
+      "_sf_json_write($routesRoot . '/current.json', $pointer);",
+    ].join("\n"),
+    `${rt.engineRoot}/shared/pointers.php`,
+    rt.storageRoot,
+    host,
+    JSON.stringify(routes),
+  ]);
+  if (write.exitCode !== 0) {
+    throw new Error(`failed to install host routes on ${host}: ${write.stderr.toString()}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Journal pull lane (contracts §10, D53)
 // ---------------------------------------------------------------------------

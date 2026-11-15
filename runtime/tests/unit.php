@@ -4152,6 +4152,63 @@ $_SERVER['REQUEST_METHOD'] = 'GET';
 $dynamicPayload = _stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['bodyEnd' => ['<div id="end"></div>', '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>']]]);
 check($dynamicPayload['sdk'] === $sdkTag && $dynamicPayload['bodyEnd'] === '<div id="end"></div>', 'a dynamic response carries the engine SDK tag, not the baked one');
 
+// The injection plan (shared/injection-plan.php). The served version's entry
+// wins over the default, an item the entry leaves out is off unless it is
+// essential, and a surface list is read against the host the request came on.
+$plan = ['v' => 1,
+    'default' => ['mode' => 'on', 'items' => ['sdk-tag' => true, 'tracker' => ['live'], 'meta' => true]],
+    'versions' => ['ver_off' => ['mode' => 'off', 'items' => ['sdk-tag' => false]]]];
+$withPlan = ['sdk' => ['config' => [], 'plan' => $plan], 'inject' => ['platform' => false]];
+$planned = _stattic_injection_plan($withPlan, 'ver_live');
+check($planned['mode'] === 'on' && $planned['items']['sdk-tag'] && $planned['items']['tracker'] && $planned['items']['meta'], 'a version without its own entry gets the default, and the plan outranks the legacy switches it replaces');
+check(!_stattic_injection_plan($withPlan + ['immutable' => true], 'ver_live')['items']['tracker'], 'a live-only item is off on a version host');
+$versionPlan = _stattic_injection_plan($withPlan, 'ver_off');
+check($versionPlan['mode'] === 'off' && !$versionPlan['items']['sdk-tag'] && !$versionPlan['items']['meta'], "the served version's own entry replaces the default whole");
+check($versionPlan['items']['security-headers'] && $versionPlan['items']['access-client'], 'essential items stay on whatever the entry says');
+check(!$planned['items']['comments'] && !$planned['items']['snippets'], 'an item the plan leaves out is off');
+// A version entry the engine cannot read is off, never the default it would fall back to.
+$unreadable = ['sdk' => ['config' => [], 'plan' => ['v' => 1, 'default' => ['mode' => 'on', 'items' => ['sdk-tag' => true]], 'versions' => ['ver_bad' => 'nope']]]];
+check(!_stattic_injection_plan($unreadable, 'ver_bad')['items']['sdk-tag'], 'an unreadable version entry is off, not the default');
+check(_stattic_injection_plan($unreadable, 'ver_other')['items']['sdk-tag'], 'a version the plan does not name follows the default');
+// The engine reads only the section the route PUT and the overlay rebuild, so
+// that rebuild must keep the unreadable entry as off rather than drop it.
+$kept = ['sdk' => ['config' => [], 'plan' => _stattic_injection_plan_section($unreadable['sdk']['plan'])]];
+check(!_stattic_injection_plan($kept, 'ver_bad')['items']['sdk-tag'], 'an unreadable version entry stays off through the rebuilt section');
+check(_stattic_injection_plan($kept, 'ver_other')['items']['sdk-tag'], 'the rebuilt section still serves the default to other versions');
+// Nested surface lists are dropped without a PHP warning, and the item is off.
+$warned = false;
+set_error_handler(static function () use (&$warned): bool { $warned = true; return true; });
+$nested = _stattic_injection_plan_section(['v' => 1, 'default' => ['mode' => 'on', 'items' => ['tracker' => [['live'], 'version']]], 'versions' => []]);
+restore_error_handler();
+check(!$warned && $nested['default']['items']['tracker'] === ['version'], 'a nested surface list is dropped without a warning');
+check(!array_key_exists('future-item', _stattic_injection_plan(['sdk' => ['config' => [], 'plan' => ['v' => 1, 'default' => ['mode' => 'on', 'items' => ['future-item' => true]], 'versions' => []]]], null)['items']), 'an item the engine does not know is ignored');
+// Without a plan, the legacy mapper gives the answers of the switches an
+// older control plane sends, plus off for every sdk.js module.
+$legacy = static fn (array $serving): array => _stattic_injection_plan($serving, 'ver_x')['items'];
+$legacyOn = $legacy(['sdk' => ['config' => []], 'immutable' => true]);
+check($legacyOn['sdk-tag'] && $legacyOn['tracker'] && $legacyOn['comments'] && $legacyOn['review'] && $legacyOn['tags-dynamic'] && $legacyOn['meta'], 'a plan-less section that is on leaves every item to what the section carries, on any surface');
+foreach ([
+    'Space off' => ['sdk' => ['injection' => false, 'config' => ['tracker' => ['src' => '/t.js']]]],
+    'version off' => ['sdk' => ['config' => ['tracker' => ['src' => '/t.js']]], 'inject' => ['platform' => false]],
+    'a plan that is not v1' => ['sdk' => ['injection' => false, 'config' => [], 'plan' => ['v' => 2]]],
+] as $label => $serving) {
+    $items = $legacy($serving + ['users' => ['enabled' => true]]);
+    $added = array_keys(array_filter($items, static fn (bool $on, string $id): bool => $on && !in_array(STATTIC_INJECTION_ITEMS[$id], ['essential', 'app', 'author'], true), ARRAY_FILTER_USE_BOTH));
+    check($added === [], "{$label}: nothing Spacefast adds is on (" . implode(',', $added) . ')');
+    check($items['snippets'] && $items['users-api'], "{$label}: author snippets and the Space's own app stay");
+}
+check(!$legacy([])['sdk-tag'], 'no SDK section is no SDK tag');
+// The section the route PUT and the overlay keep: v1 only, items reduced to
+// booleans and known surfaces.
+check(_stattic_injection_plan_section(['v' => 2, 'default' => ['items' => []]]) === null && _stattic_injection_plan_section(['v' => 1]) === null, 'a plan the engine cannot read is not kept');
+check(_stattic_injection_plan_section(['v' => 1, 'default' => ['mode' => 'on', 'items' => ['tracker' => ['live', 'evil'], 'x' => 'yes']], 'versions' => ['ver_a' => 'nope']]) === ['v' => 1, 'default' => ['mode' => 'on', 'items' => ['tracker' => ['live']]], 'versions' => ['ver_a' => ['mode' => 'off', 'items' => []]]], 'a kept plan carries only booleans and known surfaces');
+// The HTML filter: with `tags-baked` off a dynamic response gets none of the
+// version's recorded static tags, but always the author's own snippets.
+$staticTag = '<!--spacefast-static:ga:head:start--><script src="https://www.googletagmanager.com/gtag/js?id=G-X"></script><!--spacefast-static:ga:head:end-->';
+$offPayload = _stattic_html_insert_payload(['sdk' => ['injection' => false, 'config' => []], 'inject' => ['head' => [$staticTag, '<meta name="author">']]]);
+check($offPayload['head'] === '<meta name="author">' && $offPayload['sdk'] === '', 'off drops the static tags and the SDK tag and keeps the author snippet');
+check(_stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['head' => [$staticTag]]])['head'] === $staticTag, 'on keeps the static tags');
+
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");
     foreach ($failures as $failure) {

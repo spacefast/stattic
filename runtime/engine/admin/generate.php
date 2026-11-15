@@ -1423,6 +1423,15 @@ const STATTIC_RUNTIME_SDK_INLINE_BODY_MAX = 32768;
 // config; this is where its body is placed and where the section the serve
 // path reads is shaped. Absent/invalid means no SDK projection at all, which
 // the serve path renders as an inert loader, never as a failure.
+// `plan` (shared/injection-plan.php) rides the section beside `injection`, and
+// both rebuilds of it (the route PUT here and the overlay below) keep it.
+function _stattic_runtime_sdk_plan_field(array $sdk): array
+{
+    require_once __DIR__ . '/../shared/injection-plan.php';
+    $plan = _stattic_injection_plan_section($sdk['plan'] ?? null);
+    return $plan === null ? [] : ['plan' => $plan];
+}
+
 function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $spaceId, mixed $sdk): ?array
 {
     if (!is_array($sdk) || !is_array($sdk['config'] ?? null)) {
@@ -1433,7 +1442,8 @@ function _stattic_runtime_overlay_sdk_section(string $privateRoot, string $space
             ? $sdk['revision']
             : null,
         'config' => $sdk['config'],
-    ] + (is_bool($sdk['injection'] ?? null) ? ['injection' => $sdk['injection']] : []);
+    ] + (is_bool($sdk['injection'] ?? null) ? ['injection' => $sdk['injection']] : [])
+        + _stattic_runtime_sdk_plan_field($sdk);
     $body = is_string($sdk['body'] ?? null) && $sdk['body'] !== '' ? $sdk['body'] : null;
     if ($body === null) {
         return $section;

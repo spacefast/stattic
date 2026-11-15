@@ -10,8 +10,9 @@ import {
   errorCode,
   finalizeRaw,
   get,
-  PHP_BINARY,
+  type HostRouteFixture,
   postAccessCallback,
+  prependHostRoutes,
   readBlob,
   type Runtime,
   sha256,
@@ -475,7 +476,10 @@ beforeAll(async () => {
     CROSS_SPACE_PRIVATE_BODY,
   );
 
-  const configuredHeaderRoute = (location: string, headers: Record<string, string>) => ({
+  const configuredHeaderRoute = (
+    location: string,
+    headers: Record<string, string>,
+  ): HostRouteFixture => ({
     location,
     route_action: {
       action: "proxy",
@@ -490,7 +494,7 @@ beforeAll(async () => {
       connectTimeoutSeconds: 10,
     },
   });
-  const routeFixture = JSON.stringify([
+  const routeFixture: HostRouteFixture[] = [
     {
       location: "/__spacefast/functions/b",
       route_action: {
@@ -518,43 +522,11 @@ beforeAll(async () => {
         connectTimeoutSeconds: 10,
       },
     },
-  ]);
+  ];
   // Configured proxy headers have no ingress spelling (generate.php compiles
-  // `headers` empty for every host proxy route), so the fixture is installed by
-  // writing the host shard the way the compiler does: a NEW content-addressed
-  // artifact plus a pointer swap (contracts §1/§3). Never rewrite a shard in
-  // place — its name is the hash of its bytes.
-  const inject = Bun.spawnSync([
-    PHP_BINARY,
-    "-r",
-    [
-      "require $argv[1];",
-      "$routesRoot = $argv[2] . '/routes';",
-      "$host = $argv[3];",
-      "$fixtures = json_decode($argv[4], true, 512, JSON_THROW_ON_ERROR);",
-      "$pointer = json_decode((string) file_get_contents($routesRoot . '/current.json'), true, 512, JSON_THROW_ON_ERROR);",
-      "$shard = substr(hash('sha256', $host), 0, 2);",
-      "$name = $pointer['shards'][$shard] ?? null;",
-      "if (!is_string($name)) { fwrite(STDERR, 'no shard owns ' . $host); exit(1); }",
-      "$artifact = include $routesRoot . '/' . $name;",
-      "$spaceId = $artifact['hostnames'][$host]['space_id'] ?? '';",
-      "foreach ($fixtures as &$route) { $route['space_id'] = $spaceId; }",
-      "unset($route);",
-      "$artifact['host_routes'][$host] = array_merge($fixtures, $artifact['host_routes'][$host] ?? []);",
-      "$written = _sf_php_artifact_write($routesRoot . '/shards', 'hosts-' . $shard, _sf_php_artifact_source($artifact));",
-      "_sf_json_write($routesRoot . '/previous.json', $pointer);",
-      "$pointer['shards'][$shard] = 'shards/' . $written;",
-      "$pointer['gen'] = ((int) $pointer['gen']) + 1;",
-      "_sf_json_write($routesRoot . '/current.json', $pointer);",
-    ].join("\n"),
-    `${rt.engineRoot}/shared/pointers.php`,
-    rt.storageRoot,
-    PUBLIC_HOST,
-    routeFixture,
-  ]);
-  if (inject.exitCode !== 0) {
-    throw new Error(`failed to install proxy route fixture: ${inject.stderr.toString()}`);
-  }
+  // `headers` empty for every host proxy route), so the fixture goes straight
+  // into the host shard.
+  prependHostRoutes(rt, PUBLIC_HOST, routeFixture);
   // Install the content-addressed route fixture before the visitor path first
   // reads the pointer.
   const callback = await postAccessCallback(

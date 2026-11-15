@@ -1400,6 +1400,7 @@ fn pipeline_context_digest(
         "providerIconAlias": 1,
         "headAnchor": 1,
         "autoShareImage": 4,
+        "generatedFaviconFollowsMeta": 1,
         "shareImageOrigin": share_image_origin.map(Url::as_str),
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
@@ -5775,7 +5776,7 @@ mod tests {
                 &private,
                 accept_blobs(&private, &[("index.html", page)]),
                 metadata.clone(),
-                json!({"serving":{"config":{}}}),
+                json!({"serving":{"config":{"platform_meta":true}}}),
             ),
             false,
         )
@@ -5791,7 +5792,7 @@ mod tests {
             &private,
             accept_blobs(&private, &[("index.html", page)]),
             metadata,
-            json!({"serving":{"config":{}},"previous_version_id":"v"}),
+            json!({"serving":{"config":{"platform_meta":true}},"previous_version_id":"v"}),
         );
         next.version_id = "v2".into();
         next.upload_id = Some("u2".into());

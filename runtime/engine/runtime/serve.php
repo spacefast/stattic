@@ -421,6 +421,13 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // whose static pages all carry the baked SDK tag
     // (_stattic_static_page_sdk_tag).
     $serving['inject'] = is_array($root['inject'] ?? null) ? $root['inject'] : null;
+    // What Spacefast adds to this version's responses, resolved once for the
+    // version actually served: a page under a pinned mount follows its own
+    // version. /__spacefast/sdk.js and t.js sit outside every sub-path mount,
+    // so they follow the host's version (no control plane compiles sub-path
+    // version mounts today).
+    require_once __DIR__ . '/../shared/injection-plan.php';
+    $serving['injection_plan'] = _stattic_injection_plan($serving, $versionId);
     $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
 
     // ---- dynamic residue rules ------------------------------------------
@@ -1204,7 +1211,9 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         // never runs the SDK again or breaks a table or select context.
         $normalized = _stattic_normalize_auto_share_image(
             $head,
-            $status === 200 && !empty($context['share_preview_public']),
+            $status === 200
+                && !empty($context['share_preview_public'])
+                && _stattic_injection_on($serving, 'meta'),
             (string) $context['host'],
             (string) $context['client_path']
         );

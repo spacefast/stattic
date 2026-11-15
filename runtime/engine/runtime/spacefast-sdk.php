@@ -5,6 +5,7 @@ declare(strict_types=1);
 // persistent data, so the bootstrap config is loaded here explicitly.
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/response.php';
+require_once __DIR__ . '/../shared/injection-plan.php';
 
 /**
  * The three documents the collaboration layer boots from: `sdk.js`, the
@@ -327,10 +328,19 @@ function _stattic_spacefast_sdk_bootstrap(
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     $pageHost = _stattic_normalize_hostname($requestHost);
     $commentsAvailable = _stattic_spacefast_collab_available($serving, $overlay);
+    // Each module below is written only when the plan has its item on for the
+    // served version (shared/injection-plan.php). With none of them on, the
+    // response is a comment: still 200 and still JavaScript, so a page that
+    // baked the tag before injection went off loads nothing and breaks nothing.
+    $on = static fn (string $item): bool => _stattic_injection_on($serving, $item);
     // Preview tag artifacts stay capability-selected at the control plane (the
     // preview token names a session, not a release); the production release is
-    // one module of this same response.
+    // one module of this same response. It is compiled as one body that also
+    // carries Spacefast's own buttons (Remix, the chip, the bar), so it goes
+    // out while any of those items is on and never when all are off; which
+    // tags are inside is the control plane's to choose from the same plan.
     $embeddedTagBody = $previewToken === null
+        && ($on('tags-dynamic') || $on('remix') || $on('referral-chip') || $on('space-bar'))
         ? _stattic_spacefast_sdk_tag_body($privateRoot, $serving)
         : '';
     $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null;
@@ -367,7 +377,7 @@ function _stattic_spacefast_sdk_bootstrap(
     // A public, cached bootstrap uses the frame name only as a reload signal.
     // The unique URL rechecks the HttpOnly proof before returning review code.
     // The name contains no credential and cannot authorize a review.
-    $reviewReload = $review !== null ? '' : (
+    $reviewReload = ($review !== null || !$on('review')) ? '' : (
         'if(/^spacefast-review:[0-9a-f-]{36}$/.test(window.name)&&window.parent!==window){' .
         'if(!root.reviewLoader){root.reviewLoader=true;var r=document.createElement("script");r.src=' . json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?review="+encodeURIComponent(window.name.slice(17));document.head.appendChild(r);}return;}'
     );
@@ -375,7 +385,7 @@ function _stattic_spacefast_sdk_bootstrap(
     // instead of the published body. PHP knows every part of that URL, so the
     // page gets it finished rather than assembling one.
     $apiBase = _stattic_spacefast_sdk_api_base_url();
-    $tagLoader = ($previewToken === null || $apiBase === null || $spaceId === null) ? '' : (
+    $tagLoader = ($previewToken === null || $apiBase === null || $spaceId === null || !$on('tag-preview')) ? '' : (
         'if(!root.tagLoader){var t=document.createElement("script");t.async=true;t.src=' .
         json_encode(
             $apiBase . '/v1/spaces/' . rawurlencode($spaceId) . '/tags/sdk.js'
@@ -399,34 +409,39 @@ function _stattic_spacefast_sdk_bootstrap(
             && !_stattic_spacefast_preview_surface($serving),
         'brand' => _stattic_brand()['name'],
     ], JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
-    $loader = '(function(){' .
-        'var root=window.Spacefast=window.Spacefast||{};' .
-        $reviewReload .
-        'root.runtime=' . $runtimeContext . ';' .
-        (($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
+    $modules = ($on('users-api') && ($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
         // Zero v2 live updates: the Cast transport registers with every Zero client on the page.
-        (($serving['zero_generation'] ?? null) === 'v2'
+        ($on('zero-realtime') && ($serving['zero_generation'] ?? null) === 'v2'
             ? 'if(!root.zeroRealtime){root.zeroRealtime=true;var z=document.createElement("script");z.src=' . json_encode(STATTIC_ZERO_V2_REALTIME_PATH) . ';document.head.appendChild(z);}'
             : '') .
         $tagLoader .
         _stattic_spacefast_tracker_loader($serving, $previewToken) .
-        $collab .
-        '})();';
-    if ($review !== null && $collabBase !== null) {
+        $collab;
+    $reviewModule = '';
+    if ($review !== null && $collabBase !== null && $on('review')) {
         $review['spaceId'] = $spaceId;
         // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
         $reviewJson = json_encode($review, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
         $reviewUrl = json_encode(rtrim($collabBase, '/') . '/sdk/v1/review.js', JSON_UNESCAPED_SLASHES);
-        $loader .= ';(function(){var root=window.Spacefast=window.Spacefast||{};if(root.reviewModule)return;root.reviewModule=true;var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
+        $reviewModule = ';(function(){var root=window.Spacefast=window.Spacefast||{};if(root.reviewModule)return;root.reviewModule=true;var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
     }
     // Old outputs can carry their own async SDK tag. Select a draft before
     // either copy boots, even when the unqualified SDK came from an edge cache.
-    $previewRedirect = $previewToken !== null ? '' : (
+    $previewRedirect = ($previewToken !== null || !$on('tag-preview')) ? '' : (
         'var p=(new URLSearchParams(window.location&&window.location.search||"").get(' .
         json_encode(STATTIC_TAG_PREVIEW_QUERY_NAME) . ')||"").trim();' .
         'if(p){if(!root.tagPreviewLoader){root.tagPreviewLoader=true;var s=document.createElement("script");s.src=' .
         json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?preview="+encodeURIComponent(p);document.head.appendChild(s);}return;}'
     );
+    if ($previewRedirect . $reviewReload . $modules . $reviewModule . $embeddedTagBody === '') {
+        return STATTIC_SPACEFAST_SDK_OFF;
+    }
+    $loader = '(function(){' .
+        'var root=window.Spacefast=window.Spacefast||{};' .
+        $reviewReload .
+        'root.runtime=' . $runtimeContext . ';' .
+        $modules .
+        '})();' . $reviewModule;
     return '(function(){var root=window.Spacefast=window.Spacefast||{};' .
         $previewRedirect . $loader .
         ($embeddedTagBody !== '' ?
@@ -445,6 +460,8 @@ const STATTIC_SPACEFAST_TRACKER_TTL_SECONDS = 300;
 const STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS = 60;
 const STATTIC_SPACEFAST_TRACKER_MAX_BYTES = 524288;
 const STATTIC_SPACEFAST_TRACKER_EMPTY = "/* No Spacefast analytics here. */\n";
+// sdk.js with nothing on for this version: valid JavaScript that does nothing.
+const STATTIC_SPACEFAST_SDK_OFF = "/* spacefast: injection off */\n";
 
 /**
  * The tracker this Space's pages load, as the control plane projected it, or
@@ -457,7 +474,7 @@ function _stattic_spacefast_tracker_config(array $serving): ?array
 {
     require_once __DIR__ . '/../shared/egress.php';
     $tracker = _stattic_spacefast_sdk_config($serving)['tracker'] ?? null;
-    if (!is_array($tracker)) {
+    if (!is_array($tracker) || !_stattic_injection_on($serving, 'tracker')) {
         return null;
     }
     $src = is_string($tracker['src'] ?? null) ? $tracker['src'] : '';
@@ -836,7 +853,7 @@ function _stattic_comments_enabled_for_surface(array $serving): bool
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
     $lane = _stattic_spacefast_preview_surface($serving) ? 'preview' : 'live';
-    return ($comments[$lane] ?? null) === true;
+    return ($comments[$lane] ?? null) === true && _stattic_injection_on($serving, 'comments');
 }
 
 /**

@@ -41,6 +41,7 @@ declare(strict_types=1);
 //     (D95): the insert changes the length, and with an output handler
 //     installed PHP owns the framing.
 require_once __DIR__ . '/context.php';
+require_once __DIR__ . '/injection-plan.php';
 
 const STATTIC_HTML_INSERT_SCAN_LIMIT_BYTES = 16384;
 // What a stream may hold while one token is still open: an attribute list,
@@ -246,40 +247,14 @@ function _stattic_html_head_anchor(string $html, bool $final, int $limit, array 
     return $settled ? ($head ?? $scan['root']) : false;
 }
 
-/**
- * Whether the Space set `superpowers.disable_all_injection`, which the route's
- * SDK section carries as `injection: false`, or the served version's own
- * `sf.jsonc` did, which its root's injection record carries as
- * `platform: false`. Then the runtime adds no SDK
- * tag or custom snippets. A section without the field comes from a control
- * plane that projected one for
- * every Space and said nothing about the setting, so it keeps that engine's
- * behaviour.
- */
-function _stattic_platform_injection_disabled(array $serving): bool
-{
-    // The served version's own `sf.jsonc` opt-out, recorded on its root.
-    if (($serving['inject']['platform'] ?? null) === false) {
-        return true;
-    }
-    $sdk = $serving['sdk'] ?? null;
-    return is_array($sdk) && ($sdk['injection'] ?? null) === false;
-}
-
-// What the runtime adds markup on: an SDK section that does not opt out.
-function _stattic_platform_injection_enabled(array $serving): bool
-{
-    return is_array($serving['sdk'] ?? null) && !_stattic_platform_injection_disabled($serving);
-}
-
-// The engine's SDK tag, or '' when the Space turned platform injection off.
-// `defer`, not `async`: the loader's placeholder orb reads `document.body`,
-// which an async head script can run before. A tag-preview request names its
-// draft release on the script URL; a baked tag needs no token, since sdk.js
-// reads the draft from the page URL.
+// The engine's SDK tag, or '' when the plan has `sdk-tag` off for the served
+// version. `defer`, not `async`: the loader's placeholder orb reads
+// `document.body`, which an async head script can run before. A tag-preview
+// request names its draft release on the script URL; a baked tag needs no
+// token, since sdk.js reads the draft from the page URL.
 function _stattic_spacefast_sdk_tag(array $serving, ?string $previewToken): string
 {
-    if (!_stattic_platform_injection_enabled($serving)) {
+    if (!_stattic_injection_on($serving, 'sdk-tag')) {
         return '';
     }
     $src = STATTIC_SPACEFAST_SDK_PATH . ($previewToken === null ? '' : '?preview=' . rawurlencode($previewToken));
@@ -312,17 +287,22 @@ function _stattic_static_page_sdk_tag(array $serving, ?string $previewToken, str
 
 // What a dynamic lane's response gets: the version's own snippets by placement,
 // and the engine's SDK tag. The baked SDK snippet is left out of the bodyEnd
-// placement, so the response gets one tag from this filter. A static page a
-// worker relays from its assets binding already carries the snippets finalize
-// baked; for that response the filter keeps only the SDK tag
+// placement, so the response gets one tag from this filter. The static tags
+// finalize recorded beside the snippets (each one marked
+// `<!--spacefast-static:…-->`) go in only while the plan has `tags-baked` on;
+// the author's own snippets always do, since no switch removes them. A static
+// page a worker relays from its assets binding already carries the snippets
+// finalize baked; for that response the filter keeps only the SDK tag
 // (_stattic_html_insert_payload_for_response).
 function _stattic_html_insert_payload(array $serving): array
 {
     $inject = is_array($serving['inject'] ?? null) ? $serving['inject'] : [];
+    $tagsBaked = _stattic_injection_on($serving, 'tags-baked');
     $snippets = static fn (string $placement): string => implode('', array_filter(
         is_array($inject[$placement] ?? null) ? $inject[$placement] : [],
         static fn ($snippet): bool => is_string($snippet)
             && !str_contains($snippet, 'data-spacefast-sdk=')
+            && ($tagsBaked || !str_starts_with($snippet, '<!--spacefast-static:'))
     ));
     return [
         'head' => $snippets('head'),
@@ -675,7 +655,11 @@ function _stattic_html_insert_journal_miss(array &$state): void
     );
 }
 
-/** Normalize only platform-owned fallback tags, using today's anonymous access. */
+/**
+ * Normalize only platform-owned fallback tags. `$public` says the fallback is
+ * served: anonymous visitors read this page today and the plan has `meta` on
+ * for the served version. Otherwise the marked tags are removed.
+ */
 function _stattic_normalize_auto_share_image(string $html, bool $public, string $host, string $path): string
 {
     $edits = [];

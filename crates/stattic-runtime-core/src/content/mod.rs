@@ -1364,6 +1364,8 @@ fn decorate_html(
     let mut share_image = Vec::<String>::new();
     // The author's icon always wins. Declare shipped root icons explicitly so
     // the provider-safe URL pass can keep them on the runtime serving ladder.
+    // The generated letter tile is platform metadata like the title and share
+    // tags below: a page with platform meta off (injection off) gets none.
     if !has_favicon.get() {
         let href = match favicon {
             Some(favicon) => Some(favicon),
@@ -1371,6 +1373,7 @@ fn decorate_html(
                 &format!("/{IMPLICIT_FAVICON_PATH}"),
                 files,
             )),
+            None if !meta_tags => None,
             None => {
                 let fallback_title;
                 let favicon_title = if let Some(title) = title.as_deref() {
@@ -1947,6 +1950,18 @@ mod tests {
         assert!(read(&run, "configured.html")
             .contains("href=\"/apple-touch-icon.png;sf-icon?brand=1#configured\""));
 
+        // The placeholder is platform metadata: with it off (injection off),
+        // a page with no icon of its own gets none.
+        let run = run_pipeline(
+            &[("index.html", undeclared)],
+            json!({"mode":"website"}),
+            json!({"config":{}}),
+        );
+        run.result.as_ref().unwrap();
+        let plain = read(&run, "index.html");
+        assert_eq!(plain.matches("rel=\"icon\"").count(), 0, "{plain}");
+        assert!(!plain.contains("data:image/svg+xml"));
+
         // No icon anywhere earns exactly one generated placeholder, and
         // re-finalizing that output must not accumulate a second.
         let run = run_pipeline(
@@ -2322,7 +2337,7 @@ mod tests {
         let run = run_pipeline(
             &[("docs.html", source), ("docs/index.html", source)],
             json!({"mode":"website"}),
-            json!({"config":{}}),
+            json!({"config":{"platform_meta":true}}),
         );
         run.result.as_ref().unwrap();
 

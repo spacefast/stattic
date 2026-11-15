@@ -1,7 +1,7 @@
 {
-  "revision": "6d900b12a56d473270258ec57d3cbe69459eb621",
-  "sourceHash": "6f32709f9ac5901a55f219b78f0e7bc157ba99cbf33cba7e1fdf13eaea038136",
-  "manifestSha256": "53e76d62d83c5ca3a12443cffaf3e4e6dcf29d7f53ecd2c00149db916f4c87a5",
+  "revision": "92814f5977d9adcdc0501b26f563901ed271b678",
+  "sourceHash": "b129f510a60990ac398c5974015b571b46d7354102e504d35832da31980d44cd",
+  "manifestSha256": "c5c6838023fe6745467501ca779f831d7e6e973565a285e53d90f624e12fa131",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "5c39b2a356b9dcd3885594360497029529928f7de40d2a7026a16746d179df43"
+      "sha256": "e20b9480292c04bd86c0b36146f7cfa251b571d82c0b4b13aa2dc840ffb285d2"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "87443973d8134e0f92058886d5b0c861dc86e78833ec84fffba9d60055e939f4"
+      "sha256": "f3c0c3d49cb07d4d474cc95c176847f7a65e367f90d1d6647925848dec061c6a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13757,7 +13757,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "14d36409bc233b623fecc3ce395f2a9db97355d2430cd0bf5a0648de7ffaacde"
+      "sha256": "fe76d92be11fcf0d9d6422054fa8baf0da7e9516b36c1fcb00509902bdc1d536"
     },
     {
       "path": "runtime/engine/runtime/sell.php",
@@ -13768,16 +13768,16 @@
       "sha256": "c7aaabded054882dc7c6e28e82b84e840b638bb0d6cfb3e3266d4c8eff9ae196"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-V6LI4NW2.js",
-      "sha256": "693358eb415de243bd9668be4a85dc4a926d418cc32bbecf7d051517bcb98406"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-Q4LVDTNZ.js",
+      "sha256": "5c95c07f7e5ec697638a9b70ae5d5ca46a4ab68405206c5c06fa2e0f51e7f3ee"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-P2VP3F2V.js",
-      "sha256": "1abebf6953f352ff00c418d93365d469778a8c16e11fcdf9dedb2c6455a6dda4"
+      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-QRNGH2ID.js",
+      "sha256": "c2e660c6c89181b4e84b7ebeff2ccc869e30ca1e60d69cdc79a56f4fb40e26c5"
     },
     {
       "path": "runtime/engine/runtime/space-client/client.js",
-      "sha256": "b198be21796562f0d0526ec58b0ed41d4d1e7f011c090a1f4018a00695fdfc52"
+      "sha256": "5d97d58ef1e719af48b47577b3cfba29c7fc874d0b322256bd445cb70f05d7cc"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",

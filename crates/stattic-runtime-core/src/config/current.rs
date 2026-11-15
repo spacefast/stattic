@@ -30,6 +30,10 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "build",
     "cache",
     "cleanUrls",
+    // The behavior date this config was written against. Recorded on the
+    // version at finalize; a config that names none is pinned to the day it
+    // was published.
+    "compatibilityDate",
     // Connector roles the Space's pages call. Validated here so a bad role
     // blocks the publish with a diagnostic; the control plane freezes them.
     "connectors",
@@ -358,6 +362,13 @@ fn validate_config_shape(
         }
     }
     validate_space_name(object, diagnostics);
+    if object.get("compatibilityDate").is_some_and(|value| {
+        value
+            .as_str()
+            .is_none_or(|date| !compatibility_date_pattern().is_match(date))
+    }) {
+        push_shape_error(diagnostics, "compatibilityDate", "a YYYY-MM-DD date");
+    }
     validate_crons_config(object, diagnostics);
     validate_traffic_rules_config(object, diagnostics);
     validate_runtime_config(object, diagnostics);
@@ -1139,7 +1150,9 @@ fn validate_trimmed_page_theme_string(
 const PAGES_COLOR_PATTERN: &str = r"^(?:#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\([0-9.,\s%/]{1,64}\)|hsla?\([0-9.,\s%deg/]{1,64}\)|[a-zA-Z]{3,30})$";
 const PAGES_LOGO_PATTERN: &str = r#"^(?:https://[^\s\"'<>\\]+|/[^\s\"'<>\\]*)$"#;
 const PAGES_FONT_PATTERN: &str = r#"^[A-Za-z0-9 ,'\"-]+$"#;
-const COMPATIBILITY_DATE_PATTERN: &str = r"^\d{4}-\d{2}-\d{2}$";
+// ASCII digits only: the `regex` crate's `\d` matches any Unicode digit, which
+// the TS schemas (and every date parser) would refuse.
+const COMPATIBILITY_DATE_PATTERN: &str = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$";
 
 fn pages_color_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
@@ -1357,6 +1370,11 @@ pub fn public_json_schema() -> Value {
                 "maxLength": CONFIG_SPACE_NAME_MAX_CHARS
             },
             "runtime": runtime,
+            "compatibilityDate": {
+                "type": "string",
+                "pattern": COMPATIBILITY_DATE_PATTERN,
+                "description": "The date this config was written against (YYYY-MM-DD). Each version records it; a config without one is pinned to its publish date."
+            },
             "access": {
                 "anyOf": [
                     {
@@ -1503,6 +1521,7 @@ export type SpaceConfigFile = SpaceConfig & {
   $schema?: string;
   space?: string;
   name?: string;
+  compatibilityDate?: string;
   runtime?: SpaceRuntimeConfig;
   sell?: { mode?: "test" | "live"; products: string };
   access?: { public: string[] };
@@ -2053,6 +2072,48 @@ mod tests {
             .iter()
             .any(|item| item.severity == DiagnosticSeverity::Error
                 && item.message.contains("shorthand")));
+    }
+
+    #[test]
+    fn compatibility_date_is_a_day_and_nothing_else() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"compatibilityDate":"2026-11-15"}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            config.and_then(|value| value.get("compatibilityDate").cloned()),
+            Some(json!("2026-11-15"))
+        );
+
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            parse_config(
+                r#"{"compatibilityDate":"next week"}"#,
+                "sf.jsonc",
+                &mut diagnostics
+            ),
+            None
+        );
+        // Unicode digits are refused like any other non-date text.
+        let mut unicode = Vec::new();
+        assert_eq!(
+            parse_config(
+                r#"{"compatibilityDate":"２０２６-１１-１５"}"#,
+                "sf.jsonc",
+                &mut unicode
+            ),
+            None
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|item| item.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("compatibilityDate")]
+        );
     }
 
     #[test]

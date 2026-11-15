@@ -27,7 +27,8 @@ use crate::config::diagnostics::DiagnosticSeverity;
 use crate::config::jsonc::parse as parse_jsonc;
 use crate::content::{
     advertised_image_file, advertised_image_host, is_pipeline_source, materialize_html_pipeline,
-    HtmlPipelineContext, HtmlPipelineOutcome, IMPLICIT_FAVICON_PATH, PIPELINE_SOURCE_MAX_BYTES,
+    HtmlPipelineContext, HtmlPipelineOutcome, ShareImageSource, IMPLICIT_FAVICON_PATH,
+    PIPELINE_SOURCE_MAX_BYTES,
 };
 use crate::csp::PlatformCspSources;
 use crate::finalize::{
@@ -678,11 +679,24 @@ fn run_finalize_pipeline(
                 && url.query().is_none()
                 && url.fragment().is_none()
         });
+    let page_screenshot_url = input
+        .body
+        .get("page_screenshot_url")
+        .and_then(Value::as_str)
+        .and_then(|value| Url::parse(value).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
     if share_image_origin.is_some() {
         substitution
             .system_variable_dependencies
             .insert("SPACEFAST_LIVE_URL".into());
     }
+    let share_image_source = match (&share_image_origin, &page_screenshot_url) {
+        (Some(origin), Some(screenshot_url)) => Some(ShareImageSource {
+            origin,
+            screenshot_url,
+        }),
+        _ => None,
+    };
     // Everything the pipeline produces lands in the CAS: the tables address
     // blobs, and a blob is the only place a byte lives.
     let blobs = blob_root(private_root, &input.space_id);
@@ -695,7 +709,7 @@ fn run_finalize_pipeline(
         metadata,
         viewer: &viewer,
         assigned_hostnames: &assigned_hostnames,
-        share_image_origin: share_image_origin.as_ref(),
+        share_image_source,
     };
     let context_digest = pipeline_context_digest(&html_context, files);
     let adoptable = adoptable_paths(previous_catalog.as_ref(), &context_digest, files, &blobs);
@@ -1378,7 +1392,7 @@ fn pipeline_context_digest(
         serving,
         metadata,
         viewer,
-        share_image_origin,
+        share_image_source,
         ..
     } = *context;
     let absent = Map::new();
@@ -1399,9 +1413,10 @@ fn pipeline_context_digest(
         "previewMetadata": 1,
         "providerIconAlias": 1,
         "headAnchor": 1,
-        "autoShareImage": 4,
+        "autoShareImage": 5,
         "generatedFaviconFollowsMeta": 1,
-        "shareImageOrigin": share_image_origin.map(Url::as_str),
+        "shareImageOrigin": share_image_source.map(|source| source.origin.as_str()),
+        "pageScreenshotUrl": share_image_source.map(|source| source.screenshot_url.as_str()),
         "config": config,
         "siteThemeCss": serving.get("theme_css"),
         "viewer": viewer,
@@ -5080,7 +5095,7 @@ mod tests {
             metadata: &metadata,
             viewer: &viewer,
             assigned_hostnames: &[],
-            share_image_origin: None,
+            share_image_source: None,
         };
         let js_routes = BTreeMap::from([(
             "prod".to_string(),
@@ -5126,7 +5141,7 @@ mod tests {
                 metadata: &metadata,
                 viewer: &viewer,
                 assigned_hostnames: &[],
-                share_image_origin: None,
+                share_image_source: None,
             },
             &BTreeMap::new(),
             &mut diagnostics,
@@ -6054,13 +6069,22 @@ mod tests {
         }
         let scenarios = [
             ContextFlip {
-                name: "the live URL selects the mShots capture",
+                name: "the live URL selects the page the API captures",
                 first_files: vec![("index.html", page)],
                 next_files: vec![("index.html", page)],
                 first_meta: json!({"mode":"website","title":"Adopt"}),
                 next_meta: json!({"mode":"website","title":"Adopt"}),
-                first_body: json!({"serving":{"config":{"platform_meta":true}}, "system_variables":{"SPACEFAST_LIVE_URL":"https://first.example.test/"}}),
-                next_body: json!({"serving":{"config":{"platform_meta":true}}, "system_variables":{"SPACEFAST_LIVE_URL":"https://next.example.test/"}}),
+                first_body: json!({"serving":{"config":{"platform_meta":true}}, "page_screenshot_url":"https://api.example.test/v1/screenshots/page", "system_variables":{"SPACEFAST_LIVE_URL":"https://first.example.test/"}}),
+                next_body: json!({"serving":{"config":{"platform_meta":true}}, "page_screenshot_url":"https://api.example.test/v1/screenshots/page", "system_variables":{"SPACEFAST_LIVE_URL":"https://next.example.test/"}}),
+            },
+            ContextFlip {
+                name: "the API route that serves the page capture",
+                first_files: vec![("index.html", page)],
+                next_files: vec![("index.html", page)],
+                first_meta: json!({"mode":"website","title":"Adopt"}),
+                next_meta: json!({"mode":"website","title":"Adopt"}),
+                first_body: json!({"serving":{"config":{"platform_meta":true}}, "page_screenshot_url":"https://api.example.test/v1/screenshots/page", "system_variables":{"SPACEFAST_LIVE_URL":"https://next.example.test/"}}),
+                next_body: json!({"serving":{"config":{"platform_meta":true}}, "page_screenshot_url":"https://api.other.test/v1/screenshots/page", "system_variables":{"SPACEFAST_LIVE_URL":"https://next.example.test/"}}),
             },
             ContextFlip {
                 name: "site title feeds the generated favicon",
@@ -6153,7 +6177,13 @@ mod tests {
                 .is_some()
             {
                 let body = String::from_utf8(served_body(&private, "v2", "index.html")).unwrap();
-                assert!(body.contains("https://s0.wp.com/mshots/v1/https%3A%2F%2Fnext.example.test%2Findex.html?w=1200&amp;h=630"));
+                let route = next_body["page_screenshot_url"].as_str().unwrap();
+                assert!(
+                    body.contains(&format!(
+                        "{route}?url=https%3A%2F%2Fnext.example.test%2Findex.html\""
+                    )),
+                    "{name}: {body}"
+                );
                 let metadata: Value = serde_json::from_slice(
                     &fs::read(private.join("spaces/s/versions/v2/metadata.json")).unwrap(),
                 )

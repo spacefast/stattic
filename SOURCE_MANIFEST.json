@@ -1,7 +1,7 @@
 {
-  "revision": "478044a148ac9e550a4bf23815eff83f9afee85a",
-  "sourceHash": "354903708316adeff4cce4fcc627471826d476d087624ce2cf4f6ca5cf26876c",
-  "manifestSha256": "5641b23e31d9e9dc2808cbe81ae0419aa604fd54d5b983ada1fac1afb13f2b8d",
+  "revision": "6130629a514772a66e0320f5c047fceebe480177",
+  "sourceHash": "d6efceb473529163af524f6e03a61b02917b7a847c9cf090845242698bf8e552",
+  "manifestSha256": "4b6a3aeebcfc3eaa147121337c48159a0fc76505ba5a92d8dd9a38061b095f0e",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2f58b9267549b1a9722a02c9c35bff8cc0afe12d618900e66a9eb59d938539ec"
+      "sha256": "14d9bae3a9830a82f080348c7d7454b1fa26e9ae0aa557399debb626c9a9e73c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "11a3bfd76aa96f688c94ce8d52e50a58068cc788e6ef495571adbe52f33b01aa"
+      "sha256": "a59023e1f8adc2c8164b1b32bab12f2b59a5ca13f36eb8907fd22c00c6c253ca"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -109,7 +109,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "2a1122a7db532ab9f6a4317c0f80d94231c85b66a3a7458b6e778beddbe7c2d2"
+      "sha256": "17760f9e0c320165f85b1bc7f3a1b86ff3951a1e0530e4c75fb267ee1b9415cb"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -233,7 +233,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "b51c5c755ae1f957ae6708092b6b69814d13acfd1b7d7760646abcec528d85cb"
+      "sha256": "1f9f166815b6c4ad50d53f91d21d1eaf0bd28cc5766a38562b8874f780fd846c"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -13461,7 +13461,7 @@
     },
     {
       "path": "runtime/README.md",
-      "sha256": "3dca0f75ea5fd682e2be5ac95cc8c1ea9641e25486095690aa83f8a989d8e7a6"
+      "sha256": "faf69b7361c9f4325d3d0cd4c7330ee3d3cc76f347de84ee42c5f2ed1d7f54f4"
     },
     {
       "path": "runtime/SKILL.md",
@@ -13765,7 +13765,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "c7aaabded054882dc7c6e28e82b84e840b638bb0d6cfb3e3266d4c8eff9ae196"
+      "sha256": "be10aa6f98b23541811c4e6ceb7067a37722ecf5e5ee2c7d8056ffbc412329ae"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-Q4LVDTNZ.js",
@@ -13921,7 +13921,7 @@
     },
     {
       "path": "runtime/engine/shared/html-insert.php",
-      "sha256": "b3a1e6346fce13e076788f0e5f2dc9763546dab2c5ff8f80cf4fef6c700a559f"
+      "sha256": "379cecfa6b68e53a217e8ac29711ad1ad8a42e7ad56716ebd841347a74faf523"
     },
     {
       "path": "runtime/engine/shared/http.php",
@@ -14169,7 +14169,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "c78ec24639a2638875a6c2d103729075e2d8cc9991f5bc4ce246ab8e368e6b2a"
+      "sha256": "e184e4ffba5f683deac2d5f73bc5a97a5afa6741848da715aba2fe1b409137a4"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -14477,7 +14477,7 @@
     },
     {
       "path": "runtime/tests/html-inject.test.ts",
-      "sha256": "266cf80be52ae7a93bbabab9b43cccae2a3827c88da31e76bf979dbb89cd13d6"
+      "sha256": "4729e2dc114715966126d4268c5b78a162ec06901e3f9a494b358cbc430f1f50"
     },
     {
       "path": "runtime/tests/installer-native.test.ts",
@@ -14629,7 +14629,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "6702daae5eccbf44e825ce89554eb9f8e8e7cc3e37c743570f85af4d44dabbcb"
+      "sha256": "dda8a3cfcf70c2900d787b22e038bfef7cc0a07201887931b4c78f22b4677f20"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

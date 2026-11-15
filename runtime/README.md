@@ -182,13 +182,13 @@ runtime entrypoints execute as direct PHP files, after WP.Cloud has finished
 defining the DB constants needed to decrypt that data. Local tests and e2e shims
 inject the same Atomic shape before runtime PHP is loaded.
 
-| Key                             | Purpose                                                                                                                     |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `SPACEFAST_API_BASE_URL`        | Private control-plane transport. Used for JWKS refresh and callbacks only; never emitted to public pages.                   |
-| `SPACEFAST_BROWSER_API_URL`     | Browser-safe public API origin for the same-host SDK. HTTPS in production; loopback HTTP is accepted for local development. |
-| `SPACEFAST_RUNTIME_INSTANCE_ID` | This runtime's identity. Every management/upload JWT must be scoped to it.                                                  |
-| `SPACEFAST_RUNTIME_JWKS_PATH`   | Optional. Path to a local JWKS file for self-hosted runtimes that should never call the API.                                |
-| `SPACEFAST_RUNTIME_JWKS_B64`    | Optional. Base64-encoded inline JWKS JSON. WP.Cloud receives this through persistent data.                                  |
+| Key                             | Purpose                                                                                                                                                                    |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SPACEFAST_API_BASE_URL`        | Private control-plane transport. Used for JWKS refresh and callbacks only; never emitted to public pages.                                                                  |
+| `SPACEFAST_BROWSER_API_URL`     | Browser-safe public API origin for the same-host SDK and for a public page's `og:image` social card. HTTPS in production; loopback HTTP is accepted for local development. |
+| `SPACEFAST_RUNTIME_INSTANCE_ID` | This runtime's identity. Every management/upload JWT must be scoped to it.                                                                                                 |
+| `SPACEFAST_RUNTIME_JWKS_PATH`   | Optional. Path to a local JWKS file for self-hosted runtimes that should never call the API.                                                                               |
+| `SPACEFAST_RUNTIME_JWKS_B64`    | Optional. Base64-encoded inline JWKS JSON. WP.Cloud receives this through persistent data.                                                                                 |
 
 When no local JWKS is provisioned, the runtime fetches and caches
 `<SPACEFAST_API_BASE_URL>/.well-known/spacefast-runtime-jwks.json`.

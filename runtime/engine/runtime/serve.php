@@ -1212,7 +1212,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
                 && !empty($context['share_preview_public'])
                 && _stattic_injection_on($serving, 'meta'),
             (string) $context['host'],
-            (string) $context['client_path']
+            (string) $context['client_path'],
+            (string) $context['version_id']
         );
         if ($sdkTag !== '') {
             $normalized = _stattic_splice_head_markup($normalized, $sdkTag);

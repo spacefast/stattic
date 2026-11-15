@@ -4208,6 +4208,14 @@ $staticTag = '<!--spacefast-static:ga:head:start--><script src="https://www.goog
 $offPayload = _stattic_html_insert_payload(['sdk' => ['injection' => false, 'config' => []], 'inject' => ['head' => [$staticTag, '<meta name="author">']]]);
 check($offPayload['head'] === '<meta name="author">' && $offPayload['sdk'] === '', 'off drops the static tags and the SDK tag and keeps the author snippet');
 check(_stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['head' => [$staticTag]]])['head'] === $staticTag, 'on keeps the static tags');
+// A social card URL round-trips the decoded client path: each segment is
+// encoded once, so a literal `%`, a space or a `#` in a file name survives the
+// API's single decode of the `url` value.
+check(
+    _stattic_page_screenshot_card_url('https://api.example.test/v1/screenshots/page', 'h.test', '/docs/a%20b #1', 'ver_1')
+        === 'https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Fh.test%2Fdocs%2Fa%252520b%2520%25231&version=ver_1',
+    'social card URL encodes the decoded path once per segment'
+);
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

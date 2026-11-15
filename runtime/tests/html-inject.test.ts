@@ -391,24 +391,35 @@ test("runtime splices static inject placements and the one SDK tag into served H
   );
 });
 
-test("static images and mShots metadata serve without PHP temporary files", async () => {
+test("static images and share-image metadata serve without PHP temporary files", async () => {
   // Reproduce the storage condition that used to crash HTML rendering.
   const unwritable = mkdtempSync(path.join(os.tmpdir(), "stattic-full-temp-"));
   chmodSync(unwritable, 0o500);
-  const full = await startRuntime({ phpIni: { sys_temp_dir: unwritable } });
+  // The API base lets a page baked before the screenshot route existed
+  // (`retained.html` below) still name its social card on the API.
+  const full = await startRuntime({
+    phpIni: { sys_temp_dir: unwritable },
+    env: { SPACEFAST_BROWSER_API_URL: "https://api.example.test" },
+  });
   try {
     const page =
       '<html><head><meta property="og:image" content="/share.png"></head><body>Shared</body></html>\n';
     await deploy(full, {
       spaceId: "spc_full_temp",
       versionId: "ver_full_temp_1",
-      finalize: { system_variables: { SPACEFAST_LIVE_URL: "https://full-temp.test/" } },
+      finalize: {
+        system_variables: { SPACEFAST_LIVE_URL: "https://full-temp.test/" },
+        page_screenshot_url: "https://api.example.test/v1/screenshots/page",
+      },
       serving: { config: { platform_meta: true } },
       files: {
         "index.html": page,
         "fallback.html": "<html><head></head><body>Screenshot</body></html>",
         "retained.html":
           '<html><head><meta data-spacefast-auto-image="og:image" property="og:image" content="https://spacefast.com/icon.png"><meta name="twitter:card" content="summary" data-spacefast-auto-image="twitter:card"><script>const sample = \'<meta data-spacefast-auto-image="og:image" content="fake.png">\';</script></head><body>Retained</body></html>',
+        // A file whose name holds a literal percent: its card must name the
+        // same file after the API decodes the card URL's `url` value once.
+        "docs/a%20b.html": "<html><head></head><body>Percent</body></html>",
         "share.png": {
           content: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x2a]),
           contentType: "image/png",
@@ -431,15 +442,25 @@ test("static images and mShots metadata serve without PHP temporary files", asyn
     const screenshot = await get(full, "full-temp.test", "/fallback");
     expect(screenshot.status).toBe(200);
     const fallbackHtml = await screenshot.text();
+    // The card names the API's capture of the address the visitor asked for.
     expect(fallbackHtml).toContain(
-      'content="https://s0.wp.com/mshots/v1/https%3A%2F%2Ffull-temp.test%2Ffallback?w=1200&amp;h=630"',
+      'content="https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Ffull-temp.test%2Ffallback&amp;version=ver_full_temp_1"',
+    );
+    expect(fallbackHtml).not.toContain("s0.wp.com");
+    // The visitor asks for /docs/a%2520b (the runtime's own address for the
+    // file `docs/a%20b.html`); the card URL carries that spelling encoded
+    // once more, so one decode on the API gives it back.
+    const percent = await get(full, "full-temp.test", "/docs/a%2520b");
+    expect(percent.status).toBe(200);
+    expect(await percent.text()).toContain(
+      'content="https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Ffull-temp.test%2Fdocs%2Fa%252520b&amp;version=ver_full_temp_1"',
     );
     expect(fallbackHtml).toContain("<body>Screenshot</body>");
     const retained = await get(full, "full-temp.test", "/retained?token=never-capture-this");
     const retainedHtml = await retained.text();
     expect(retained.status).toBe(200);
     expect(retainedHtml).toContain(
-      'content="https://s0.wp.com/mshots/v1/https%3A%2F%2Ffull-temp.test%2Fretained?w=1200&amp;h=630"',
+      'content="https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Ffull-temp.test%2Fretained&amp;version=ver_full_temp_1"',
     );
     expect(retainedHtml).toContain('content="summary_large_image"');
     expect(retainedHtml).not.toContain("never-capture-this");
@@ -563,7 +584,7 @@ test("injection off reaches every engine page type and endpoint, from every sour
     "spacefast-static:",
     "googletagmanager.com",
     "data-spacefast-auto-image",
-    "s0.wp.com/mshots",
+    "/v1/screenshots/page?url=",
   ];
   const TAG_BODY = "window.__spacefastTagBody=1;";
   const beaconBody = "window.__beaconTracker=1;\n";
@@ -756,7 +777,7 @@ function get_post_meta($id, $key, $single) { return ${JSON.stringify(SPACE)}; }
     }
     // The static home's share image is the serve-time rewrite of a baked
     // fallback, so it is there only when on.
-    expect(on["/"]?.body).toContain("s0.wp.com/mshots");
+    expect(on["/"]?.body).toContain("/v1/screenshots/page?url=");
     expect(staticBlob("on", "/")).toContain("data-spacefast-auto-image");
     expect(on["/doc"]?.body).toContain(wordpressPage);
     const wholeProxyOn = await read(WHOLE_PROXY, "/");
@@ -819,7 +840,7 @@ function get_post_meta($id, $key, $single) { return ${JSON.stringify(SPACE)}; }
             const allowed =
               stored === null ||
               marker === "data-spacefast-auto-image" ||
-              marker === "s0.wp.com/mshots"
+              marker === "/v1/screenshots/page?url="
                 ? 0
                 : count(stored, marker);
             expect(count(served.body, marker), `${label}: ${marker}`).toBeLessThanOrEqual(allowed);

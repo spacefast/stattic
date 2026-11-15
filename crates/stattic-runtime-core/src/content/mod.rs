@@ -108,7 +108,7 @@ pub struct HtmlPipelineContext<'a> {
     pub metadata: &'a Map<String, Value>,
     pub viewer: &'a Map<String, Value>,
     pub assigned_hostnames: &'a [String],
-    pub share_image_origin: Option<&'a url::Url>,
+    pub share_image_source: Option<ShareImageSource<'a>>,
 }
 
 /// Runs the content pipeline over the committed files, writing generated
@@ -126,7 +126,7 @@ pub fn materialize_html_pipeline(
         metadata,
         viewer,
         assigned_hostnames,
-        share_image_origin,
+        share_image_source,
     } = context;
     let absent = Map::new();
     let config = serving
@@ -477,7 +477,7 @@ pub fn materialize_html_pipeline(
                 meta_tags: page_by_output.contains_key(&path) || platform_meta,
                 theme_available: files.contains_key(THEME_STYLESHEET_PATH),
                 path: &path,
-                share_image_origin,
+                share_image_source,
             },
             diagnostics,
         )?;
@@ -909,7 +909,7 @@ struct HtmlDecorationContext<'a> {
     meta_tags: bool,
     theme_available: bool,
     path: &'a str,
-    share_image_origin: Option<&'a url::Url>,
+    share_image_source: Option<ShareImageSource<'a>>,
 }
 
 fn cache_busted_local_asset(asset: &str, files: &BTreeMap<String, FileMeta>) -> String {
@@ -1064,19 +1064,25 @@ fn html_has_body(source: &str) -> bool {
     found.get()
 }
 
-/// mShots accepts one encoded URL and follows the file's canonical redirect.
-fn mshots_image_url(origin: &url::Url, path: &str) -> String {
-    const URL_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~');
-    let mut page_url = origin.clone();
+/// The API's page screenshot route for one published file URL. The API
+/// captures the page itself and follows the file's canonical redirect.
+fn page_screenshot_image_url(share_image: &ShareImageSource<'_>, path: &str) -> String {
+    let mut page_url = share_image.origin.clone();
     page_url.set_path(&format!("/{}", path.replace('%', "%25")));
-    format!(
-        "https://s0.wp.com/mshots/v1/{}?w=1200&h=630",
-        percent_encoding::utf8_percent_encode(page_url.as_str(), URL_COMPONENT)
-    )
+    let mut image = share_image.screenshot_url.clone();
+    image
+        .query_pairs_mut()
+        .clear()
+        .append_pair("url", page_url.as_str());
+    image.to_string()
+}
+
+/// Where a public page's fallback share image comes from: the live origin the
+/// page is captured at, and the API route that serves the capture.
+#[derive(Clone, Copy)]
+pub struct ShareImageSource<'a> {
+    pub origin: &'a url::Url,
+    pub screenshot_url: &'a url::Url,
 }
 
 /// Elements a browser keeps in the document's head: the head ends at the
@@ -1102,7 +1108,7 @@ fn decorate_html(
         meta_tags,
         theme_available,
         path,
-        share_image_origin,
+        share_image_source,
     } = context;
     let html = if source.contains("<!-- spacefast:") {
         strip_generated_html_blocks(source)
@@ -1448,11 +1454,14 @@ fn decorate_html(
                 ));
             }
         }
-        // mShots captures the published file URL and follows its canonical
+        // The API captures the published file URL and follows its canonical
         // redirects. Serving filters marked fallbacks by current public access.
         let fallback =
-            (image.is_none() && !declares_preview_image.get()).then(|| match share_image_origin {
-                Some(origin) => (mshots_image_url(origin, path), "summary_large_image"),
+            (image.is_none() && !declares_preview_image.get()).then(|| match share_image_source {
+                Some(source) => (
+                    page_screenshot_image_url(&source, path),
+                    "summary_large_image",
+                ),
                 None => (Brand::default().share_image_url, "summary"),
             });
         if let Some((image_url, _)) = &fallback {
@@ -1607,7 +1616,7 @@ mod tests {
         files: &[(&str, &[u8])],
         metadata: Value,
         serving: Value,
-        origin: Option<&url::Url>,
+        origin: Option<ShareImageSource<'_>>,
     ) -> PipelineRun {
         let temp = tempdir().unwrap();
         let files_root = temp.path().join("files");
@@ -1630,7 +1639,7 @@ mod tests {
                 metadata: &metadata,
                 viewer: &viewer,
                 assigned_hostnames: &["local.example.test".to_string()],
-                share_image_origin: origin,
+                share_image_source: origin,
             },
             &BTreeMap::new(),
             &mut diagnostics,
@@ -1669,7 +1678,7 @@ mod tests {
                 meta_tags: true,
                 theme_available: true,
                 path: "index.html",
-                share_image_origin: None,
+                share_image_source: None,
             },
             &mut diagnostics,
         )
@@ -2298,6 +2307,8 @@ mod tests {
         }
 
         let origin = url::Url::parse("https://live.example.test/").unwrap();
+        let screenshot_url =
+            url::Url::parse("https://api.example.test/v1/screenshots/page").unwrap();
         let captured = run_pipeline_with_origin(
             &[("index.html", bare), ("docs/a b.html", bare),
                 ("docs/a%20b.html", bare),
@@ -2305,18 +2316,18 @@ mod tests {
               ("authored.html", br#"<html><head><meta property="og:image" content="https://cdn.example.test/cover.png"></head><body></body></html>"#)],
             json!({"mode":"website"}),
             json!({"config":{"platform_meta":true}}),
-            Some(&origin),
+            Some(ShareImageSource { origin: &origin, screenshot_url: &screenshot_url }),
         );
         captured.result.as_ref().unwrap();
         let home = read(&captured, "index.html");
-        assert!(home.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Findex.html?w=1200&amp;h=630\""));
+        assert!(home.contains("content=\"https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Flive.example.test%2Findex.html\""));
         assert!(home.contains("<meta name=\"twitter:card\" content=\"summary_large_image\" data-spacefast-auto-image=\"twitter:card\">"));
         let nested = read(&captured, "docs/a b.html");
-        assert!(nested.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2520b.html?w=1200&amp;h=630\""));
+        assert!(nested.contains("content=\"https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2520b.html\""));
         let percent = read(&captured, "docs/a%20b.html");
-        assert!(percent.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%252520b.html?w=1200&amp;h=630\""));
+        assert!(percent.contains("content=\"https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Flive.example.test%2Fdocs%2Fa%252520b.html\""));
         let delimiters = read(&captured, "docs/a#b?.html");
-        assert!(delimiters.contains("content=\"https://s0.wp.com/mshots/v1/https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2523b%253F.html?w=1200&amp;h=630\""));
+        assert!(delimiters.contains("content=\"https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Flive.example.test%2Fdocs%2Fa%2523b%253F.html\""));
         let authored = read(&captured, "authored.html");
         assert!(authored.contains("content=\"https://cdn.example.test/cover.png\""));
         assert_eq!(authored.matches("property=\"og:image\"").count(), 1);

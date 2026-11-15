@@ -656,15 +656,54 @@ function _stattic_html_insert_journal_miss(array &$state): void
 }
 
 /**
+ * The API route that serves a public page's social card. The engine's
+ * configured browser-facing API origin names it first: that is what every
+ * provisioned box has, and a page author can never point it elsewhere. Only an
+ * engine with no such origin falls back to the route the finalizer baked into
+ * the tag (`<route>?url=<immutable page URL>`). '' when neither names one.
+ */
+function _stattic_page_screenshot_route(string $bakedImageUrl): string
+{
+    $apiBase = rtrim(_stattic_config_value('SPACEFAST_BROWSER_API_URL'), '/');
+    if (filter_var($apiBase, FILTER_VALIDATE_URL) && in_array(parse_url($apiBase, PHP_URL_SCHEME), ['http', 'https'], true)) {
+        return $apiBase . '/v1/screenshots/page';
+    }
+    $parsed = parse_url($bakedImageUrl);
+    if (is_array($parsed)) {
+        parse_str((string) ($parsed['query'] ?? ''), $query);
+        if (isset($query['url']) && is_string($query['url']) && in_array($parsed['scheme'] ?? '', ['http', 'https'], true) && ($parsed['host'] ?? '') !== '') {
+            return $parsed['scheme'] . '://' . $parsed['host'] . (isset($parsed['port']) ? ':' . $parsed['port'] : '') . ($parsed['path'] ?? '');
+        }
+    }
+    return '';
+}
+
+/**
+ * The address a social card is asked for: the request's decoded client path
+ * spelled as a URL again, segment by segment, so a file whose name holds a
+ * literal `%`, a space or a `#` round-trips through the card URL's query
+ * value and back to the same file.
+ */
+function _stattic_page_screenshot_card_url(string $route, string $host, string $path, string $versionId): string
+{
+    $encodedPath = implode('/', array_map('rawurlencode', explode('/', $path)));
+    return $route . '?url=' . rawurlencode('https://' . $host . $encodedPath) . '&version=' . rawurlencode($versionId);
+}
+
+/**
  * Normalize only platform-owned fallback tags. `$public` says the fallback is
  * served: anonymous visitors read this page today and the plan has `meta` on
- * for the served version. Otherwise the marked tags are removed.
+ * for the served version. A served fallback names the page's social card on
+ * the API, at the address the visitor asked for and the version that answered
+ * it, so the card's URL changes with every deploy. Otherwise the marked tags
+ * are removed.
  */
-function _stattic_normalize_auto_share_image(string $html, bool $public, string $host, string $path): string
+function _stattic_normalize_auto_share_image(string $html, bool $public, string $host, string $path, string $versionId): string
 {
     $edits = [];
     $state = [];
-    _stattic_html_lex($html, $state, false, static function (string $kind, string $name, string $token, int $offset) use (&$edits, $public, $host, $path): bool {
+    $route = null;
+    _stattic_html_lex($html, $state, false, static function (string $kind, string $name, string $token, int $offset) use (&$edits, &$route, $public, $host, $path, $versionId): bool {
         if (($kind === 'end' && $name === 'head') || ($kind === 'start' && $name === 'body')) {
             return false;
         }
@@ -685,12 +724,26 @@ function _stattic_normalize_auto_share_image(string $html, bool $public, string 
         if ($marker !== 'og:image' && $marker !== 'twitter:card') {
             return true;
         }
+        // A page nobody may read anonymously carries no fallback image. A
+        // public one names its capture on the API; when no route is known
+        // (a page baked before the route existed on an engine with no API
+        // base), the baked brand image stands as finalize wrote it.
         $replacement = '';
         if ($public) {
             if ($marker === 'og:image') {
-                $url = 'https://s0.wp.com/mshots/v1/' . rawurlencode('https://' . $host . $path) . '?w=1200&h=630';
+                $route = _stattic_page_screenshot_route(html_entity_decode((string) ($attributes['content'] ?? ''), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+                if ($route === '') {
+                    return true;
+                }
+                $url = _stattic_page_screenshot_card_url($route, $host, $path, $versionId);
                 $replacement = '<meta data-spacefast-auto-image="og:image" property="og:image" content="' . htmlspecialchars($url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">';
             } else {
+                // The card follows the image. Finalize writes the image tag
+                // first; a hand-written page may not, so settle the route here.
+                $route ??= _stattic_page_screenshot_route('');
+                if ($route === '') {
+                    return true;
+                }
                 $replacement = '<meta name="twitter:card" content="summary_large_image" data-spacefast-auto-image="twitter:card">';
             }
         }

@@ -1066,7 +1066,7 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     expect(constrained.headers.get("cache-control")).toBe("private, no-store");
     const constrainedHtml = await constrained.text();
     expect(constrainedHtml).not.toContain("data-spacefast-auto-image=");
-    expect(constrainedHtml).not.toContain("s0.wp.com/mshots/");
+    expect(constrainedHtml).not.toContain("/v1/screenshots/page");
   } finally {
     await putRoute(runtime, PREVIEW_SPACE, "production", {
       version_id: PREVIEW_VERSION,
@@ -2185,7 +2185,7 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   const docsHtml = await admitted.text();
   expect(docsHtml).toContain("<h1>docs</h1>");
   expect(docsHtml).not.toContain("data-spacefast-auto-image=");
-  expect(docsHtml).not.toContain("s0.wp.com/mshots/");
+  expect(docsHtml).not.toContain("/v1/screenshots/page");
   expect(admitted.headers.get("x-spacefast-share-image")).toBeNull();
 });
 

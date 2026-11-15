@@ -2632,6 +2632,432 @@ mod tests {
             .is_file());
     }
 
+    /// A captured bundle, the raw project it came from, and a finalize input
+    /// that publishes `manifest` over the reusable version `base`.
+    struct MixedForms {
+        captured: Vec<(&'static str, Vec<u8>)>,
+        raw: Vec<(&'static str, Vec<u8>)>,
+    }
+
+    fn mixed_forms() -> MixedForms {
+        let project = tempdir().unwrap();
+        let config = r#"import { defineConfig } from "zero"; export default defineConfig({ name: "mixed" });"#;
+        fs::write(project.path().join("zero.config.ts"), config).unwrap();
+        let sources = project.path().join(".zero-source");
+        zero::host::sources(project.path(), &sources).unwrap();
+        let read = |name: &str| fs::read(sources.join(name)).unwrap();
+        MixedForms {
+            captured: vec![
+                (".zero-source/app.zero.json", read("app.zero.json")),
+                (".zero-source/vendor.zero.json", read("vendor.zero.json")),
+                (".zero-source/manifest.json", read("manifest.json")),
+                ("index.html", b"captured".to_vec()),
+            ],
+            raw: vec![
+                ("zero.config.ts", config.as_bytes().to_vec()),
+                ("actions.ts", b"export const unused = 1;".to_vec()),
+                ("public/index.html", b"raw".to_vec()),
+                ("lib/helper.ts", b"export const helper = 1;".to_vec()),
+                ("data/seed.json", b"{\"seed\":true}".to_vec()),
+                ("package.json", b"{\"name\":\"mixed\"}".to_vec()),
+                ("actions.ts.map", b"{\"version\":3}".to_vec()),
+            ],
+        }
+    }
+
+    fn borrowed<'a>(files: &'a [(&'static str, Vec<u8>)]) -> Vec<(&'static str, &'a [u8])> {
+        files
+            .iter()
+            .map(|(path, bytes)| (*path, bytes.as_slice()))
+            .collect()
+    }
+
+    fn publish_over(
+        private: &Path,
+        version: &str,
+        base: &str,
+        uploaded: &[(&str, &[u8])],
+        retained: Vec<Value>,
+    ) -> Result<SiteFinalizeOutput> {
+        let mut next = fixture_input(
+            private,
+            accept_blobs(private, uploaded),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"v2"}),
+        );
+        next.version_id = version.into();
+        next.session["reusable_version_id"] = json!(base);
+        if retained.is_empty() {
+            next.session["retention"] = json!("all");
+        } else {
+            next.session["retention"] = json!("list");
+            next.session["retained_files"] = json!(retained);
+        }
+        finalize_site(next, false)
+    }
+
+    #[test]
+    fn finalize_refuses_an_upload_carrying_both_zero_source_forms() {
+        let forms = mixed_forms();
+        let both = [borrowed(&forms.captured), borrowed(&forms.raw)].concat();
+        let (_temp, private, result) = finalize_fixture(
+            &both,
+            json!({"mode":"website"}),
+            json!({"zero_generation":"v2"}),
+        );
+        match result {
+            Err(FinalizeError::Invalid { code, message, .. }) => {
+                assert_eq!(code, "zero_v2_mixed_source_forms");
+                assert!(message.contains("Upload one of them"), "{message}");
+            }
+            other => panic!("expected a mixed-upload refusal, got {other:?}"),
+        }
+        assert!(!private.join("spaces/s/versions/v").exists());
+    }
+
+    /// Before forms were replaced, alternating CLI and hosted MCP publishes
+    /// left ready versions holding both. Every operation over one keeps
+    /// working, compiles one form, and serves no source of either.
+    #[test]
+    fn finalize_publishes_over_a_version_holding_both_zero_source_forms() {
+        let forms = mixed_forms();
+        let (_temp, private, base) = finalize_fixture(
+            &borrowed(&forms.captured),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        base.unwrap();
+        // The pre-fix shape: the capture retained beside a raw project, with
+        // nothing uploaded that names a form. As after a real raw-then-CLI
+        // history, the project's public/index.html is the page the capture
+        // serves at the root.
+        let mut raw_project = forms.raw.clone();
+        raw_project[2].1 = b"captured".to_vec();
+        let mut retained = accept_blobs(&private, &borrowed(&forms.captured));
+        retained.extend(accept_blobs(&private, &borrowed(&raw_project)));
+        publish_over(&private, "mixed", "v", &[], retained).unwrap();
+        let sources = [
+            ".zero-source/app.zero.json",
+            ".zero-source/manifest.json",
+            ".zero-source/vendor.zero.json",
+            "zero.config.ts",
+            "actions.ts",
+            "public/index.html",
+            "lib/helper.ts",
+            "data/seed.json",
+            "package.json",
+            "actions.ts.map",
+        ];
+        let assert_private = |version: &str| {
+            let catalog = catalog_at(&private, version);
+            for path in sources {
+                if let Some(entry) = catalog.paths.get(path) {
+                    assert!(!entry.public, "{version} serves {path}");
+                    assert!(entry.served.is_none(), "{version} serves {path}");
+                }
+            }
+        };
+        assert_private("mixed");
+        // index.html carries exactly its public/ file's bytes, the only root
+        // file that can be a promoted copy, so it is served.
+        assert_eq!(served_body(&private, "mixed", "index.html"), b"captured");
+        // The same root path with other bytes than its public/ file is raw
+        // source, which a capture compile never replaced.
+        let mut differs = accept_blobs(&private, &borrowed(&forms.captured));
+        differs.extend(accept_blobs(&private, &borrowed(&forms.raw)));
+        publish_over(&private, "mixed-differs", "v", &[], differs).unwrap();
+        let entry = &catalog_at(&private, "mixed-differs").paths["index.html"];
+        assert!(
+            !entry.public && entry.served.is_none(),
+            "a differing root page is served"
+        );
+
+        // A retained module beside an uploaded public/ twin with other bytes
+        // stays private: no compile copied the twin over it.
+        publish_over(
+            &private,
+            "public-twin",
+            "mixed",
+            &[("public/actions.ts", b"export const twin = 1;".as_slice())],
+            vec![],
+        )
+        .unwrap();
+        let entry = &catalog_at(&private, "public-twin").paths["actions.ts"];
+        assert!(
+            !entry.public && entry.served.is_none(),
+            "public-twin serves actions.ts"
+        );
+
+        // A refreshing rollback or config-only recompile uploads nothing; a
+        // settings change uploads sf.jsonc. Neither names a form, so each
+        // compiles the capture the base served.
+        for (version, uploaded) in [
+            ("rollback", vec![]),
+            ("config", vec![("sf.jsonc", b"{}".as_slice())]),
+        ] {
+            publish_over(&private, version, "mixed", &uploaded, vec![])
+                .unwrap_or_else(|error| panic!("{version}: {error:?}"));
+            assert_private(version);
+            assert_eq!(served_body(&private, version, "index.html"), b"captured");
+            assert!(private
+                .join(format!(
+                    "spaces/s/versions/{version}/.zero-compiled/manifest.json"
+                ))
+                .is_file());
+        }
+
+        // Source uploaded alone names no form: the capture compiles and the
+        // uploaded file stays private, whatever kind of source it is.
+        for (version, path) in [
+            ("module", "actions.ts"),
+            ("helper", "lib/helper.ts"),
+            ("data", "data/seed.json"),
+            ("package", "package.json"),
+            ("map", "actions.ts.map"),
+            ("public-source", "public/index.html"),
+        ] {
+            publish_over(
+                &private,
+                version,
+                "mixed",
+                &[(path, b"changed".as_slice())],
+                vec![],
+            )
+            .unwrap_or_else(|error| panic!("{version}: {error:?}"));
+            assert_private(version);
+            let entry = &catalog_at(&private, version).paths[path];
+            assert!(
+                !entry.public && entry.served.is_none(),
+                "{version} serves {path}"
+            );
+            // A changed public/index.html leaves the root page with other
+            // bytes than its twin, so that page turns private as well.
+            if path == "public/index.html" {
+                let root = &catalog_at(&private, version).paths["index.html"];
+                assert!(
+                    !root.public && root.served.is_none(),
+                    "{version} serves index.html"
+                );
+            } else {
+                assert_eq!(served_body(&private, version, "index.html"), b"captured");
+            }
+        }
+
+        // A page uploaded at the root of a tree holding raw source is project
+        // source, as over a raw base: private after the partial publish and
+        // still private after a settings-only publish over it.
+        publish_over(
+            &private,
+            "page",
+            "mixed",
+            &[("about.html", b"about".as_slice())],
+            vec![],
+        )
+        .unwrap();
+        publish_over(
+            &private,
+            "page-settings",
+            "page",
+            &[("sf.jsonc", b"{}".as_slice())],
+            vec![],
+        )
+        .unwrap();
+        for version in ["page", "page-settings"] {
+            let entry = &catalog_at(&private, version).paths["about.html"];
+            assert!(
+                !entry.public && entry.served.is_none(),
+                "{version} serves about.html"
+            );
+            assert_private(version);
+        }
+        // A root page of the captured app with no public/ counterpart is
+        // raw-private in such a tree on every publish over it: the accepted
+        // cost of closing these trees. A whole-project publish serves it again.
+        let mut with_page = accept_blobs(&private, &borrowed(&forms.captured));
+        with_page.extend(accept_blobs(&private, &borrowed(&forms.raw)));
+        with_page.extend(accept_blobs(
+            &private,
+            &[("guide.html", b"guide".as_slice())],
+        ));
+        publish_over(&private, "mixed-page", "v", &[], with_page).unwrap();
+        publish_over(
+            &private,
+            "mixed-page-settings",
+            "mixed-page",
+            &[("sf.jsonc", b"{}".as_slice())],
+            vec![],
+        )
+        .unwrap();
+        for version in ["mixed-page", "mixed-page-settings"] {
+            let entry = &catalog_at(&private, version).paths["guide.html"];
+            assert!(
+                !entry.public && entry.served.is_none(),
+                "{version} serves guide.html"
+            );
+        }
+        // Planning drops the raw project from the retained set when a captured
+        // publish replaces it, and the engine receives that pruned list.
+        let mut whole = forms.captured.clone();
+        whole.push(("guide.html", b"guide".to_vec()));
+        let kept = accept_blobs(&private, &[("sf.jsonc", b"{}".as_slice())]);
+        publish_over(
+            &private,
+            "mixed-page-captured",
+            "mixed-page-settings",
+            &borrowed(&whole),
+            kept,
+        )
+        .unwrap();
+        assert_eq!(
+            served_body(&private, "mixed-page-captured", "guide.html"),
+            b"guide"
+        );
+
+        // Under public/ it is not promoted either: this tree compiles its
+        // capture, and only a raw compile copies public/ to the root (doing
+        // so here would replace the capture's own pages). A full publish of
+        // either form is the way to add a page to such a version.
+        publish_over(
+            &private,
+            "public-page",
+            "mixed",
+            &[("public/about.html", b"about".as_slice())],
+            vec![],
+        )
+        .unwrap();
+        let catalog = catalog_at(&private, "public-page");
+        assert!(!catalog.paths.contains_key("about.html"));
+        assert!(!catalog.paths["public/about.html"].public);
+        assert_eq!(
+            served_body(&private, "public-page", "index.html"),
+            b"captured"
+        );
+
+        // A captured publish compiles its own bundle. Planning drops the raw
+        // project when a captured publish replaces it, so the engine receives
+        // only the capture as retained (here, before the declared bytes win).
+        let mut recaptured = forms.captured.clone();
+        recaptured[3].1 = b"recaptured".to_vec();
+        let pruned = accept_blobs(&private, &borrowed(&forms.captured));
+        publish_over(
+            &private,
+            "captured",
+            "mixed",
+            &borrowed(&recaptured),
+            pruned,
+        )
+        .unwrap();
+        assert!(!catalog_at(&private, "captured")
+            .paths
+            .contains_key("zero.config.ts"));
+        assert_private("captured");
+        assert_eq!(
+            served_body(&private, "captured", "index.html"),
+            b"recaptured"
+        );
+
+        // A raw publish compiles the project it uploads, never the stale capture.
+        // Its app has another name, so the compiled output says which one ran.
+        let mut project = forms.raw.clone();
+        project[0].1 = br#"import { defineConfig } from "zero"; export default defineConfig({ name: "rawagain" });"#.to_vec();
+        project[2].1 = b"raw again".to_vec();
+        publish_over(&private, "raw", "mixed", &borrowed(&project), vec![]).unwrap();
+        assert_private("raw");
+        let compiled = private.join("spaces/s/versions/raw/.zero-compiled/plugins");
+        assert!(compiled
+            .join("zero-app-rawagain/zero/app/schema.php")
+            .is_file());
+        assert!(!compiled.join("zero-app-mixed").exists());
+        let catalog = catalog_at(&private, "raw");
+        assert!(!catalog
+            .paths
+            .keys()
+            .any(|path| path.starts_with(".zero-source/")));
+        assert_eq!(served_body(&private, "raw", "index.html"), b"raw again");
+        // The version it replaced still serves its own bytes from the shared CAS.
+        assert_eq!(served_body(&private, "mixed", "index.html"), b"captured");
+    }
+
+    /// A replace-mode publish narrowed against identical retained bytes can
+    /// reach the engine as a capture plus a changed module, with the raw
+    /// config retained. The control plane refuses the logical declaration;
+    /// an engine that still receives the shape keeps every raw path private.
+    #[test]
+    fn finalize_keeps_a_narrowed_mixed_publish_private() {
+        let forms = mixed_forms();
+        let (_temp, private, base) = finalize_fixture(
+            &borrowed(&forms.raw),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        base.unwrap();
+        let retained = accept_blobs(
+            &private,
+            &borrowed(&forms.raw)
+                .into_iter()
+                .filter(|(path, _)| *path != "actions.ts")
+                .collect::<Vec<_>>(),
+        );
+        let uploaded = [
+            borrowed(&forms.captured),
+            vec![("actions.ts", b"export const changed = 1;".as_slice())],
+        ]
+        .concat();
+        publish_over(&private, "narrowed", "v", &uploaded, retained).unwrap();
+        let catalog = catalog_at(&private, "narrowed");
+        for path in [
+            "actions.ts",
+            "zero.config.ts",
+            "lib/helper.ts",
+            "data/seed.json",
+        ] {
+            let entry = &catalog.paths[path];
+            assert!(
+                !entry.public && entry.served.is_none(),
+                "narrowed serves {path}"
+            );
+        }
+    }
+
+    /// What a module uploaded alone does over a clean captured base: released
+    /// hosted MCP sends no Zero transformation without zero.config.ts, so an
+    /// agent asked to "update actions.ts" on a CLI-published Space sends this.
+    /// Pinned as observed; the policy is not decided here.
+    #[test]
+    fn finalize_module_only_upload_over_a_captured_base() {
+        let forms = mixed_forms();
+        let (_temp, private, base) = finalize_fixture(
+            &borrowed(&forms.captured),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        base.unwrap();
+        let module = b"export const changed = 1;";
+        publish_over(
+            &private,
+            "module",
+            "v",
+            &[("actions.ts", module.as_slice())],
+            vec![],
+        )
+        .unwrap();
+        let catalog = catalog_at(&private, "module");
+        // The tree holds only the capture, so the capture compiles unchanged
+        // and the module is an ordinary root file the Space serves.
+        let compiled = |version: &str| {
+            fs::read(private.join(format!(
+                "spaces/s/versions/{version}/.zero-compiled/manifest.json"
+            )))
+            .unwrap()
+        };
+        let app: Value = serde_json::from_slice(&compiled("module")).unwrap();
+        let base_app: Value = serde_json::from_slice(&compiled("v")).unwrap();
+        assert_eq!(app["app"], base_app["app"]);
+        assert!(catalog.paths["actions.ts"].public);
+        assert_eq!(served_body(&private, "module", "actions.ts"), module);
+        assert_eq!(served_body(&private, "module", "index.html"), b"captured");
+    }
+
     #[test]
     fn finalize_requires_local_capture_for_raw_npm_imports() {
         let (_temp, _private, result) = finalize_fixture(

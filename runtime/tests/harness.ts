@@ -54,6 +54,7 @@ import type {
 import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { writeActiveReleasePointer } from "./active-release.ts";
+import { ensureZeroDashboardPlugin } from "./zero-dashboard-plugin.ts";
 
 // The canonical runner (tests/run.sh) passes `--timeout 30000`; encode the
 // same default here so direct `bun test tests/<suite>.test.ts` invocations
@@ -447,21 +448,6 @@ export type RuntimeOptions = {
    */
   captureEdgePurges?: boolean;
 };
-
-function ensureZeroDashboardPlugin(): void {
-  if (existsSync(path.join(RUNTIME_DIR, "wordpress/zero-dashboard/next-admin.php"))) return;
-  const build = spawnSync(
-    process.execPath,
-    [path.join(REPO_ROOT, "legacy/zero-0.8/dashboard/scripts/build.ts")],
-    {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-    },
-  );
-  if (build.status !== 0) {
-    throw new Error(`Zero dashboard build failed:\n${build.stdout}\n${build.stderr}`);
-  }
-}
 
 function ensureIdentityPlugin(): void {
   // The build is idempotent and safe to run concurrently: it returns at once

@@ -256,6 +256,13 @@ test("without a session, a surface without Comments refuses uploads", async () =
   });
   expect(refused.status).toBe(401);
   expect(await errorCode(refused)).toBe("storage_auth_required");
+
+  // A storage refusal names no version: released CLIs read it only from
+  // admitted pages, and the storage API authenticates after Space access.
+  const read = await get(strict, HOST, `/storage/${"a".repeat(32)}`);
+  expect(read.status).toBe(401);
+  expect(read.headers.get("x-spacefast-version")).toBeNull();
+  expect(await errorCode(read)).toBe("storage_auth_required");
 });
 
 test("the admin surface lists keyed URLs and serves the Space's own read key", async () => {

@@ -5,8 +5,10 @@
 //  * every response the visitor lane produces — object, redirect, 404, denial,
 //    probe — carries `X-Spacefast-Runtime` (shared/context.php
 //    `_stattic_emit_runtime_identity`); on a denial it is the only thing
-//    separating our access wall from an upstream proxy's. No response names the
-//    version it selected: `health.php?v=` answers whether a hostname serves one;
+//    separating our access wall from an upstream proxy's. `health.php?v=`
+//    answers whether a hostname serves a version. Released CLIs still read
+//    `X-Spacefast-Version` from responses, so the hostname root and every
+//    admitted GET or HEAD name it, the same for every visitor;
 //  * the readiness target finalize hands back (`metadata.readinessTarget`, read
 //    by admin/management.php) is a promise about what the serving lane will
 //    answer for one path. This file is where that promise is checked against the
@@ -53,9 +55,16 @@ const ASSET = new Uint8Array(Array.from({ length: 65_536 }, (_, index) => index 
 
 function expectRuntime(response: Response, label = ""): void {
   expect(response.headers.get("x-spacefast-runtime"), label).toBe("1");
-  // No response names the version it selected; health.php?v= is the one answer.
-  // Released CLIs still read this header directly.
+  // health.php?v= is the one answer to which version a hostname serves.
   expect(response.headers.get("x-spacefast-version"), label).toBeNull();
+}
+
+// Released CLI 0.9.0 reads the version from the response itself:
+// `sf domains --wait` HEADs the hostname root, and `sf fetch --verify` reads
+// the page its open handoff lands on.
+function expectReleasedCliVersion(response: Response, versionId: string, label = ""): void {
+  expect(response.headers.get("x-spacefast-runtime"), label).toBe("1");
+  expect(response.headers.get("x-spacefast-version"), label).toBe(versionId);
 }
 
 beforeAll(async () => {
@@ -98,17 +107,12 @@ beforeAll(async () => {
 afterAll(() => rt?.stop());
 
 test("public objects carry the runtime's identity and exact bytes, and health names their version, on every hostname", async () => {
-  const page = await get(rt, HOST, "/");
-  expect(page.status).toBe(200);
-  expect(await page.text()).toBe(PAGE);
-  expectRuntime(page);
-
   // The bytes come out of the CAS through the compiled entry, so a whole-object
   // read is also the proof that the blob the table names is the blob served.
   for (const host of [HOST, VERSION_HOST]) {
     const asset = await get(rt, host, "/assets/public.bin");
     expect(asset.status, host).toBe(200);
-    expectRuntime(asset, host);
+    expectReleasedCliVersion(asset, VERSION, host);
     expect(new Uint8Array(await asset.arrayBuffer()), host).toEqual(ASSET);
     // Which version those bytes are is health's answer for the hostname: yes
     // for the one it serves, no for any other.
@@ -127,12 +131,50 @@ test("public objects carry the runtime's identity and exact bytes, and health na
   const head = await get(rt, HOST, "/assets/public.bin", { method: "HEAD" });
   expect(head.status).toBe(200);
   expect(head.headers.get("content-length")).toBe(String(ASSET.byteLength));
-  expectRuntime(head);
+  expectReleasedCliVersion(head, VERSION);
   expect((await head.arrayBuffer()).byteLength).toBe(0);
 
   const proof = await get(rt, HOST, "/spacefast-readiness/*");
   expect(proof.status).toBe(404);
-  expectRuntime(proof);
+  expectReleasedCliVersion(proof, VERSION);
+
+  // The edge keys on host, path and query and answers before PHP runs, so a
+  // response must not depend on who asked: a visitor with a session cookie
+  // gets the same header as one without.
+  const withSession = await get(rt, HOST, "/assets/public.bin", {
+    headers: { cookie: "spacefast_session_dev=sfa1_unrelated" },
+  });
+  expect(withSession.status).toBe(200);
+  expectReleasedCliVersion(withSession, VERSION);
+  await withSession.arrayBuffer();
+
+  // Writes name nothing.
+  const posted = await get(rt, HOST, "/assets/public.bin", { method: "POST" });
+  expectRuntime(posted);
+});
+
+test("the hostname root names its version for released CLI domain waits", async () => {
+  // `sf domains --wait` in CLI 0.9.0: HEAD https://<hostname>/ until
+  // X-Spacefast-Version equals the live version.
+  for (const host of [HOST, VERSION_HOST]) {
+    const head = await get(rt, host, "/", { method: "HEAD" });
+    expect(head.status, host).toBe(200);
+    expectReleasedCliVersion(head, VERSION, host);
+  }
+  // GET answers the same, so a root the edge stored from a browser still does.
+  const page = await get(rt, HOST, "/");
+  expect(page.status).toBe(200);
+  expect(await page.text()).toBe(PAGE);
+  expectReleasedCliVersion(page, VERSION);
+
+  // A root that redirects names the version it selected, as before health.
+  const redirected = await get(rt, PROBE_HOST, "/", { method: "HEAD" });
+  expect(redirected.status).toBe(302);
+  expectReleasedCliVersion(redirected, PROBE_VERSION);
+
+  // Only to readers: a write to it names nothing.
+  const posted = await get(rt, HOST, "/", { method: "POST" });
+  expectRuntime(posted);
 });
 
 test("the production probe answers before any route action, with runtime identity only", async () => {
@@ -544,7 +586,12 @@ test("every finalized readiness target names a status the serving lane answers",
     expect(response.status, row.suffix).toBe(row.status);
     expect(body.readiness_target.expected_statuses, row.suffix).toContain(response.status);
     expect(response.headers.get("location"), row.suffix).toBe(row.location);
-    expectRuntime(response, row.suffix);
+    // The root always names it. Elsewhere an admitted answer does; a denial
+    // and an authored redirect (answered before access runs) do not. CLI 0.9.0
+    // follows redirects and reads the page it lands on.
+    if (row.target.path === "/" || response.status === 200 || response.status === 404)
+      expectReleasedCliVersion(response, versionId, row.suffix);
+    else expectRuntime(response, row.suffix);
     // The target is this version's promise: the hostname serves it.
     expect(await healthServing(rt, hostname, versionId), row.suffix).toMatchObject({
       version_match: true,

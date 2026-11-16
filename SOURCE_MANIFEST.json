@@ -1,7 +1,7 @@
 {
-  "revision": "fa069ab4dc7df4a5fea872ef0b8ddd4c8319f8fd",
-  "sourceHash": "d6efceb473529163af524f6e03a61b02917b7a847c9cf090845242698bf8e552",
-  "manifestSha256": "8ec94144b39fe7606dc9710ff43183315f2a265892f0b60ec7df8db07d390772",
+  "revision": "7ac890b251d8b8a3731a81ee365ef510eea6598a",
+  "sourceHash": "e8bed1d9fb8699de68cddb3dcd68bad837bac999372095a2360a281d17e0b9de",
+  "manifestSha256": "c9a4c3a4a2efe8628618464dbaff69d38f42efc7004d4b22b024f199f11f2519",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "62db566e65e90dfb0b66ab0b7c0bbcf0146cf4150eb25bc20faa5e0ca6ff442c"
+      "sha256": "6cbe0c7975790b530f8b066802530b24b4eb73d2d97c4b4b9523505e361f1562"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "d586c8958341b0880c2b7d6bce61ed6b90a0d606890ed62cf547db6b1535cac6"
+      "sha256": "47074b33649252112a84948ae2bfaf8408e79e92bd2a2f4c0a760db1feed2da2"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13765,7 +13765,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "be10aa6f98b23541811c4e6ceb7067a37722ecf5e5ee2c7d8056ffbc412329ae"
+      "sha256": "2d3b2b4831e64038563c961f9ff3d974e3a97e6798dcffbc8ad4faf051a05c14"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-Q4LVDTNZ.js",
@@ -13877,7 +13877,7 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "5720fa72f92489d9175cfd4ecda6761a8d839c6bd72d5f418fc9a3c292545596"
+      "sha256": "4c0787f77de3082af14c33f73f25d012e911772f88cfbb07bc20b86901f2e8d1"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",
@@ -14169,7 +14169,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "e184e4ffba5f683deac2d5f73bc5a97a5afa6741848da715aba2fe1b409137a4"
+      "sha256": "d44a0a26cc3378a2b575c270e362c2b280aca8808ee9d96cf5370141e3cb337c"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -14541,7 +14541,7 @@
     },
     {
       "path": "runtime/tests/provenance-serving.test.ts",
-      "sha256": "86e21daef57839533eb3af412627eac78c3841d35a26d1b9c47668ead1691679"
+      "sha256": "759d10b1a461787591f30cf88bbcff35860d7e884ded9b18b9ad4bd85ac9d7b3"
     },
     {
       "path": "runtime/tests/proxy-cache-upstream.test.ts",
@@ -14613,7 +14613,7 @@
     },
     {
       "path": "runtime/tests/storage.test.ts",
-      "sha256": "61cef3c662ca0bb3ccc779894f9c1e1b578118199942f4deaf6c5a3e7b9923d0"
+      "sha256": "edee07a1e38dcd20a0da30dba826049ea224a2df85b8de6f7f9893e7612474de"
     },
     {
       "path": "runtime/tests/subprocess-cli.php",

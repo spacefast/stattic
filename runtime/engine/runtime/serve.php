@@ -335,6 +335,9 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
     require_once __DIR__ . '/../shared/zero-v2.php';
     _stattic_zero_generation_serve($versionDir, $serving);
+    if (_stattic_released_cli_reads_version('root', $originalRequestPath)) {
+        _stattic_emit_runtime_identity($versionId);
+    }
 
     // A worker reading its own files through its assets binding (set by
     // functions-relay.php after the relay credential verified). The host must
@@ -536,6 +539,10 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $accessPath,
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
+    }
+    if (!($storageRequest && !$storageContentEntry)
+        && _stattic_released_cli_reads_version('admitted', $originalRequestPath)) {
+        _stattic_emit_runtime_identity($versionId);
     }
     if ($requestPath === STATTIC_ZERO_V2_REALTIME_PATH) {
         require_once __DIR__ . '/zero-v2-realtime.php';

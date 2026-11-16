@@ -956,6 +956,12 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const anonymous = await get(runtime, PRIVATE_HOST, "/docs/");
   expect(anonymous.status).toBe(403);
   expect(anonymous.headers.get("cache-control")).toBe("private, no-store");
+  expect(anonymous.headers.get("x-spacefast-version")).toBeNull();
+  // Released CLI 0.9.0 waits on a domain by reading the root's version, so the
+  // root's wall names it, as every engine before health did.
+  const rootWall = await get(runtime, PRIVATE_HOST, "/", { method: "HEAD" });
+  expect(rootWall.status).toBe(403);
+  expect(rootWall.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
   // The wall is this version's: health answers for it without admitting anyone.
   expect(await healthServing(runtime, PRIVATE_HOST, PRIVATE_VERSION)).toMatchObject({
     state: "serving",
@@ -977,6 +983,14 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const admitted = await get(runtime, PRIVATE_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
   expect(await admitted.text()).toContain("<h1>docs</h1>");
+  // Released CLI 0.9.0 `sf fetch --verify` reads the version from the page its
+  // open handoff's session lands on.
+  expect(admitted.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
+  const admittedHead = await get(runtime, PRIVATE_HOST, "/docs/", {
+    method: "HEAD",
+    headers: { cookie },
+  });
+  expect(admittedHead.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
   // Private bytes never enter a shared cache, and the edge is told so.
   expect(admitted.headers.get("cache-control")).toStartWith("private");
   expect(admitted.headers.get(EDGE_CACHE_HEADER)).toBe("no-cache");
@@ -1009,6 +1023,8 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const crossHost = await get(runtime, OTHER_PRIVATE_HOST, "/docs/", { headers: { cookie } });
   expect(crossHost.status).toBe(403);
   expect(crossHost.headers.get("cache-control")).toBe("private, no-store");
+  // A session that is not admitted learns nothing about the version.
+  expect(crossHost.headers.get("x-spacefast-version")).toBeNull();
 
   const external = await openAuthorities(PRIVATE_HOST, [
     externalAuthorityReference("a".repeat(64)),

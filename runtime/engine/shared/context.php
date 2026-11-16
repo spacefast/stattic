@@ -107,11 +107,35 @@ const STATTIC_VISITOR_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'
 // `X-Spacefast-Runtime: 1` is emitted from init.php before ANY gate can exit, so
 // it rides every response shape including denials. On a denial it is the only
 // thing separating our access wall from an upstream proxy/CDN 401.
-// No response names the version it selected: health.php?v= is the one answer
-// to which version a hostname serves.
-function _stattic_emit_runtime_identity(): void
+// health.php?v= is the one answer to which version a hostname serves. Only the
+// responses released CLIs (0.9.0 and older) read still name the version they
+// selected, see _stattic_released_cli_reads_version().
+function _stattic_emit_runtime_identity(?string $versionId = null): void
 {
     header('X-Spacefast-Runtime: 1', true);
+    if (is_string($versionId) && $versionId !== '') {
+        header('X-Spacefast-Version: ' . $versionId, true);
+    }
+}
+
+// Released CLIs read X-Spacefast-Version on two responses:
+//  * 'root': the hostname root after a domain change (`sf domains --wait`
+//    sends HEAD /). Named before access runs, as engines before health did, so
+//    a private Space's wall still answers it.
+//  * 'admitted': the page `sf fetch --verify` lands on, which can be any path.
+//    Named once access admitted the request, for every visitor alike: the edge
+//    keys on host, path and query and answers before PHP runs, so a header
+//    that depended on who asked would reach the CLI from a copy stored for
+//    someone else. A denial never names it, and neither does the storage
+//    API, which runs its own authentication after Space access.
+// Remove once the API stops seeing released CLIs (`api.released_cli.requests`).
+function _stattic_released_cli_reads_version(string $response, string $requestPath): bool
+{
+    $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    if ($method !== 'GET' && $method !== 'HEAD') {
+        return false;
+    }
+    return $response === 'admitted' || $requestPath === '/';
 }
 
 // The __Host- prefix forbids Domain and requires Secure + Path=/ in conforming

@@ -1,7 +1,7 @@
 {
-  "revision": "7ac890b251d8b8a3731a81ee365ef510eea6598a",
-  "sourceHash": "e8bed1d9fb8699de68cddb3dcd68bad837bac999372095a2360a281d17e0b9de",
-  "manifestSha256": "c9a4c3a4a2efe8628618464dbaff69d38f42efc7004d4b22b024f199f11f2519",
+  "revision": "b756661f35893a66e81fa964cae3d4f19d89c793",
+  "sourceHash": "bb0786c926a50dc92e3cdbfebceed8852d0e02fcf4081e3901a07104c024bac7",
+  "manifestSha256": "c869861861cc128a48186de329ea0760343d324585b963b4dbf772835f0ae234",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "6cbe0c7975790b530f8b066802530b24b4eb73d2d97c4b4b9523505e361f1562"
+      "sha256": "f5f60cd2bf7cf3994ffc634930f6b895036bd8f13ff389bbfc1f55d17a5ed87b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "47074b33649252112a84948ae2bfaf8408e79e92bd2a2f4c0a760db1feed2da2"
+      "sha256": "fe453401400ad2d5de37e325bffece1c0b3047480aa1a1e819b591410eaf0b50"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13617,7 +13617,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/cron.php",
-      "sha256": "ca856b7421e88179ca110735b3851c6e76c47a8df08be5c4039be8a08fb65a3d"
+      "sha256": "e835d5c605d22cbfd5167d618b7dcedb23288a4b9845daa575b7df553a4ae6a6"
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
@@ -13697,7 +13697,7 @@
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
-      "sha256": "4db8e53e03daa40a42862dd7f1be52f1b2ee64434f964d4ea58d26564712c299"
+      "sha256": "b5b85487bea7c0b0c0f49fa66d445bdb74f5b245f10458f4a5f969ea9b10fc62"
     },
     {
       "path": "runtime/engine/runtime/connectors.php",
@@ -14293,7 +14293,7 @@
     },
     {
       "path": "runtime/tests/cron-cli.test.ts",
-      "sha256": "aa9b21729e758e72aee2c53646ddf4b7931e7a10393f16b59b5b4296096bf44e"
+      "sha256": "81d422908466a64bb91de5e9d496f3e5269b0bce070b11c4fbd92d8e79d2d22c"
     },
     {
       "path": "runtime/tests/db-broker-admission.test.ts",

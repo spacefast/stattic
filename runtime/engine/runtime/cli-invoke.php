@@ -158,7 +158,8 @@ function _stattic_cli_invoke(
     string $requestMethod,
     string $requestTarget,
     array $params = [],
-    array $platformParams = []
+    array $platformParams = [],
+    int $failAtStatus = 400
 ): never {
     // Split exactly as engine/init.php splits it: REQUEST_URI stays raw, the
     // canonical path is derived from it, and an uncanonicalizable path is
@@ -192,7 +193,7 @@ function _stattic_cli_invoke(
         $_SERVER['CONTENT_LENGTH'] = (string) strlen($body);
     }
 
-    _stattic_cli_arm_receipt(['method' => $requestMethod, 'path' => $path]);
+    _stattic_cli_arm_receipt(['method' => $requestMethod, 'path' => $path], $failAtStatus);
 
     _sf_serve_fast(
         $privateRoot,
@@ -217,10 +218,10 @@ function _stattic_cli_invoke(
  *
  * @param array{method: string, path: string} $request
  */
-function _stattic_cli_arm_receipt(array $request): void
+function _stattic_cli_arm_receipt(array $request, int $failAtStatus = 400): void
 {
     _stattic_cli_capture_fatal_errors();
-    register_shutdown_function(static function () use ($request): void {
+    register_shutdown_function(static function () use ($request, $failAtStatus): void {
         // A cleanup warning must not hide the fatal that ended the handler.
         $error = error_get_last();
         $fatal = _stattic_cli_observed_fatal()
@@ -229,7 +230,7 @@ function _stattic_cli_arm_receipt(array $request): void
         $code = http_response_code();
         $status = $fatal ? 500 : (is_int($code) && $code > 0 ? $code : 200);
 
-        register_shutdown_function('_stattic_cli_receipt', $request, $status);
+        register_shutdown_function('_stattic_cli_receipt', $request, $status, $failAtStatus);
     });
 }
 
@@ -266,7 +267,7 @@ function _stattic_cli_observed_fatal(?bool $observed = null): bool
  *
  * @param array{method: string, path: string} $request
  */
-function _stattic_cli_receipt(array $request, int $status): never
+function _stattic_cli_receipt(array $request, int $status, int $failAtStatus = 400): never
 {
     // Which engine answered, as health reports it: a scheduled command picks its
     // engine on its own, so only its receipt can say which one ran.
@@ -280,7 +281,7 @@ function _stattic_cli_receipt(array $request, int $status): never
     fwrite(STDERR, STATTIC_RUNTIME_INVOKE_RESULT_SENTINEL . (is_string($receipt) ? $receipt : '{}') . "\n");
 
     // The one signal the provider's cron-results webhook reads.
-    exit($status < 400 ? 0 : 1);
+    exit($status < $failAtStatus ? 0 : 1);
 }
 
 /**

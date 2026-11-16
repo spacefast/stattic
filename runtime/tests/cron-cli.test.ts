@@ -38,6 +38,7 @@ const CRON_SECRET = "sk_cron_fixture_secret";
 const PREPEND = "cron-cli-prepend.php";
 
 const FAIL_SOURCE = `globalThis.__statticZeroResult = JSON.stringify({ status: 500, body: "the job failed\\n" });`;
+const REDIRECT_SOURCE = `globalThis.__statticZeroResult = JSON.stringify({ status: 302, headers: { location: "https://elsewhere.test/" }, body: "" });`;
 const BODY_SOURCE = `globalThis.__statticZeroResult = JSON.stringify({
   status: 200,
   body: JSON.stringify({ body: globalThis.__statticZeroRequest.bodyBase64 }),
@@ -151,6 +152,7 @@ require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};
           { path: "/cron/report", schedule: "daily" },
           { path: "/cron/fail", schedule: "12h" },
           { path: "/cron/php", schedule: "hourly" },
+          { path: "/cron/moved", schedule: "daily" },
         ],
       }),
     },
@@ -192,6 +194,13 @@ require ${JSON.stringify(RUNTIME_TEST_ATOMIC_PREPEND)};
           method: "GET",
           path: "/cron/fail",
           source: FAIL_SOURCE,
+          capabilities: { db: false },
+        },
+        {
+          execution_mode: "read",
+          method: "GET",
+          path: "/cron/moved",
+          source: REDIRECT_SOURCE,
           capabilities: { db: false },
         },
         {
@@ -257,6 +266,14 @@ test("a route that answers 500 exits non-zero", async () => {
   expect(receipt(result.stderr)).toMatchObject({ path: "/cron/fail", status: 500 });
   expect(result.stdout).toBe("the job failed\n");
   expect(readFileSync(signingKeyPath, "utf8")).toBe(signingKeyBefore);
+});
+
+// A scheduled run follows no redirect: a handler that answers 3xx never ran
+// its job, so the run fails and the provider reports it.
+test("a route that answers a redirect exits non-zero", async () => {
+  const result = await runCli("cron.php", [`--host=${HOST}`, "--key=cron-moved"]);
+  expect(receipt(result.stderr)).toMatchObject({ path: "/cron/moved", status: 302 });
+  expect(result.exitCode).toBe(1);
 });
 
 test("an undeclared key is a named refusal", async () => {

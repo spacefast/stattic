@@ -20,9 +20,10 @@ declare(strict_types=1);
  *                      declared a `CRON_SECRET` runtime variable. That is the
  *                      half of the proof the TENANT owns and can compare.
  *
- * Exit codes are invoke.php's: 0 when the route answered < 400 (the provider's
- * `site-cron-results` webhook fires on anything else), 1 when it answered >= 400,
- * 2 on usage, 3 when the box, the host or the key does not resolve.
+ * Exit codes: 0 when the route answered 2xx, 1 on anything else (the
+ * provider's `site-cron-results` webhook fires on it), 2 on usage, 3 when the
+ * box, the host or the key does not resolve. A redirect is a failure: nothing
+ * follows it, so the job behind it never ran. invoke.php keeps `< 400`.
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -114,5 +115,6 @@ _stattic_cli_invoke(
         : ['HTTP_AUTHORIZATION' => 'Bearer ' . $_stattic_secret['value']],
     [
         STATTIC_CRON_REQUEST_PARAM => $_stattic_signature,
-    ]
+    ],
+    300
 );

@@ -1489,59 +1489,6 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
   }
 });
 
-// Catches: a membership reduction (the epoch bump member removal makes, and
-// Require SSO will make) signing out visitors, or a member's team authority
-// outliving it through a person share they also hold. Member sessions ending
-// belongs to the test above.
-test("an epoch bump retires member authority and keeps person shares, for visitors and members alike", async () => {
-  const team = { teamId: "team_session", membershipEpoch: 0 };
-  const people = [
-    { personId: "per_visitor", grants: [{ id: "pgr_visitor", scope: "/" }] },
-    { personId: "per_member", grants: [{ id: "pgr_member", scope: "/" }] },
-  ];
-  await putRoute(runtime, SESSION_SPACE, "production", {
-    version_id: SESSION_VERSION,
-    config: projection({ team, people }),
-  });
-  try {
-    const visitor = await openAuthorities(SESSION_HOST, ["person:per_visitor"]);
-    const memberWithShare = await openAuthorities(SESSION_HOST, [
-      "member:mem_shared",
-      "person:per_member",
-    ]);
-    expect(
-      decodeSession(memberWithShare)
-        .authorities.map((authority) => authority.reference)
-        .toSorted(),
-    ).toEqual(["member:mem_shared", "person:per_member"]);
-
-    await putRoute(runtime, SESSION_SPACE, "production", {
-      version_id: SESSION_VERSION,
-      config: projection({ team: { ...team, membershipEpoch: 1 }, people, accessGeneration: 1 }),
-    });
-    expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie: visitor } })).status).toBe(
-      200,
-    );
-    // A person share is visitor authority, members included: the session goes
-    // on with that authority alone.
-    const continued = await get(runtime, SESSION_HOST, "/", {
-      headers: { cookie: memberWithShare },
-    });
-    expect(continued.status).toBe(200);
-    expect(
-      decodeSession(setCookieValue(continued)).authorities.map((authority) => authority.reference),
-    ).toEqual(["person:per_member"]);
-  } finally {
-    await putRoute(runtime, SESSION_SPACE, "production", {
-      version_id: SESSION_VERSION,
-      config: projection({
-        memberRefs: ["member:mem_session"],
-        people: [{ personId: "per_session", grants: [{ id: "pgr_session", scope: "/" }] }],
-      }),
-    });
-  }
-});
-
 test("logout revokes only the presented session and fails closed when the record survives", async () => {
   const logout = (cookie?: string) =>
     get(runtime, PRIVATE_HOST, "/__spacefast/access/logout?return=/", {

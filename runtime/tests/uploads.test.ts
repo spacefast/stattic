@@ -21,6 +21,7 @@ import path from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { z } from "zod";
 
+import { FUNCTIONS_BUNDLE_MAX_BYTES } from "@spacefast/common/contracts/functions";
 import { MAX_VERSION_TOTAL_BYTES } from "@spacefast/common/utils/publish-policy";
 import { runtimeUploadFileUrl } from "@spacefast/common/utils/runtime-upload";
 
@@ -1075,6 +1076,15 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   expect(mismatched.status).toBe(422);
   expect(await errorCode(mismatched)).toBe("upload_hash_mismatch");
   expect(readBlob(rt, SPACE, digest)).toBeNull();
+
+  // The route takes the largest bundle the builder emits and nothing larger:
+  // a full-size body is read to the end and fails only on its digest.
+  const atCap = await putGenerated("x".repeat(FUNCTIONS_BUNDLE_MAX_BYTES));
+  expect(atCap.status).toBe(422);
+  expect(await errorCode(atCap)).toBe("upload_hash_mismatch");
+  const overCap = await putGenerated("x".repeat(FUNCTIONS_BUNDLE_MAX_BYTES + 1));
+  expect(overCap.status).toBe(413);
+  expect(await errorCode(overCap)).toBe("generated_blob_too_large");
 
   const files = { "index.html": "<h1>generated</h1>\n" };
   const session = await createDeclaredSession(rt, SPACE, "ver_generated", files);

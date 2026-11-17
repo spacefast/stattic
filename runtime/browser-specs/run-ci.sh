@@ -8,18 +8,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-if [[ "$cargo_target_dir" != /* ]]; then
-  cargo_target_dir="$repo_root/$cargo_target_dir"
-fi
 if [[ -n "${CI:-}" ]]; then
   # This task runs beside the integration suite, which reports coverage from the
   # instrumented binary ci:runtime-prepare built. Never rebuild it here: a plain
   # cargo build could replace it uninstrumented while the suite still runs it.
-  [[ -x "$cargo_target_dir/debug/stattic-runtime" ]] || {
-    echo "ci:runtime-prepare did not build stattic-runtime" >&2
-    exit 1
-  }
+  runtime_binary="$(bash runtime/tests/runtime-binary.sh)"
   # Keep this run's Rust profiles and PHP coverage apart from the suite's, so
   # the suite's report and PHP entrypoint guard read only its own requests.
   profile_dir="$(mktemp -d)"
@@ -28,6 +21,7 @@ if [[ -n "${CI:-}" ]]; then
   mkdir -p "$SPACEFAST_PHP_COVERAGE_DIR"
 else
   cargo build --locked -p stattic-runtime-compiler --bin stattic-runtime
+  runtime_binary="$(bash runtime/tests/runtime-binary.sh)"
 fi
 
 # CI starts from a fresh checkout, so an existing dashboard came from
@@ -39,7 +33,7 @@ fi
 
 database_url="${SPACEFAST_TEST_DATABASE_ADMIN_URL:-postgres://stattic:stattic@127.0.0.1:25432/stattic}"
 DATABASE_URL="$database_url" bun run --cwd apps/control-plane db:migrate
-SPACEFAST_RUNTIME_BIN="${SPACEFAST_RUNTIME_BIN:-$cargo_target_dir/debug/stattic-runtime}" \
+SPACEFAST_RUNTIME_BIN="${SPACEFAST_RUNTIME_BIN:-$runtime_binary}" \
   SPACEFAST_TEST_DATABASE_URL="$database_url" \
   bun runtime/browser-specs/run.ts
 

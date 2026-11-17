@@ -26,12 +26,12 @@ import {
   readBlob,
   responseEntry,
   type Runtime,
+  runtimeBinaryPath,
   startRuntime,
   uploadSessionBlobs,
   versionRoot,
 } from "./harness.ts";
 
-const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const RUNTIME_ENGINE = path.resolve(import.meta.dir, "../engine");
 const HOST = "native-finalize.test";
 
@@ -56,24 +56,7 @@ function publishedBody(spaceId: string, versionId: string, key: string): string 
 }
 
 beforeAll(async () => {
-  const build = Bun.spawnSync({
-    cmd: [
-      "cargo",
-      "build",
-      "--locked",
-      "-p",
-      "stattic-runtime-compiler",
-      "--bin",
-      "stattic-runtime",
-    ],
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(`cargo build failed:\n${build.stdout.toString()}\n${build.stderr.toString()}`);
-  }
-  runtimePath = path.join(REPO_ROOT, "target/debug/stattic-runtime");
+  runtimePath = runtimeBinaryPath();
 
   // Wrapper binary: passes through to the real compiler unless the fail marker
   // exists. On a forced failure it records whether the version dir named in the

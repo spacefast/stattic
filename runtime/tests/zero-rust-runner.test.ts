@@ -22,6 +22,7 @@ import {
   type Runtime,
   sha256,
   spaceRoot,
+  runtimeBinaryPath,
   startRuntime,
   versionRoot,
 } from "./harness.ts";
@@ -52,7 +53,6 @@ const PARTNER_SIGNING_SEED = String(PARTNER_SIGNING_KEY.privateKey.export({ form
 const PARTNER_PUBLIC_KEY = String(PARTNER_SIGNING_KEY.publicKey.export({ format: "jwk" }).x);
 const REPUBLISH_SPACE = "spc_zero_republish_rust";
 const REPUBLISH_TABLE = "sf_spc_zero_republish_todos";
-const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const MYSQL_ROOT_PASSWORD = "stattic";
 const MYSQL_DATABASE = "zero_test";
 const MYSQL_SETUP_TIMEOUT_MS = 180_000;
@@ -111,24 +111,7 @@ const SHARED_ZERO_RUNS = [
 ] as const;
 
 beforeAll(async () => {
-  const build = Bun.spawnSync({
-    cmd: [
-      "cargo",
-      "build",
-      "--locked",
-      "-p",
-      "stattic-runtime-compiler",
-      "--bin",
-      "stattic-runtime",
-    ],
-    cwd: REPO_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(`cargo build failed:\n${build.stdout.toString()}\n${build.stderr.toString()}`);
-  }
-  runtimePath = path.join(REPO_ROOT, "target/debug/stattic-runtime");
+  runtimePath = runtimeBinaryPath();
   // PATH can resolve Bun to a package-manager shell shim, which cannot serve
   // as the interpreter of another shebang on macOS.
   const bunPath = process.execPath;

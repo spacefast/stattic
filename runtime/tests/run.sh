@@ -21,11 +21,9 @@ command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 1; }
 if [[ "${SPACEFAST_RUNTIME_PREPARED:-}" != 1 ]]; then
   bash "$RUNTIME_DIR/tests/prepare.sh"
 fi
-runtime_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-if [[ "$runtime_target_dir" != /* ]]; then
-  runtime_target_dir="$REPO_ROOT/$runtime_target_dir"
-fi
-export SPACEFAST_RUNTIME_BIN="$runtime_target_dir/debug/stattic-runtime"
+# The debug binary prepare.sh built, or in CI the packaged one it left alone.
+SPACEFAST_RUNTIME_BIN="$(bash "$RUNTIME_DIR/tests/runtime-binary.sh")"
+export SPACEFAST_RUNTIME_BIN
 
 echo "==> runtime integration tests"
 # Scoped to the runtime dir so the suite runs from one working directory.

@@ -160,7 +160,12 @@ function runtimeNativeBinaryPath(binary: string, packageName: string, configured
   return candidate;
 }
 
-function runtimeBinaryPath() {
+/**
+ * The native runtime binary these tests run: the one SPACEFAST_RUNTIME_BIN
+ * names, in CI the packaged binary restored for this checkout's native inputs,
+ * and otherwise a cargo debug build.
+ */
+export function runtimeBinaryPath() {
   return runtimeNativeBinaryPath(
     "stattic-runtime",
     "stattic-runtime-compiler",

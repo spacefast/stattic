@@ -1090,24 +1090,24 @@ export async function getBlob(
   return get(rt, host, `${RUNTIME_BLOB_GATE_PREFIX}${token}`, init);
 }
 
-export async function postAccessCallback(
+/**
+ * Lands a control-plane handoff the way a browser does: a GET to the one way in,
+ * `/__spacefast/in/<token>?return=<path>`. A good handoff answers 303 to the
+ * return path with the session cookie; a spent, stale or foreign one is a 404.
+ */
+export async function redeemHandoff(
   rt: Runtime,
   host: string,
   token: string,
   returnTo = "/",
   cookie?: string,
 ): Promise<Response> {
-  return get(rt, host, "/__sf/redeem", {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      // Runtime fixtures use SPACEFAST_INSECURE_COOKIES=1 and therefore own
-      // an http origin. The production scheme is always https.
-      origin: `http://${host}`,
-      ...(cookie ? { cookie } : {}),
-    },
-    body: new URLSearchParams({ token, return: returnTo }),
-  });
+  return get(
+    rt,
+    host,
+    `/__spacefast/in/${encodeURIComponent(token)}?return=${encodeURIComponent(returnTo)}`,
+    cookie ? { headers: { cookie } } : {},
+  );
 }
 
 export function sha256(content: string | Uint8Array): string {
@@ -1717,6 +1717,17 @@ export function hostEntry(rt: Runtime, host: string): HostEntry | null {
 }
 
 export type SpacePointer = { schema: number; gen: number; overlay: string };
+
+/**
+ * The visitor-session key the box minted for this Space at its first route
+ * sync (space-identity.php `_stattic_space_session_key`). Fixtures sign with
+ * it to build a cookie this box would have minted.
+ */
+export function spaceSessionKey(rt: Runtime, spaceId: string): string {
+  return z
+    .object({ key: z.string().regex(/^[a-f0-9]{64}$/) })
+    .parse(readJsonFile(path.join(spaceRoot(rt, spaceId), "identity", "session-key.json"))).key;
+}
 
 export function spacePointer(rt: Runtime, spaceId: string): SpacePointer | null {
   return readJsonFile<SpacePointer>(path.join(spaceRoot(rt, spaceId), "space.json"));

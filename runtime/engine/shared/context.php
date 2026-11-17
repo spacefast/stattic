@@ -46,7 +46,14 @@ function _stattic_runtime_install_root(string $engineRoot): string
 }
 const STATTIC_RUNTIME_NAMESPACE_PATH = '/__spacefast';
 
-const STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH = '/__sf';
+// Sign in with Spacefast on a Space origin. Every route here only redirects.
+// Bare `/__spacefast` is the door, which offers this start among its lanes.
+const STATTIC_SHARE_OAUTH_START_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/sign-in';
+const STATTIC_SHARE_OAUTH_CALLBACK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/callback';
+// Where an app's own server (Functions, a First app) receives a code. Reserved
+// from published files by the `__spacefast` upload rule, so only server code on
+// this Space answers here (apps/control-plane/src/auth/share-oauth-callbacks.ts).
+const STATTIC_SHARE_OAUTH_APP_CALLBACK_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/oauth/';
 // Security boundary: only these files may be direct-executed. The drift guard
 // proves this region matches the manifest; it cannot see a second table added
 // outside the markers, so widen the manifest, never the region.
@@ -176,6 +183,16 @@ const STATTIC_ACCESS_QUERY_TOKEN_SYSTEM_VIEW_PREFIX = 'sfv_';
 // verified locally against the Space's own keys. Mirrors
 // FRAME_SESSION_TOKEN_PREFIX in apps/control-plane/src/access/frame-session-token.ts.
 const STATTIC_ACCESS_QUERY_TOKEN_FRAME_SESSION_PREFIX = 'sff_';
+// THE way into a Space by secret: `/__spacefast/in/<token>`. A link token
+// (`sfl_…`) is exchanged centrally; the door's one-use, 60-second handoff (a
+// signed JWT) is consumed here. Either way the response sets the session and
+// redirects to the clean landing path, so no secret stays in the URL.
+const STATTIC_ACCESS_IN_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/in/';
+// Where a control plane older than `runtime.access.in.v1` sends the same
+// handoff (`?sf_token=<handoff>&return=<path>`). An old control-plane image can
+// still reach a new engine during a deploy, so this stays a thin alias of the
+// handoff half of `/__spacefast/in/`. See compat/old-engine.ts S12.
+const STATTIC_ACCESS_LEGACY_REDEEM_PATH = '/__sf/redeem';
 const STATTIC_ACCESS_LOGOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/logout';
 const STATTIC_ACCESS_SESSION_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/session';
 const STATTIC_ACCESS_PASSWORD_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/password';
@@ -534,7 +551,19 @@ function _stattic_redact_access_secrets(string $uri): string
         default => min($queryStart, $fragmentStart),
     };
     if ($pairsStart !== false) {
-        $secretNames = ['purchaseToken', 'token', STATTIC_TAG_PREVIEW_QUERY_NAME, STATTIC_ACCESS_QUERY_TOKEN_PARAM];
+        $secretNames = [
+            'purchaseToken',
+            'token',
+            STATTIC_TAG_PREVIEW_QUERY_NAME,
+            STATTIC_ACCESS_QUERY_TOKEN_PARAM,
+            // Sign in with Spacefast: the authorization code, its PKCE pair, the
+            // state that binds them, and a sealed OAuth continuation.
+            'state',
+            'code_challenge',
+            'code_verifier',
+            'code',
+            'oauth_query',
+        ];
         if (substr($uri, 0, $pairsStart) === STATTIC_SPACEFAST_SDK_PATH) {
             $secretNames[] = 'preview';
         }
@@ -1690,6 +1719,22 @@ function _stattic_access_entry_token(string $requestPath): ?string
     }
     $token = substr($requestPath, strlen(STATTIC_ACCESS_ENTRY_PREFIX));
     return preg_match('/^[A-Za-z0-9_-]{16,512}$/D', $token) === 1 ? $token : null;
+}
+
+// `/__spacefast/in/<token>`: a link token (`sfl_…`, the query lane's grammar) or
+// a three-part handoff JWT. Anything else names no lane.
+function _stattic_access_in_token(string $requestPath): ?array
+{
+    if (!str_starts_with($requestPath, STATTIC_ACCESS_IN_PREFIX)) {
+        return null;
+    }
+    $value = substr($requestPath, strlen(STATTIC_ACCESS_IN_PREFIX));
+    if (str_starts_with($value, STATTIC_ACCESS_QUERY_TOKEN_LINK_PREFIX)) {
+        return preg_match('/^sfl_[A-Za-z0-9_-]{16,512}$/D', $value) === 1 ? ['link', $value] : null;
+    }
+    return preg_match('/^[A-Za-z0-9_-]{4,1024}\.[A-Za-z0-9_-]{4,4096}\.[A-Za-z0-9_-]{4,1024}$/D', $value) === 1
+        ? ['handoff', $value]
+        : null;
 }
 
 // init.php's alias dispatch stages the original request in the

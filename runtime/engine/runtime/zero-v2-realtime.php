@@ -155,17 +155,28 @@ function _stattic_zero_v2_realtime_post(string $url, string $token, string $body
     $deadline ??= microtime(true) + STATTIC_ZERO_V2_REALTIME_BUDGET_MS / 1000;
     $remainingMs = (int) floor(($deadline - microtime(true)) * 1000);
     if ($remainingMs < 1 || !_stattic_platform_destination_allowed($url)) return;
-    // Best effort: the receipt is not read, but PHP 8.5's NoDiscard needs it acknowledged.
-    $receipt = _stattic_http_request([
-        'url' => $url,
-        'method' => 'POST',
-        'headers' => ['Content-Type: application/json', 'Authorization: Bearer ' . $token],
-        'body' => $body,
-        'connect_timeout_ms' => $remainingMs,
-        'timeout_ms' => $remainingMs,
-        'schemes' => ['https', 'http'],
-        'max_body_bytes' => 4096,
-    ]);
+    // The Space token when the control plane has registered this box's key;
+    // the version's callback JWT otherwise, or when a rolled-back control
+    // plane refuses the token.
+    require_once __DIR__ . '/../shared/space-identity.php';
+    $spaceId = (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? '');
+    $privateRoot = (string) ($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? '');
+    $receipt = _stattic_space_identity_send(
+        _stattic_space_identity_serving($privateRoot, $spaceId),
+        static fn (?string $authorization): array => _stattic_http_request([
+            'url' => $url,
+            'method' => 'POST',
+            'headers' => ['Content-Type: application/json', $authorization ?? 'Authorization: Bearer ' . $token],
+            'body' => $body,
+            'connect_timeout_ms' => max(1, (int) floor(($deadline - microtime(true)) * 1000)),
+            'timeout_ms' => max(1, (int) floor(($deadline - microtime(true)) * 1000)),
+            'schemes' => ['https', 'http'],
+            'max_body_bytes' => 4096,
+        ]),
+        [403],
+        $privateRoot,
+        $spaceId,
+    );
     if (($receipt['status'] ?? 0) < 200 || ($receipt['status'] ?? 0) > 299) {
         error_log('[spacefast] Zero realtime notice was not accepted: ' . ($receipt['error'] ?? 'HTTP ' . ($receipt['status'] ?? 0)));
     }

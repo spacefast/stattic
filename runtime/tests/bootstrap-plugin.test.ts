@@ -21,28 +21,6 @@ async function testRoot(prefix: string): Promise<string> {
   return root;
 }
 
-async function readTrustAnchor(input: { prelude: string; cwd?: string }): Promise<string> {
-  const php = `
-    define('WP_CLI', true);
-    ${input.prelude}
-    require $argv[1];
-    require $argv[2];
-    echo spacefast_bootstrap_jwks_b64();
-  `;
-  const process = Bun.spawn(["php", "-r", php, atomicPrependPath, pluginPath], {
-    cwd: input.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
-  ]);
-  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-  return stdout;
-}
-
 async function runSyntheticInstaller(
   installerSource: string,
   options?: { graceSeconds?: number; timeoutSeconds?: number },
@@ -76,52 +54,6 @@ async function runSyntheticInstaller(
     stderr: result.stderr.toString(),
   };
 }
-
-test("a fresh box reads its trust anchor through Atomic_Persistent_Data", async () => {
-  // The provider never define()s persistent data or exports it as env; the
-  // class is the only exposure a pre-engine box has (live-verified 2026-08-31).
-  const root = await testRoot("spacefast-bootstrap-");
-  await writeFile(
-    path.join(root, ".atomic-persistent-data.json"),
-    JSON.stringify({ SPACEFAST_RUNTIME_JWKS_B64: "persistent-data-jwks" }),
-  );
-  expect(await readTrustAnchor({ prelude: "", cwd: root })).toBe("persistent-data-jwks");
-});
-
-test("an installed engine's constant shadows persistent data", async () => {
-  const root = await testRoot("spacefast-bootstrap-");
-  await writeFile(
-    path.join(root, ".atomic-persistent-data.json"),
-    JSON.stringify({ SPACEFAST_RUNTIME_JWKS_B64: "persistent-data-jwks" }),
-  );
-  expect(
-    await readTrustAnchor({
-      prelude: "define('SPACEFAST_RUNTIME_JWKS_B64', 'engine-shim-jwks');",
-      cwd: root,
-    }),
-  ).toBe("engine-shim-jwks");
-});
-
-test("a malformed Ed25519 signature is rejected without throwing", () => {
-  const php = `
-    define('WP_CLI', true);
-    $pair = sodium_crypto_sign_keypair();
-    $public = sodium_crypto_sign_publickey($pair);
-    $b64url = static fn(string $value): string => rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
-    $jwks = ['keys' => [['kty' => 'OKP', 'crv' => 'Ed25519', 'alg' => 'EdDSA', 'kid' => 'test', 'x' => $b64url($public)]]];
-    define('SPACEFAST_RUNTIME_JWKS_B64', base64_encode(json_encode($jwks)));
-    require $argv[1];
-    $header = $b64url(json_encode(['alg' => 'EdDSA', 'kid' => 'test']));
-    $payload = $b64url(json_encode(['exp' => time() + 60]));
-    echo json_encode(spacefast_bootstrap_verify_jwt($header . '.' . $payload . '.AA'));
-  `;
-  const result = Bun.spawnSync({ cmd: ["php", "-r", php, pluginPath], env: process.env });
-  expect({ exitCode: result.exitCode, stderr: result.stderr.toString() }).toEqual({
-    exitCode: 0,
-    stderr: "",
-  });
-  expect(result.stdout.toString()).toBe("null");
-});
 
 test("an installer output overflow is capped and receives rollback grace", async () => {
   const { outcome, root, stderr } = await runSyntheticInstaller(`<?php

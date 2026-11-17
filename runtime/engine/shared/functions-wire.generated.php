@@ -36,6 +36,7 @@ const SPACEFAST_FUNCTIONS_DISPATCH_HEADERS = [
     'requestId' => 'sf-fx-request',
     'assetsNonce' => 'sf-fx-assets-nonce',
     'dispatchToken' => 'sf-fx-dispatch-token',
+    'spaceToken' => 'sf-fx-space-token',
 ];
 
 // The $_SERVER spellings of the headers the host's gateway sets on a relay call.

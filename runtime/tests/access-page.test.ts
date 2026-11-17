@@ -4,6 +4,7 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
+import { DEFAULT_PAGE_TEMPLATES, expandPageHtml } from "../../packages/common/src/utils/pages.ts";
 import {
   RUNTIME_ACCESS_SESSION_PATH,
   RUNTIME_COLLAB_MANIFEST_PATH,
@@ -20,6 +21,16 @@ import {
   type Runtime,
   visitorIssuer,
 } from "./harness.ts";
+
+/** A handoff lands the way a browser carries it: `/__spacefast/in/<token>?return=`. */
+function landHandoff(rt: Runtime, host: string, token: string, returnTo: string, cookie?: string) {
+  return get(
+    rt,
+    host,
+    `/__spacefast/in/${encodeURIComponent(token)}?return=${encodeURIComponent(returnTo)}`,
+    cookie ? { headers: { cookie } } : {},
+  );
+}
 
 // The runtime-rendered visitor access page: lanes from the projected grants,
 // presentation from the accessPage descriptor, credentials verified centrally
@@ -42,8 +53,7 @@ const PUBLIC_SPACE = "spc_access_page_public_account";
 const PUBLIC_VERSION = "ver_access_page_public_account";
 const PUBLIC_GRANT = "grt_public_account";
 const PUBLIC_AUTHORITY = `external:grant.${PUBLIC_GRANT}`;
-// Identity-bound AND link-shareable: the one shape where a link arrival can
-// chain the silent account probe before landing.
+// Identity-bound AND link-shareable: a link holder here is still never probed.
 const CHAIN_HOST = "chain.access-page.test";
 const CHAIN_SPACE = "spc_access_page_chain";
 const CHAIN_VERSION = "ver_access_page_chain";
@@ -83,6 +93,9 @@ const API_TOKEN = "sfa_ownerIntegrationToken123";
 const UNCLAIMED_LINK_TOKEN = `${LINK_PREFIX}unclaimed-shareLink_0123456789`;
 const CHAIN_LINK_TOKEN = `${LINK_PREFIX}chain-shareLink_0123456789`;
 let linkRevoked = false;
+// What the request lane answers: `sent` today; an older control plane answers
+// `pending` and still mails an unhinted visitor a confirmation link.
+let requestLaneStatus: "sent" | "pending" = "sent";
 const ACCOUNT_URL = "https://api.access-page.test/v1/access/acquire/runtime-page";
 const SSO_START_URL =
   "https://access.access-page.test/identity/acn_okta/start?spaceId=spc_access_page_lanes";
@@ -462,7 +475,7 @@ beforeAll(async () => {
           const host = form.get("host") ?? "";
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: handoffToken(host, LANES_SPACE, ["password:pwd_page_test"]),
                 return: form.get("landingPath") ?? "/",
@@ -485,7 +498,7 @@ beforeAll(async () => {
           const host = form.get("host") ?? "";
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: handoffToken(host, LANES_SPACE, ["link:lnk_page_share"]),
                 return: "/docs/",
@@ -498,7 +511,7 @@ beforeAll(async () => {
           const host = form.get("host") ?? "";
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: handoffToken(host, CHAIN_SPACE, ["link:lnk_chain_share"]),
                 return: "/docs/",
@@ -511,7 +524,7 @@ beforeAll(async () => {
           const host = form.get("host") ?? "";
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: handoffToken(host, UNCLAIMED_SPACE, ["link:lnk_page_author"]),
                 return: "/docs/",
@@ -531,7 +544,7 @@ beforeAll(async () => {
         if (presented === API_TOKEN) {
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: systemViewToken({ scope: form.get("landingPath") ?? "/" }),
                 return: form.get("landingPath") ?? "/",
@@ -543,7 +556,7 @@ beforeAll(async () => {
         if (presented === LINK_TOKEN && !linkRevoked) {
           return Response.json(
             {
-              action: `https://${host}/__sf/redeem`,
+              action: `https://${host}/__spacefast/in`,
               fields: {
                 token: handoffToken(host, LANES_SPACE, ["link:lnk_page_share"]),
                 return: form.get("landingPath") ?? "/",
@@ -564,7 +577,7 @@ beforeAll(async () => {
         if (request.headers.get("spacefast-runtime-exchange") !== EXCHANGE_CREDENTIAL) {
           return problem(404, "not_found");
         }
-        return Response.json({ data: { status: "pending" } }, { status: 202 });
+        return Response.json({ data: { status: requestLaneStatus } }, { status: 202 });
       }
       return new Response("not found", { status: 404 });
     },
@@ -635,7 +648,10 @@ beforeAll(async () => {
           issuer: "spacefast-membership",
           subject: "mem_chain_owner",
         }),
-        grant("grt_chain_share", { kind: "link", linkId: "lnk_chain_share" }),
+        {
+          ...grant("grt_chain_share", { kind: "link", linkId: "lnk_chain_share" }),
+          resources: { include: ["/docs/**"], exclude: [] },
+        },
       ],
       accessPage: {
         displayName: "Chain Handbook",
@@ -744,13 +760,24 @@ beforeAll(async () => {
         "<!--sf-runtime:access-status:start--><!--sf-runtime:access-status:end-->" +
         "<!--sf-runtime:access-lanes:start--><p>fallback</p><!--sf-runtime:access-lanes:end-->" +
         "</body></html>",
+      // The built-in access page as finalize compiles it for a themed Space.
+      "page-access-compiled": expandPageHtml(DEFAULT_PAGE_TEMPLATES.access, {
+        page: "access",
+        theme: { accent: "#ff603d" },
+      }),
     },
     serving: {
       config: {
         index: false,
         listing: false,
         viewer: false,
-        pages: { routes: { "/": { pages: { access: "page-access" } } }, previews: {} },
+        pages: {
+          routes: {
+            "/": { pages: { access: "page-access" } },
+            "/compiled/": { pages: { access: "page-access-compiled" } },
+          },
+          previews: {},
+        },
       },
     },
     activate: {
@@ -826,7 +853,10 @@ test("the deny surface renders the access page with every configured lane", asyn
     'id="sf-account-help" style="margin:0 0 8px;color:var(--sf-dim);font-size:13px">We&#039;ll use your Spacefast account to check whether you have access to this site.',
   );
   expect(html).toContain('href="/__spacefast/access/account?return=%2Fdocs%2F"');
-  expect(html).toContain("Continue with Okta");
+  // Company SSO is offered by Spacefast's own sign-in, never by the Space: a
+  // projection that still names a connection gets no button for it.
+  expect(html).not.toContain("Continue with Okta");
+  expect(html).not.toContain("/identity/acn_okta/start");
   expect(html).toContain('action="/__spacefast/access/password"');
   expect(html).toContain('name="password"');
   expect(html).toContain('type="submit">Request access<svg');
@@ -840,9 +870,27 @@ test("the deny surface renders the access page with every configured lane", asyn
   const clientScript = await get(runtime, LANES_HOST, "/__spacefast/access/client.js");
   expect(clientScript.status).toBe(200);
   expect(clientScript.headers.get("content-type")).toBe("application/javascript; charset=utf-8");
-  // Central URLs carry host and return so the flows come back to this page.
-  expect(html).toContain("host=lanes.access-page.test");
+  // The account start carries the return so the flow comes back to this page.
   expect(html).toContain("return=%2Fdocs%2F");
+
+  // `/__spacefast` is the door: the same lanes, returning where it was asked
+  // to, and never the Space's content.
+  const door = await get(runtime, LANES_HOST, "/__spacefast?return=%2Fdocs%2Fguide%2F");
+  expect(door.status).toBe(403);
+  expect(door.headers.get("cache-control")).toBe("private, no-store");
+  const doorHtml = await door.text();
+  expect(doorHtml).toContain('action="/__spacefast/access/password"');
+  expect(doorHtml).toContain('name="return" value="/docs/guide/"');
+  expect(doorHtml).toContain(">Continue with Spacefast</a>");
+  expect(doorHtml).not.toContain(`docs of ${LANES_SPACE}`);
+
+  // A visitor who can already open the page goes straight there.
+  const linked = await get(runtime, LANES_HOST, `/__/${LINK_TOKEN}`);
+  const passThrough = await get(runtime, LANES_HOST, "/__spacefast?return=%2Fdocs%2Fguide%2F", {
+    headers: { cookie: sessionCookie(linked) },
+  });
+  expect(passThrough.status).toBe(303);
+  expect(passThrough.headers.get("location")).toBe("/docs/guide/");
 });
 
 test("state codes render as page states and never echo unknown values", async () => {
@@ -914,7 +962,7 @@ test("a fenced space keeps the uniform deny even while unclaimed", async () => {
   expect(html).not.toContain("Fenced Space");
 });
 
-test("the password lane verifies centrally and admits with zero visible redirects", async () => {
+test("the password lane verifies centrally and enters through one single-use handoff", async () => {
   const submitted = await get(runtime, LANES_HOST, "/__spacefast/access/password", {
     method: "POST",
     headers: {
@@ -923,9 +971,25 @@ test("the password lane verifies centrally and admits with zero visible redirect
     },
     body: new URLSearchParams({ password: PASSWORD, return: "/docs/" }),
   });
+  // One way in: the password answer is a same-origin hop through
+  // `/__spacefast/in/<handoff>`, never a cookie on the POST itself.
   expect(submitted.status).toBe(303);
-  expect(submitted.headers.get("location")).toBe("/docs/");
-  const cookie = sessionCookie(submitted);
+  expect(submitted.headers.get("set-cookie")).toBeNull();
+  expect(submitted.headers.get("referrer-policy")).toBe("no-referrer");
+  const entry = new URL(submitted.headers.get("location") ?? "", `https://${LANES_HOST}`);
+  expect(entry.pathname.startsWith("/__spacefast/in/")).toBe(true);
+  expect(entry.searchParams.get("return")).toBe("/docs/");
+  const entered = await get(runtime, LANES_HOST, `${entry.pathname}${entry.search}`);
+  expect(entered.status).toBe(303);
+  expect(entered.headers.get("location")).toBe("/docs/");
+  expect(entered.headers.get("cache-control")).toBe("private, no-store");
+  expect(entered.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await entered.text()).toBe("");
+  // The handoff is spent: the same URL opens nothing a second time.
+  const replayed = await get(runtime, LANES_HOST, `${entry.pathname}${entry.search}`);
+  expect(replayed.status).toBe(404);
+  expect(replayed.headers.get("set-cookie")).toBeNull();
+  const cookie = sessionCookie(entered);
   expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
   // The cookie is the session (§7/D120): it names its authority and the
   // [access_gen, session_ver] tuple the hot path compares against the overlay,
@@ -973,6 +1037,8 @@ test("a wrong password bounces back to the page with an allowlisted state", asyn
   expect(submitted.headers.get("location")).toBe("/docs/?sf_access=invalid-password");
   // The exchange meters failures per browser, so the first attempt names one
   // and the browser keeps that name for the next attempt. It authorizes nothing.
+  // It goes as `anon_` and 32 hex, the form every control-plane image reads;
+  // the guest's own `pg1_` id never leaves the box.
   const browser = passwordBrowser();
   expect(browser).toMatch(/^anon_[a-f0-9]{32}$/);
   const cookie = (submitted.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
@@ -1086,10 +1152,11 @@ test.each(originMetadataCases)("password origin metadata contract: $name", async
     body: new URLSearchParams({ password: PASSWORD, return: "/" }),
   });
   expect(submitted.status).toBe(entry.accepted ? 303 : 403);
+  // An accepted password answers with the hop through `/__spacefast/in/`; a
+  // refused one with nothing at all. Neither sets a cookie on the POST.
+  expect(submitted.headers.get("set-cookie")).toBeNull();
   if (entry.accepted) {
-    expect(submitted.headers.get("set-cookie")).toContain(RECORDED_SESSION_PREFIX);
-  } else {
-    expect(submitted.headers.get("set-cookie")).toBeNull();
+    expect(submitted.headers.get("location")).toStartWith("/__spacefast/in/");
   }
 });
 
@@ -1108,7 +1175,9 @@ test("the request-invite lane relays centrally and remembers only the requested 
     }),
   });
   expect(submitted.status).toBe(303);
-  expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-confirm");
+  // The request reaches the owner unconfirmed: nothing is left for the
+  // visitor to do but wait.
+  expect(submitted.headers.get("location")).toBe("/docs/?sf_access=request-sent");
   // The requested scope is remembered on the host session, not in a cookie of
   // its own. Nobody proved anything here, so that session is the stateless
   // form: asking for an invite writes no revocation record, and a flood of
@@ -1117,25 +1186,35 @@ test("the request-invite lane relays centrally and remembers only the requested 
   expect(requested).toStartWith(`__Host-spacefast_session=${STATELESS_SESSION_PREFIX}`);
   expect(sessionRecords(LANES_SPACE)).toEqual(recordsBefore);
 
-  const pending = await get(runtime, LANES_HOST, "/docs/?sf_access=request-confirm", {
-    headers: { cookie: requested },
-  });
-  const pendingHtml = await pending.text();
-  expect(pendingHtml).toContain('class="sf-copy sf-access-status sf-access-status-action"');
-  expect(pendingHtml).not.toContain("Request again</summary>");
-
-  const hinted = await get(runtime, LANES_HOST, "/docs/?sf_access=request-pending", {
-    headers: { cookie: requested },
-  });
-  const hintedHtml = await hinted.text();
-  expect(hintedHtml).toContain('class="sf-copy sf-access-status" role="status"');
-  expect(hintedHtml).not.toContain("Request again</summary>");
+  const statusLine = async (code: string) => {
+    const html = await (
+      await get(runtime, LANES_HOST, `/docs/?sf_access=${code}`, {
+        headers: { cookie: requested },
+      })
+    ).text();
+    expect(html).not.toContain("Request again</summary>");
+    return /<p class="sf-copy sf-access-status[^"]*" role="status">(.*?)<\/p>/.exec(html)?.[1];
+  };
+  expect(await statusLine("request-sent")).toBe(
+    "Request sent. We&#039;ll email you if the owner lets you in.",
+  );
+  // An older control plane still mails a confirmation link, and the engine
+  // keeps saying so for the statuses it maps that answer to.
+  expect(await statusLine("request-confirm")).toBe(
+    "<strong>Check your email to finish your request.</strong> Open the confirmation link we sent. It expires in 30 minutes.",
+  );
+  expect(await statusLine("request-pending")).toBe(
+    "Request sent. If we emailed you a confirmation link, open it. We&#039;ll email you if the owner lets you in.",
+  );
 
   const rendered = await get(runtime, LANES_HOST, "/docs/guide/", {
     headers: { cookie: requested },
   });
   const html = await rendered.text();
-  expect(html).toContain(`Access requested for ${LANES_HOST}/docs.`);
+  expect(html).toContain(
+    `Access requested for ${LANES_HOST}/docs. We'll email you if the owner lets you in.`,
+  );
+  expect(html).not.toContain("confirm");
   expect(html).toContain("Request again</summary>");
   expect(html).not.toContain("Request access</summary>");
 
@@ -1152,16 +1231,26 @@ test("the request-invite lane relays centrally and remembers only the requested 
   expect(call?.form.get("email")).toBe("visitor@example.com");
   expect(call?.form.get("message")).toBe("It's me");
   expect(call?.form.has("accountHint")).toBe(false);
+  // The exchange counts requests per browser, never by the proxy address this
+  // runtime sees, so the first request names its browser and the session the
+  // request left keeps that name for the next one.
+  const browser = call?.headers["spacefast-visitor-browser"];
+  expect(browser).toMatch(/^anon_[a-f0-9]{32}$/);
 
   const rootRequest = await get(runtime, LANES_HOST, "/__spacefast/access/request", {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
       origin: `https://${LANES_HOST}`,
+      cookie: requested,
     },
     body: new URLSearchParams({ email: "visitor@example.com", return: "/" }),
   });
   expect(rootRequest.status).toBe(303);
+  expect(
+    exchangeRequests.findLast((request) => request.pathname === "/acquire/runtime-page/request")
+      ?.headers["spacefast-visitor-browser"],
+  ).toBe(browser);
   const rootPage = await get(runtime, LANES_HOST, "/", {
     headers: { cookie: sessionCookie(rootRequest) },
   });
@@ -1189,17 +1278,32 @@ test("the request-invite lane forwards only this browser's hint for the posted a
     );
     expect(call?.form.get("email")).toBe(body.email);
     const forwardedHint = call?.form.get("accountHint") ?? null;
-    // Only an unhinted request is sure to need the emailed confirmation.
+    // Today's control plane mails no confirmation, hint or not. An older one
+    // still mails one to an unhinted request.
     expect(submitted.headers.get("location")).toBe(
-      `/docs/?sf_access=${forwardedHint === null ? "request-confirm" : "request-pending"}`,
+      `/docs/?sf_access=${
+        requestLaneStatus === "sent"
+          ? "request-sent"
+          : forwardedHint === null
+            ? "request-confirm"
+            : "request-pending"
+      }`,
     );
     return forwardedHint;
   };
 
   expect(await forwarded({ email: "anne@example.com", account_hint: hint })).toBe(hint);
-  // The platform skips confirming the address on a verified hint, so a copied
-  // hint or another address is dropped and the email flow runs. What makes a
-  // hint verify at all is held by the no-grant page test below.
+  expect(await forwarded({ email: "mallory@example.com", account_hint: hint })).toBeNull();
+  requestLaneStatus = "pending";
+  try {
+    expect(await forwarded({ email: "anne@example.com", account_hint: hint })).toBe(hint);
+    expect(await forwarded({ email: "mallory@example.com" })).toBeNull();
+  } finally {
+    requestLaneStatus = "sent";
+  }
+  // A verified hint marks the address verified for the owner, so a copied
+  // hint or another address is dropped. What makes a hint verify at all is
+  // held by the no-grant page test below.
   expect(await forwarded({ email: "anne@example.com", account_hint: hint }, "")).toBeNull();
   expect(await forwarded({ email: "mallory@example.com", account_hint: hint })).toBeNull();
 });
@@ -1322,12 +1426,24 @@ test("a bounced silent probe renders the page instead of looping", async () => {
   expect(switchLocation.searchParams.get("addAccount")).toBe("1");
   expect(switchLocation.searchParams.get("return")).toBe("/docs/");
   expect(switchLocation.searchParams.get("browserState")).toMatch(/^[a-f0-9]{64}$/);
+  // The bar's Switch Account on a page loaded before Sign in with Spacefast
+  // was switched off asks the same way: it adds an account, never silently
+  // signs the same one back in.
+  const barSwitch = await get(
+    runtime,
+    SILENT_HOST,
+    "/__spacefast/sign-in?return=%2Fdocs%2F&prompt=select_account",
+  );
+  expect(barSwitch.status).toBe(302);
+  const barSwitchLocation = new URL(barSwitch.headers.get("location") ?? "");
+  expect(`${barSwitchLocation.origin}${barSwitchLocation.pathname}`).toBe(ACCOUNT_URL);
+  expect(barSwitchLocation.searchParams.get("addAccount")).toBe("1");
+  expect(barSwitchLocation.searchParams.get("return")).toBe("/docs/");
 
   const lanesNoGrant = await get(runtime, LANES_HOST, "/docs/?sf_access=no-grant");
   const lanesHtml = await lanesNoGrant.text();
   expect(lanesHtml).not.toContain(">Continue with Spacefast</a>");
   expect(lanesHtml).toContain(">Check access again</a>");
-  expect(lanesHtml).toContain("Continue with Okta");
   // The invite is the way forward for a refused account, so its form is shown
   // outright (no disclosure to open) and set apart from the lanes above it.
   expect(lanesHtml).not.toContain("<details");
@@ -1449,11 +1565,12 @@ test("a no-grant bounce names the signed-in account and asks for no email", asyn
   expect(askedHtml).not.toContain("Request again</summary>");
   // It opens nothing and mints no session.
   expect(sessionCookie(hinted)).toBe("");
-  const redeemed = await get(
+  const redeemed = await landHandoff(
     runtime,
     LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(accountHintToken(browserState))}&return=%2Fdocs%2F`,
-    { headers: { cookie: stateCookie } },
+    accountHintToken(browserState),
+    "/docs/",
+    stateCookie,
   );
   expect(redeemed.status).not.toBe(303);
   expect(sessionCookie(redeemed)).toBe("");
@@ -1461,7 +1578,7 @@ test("a no-grant bounce names the signed-in account and asks for no email", asyn
   const ignored = [
     ["another browser", accountHintToken(browserState), ""],
     ["a different browser binding", accountHintToken("b".repeat(64)), stateCookie],
-    ["a redeem handoff", accountHintToken(browserState, { purpose: "handoff" }), stateCookie],
+    ["a session handoff", accountHintToken(browserState, { purpose: "handoff" }), stateCookie],
     ["a stale generation", accountHintToken(browserState, { generation: 1 }), stateCookie],
     ["a non-email", accountHintToken(browserState, { email: "<b>x</b>" }), stateCookie],
   ] as const;
@@ -1475,25 +1592,20 @@ test("a no-grant bounce names the signed-in account and asks for no email", asyn
   }
 });
 
-test("a sole SSO lane skips the chooser entirely", async () => {
+test("a Space whose only lane would be its team's SSO never sends the visitor there", async () => {
+  // The projection still names a connection, and the Space has an external
+  // Grant. Company SSO now comes from Spacefast's own sign-in, so the Space
+  // neither redirects to the IdP nor offers a button for it.
   const probe = await get(runtime, SOLE_SSO_HOST, "/", {
     headers: { "sec-fetch-dest": "document" },
   });
-  expect(probe.status).toBe(302);
-  const location = probe.headers.get("location") ?? "";
-  expect(location.startsWith(SSO_START_URL)).toBe(true);
-  expect(location).toContain(`host=${SOLE_SSO_HOST}`);
-  // The browser binding is the only cookie this redirect needs. This projection
-  // carries no exchange credential, so it cannot write an access session.
-  expect(browserStateCookie(probe)).toMatch(
-    /^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/,
-  );
+  expect(probe.status).toBe(403);
+  expect(probe.headers.get("location")).toBeNull();
   expect(sessionCookie(probe)).toBe("");
   expect(sessionRecords(SOLE_SSO_SPACE)).toEqual([]);
-
-  const rendered = await get(runtime, SOLE_SSO_HOST, "/?sf_access=checked");
-  expect(rendered.status).toBe(403);
-  expect(await rendered.text()).toContain("Continue with Acme SSO");
+  const html = await probe.text();
+  expect(html).not.toContain("Continue with Acme SSO");
+  expect(html).not.toContain(SSO_START_URL);
 });
 
 test("only a positively identified top-level document gets the silent redirect", async () => {
@@ -1527,17 +1639,29 @@ test("a publisher access template keeps the working lane blocks", async () => {
   expect(expiredHtml).toContain("That link has expired");
   // The status renders once, in its slot, never duplicated into the lanes.
   expect(expiredHtml.split("That link has expired").length).toBe(2);
+
+  // The compiled built-in page names the Space in its heading, like the
+  // engine's own fallback, and its lane buttons take the Space's accent.
+  const compiled = await (await get(runtime, CUSTOM_HOST, "/compiled/")).text();
+  expect(compiled).toContain("<h1>Acme is private</h1>");
+  expect(compiled).not.toContain("This Space is private</h1>");
+  expect(compiled).toContain("--sf-access-primary:#ff603d");
+  expect(compiled).toContain(
+    ".sf-access-lanes .sf-button:not(.sf-button-quiet){background:var(--sf-access-primary)",
+  );
 });
 
 // The account lane: the control plane 303s a signed handoff straight at the
-// runtime, so a signed-in visitor with authority never sees an interstitial.
-test("the account lane redeems by GET, in the page or in a popup", async () => {
-  const gate = await get(runtime, LANES_HOST, "/docs/");
-  expect(gate.status).toBe(403);
-  const stateCookie = browserStateCookie(gate);
+// runtime's one way in, so a signed-in visitor with authority never sees an
+// interstitial.
+test("the account lane lands its handoff at /__spacefast/in, bound to the browser that started it", async () => {
+  // The browser binding is made where the sign-in leaves this origin.
+  const start = await get(runtime, LANES_HOST, "/__spacefast/access/account?return=%2Fdocs%2F");
+  expect(start.status).toBe(302);
+  const stateCookie = browserStateCookie(start);
   expect(stateCookie).toMatch(/^__Host-spacefast_access_state_[a-f0-9]{16}=[a-f0-9]{64}$/);
   const browserState = stateCookie.slice(stateCookie.indexOf("=") + 1);
-  expect(await gate.text()).toContain(`browserState=${browserState}`);
+  expect(start.headers.get("location")).toContain(`browserState=${browserState}`);
 
   const token = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
     browserState,
@@ -1577,35 +1701,20 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
     const parallelToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
       browserState: parallelState,
     });
-    const completed = await get(
-      runtime,
-      LANES_HOST,
-      `/__sf/redeem?sf_token=${encodeURIComponent(parallelToken)}&return=%2Fdocs%2F`,
-      { headers: { cookie: parallelJar } },
-    );
+    const completed = await landHandoff(runtime, LANES_HOST, parallelToken, "/docs/", parallelJar);
     expect(completed.status).toBe(303);
   }
 
   // First use in another browser with its own valid state proves nothing and,
   // importantly, does not consume the jti before the initiating browser returns.
-  const swapped = await get(
-    runtime,
-    LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
-    { headers: { cookie: otherBrowserCookie } },
-  );
-  expect(swapped.status).toBe(403);
+  const swapped = await landHandoff(runtime, LANES_HOST, token, "/docs/", otherBrowserCookie);
+  expect(swapped.status).toBe(404);
   expect(swapped.headers.get("set-cookie")).toBeNull();
 
-  const redeem = await get(
-    runtime,
-    LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
-    { headers: { cookie: stateCookie } },
-  );
+  const redeem = await landHandoff(runtime, LANES_HOST, token, "/docs/", stateCookie);
   expect(redeem.status).toBe(303);
   expect(redeem.headers.get("location")).toBe("/docs/");
-  expect(redeem.headers.get("cache-control")).toBe("no-store");
+  expect(redeem.headers.get("cache-control")).toBe("private, no-store");
   expect(redeem.headers.get("referrer-policy")).toBe("no-referrer");
   const cookie = sessionCookie(redeem);
   expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
@@ -1615,42 +1724,15 @@ test("the account lane redeems by GET, in the page or in a popup", async () => {
   expect(admitted.status).toBe(200);
 
   // One use only: the same handoff cannot be replayed into a second session.
-  const replayed = await get(
+  const replayed = await landHandoff(
     runtime,
     LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
-    { headers: { cookie: `${stateCookie}; ${cookie}` } },
+    token,
+    "/docs/",
+    `${stateCookie}; ${cookie}`,
   );
-  expect(replayed.status).toBe(403);
+  expect(replayed.status).toBe(404);
   expect(replayed.headers.get("set-cookie")).toBeNull();
-
-  const popupStart = await get(
-    runtime,
-    LANES_HOST,
-    "/__spacefast/access/account?return=%2Fdocs%2F&display=popup",
-  );
-  expect(popupStart.status).toBe(302);
-  const popupAcquire = new URL(popupStart.headers.get("location") ?? "");
-  expect(popupAcquire.searchParams.get("display")).toBe("popup");
-  expect(popupAcquire.searchParams.get("return")).toBe("/docs/");
-  const popupStateCookie = browserStateCookie(popupStart);
-  const popupToken = handoffToken(LANES_HOST, LANES_SPACE, ["password:pwd_page_test"], {
-    browserState: popupAcquire.searchParams.get("browserState") ?? "",
-  });
-  const popupReturn = new URLSearchParams({
-    sf_token: popupToken,
-    return: popupAcquire.searchParams.get("return") ?? "",
-    display: popupAcquire.searchParams.get("display") ?? "",
-  });
-  const popup = await get(runtime, LANES_HOST, `/__sf/redeem?${popupReturn}`, {
-    headers: { cookie: popupStateCookie },
-  });
-  expect(popup.status).toBe(200);
-  expect(popup.headers.get("set-cookie") ?? "").toContain(RECORDED_SESSION_PREFIX);
-  const html = await popup.text();
-  expect(html).toContain("sf-access-complete");
-  expect(html).toContain("window.close()");
-  expect(html).not.toContain(popupToken);
 });
 
 test("a public Grant retains a signed-in account identity without team membership", async () => {
@@ -1661,11 +1743,7 @@ test("a public Grant retains a signed-in account identity without team membershi
       avatar_url: "https://gravatar.com/avatar/public-voter",
     },
   });
-  const redeem = await get(
-    runtime,
-    PUBLIC_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2F`,
-  );
+  const redeem = await landHandoff(runtime, PUBLIC_HOST, token, "/");
   expect(redeem.status).toBe(303);
   expect(redeem.headers.get("location")).toBe("/");
 
@@ -1702,44 +1780,27 @@ test("a public Grant retains a signed-in account identity without team membershi
   });
   expect(await anotherHost.json()).toEqual({ data: { state: "anonymous" } });
 
-  // The account leaves one bit behind for the visit after this session: no id,
-  // host-only, and readable by the overlay that renews it, which looks for the
-  // name this host's collab manifest gives it.
-  const marker = returningAccountSetCookie(redeem);
-  expect(marker).toStartWith(`${RETURNING_MARKER}=1;`);
-  const manifest = await get(runtime, PUBLIC_HOST, RUNTIME_COLLAB_MANIFEST_PATH);
-  expect(collabManifestSchema.parse(await manifest.json()).returningAccountCookie).toBe(
-    RETURNING_MARKER,
-  );
-  expect(marker).toContain("Path=/");
-  expect(marker).toContain("Max-Age=15552000");
-  expect(marker).toContain("SameSite=Lax");
-  expect(marker).toContain("Secure");
-  expect(marker).not.toContain("HttpOnly");
-  expect(marker).not.toContain("Domain");
+  // A redeem is not the Space's own sign-in, so it leaves no renewal marker.
+  expect(returningAccountSetCookie(redeem)).toBe("");
 });
 
-test("a returning account's silent start spends its marker and never prompts", async () => {
+test("a returning account's silent start spends its marker and goes nowhere without the Space's sign-in", async () => {
   const marker = `${RETURNING_MARKER}=1`;
-  // A page opened in place by a share link still carries its secret; the
-  // trip to the sign-in host never does.
+  // This Space signs in through the account broker, not its own OpenID Connect
+  // client, so it has no renewal: a silent start ends back on the page and
+  // spends the marker. The renewal itself (prompt=none at the Space's own
+  // client) is held in access-chain.test.ts.
   const start = await get(
     runtime,
     PUBLIC_HOST,
     "/__spacefast/access/account?silent=1&return=%2Fdocs%2F%3Fq%3Da%2520b%26__%3Dsfl_secret%26sf_access%3Dchecked",
     { headers: { cookie: marker } },
   );
-  expect(start.status).toBe(302);
-  const signIn = new URL(start.headers.get("location") ?? "");
-  expect(`${signIn.origin}${signIn.pathname}`).toBe(ACCOUNT_URL);
-  expect(signIn.searchParams.get("silent")).toBe("1");
-  expect(signIn.searchParams.get("host")).toBe(PUBLIC_HOST);
-  expect(signIn.searchParams.get("return")).toBe("/docs/?q=a%20b");
-  expect(start.headers.get("location")).not.toContain("sfl_secret");
-  expect(signIn.searchParams.get("browserState")).toMatch(/^[a-f0-9]{64}$/);
-  // Spent on the way out: only an account session coming back writes it again,
-  // so a trip that returns empty-handed is never taken twice.
+  expect(start.status).toBe(303);
+  expect(start.headers.get("location")).toBe("/docs/?q=a%20b");
   expect(returningAccountSetCookie(start)).toContain("Max-Age=0");
+  const manifest = await get(runtime, PUBLIC_HOST, RUNTIME_COLLAB_MANIFEST_PATH);
+  expect(collabManifestSchema.parse(await manifest.json()).returningAccountCookie).toBeNull();
 
   // Asked for by hand, the start may prompt, and leaves the marker alone; its
   // return sheds the secret all the same.
@@ -1751,28 +1812,10 @@ test("a returning account's silent start spends its marker and never prompts", a
   );
   expect(asked.status).toBe(302);
   const askedSignIn = new URL(asked.headers.get("location") ?? "");
+  expect(`${askedSignIn.origin}${askedSignIn.pathname}`).toBe(ACCOUNT_URL);
   expect(askedSignIn.searchParams.has("silent")).toBe(false);
   expect(askedSignIn.searchParams.get("return")).toBe("/");
   expect(returningAccountSetCookie(asked)).toBe("");
-
-  // Already an account here, and read-only all the same: that is the account's
-  // own answer, so the trip stops at this host and is never taken again.
-  const redeemed = await get(
-    runtime,
-    PUBLIC_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(accountHandoff(PUBLIC_HOST, PUBLIC_SPACE, PUBLIC_AUTHORITY))}&return=%2F`,
-  );
-  const account = sessionCookie(redeemed);
-  expect(account).toStartWith("__Host-spacefast_session=");
-  const signedIn = await get(
-    runtime,
-    PUBLIC_HOST,
-    "/__spacefast/access/account?silent=1&return=%2Fdocs%2F",
-    { headers: { cookie: `${account}; ${marker}` } },
-  );
-  expect(signedIn.status).toBe(303);
-  expect(signedIn.headers.get("location")).toBe("/docs/");
-  expect(returningAccountSetCookie(signedIn)).toContain("Max-Age=0");
 
   // With no sign-in host to ask, the silent trip ends back on the page.
   const nowhere = await get(
@@ -1784,48 +1827,60 @@ test("a returning account's silent start spends its marker and never prompts", a
   expect(nowhere.status).toBe(303);
   expect(nowhere.headers.get("location")).toBe("/docs/");
   expect(returningAccountSetCookie(nowhere)).toContain("Max-Age=0");
-
-  // A silent handoff that will not redeem lands back on the page, not on an
-  // error nobody clicked for.
-  const unredeemable = await get(
-    runtime,
-    PUBLIC_HOST,
-    "/__sf/redeem?sf_token=not-a-handoff&return=%2Fdocs%2F&silent=1",
-  );
-  expect(unredeemable.status).toBe(303);
-  expect(unredeemable.headers.get("location")).toBe("/docs/");
-  expect(sessionCookie(unredeemable)).toBe("");
 });
 
-test("a browser share-link navigation exchanges the token before serving the clean URL", async () => {
+test("a browser share-link navigation enters through /__spacefast/in and lands on the clean URL", async () => {
+  const navigate = { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
   const opened = await get(
     runtime,
     LANES_HOST,
     `/docs/guide/?tag=a&tag=b&x.y=1&flag&__=${LINK_TOKEN}&page=2`,
-    {
-      headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
-    },
+    { headers: navigate },
   );
+  // The old `?__=` form hops into the one way in, carrying the page asked for.
   expect(opened.status).toBe(302);
-  expect(opened.headers.get("location")).toBe("/docs/guide/?tag=a&tag=b&x.y=1&flag&page=2");
+  expect(opened.headers.get("set-cookie")).toBeNull();
   expect(opened.headers.get("cache-control")).toBe("private, no-store");
   expect(opened.headers.get("referrer-policy")).toBe("no-referrer");
-  expect(await opened.text()).toBe("");
-  const cookie = sessionCookie(opened);
+  const entry = new URL(opened.headers.get("location") ?? "", `https://${LANES_HOST}`);
+  expect(entry.pathname).toBe(`/__spacefast/in/${LINK_TOKEN}`);
+  expect(entry.searchParams.get("return")).toBe("/docs/guide/?tag=a&tag=b&x.y=1&flag&page=2");
+
+  const entered = await get(runtime, LANES_HOST, `${entry.pathname}${entry.search}`, {
+    headers: navigate,
+  });
+  expect(entered.status).toBe(303);
+  expect(entered.headers.get("location")).toBe("/docs/guide/?tag=a&tag=b&x.y=1&flag&page=2");
+  expect(entered.headers.get("cache-control")).toBe("private, no-store");
+  expect(entered.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await entered.text()).toBe("");
+  const cookie = sessionCookie(entered);
   expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
-  const followed = await get(runtime, LANES_HOST, opened.headers.get("location") ?? "", {
+  const followed = await get(runtime, LANES_HOST, entered.headers.get("location") ?? "", {
     headers: { cookie },
   });
   expect(followed.status).toBe(200);
   expect(await followed.text()).toContain(`guide of ${LANES_SPACE}`);
+
+  // A new link is `/__spacefast/in/<token>` alone: the link's own landing path.
+  const direct = await get(runtime, LANES_HOST, `/__spacefast/in/${LINK_TOKEN}`, {
+    headers: navigate,
+  });
+  expect(direct.status).toBe(303);
+  expect(direct.headers.get("location")).toBe("/docs/");
+
   const withReturn = await get(
     runtime,
     LANES_HOST,
     `/docs/guide/?x%20y=1&flag&__=${LINK_TOKEN}&sf_access_return=%2Fadmin%2F`,
-    { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } },
+    { headers: navigate },
   );
   expect(withReturn.status).toBe(302);
-  expect(withReturn.headers.get("location")).toBe("/docs/guide/?x%20y=1&flag");
+  expect(
+    new URL(withReturn.headers.get("location") ?? "", `https://${LANES_HOST}`).searchParams.get(
+      "return",
+    ),
+  ).toBe("/docs/guide/?x%20y=1&flag");
 });
 
 // Clients without Fetch Metadata still receive the page in one request.
@@ -1919,32 +1974,32 @@ test("an access URL sets a session and redirects to a clean live URL", async () 
   expect(head.headers.get("location")).toBe("/docs/");
 });
 
-// A link says what the holder may do; it never says who they are. When the
-// Space knows accounts, one silent account bounce is chained in before the
-// clean URL so a signed-in member arriving by link stops being a guest.
-test("a link arrival chains one silent account probe before the clean URL", async () => {
+// A link says what the holder may do; it never says who they are. A signed-in
+// Spacefast user who opens one stays a guest on this Space until they choose
+// to sign in, so neither the arrival nor a later gate probes their account.
+test("a link holder is never silently probed into an account", async () => {
   const opened = await get(runtime, CHAIN_HOST, `/__/${CHAIN_LINK_TOKEN}`);
   expect(opened.status).toBe(303);
-  const location = opened.headers.get("location") ?? "";
-  expect(location.startsWith(ACCOUNT_URL)).toBe(true);
-  expect(location).toContain("silent=1");
-  expect(location).toContain(`host=${CHAIN_HOST}`);
-  expect(location).toContain("return=%2Fdocs%2F");
+  expect(opened.headers.get("location")).toBe("/docs/");
   const cookie = sessionCookie(opened);
   expect(cookie).toStartWith(`__Host-spacefast_session=${RECORDED_SESSION_PREFIX}`);
 
-  // The link already admitted: the detour is about identity, not access.
   const admitted = await get(runtime, CHAIN_HOST, "/docs/", { headers: { cookie } });
   expect(admitted.status).toBe(200);
   expect(await admitted.text()).toContain(`docs of ${CHAIN_SPACE}`);
 
-  // Exactly one probe per browser: the second arrival carries the recorded
-  // check forward across the session rotation and lands on the clean URL.
-  const again = await get(runtime, CHAIN_HOST, `/__/${CHAIN_LINK_TOKEN}`, {
-    headers: { cookie },
+  // A page the link does not cover renders the gate, and its sign-in button
+  // still works; a visitor holding nothing on the same Space is probed.
+  const gate = await get(runtime, CHAIN_HOST, "/admin/", {
+    headers: { cookie, "sec-fetch-dest": "document" },
   });
-  expect(again.status).toBe(303);
-  expect(again.headers.get("location")).toBe("/docs/");
+  expect(gate.status).toBe(403);
+  expect(await gate.text()).toContain(">Continue with Spacefast</a>");
+  const bare = await get(runtime, CHAIN_HOST, "/admin/", {
+    headers: { "sec-fetch-dest": "document" },
+  });
+  expect(bare.status).toBe(302);
+  expect(bare.headers.get("location") ?? "").toContain("silent=1");
 });
 
 test("X-SF-Authorization admits access, owner API, and centrally exchanged machine tokens", async () => {
@@ -2001,8 +2056,8 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
   const { db } = await import("../../apps/control-plane/src/db/client.js");
   const { seedSpaceWithKey, cleanupSpaceWithKey } =
     await import("../../apps/control-plane/src/test/seed.js");
-  const { createMachineCredential, revokeMachineCredential } =
-    await import("../../apps/control-plane/src/access/credentials.js");
+  const { writeMachineCreate, writeSecretRevoke } =
+    await import("../../apps/control-plane/src/access/space-access-service.js");
   const { loadAccessBrokerTargetCredential } =
     await import("../../apps/control-plane/src/access/broker-target.js");
   const { runtimeExchangeCredential } =
@@ -2026,7 +2081,7 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
   cleanup.defer(() => cleanupSpaceWithKey(seed));
   const { hostname } = await ensureSpaceDefaultHostname(seed.spaceId);
   const brokerTarget = await loadAccessBrokerTargetCredential(db, seed.spaceId);
-  const machine = await createMachineCredential({
+  const machine = await writeMachineCreate({
     spaceId: seed.spaceId,
     credential: {
       name: "Private docs agent",
@@ -2078,7 +2133,7 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
   const outside = await get(runtime, hostname, "/admin/", { headers: machineHeaders });
   expect(outside.status).toBe(403);
   expect(await outside.text()).not.toContain("private admin");
-  await revokeMachineCredential({ spaceId: seed.spaceId, credentialId: machine.credential.id });
+  await writeSecretRevoke(seed.spaceId, machine.credential.grant.grant.id);
   const revoked = await get(runtime, hostname, "/docs/", { headers: machineHeaders });
   expect(revoked.status).toBe(403);
   expect(await revoked.text()).not.toContain("private machine docs");
@@ -2129,10 +2184,32 @@ test("revoking the Grant behind a link closes the sessions it opened", async () 
     expect(await onQuery.text()).not.toContain(`docs of ${LANES_SPACE}`);
     expect(sessionCookie(onQuery)).toBe("");
 
+    // A dead link through the one way in shows the gate for the page it asked
+    // for and says the link no longer works.
+    const viaIn = await get(runtime, LANES_HOST, `/__spacefast/in/${LINK_TOKEN}?return=%2Fdocs%2F`);
+    expect(viaIn.status).toBe(403);
+    expect(viaIn.headers.get("referrer-policy")).toBe("no-referrer");
+    const viaInHtml = await viaIn.text();
+    expect(viaInHtml).toContain("That link doesn&#039;t work anymore.");
+    expect(viaInHtml).toContain('name="return" value="/docs/"');
+    expect(sessionCookie(viaIn)).toBe("");
+    // A new link names no page; its gate is the front page's.
+    const bare = await get(runtime, LANES_HOST, `/__spacefast/in/${LINK_TOKEN}`);
+    expect(bare.status).toBe(403);
+    const bareHtml = await bare.text();
+    expect(bareHtml).toContain("That link doesn&#039;t work anymore.");
+    expect(bareHtml).toContain('name="return" value="/"');
+
     const before = exchangeRequests.length;
     const retried = await get(runtime, LANES_HOST, `/__/${LINK_TOKEN}`);
     expect(retried.status).toBe(404);
     expect(retried.headers.get("set-cookie")).toBeNull();
+    // No page to return to: an access page that says what happened and offers
+    // the Space, never the generic "could not serve this page".
+    const notFound = await retried.text();
+    expect(notFound).toContain("<h1>That link doesn’t work here</h1>");
+    expect(notFound).toContain("This link may have expired or already been used.");
+    expect(notFound).toContain('href="/">Go to the Space</a>');
     expect(
       exchangeRequests
         .slice(before)
@@ -2178,8 +2255,13 @@ test("an invalid access URL never serves customer content", async () => {
 // parameter were absent: the Space's own gate, no token error, no 500. A prober
 // learns nothing about whether the token ever existed.
 test("a share token that opens nothing serves the gate, not content", async () => {
-  const refused = await get(runtime, LANES_HOST, `/docs/?__=${LINK_PREFIX}neverMintedToken0000`, {
-    headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+  const navigate = { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+  const hop = await get(runtime, LANES_HOST, `/docs/?__=${LINK_PREFIX}neverMintedToken0000`, {
+    headers: navigate,
+  });
+  expect(hop.status).toBe(302);
+  const refused = await get(runtime, LANES_HOST, hop.headers.get("location") ?? "", {
+    headers: navigate,
   });
   expect(refused.status).toBe(403);
   expect(refused.headers.get("location")).toBeNull();
@@ -2603,11 +2685,7 @@ test.each(systemViewRefusals)("a system view token $name opens nothing", async (
 });
 
 test("a system view token can never be redeemed into a session", async () => {
-  const redeem = await get(
-    runtime,
-    LANES_HOST,
-    `/__sf/redeem?sf_token=${encodeURIComponent(systemViewToken())}&return=%2Fdocs%2F`,
-  );
-  expect(redeem.status).toBe(403);
+  const redeem = await landHandoff(runtime, LANES_HOST, systemViewToken(), "/docs/");
+  expect(redeem.status).toBe(404);
   expect(redeem.headers.get("set-cookie")).toBeNull();
 });

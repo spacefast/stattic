@@ -1701,7 +1701,7 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         require_once __DIR__ . '/connectors.php';
     }
     match ($handler) {
-        'access_callback' => _stattic_access_handle_callback($serving, $requestHost, $privateRoot),
+        'share_oauth_callback' => _stattic_share_oauth_callback($serving, $requestHost),
         'access_client_script' => _stattic_access_handle_client_script(),
         'access_account_start' => _stattic_access_handle_account_start($serving, $requestHost),
         'access_session' => _stattic_access_handle_session($serving, $requestHost),
@@ -1715,6 +1715,9 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         'space_client' => _stattic_space_client_serve($requestPath),
         'sell_status' => _stattic_sell_handle_status($serving),
         'access_link_entry' => _stattic_access_handle_link_entry($serving, $requestPath, $requestHost),
+        'access_in' => _stattic_access_handle_in($serving, $requestPath, $requestHost),
+        'access_legacy_redeem' => _stattic_access_handle_legacy_redeem($serving, $requestHost),
+        'access_door' => _stattic_access_handle_door($serving, $requestHost),
     };
 }
 

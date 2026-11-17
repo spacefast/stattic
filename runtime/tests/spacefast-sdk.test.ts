@@ -36,8 +36,8 @@ import {
   deploy,
   errorCode,
   get,
-  postAccessCallback,
   prependHostRoutes,
+  redeemHandoff,
   problemDocument,
   publicAccessConfig,
   putRoute,
@@ -1009,9 +1009,9 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
     // Never the descriptor's own URL: the page goes to this host's account
     // start route, which is what mints browser state before the handoff.
     accountUrl: "http://local-sdk.site.test/__spacefast/access/account",
-    // The marker this engine writes for a returning account, in the spelling
-    // this plain-HTTP host uses, and the overlay's cue that it can renew one.
-    returningAccountCookie: "spacefast_returning_dev",
+    // Renewal runs only through the Space's own sign-in, and this Space signs
+    // in through the account broker, so the overlay is never told to renew.
+    returningAccountCookie: null,
     features: { picker: true, drawing: true, capture: false, attachments: true },
     // The revocable read key rides the manifest: that IS the fresh-URL
     // mechanism. Its exact value is asserted below.
@@ -1535,6 +1535,8 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     // Reading the manifest costs the visitor no session: only the mint below does.
     expect(response.headers.getSetCookie()).toHaveLength(0);
 
+    // Well-formed on purpose: even a valid guest id the page names is ignored.
+    const pageChosenId = `pg1_${"p".repeat(43)}`;
     const ticket = (headers: Record<string, string> = {}) =>
       get(runtime, "comments-exchange.site.test", "/__spacefast/comments/ticket", {
         method: "POST",
@@ -1546,7 +1548,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
         },
         body: JSON.stringify({
           pagePath: "/docs",
-          identity: { anonymousId: "anon_browser_chosen", name: "Page visitor", namedByUser: true },
+          identity: { anonymousId: pageChosenId, name: "Page visitor", namedByUser: true },
         }),
       });
     const forwardedIdentity = (exchange?: { payload: Record<string, unknown> }) =>
@@ -1589,7 +1591,8 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
       },
     });
     const firstIdentity = forwardedIdentity(exchanges[0]);
-    expect(firstIdentity.anonymousId).toMatch(/^anon_[a-f0-9]{32}$/);
+    expect(firstIdentity.anonymousId).toMatch(/^pg1_[A-Za-z0-9_-]{43}$/);
+    expect(firstIdentity.anonymousId).not.toBe(pageChosenId);
     expect(firstIdentity.name).toBe("Page visitor");
     expect(firstIdentity.namedByUser).toBe(true);
     const firstSessionId = exchanges[0]?.payload["visitorSessionId"];
@@ -1610,7 +1613,7 @@ test("Comments configuration stays on-origin while the runtime authenticates ups
     });
     expect(tampered.status).toBe(200);
     const tamperedIdentity = forwardedIdentity(exchanges[2]);
-    expect(tamperedIdentity.anonymousId).toMatch(/^anon_[a-f0-9]{32}$/);
+    expect(tamperedIdentity.anonymousId).toMatch(/^pg1_[A-Za-z0-9_-]{43}$/);
     expect(tamperedIdentity.anonymousId).not.toBe(firstIdentity.anonymousId);
 
     // The Zero mint answers on the canonical path the config response now
@@ -2081,7 +2084,7 @@ test("a secure runtime reports the https published origin to the exchange", asyn
         },
         body: JSON.stringify({
           pagePath: "/docs",
-          identity: { anonymousId: "anon_x", name: "Visitor", namedByUser: false },
+          identity: { name: "Visitor", namedByUser: false },
         }),
       },
     );
@@ -2270,7 +2273,7 @@ test("private SDK bytes require admission before any body", async () => {
     exp: now + 300,
     jti: randomUUID(),
   });
-  const callback = await postAccessCallback(runtime, host, token);
+  const callback = await redeemHandoff(runtime, host, token);
   expect(callback.status).toBe(303);
   const cookie = (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
 
@@ -2408,7 +2411,7 @@ test("private SDK bytes require admission before any body", async () => {
     expect(visitorSessionId).toBe(identifiedClaims["sid"]);
     // The pseudonym is the one thing that is NOT the session id: it survives a
     // credential attach, which rotates the session.
-    expect(identifiedClaims["anonymousId"]).toMatch(/^anon_[a-f0-9]{32}$/);
+    expect(identifiedClaims["anonymousId"]).toMatch(/^pg1_[A-Za-z0-9_-]{43}$/);
 
     // Stable across mints: the next exchange reuses what the cookie carries
     // instead of minting a second identity beside it.
@@ -2482,6 +2485,153 @@ test("a large tag module rides the blob store, not the overlay", async () => {
   const blobs = path.join(spaceRoot(runtime, "spc_sdk_big"), "blobs");
   const bodySha = createHash("sha256").update(marker).digest("hex");
   expect(existsSync(path.join(blobs, bodySha.slice(0, 2), bodySha))).toBe(true);
+});
+
+// The bar replaces the collab overlay and the separate t.js tag only where the
+// control plane projected it (an engine with `runtime.space-bar.v1`) and only on
+// a private Space. A public Space, and any projection without `bar`, keep the
+// tags they have today.
+test("sdk.js loads the Space bar only where the bar is projected and the Space is private", async () => {
+  const runtime = await startRuntime({
+    atomicData: { SPACEFAST_CAST_API_URL: "https://cast.example.test" },
+  });
+  runtimes.push(runtime);
+  // A private Space: only the platform's own files are public, so sdk.js
+  // answers while `/` stays behind the gate.
+  // Comments on, so without the bar this Space would load the collab overlay.
+  const accessPage = {
+    displayName: "Bar",
+    accountUrl: "https://api.spacefast.com/acquire/bar/account",
+    connections: [],
+    exchange: {
+      passwordUrl: "https://api.spacefast.com/acquire/bar/password",
+      tokenUrl: "https://api.spacefast.com/acquire/bar/token",
+      emailUrl: "https://api.spacefast.com/acquire/bar/email",
+      requestUrl: "https://api.spacefast.com/acquire/bar/request",
+      logoutUrl: "https://api.spacefast.com/runtime/collaboration-sessions/revoke",
+      commentsTicketUrl: "https://api.spacefast.com/runtime/comments/bar/ticket",
+      credential: "runtime-comments-credential-0000000000000000000000000000",
+    },
+  };
+  // A private Space opens only the platform's own files without a session, so
+  // sdk.js answers while `/` stays behind the gate.
+  const routeConfig = (visibility: "private" | "public") => {
+    const config = publicAccessConfig({ mode: "website", site_title: "Bar" });
+    const publicGrant = {
+      id: "grt_runtime_public_live",
+      generation: 1,
+      name: "Public",
+      audience: { kind: "public" },
+      resources: {
+        include: visibility === "private" ? ["/__spacefast/**"] : ["/**"],
+        exclude: [],
+      },
+      capabilities: ["page.view"],
+      constraints: {},
+      target: { kind: "live" },
+      source: { kind: "managed", reference: "test:runtime-public" },
+    };
+    return {
+      ...config,
+      authorization: {
+        generation: 1,
+        sessionVersion: 0,
+        fence: "none",
+        acquireUrl: "https://api.spacefast.com/acquire/bar",
+        spaceClaimed: true,
+        accessPage,
+        grants: [publicGrant],
+      },
+    };
+  };
+  const tracker = {
+    src: RUNTIME_TRACKER_SCRIPT_PATH,
+    endpoint: "https://beacon.example.test",
+    key: "pk_bar",
+    consent: "count",
+  };
+  const bar = {
+    frame_url: "https://access.example.test/bar/spc_bar",
+    dashboard_url: "https://my.example.test/spaces/spc_bar",
+  };
+  const activate = async (visibility: "private" | "public", withBar: boolean) => {
+    const sdkConfig = {
+      cast_api_base: "https://cast.example.test",
+      cast_ws_url: "wss://cast.example.test/socket/websocket",
+      cast_resource_key: "resource_bar",
+      comments: LOCAL_COMMENTS,
+      tracker,
+      bar: withBar ? bar : null,
+    };
+    await putRoute(runtime, "spc_bar", "production", {
+      version_id: "ver_bar_1",
+      config: {
+        ...routeConfig(visibility),
+        sdk: { revision: `sdk-bar-${visibility}-${withBar}`, config: sdkConfig },
+      },
+      production_hostnames: ["bar.site.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    });
+  };
+  await deploy(runtime, {
+    spaceId: "spc_bar",
+    versionId: "ver_bar_1",
+    files: { "index.html": "<h1>Bar</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: routeConfig("private"),
+      production_hostnames: ["bar.site.test"],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  const sdk = async () => {
+    const response = await get(runtime, "bar.site.test", "/__spacefast/sdk.js");
+    expect(response.status).toBe(200);
+    const { head } = runSdk(await response.text(), { host: "bar.site.test" });
+    return head.map((node) => ({ src: node.src, type: node.type, dataset: { ...node.dataset } }));
+  };
+
+  await activate("private", false);
+  expect((await get(runtime, "bar.site.test", "/")).status).not.toBe(200);
+  // Private, no bar projected (an old engine's projection): today's tags,
+  // t.js and the collab overlay.
+  const today = (await sdk()).map((node) => node.src);
+  expect(today[0]).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(today).toContain("https://cast.example.test/sdk/v1/collab.js");
+
+  // Private, bar projected: one tag, client.js, told where the frame is and
+  // which tracker to start. No collab overlay of its own, no separate t.js
+  // tag. sdk.js is one cached answer for every visitor, so it cannot know
+  // whether the bar boots: client.js boots it for an account and loads the
+  // overlay it is handed here for anyone else, so a share-link or password
+  // holder keeps Comments (packages/space-client/src/bar.test.ts).
+  await activate("private", true);
+  expect(await sdk()).toEqual([
+    {
+      src: "/__spacefast/client.js",
+      type: "module",
+      dataset: {
+        sfBarFrame: bar.frame_url,
+        sfBarDashboard: bar.dashboard_url,
+        sfTracker: RUNTIME_TRACKER_SCRIPT_PATH,
+        sfTrackerSite: "pk_bar",
+        sfTrackerEndpoint: "https://beacon.example.test",
+        sfCollabTheme: "/__spacefast/collab.css",
+        sfCollabConfig: "/__spacefast/collab.json",
+        sfCollab: "https://cast.example.test/sdk/v1/collab.js",
+      },
+    },
+  ]);
+
+  // Public, bar projected: the bar never shows on a public Space, which keeps
+  // today's tags.
+  await activate("public", true);
+  const open = (await sdk()).map((node) => node.src);
+  expect(open[0]).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(open).toContain("https://cast.example.test/sdk/v1/collab.js");
+  expect(open).not.toContain("/__spacefast/client.js");
 });
 
 test("only named routes are public under the private platform namespaces", async () => {

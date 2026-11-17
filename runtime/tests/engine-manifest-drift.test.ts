@@ -33,7 +33,7 @@ const manifest = JSON.parse(
 const NOT_SHIPPED = {
   "identity/": "pinned plugin distribution and build inputs, installed through its extracted tree",
   "bootstrap-plugin/":
-    "signed box bootstrap plugin source, packaged only in the paired bootstrap zip",
+    "installer helper source, staged over SSH and packaged only in the paired bootstrap zip",
   "browser-specs/": "real-browser runtime tests, never installed on a site",
   "browser/":
     "payment browser source; scripts/build-sell-payment.mjs emits the shipped runtime bundle",

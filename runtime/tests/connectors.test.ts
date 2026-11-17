@@ -23,7 +23,7 @@ import {
   deploy,
   get,
   PHP_BINARY,
-  postAccessCallback,
+  redeemHandoff,
   publicAccessConfig,
   putRoute,
   type Runtime,
@@ -183,7 +183,7 @@ beforeAll(async () => {
     },
   });
   const now = Math.floor(Date.now() / 1000);
-  const handoff = await postAccessCallback(
+  const handoff = await redeemHandoff(
     rt,
     HOST,
     signEd25519Jwt(visitorKey.privateKey, visitor.kid, {

@@ -15,7 +15,11 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => '/__zero/auth/native', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/api/', 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
-    ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH . '/redeem', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_callback'],
+    ['path' => STATTIC_SHARE_OAUTH_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
+    ['path' => STATTIC_SHARE_OAUTH_CALLBACK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'share_oauth_callback'],
+    // The Space's own server code answers here, after the access check; no
+    // published file can, because uploads refuse every `__spacefast` segment.
+    ['path' => STATTIC_SHARE_OAUTH_APP_CALLBACK_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => true, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],
     ['path' => STATTIC_ACCESS_ACCOUNT_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
     ['path' => STATTIC_ACCESS_SESSION_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_session'],
@@ -32,6 +36,10 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_COMMENTS_MENTIONABLE_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ...STATTIC_LEGACY_ZERO_TICKET_PATHS,
     ['path' => STATTIC_ACCESS_ENTRY_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_entry_token', 'visitor' => true, 'tenant' => true, 'stage' => 'entry', 'handler' => 'access_link_entry'],
+    ['path' => STATTIC_ACCESS_LEGACY_REDEEM_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_legacy_redeem'],
+    ['path' => STATTIC_ACCESS_IN_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_in_token', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_in'],
+    // The door: every way into a private Space on one page.
+    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_door'],
     ['path' => STATTIC_SPACEFAST_SDK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
     ['path' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
     ['path' => STATTIC_SPACEFAST_COLLAB_THEME_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'sdk'],
@@ -60,7 +68,9 @@ const SPACEFAST_CONTROL_PATHS = [
     // tenant routes still may not claim it.
     ['path' => STATTIC_FIRST_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'destination' => true, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_RUNTIME_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
-    ['path' => STATTIC_RUNTIME_VISITOR_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
+    // The old handoff namespace: only `/__sf/redeem` answers (above), and no
+    // tenant may claim the rest while an old control plane can still send there.
+    ['path' => '/__sf', 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     // An entry-stage row so the front door admits it and no tenant can publish
     // over it; serve.php dispatches it AFTER the Space access check. Must precede
     // the '/__stattic' catch-all below.

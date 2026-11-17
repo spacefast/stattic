@@ -48,6 +48,10 @@ function check(bool $condition, string $label): void
     }
 }
 
+check(_stattic_redact_access_secrets('/__spacefast/callback?state=secret-state&code_challenge=secret-challenge&code=secret-code&code_verifier=secret-verifier&oauth_query=secret-query&scope=profile') === '/__spacefast/callback?state=[redacted]&code_challenge=[redacted]&code=[redacted]&code_verifier=[redacted]&oauth_query=[redacted]&scope=profile', 'OAuth request logs redact state, challenge, code and continuation');
+
+check(_stattic_cookie_header_without_platform_cookies('__Host-spacefast_oauth_spc_test=secret-cookie; app_preference=dark') === 'app_preference=dark', 'OAuth cookies are stripped before tenant code and upstreams');
+
 // Only positive Fetch Metadata identification opts token exchanges into a hop.
 $navigationServer = $_SERVER;
 foreach ([
@@ -668,17 +672,6 @@ check(
 // (X-Real-IP, CF-Connecting-IP, X-Forwarded-Host) are attacker-controlled, so
 // there is no address to match. What survives: country (a server-set
 // fastcgi_param), user-agent selectors, and fail-closed for a stored ipCidrs grant.
-$ssoFragment = _stattic_access_lanes_fragment(
-    ['account' => null, 'connections' => [['startUrl' => 'https://access.example.test/identity/acn_example/start?spaceId=spc_example', 'label' => 'Example']], 'exchange' => null, 'password' => false, 'link' => false, 'request' => false],
-    'page.example.test',
-    '/docs/?mode=present',
-    '',
-    null,
-    null
-);
-preg_match('/href="([^"]+)"/', $ssoFragment, $ssoMatch);
-parse_str(parse_url(html_entity_decode($ssoMatch[1] ?? ''), PHP_URL_QUERY) ?? '', $ssoQuery);
-check(($ssoQuery['return'] ?? null) === '/docs/', 'SSO start receives a query-free access scope');
 
 $networkGrant = [
     'id' => 'grt_network',
@@ -744,6 +737,38 @@ check(
         && ($unclaimedProjection['grantIndex']['authorities'] ?? null) === [],
     'historical access projections retain existing lanes without browser-token exchange'
 );
+// Visitor-session keys. An overlay an older engine wrote carries no session
+// key: the box signs and verifies exactly as that engine did, under the
+// exchange credential, until its next route sync. Once the box has its own
+// key, a cookie signed the older way verifies nothing.
+if (is_array($unclaimedProjection)) {
+    $legacyServing = ['space_id' => 'spc_unit_session', 'authorization' => $unclaimedProjection];
+    $ownServing = [
+        'space_id' => 'spc_unit_session',
+        'authorization' => [...$unclaimedProjection, 'sessionKey' => str_repeat('ab', 32)],
+    ];
+    check(
+        _stattic_access_session_hmac_key($legacyServing, 'spacefast-access-session')
+            === hash_hmac('sha256', 'spacefast-access-session', str_repeat('x', 32)),
+        'an overlay without a session key derives the session key from the exchange credential, as older engines do'
+    );
+    $legacyCookie = _stattic_anonymous_session_encode($legacyServing, 'unit.test', ['anonymousId' => 'pg1_' . str_repeat('A', 43)]);
+    check(
+        is_string($legacyCookie)
+            && _stattic_anonymous_session_decode($legacyServing, 'unit.test', $legacyCookie) !== null
+            && _stattic_anonymous_session_decode($ownServing, 'unit.test', $legacyCookie) === null,
+        'a session signed under the exchange credential stops verifying once the box has its own key'
+    );
+    $ownCookie = _stattic_anonymous_session_encode($ownServing, 'unit.test', ['anonymousId' => 'pg1_' . str_repeat('A', 43)]);
+    check(
+        is_string($ownCookie) && _stattic_anonymous_session_decode($ownServing, 'unit.test', $ownCookie) !== null,
+        'a session signed under the box key verifies'
+    );
+    check(
+        _stattic_access_session_hmac_key(['space_id' => 'spc_unit_session_laneless', 'authorization' => [...$unclaimedProjection, 'accessPage' => null, 'sessionKey' => str_repeat('ab', 32)]], 'spacefast-access-session') === null,
+        'a Space without an exchange holds no session, with or without a box key'
+    );
+}
 check(
     in_array('page.view', _stattic_grant_decision(
         $networkProjection,
@@ -1793,6 +1818,88 @@ putenv('SPACEFAST_RUNTIME_JWKS_B64=' . base64_encode(json_encode([
     ]],
 ])));
 
+// --- Platform key rotation: the fetched JWKS decides once a box holds one ---------
+
+$rotationRoot = realpath(sys_get_temp_dir()) . '/spacefast-rotation-' . bin2hex(random_bytes(8)) . '/.stattic/storage';
+mkdir($rotationRoot . '/runtime', 0700, true);
+$rotationNext = sodium_crypto_sign_keypair();
+$rotationNextJwk = [
+    'kty' => 'OKP', 'crv' => 'Ed25519', 'kid' => 'spacefast-runtime-next', 'alg' => 'EdDSA', 'use' => 'sig',
+    'x' => _stattic_base64url_encode(sodium_crypto_sign_publickey($rotationNext)),
+];
+$rotationLocalJwk = [
+    'kty' => 'OKP', 'crv' => 'Ed25519', 'kid' => 'runtime', 'alg' => 'EdDSA', 'use' => 'sig',
+    'x' => _stattic_base64url_encode($artifactPublicKey),
+];
+$rotationKids = static fn (array $keys): array => array_map(static fn (array $key): string => (string) $key['kid'], $keys);
+check(
+    $rotationKids(_stattic_runtime_signing_jwks($rotationRoot, 'runtime', false)) === ['runtime'],
+    'key rotation: before its first fetch a box trusts its configured keys'
+);
+check(
+    _stattic_runtime_signing_jwks($rotationRoot, 'spacefast-runtime-next', false) === [],
+    'key rotation: a serving lane never fetches for an unknown kid'
+);
+$rotationWrite = static function (array $keys, int $attemptedAt = 0) use ($rotationRoot): void {
+    _stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+        'fetched_at' => time(), 'attempted_at' => $attemptedAt, 'jwks' => ['keys' => $keys],
+    ]);
+};
+// Stage 1 of a rotation: the API publishes current + next.
+$rotationWrite([$rotationLocalJwk, $rotationNextJwk]);
+check(
+    $rotationKids(_stattic_runtime_signing_jwks($rotationRoot, 'spacefast-runtime-next', false)) === ['spacefast-runtime-next'],
+    'key rotation: a published next key verifies though no configured copy has it'
+);
+check(
+    $rotationKids(_stattic_runtime_signing_jwks($rotationRoot, 'runtime', false)) === ['runtime'],
+    'key rotation: the configured key verifies while the API still publishes it'
+);
+// Stage 3: the original key is retired from the published set.
+$rotationWrite([$rotationNextJwk]);
+check(
+    _stattic_runtime_signing_jwks($rotationRoot, 'runtime', false) === [],
+    'key rotation: a configured key the API no longer publishes stops verifying'
+);
+// The same rule on the visitor lane, for a route's stale `visitor_jwks`.
+$rotationVisitorClaims = ['sub' => 'user:carol', 'spaceId' => 'spc_unit', 'generation' => 0, 'iss' => 'spacefast-api', 'aud' => 'spc_unit', 'host' => 'unit.test', 'exp' => time() + 600];
+$rotationVisitorToken = static function (string $kid, string $secret) use ($rotationVisitorClaims): string {
+    $header = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => $kid], JSON_UNESCAPED_SLASHES));
+    $body = _stattic_base64url_encode(json_encode($rotationVisitorClaims, JSON_UNESCAPED_SLASHES));
+    return $header . '.' . $body . '.' . _stattic_base64url_encode(sodium_crypto_sign_detached($header . '.' . $body, $secret));
+};
+$rotationVisitorOptions = [
+    'issuers' => [['kid' => 'runtime', 'alg' => 'EdDSA', 'publicKey' => $rotationLocalJwk['x']]],
+    'issuer' => 'spacefast-api', 'host' => 'unit.test', 'spaceId' => 'spc_unit', 'generation' => 0,
+    'privateRoot' => $rotationRoot,
+];
+check(
+    _stattic_visitor_verify($rotationVisitorToken('spacefast-runtime-next', sodium_crypto_sign_secretkey($rotationNext)), $rotationVisitorOptions) !== null,
+    'key rotation: a visitor token under the new key verifies before the route is rewritten'
+);
+check(
+    _stattic_visitor_verify($rotationVisitorToken('runtime', $artifactSecretKey), $rotationVisitorOptions) === null,
+    'key rotation: a visitor token under a retired key fails even while the route still lists it'
+);
+// A failed read keeps the last good set and waits a minute before trying again.
+putenv('SPACEFAST_API_BASE_URL=https://127.0.0.1:1');
+$rotationWrite([$rotationNextJwk], time());
+check(
+    $rotationKids(_stattic_runtime_platform_jwks($rotationRoot, 'unknown_kid') ?? []) === ['spacefast-runtime-next']
+        && (int) (_stattic_runtime_read_json(_stattic_runtime_platform_jwks_path($rotationRoot))['attempted_at'] ?? 0) <= time(),
+    'key rotation: an unknown kid inside the retry floor reads the kept set without fetching'
+);
+$rotationWrite([$rotationNextJwk], time() - 120);
+$rotationReason = null;
+$rotationKept = _stattic_runtime_platform_jwks($rotationRoot, 'unknown_kid', $rotationReason);
+check(
+    $rotationKids($rotationKept ?? []) === ['spacefast-runtime-next'] && $rotationReason === 'jwks_fetch_failed'
+        && (int) (_stattic_runtime_read_json(_stattic_runtime_platform_jwks_path($rotationRoot))['attempted_at'] ?? 0) >= time() - 5,
+    'key rotation: a failed fetch keeps the last good set and records the attempt'
+);
+putenv('SPACEFAST_API_BASE_URL');
+_stattic_job_runner_unit_rm_recursive(dirname($rotationRoot, 2));
+
 $mintBundleToken = static function (array $claims) use ($artifactSecretKey): string {
     $header = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES));
     $body = _stattic_base64url_encode(json_encode($claims, JSON_UNESCAPED_SLASHES));
@@ -2165,6 +2272,19 @@ $_SERVER['GEOIP_COUNTRY_CODE'] = 'GB';
 $_SERVER['GEOIP_CITY'] = 'London';
 $fxHeaders = _stattic_functions_dispatch_headers($fxConfig, 'spc_1', 'ver_1', 'fxr_abc', $fxDispatchToken, 'https://shop.example', 'open');
 check($fxHeaders['sf-fx-d1'] === 'DB', 'dispatch: imports the declared D1 binding');
+// A route config from a control plane that grants no Functions scope (or names
+// no key) sends no Space token, so the host's admission check stays what it was.
+check(
+    _stattic_functions_space_token(['space_id' => 'spc_1', 'authorization' => null]) === null
+        && _stattic_functions_space_token(['space_id' => 'spc_1', 'authorization' => ['accessPage' => ['identity' => [
+            'clientId' => 'spacefast-space:spc_1',
+            'tokenUrl' => 'https://api.spacefast.test/v1/auth/oauth2/token',
+            'resource' => 'https://api.spacefast.test/space-runtime',
+            'kid' => 'kid_unit',
+            'scope' => 'space-runtime:exchange space-runtime:callback space-runtime:connectors',
+        ]]]]) === null,
+    'dispatch: no Space token without the Functions scope'
+);
 check(!array_key_exists('sf-fx-assets', $fxHeaders), 'dispatch: a worker without an assets binding names none');
 $fxAssetsConfig = $fxConfig;
 $fxAssetsConfig['artifact']['assets'] = ['binding' => 'ASSETS', 'runWorkerFirst' => false, 'navigationFallback' => false];
@@ -2250,10 +2370,10 @@ check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake witho
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
 // The platform's own surfaces are never the worker's to answer.
-foreach (['/identity', '/identity/session', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast'] as $reserved) {
+foreach (['/identity', '/identity/session', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast', '/__spacefast/callback', '/__spacefast/oauth'] as $reserved) {
     check(!_stattic_functions_dispatchable($reserved, 'GET'), 'dispatch: refuses reserved path ' . $reserved);
 }
-foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storage', '/storage/123', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok'] as $ordinary) {
+foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storage', '/storage/123', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok', '/__spacefast/oauth/app'] as $ordinary) {
     check(_stattic_functions_dispatchable($ordinary, 'GET'), 'dispatch: allows ' . $ordinary);
 }
 check(!_stattic_functions_dispatchable('/', 'TRACE'), 'dispatch: refuses TRACE');
@@ -2536,7 +2656,8 @@ check(_stattic_control_path_admits_visitor('/__spacefast/functions/b/' . str_rep
 check(!_stattic_control_path_admits_visitor('/__spacefast/functions'), 'front door: the namespace root is not reachable');
 // A tenant worker must never answer for the platform, whatever the spelling.
 check(_stattic_path_is_reserved('/__spacefast/functions/relay'), 'front door: control paths stay reserved from tenant code');
-check(_stattic_path_is_reserved('/__SF/redeem'), 'front door: a case-folded control namespace is still reserved');
+check(_stattic_path_is_reserved('/__SPACEFAST/callback'), 'front door: a case-folded control namespace is still reserved');
+check(_stattic_path_is_reserved('/__SF/notes'), 'front door: the old handoff namespace stays reserved while /__sf/redeem answers');
 check(!_stattic_path_is_reserved('/__spanish/page'), 'front door: reservation is whole-segment, not a string prefix');
 
 // The canonical Zero namespace admits exactly the control routes, on both
@@ -2583,7 +2704,7 @@ foreach (['/__first/.htaccess', '/__first/__spacefast/x', '/__first/a./b', '/__f
     check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: other path rules still hold under First ' . substr($destination, 0, 40));
 }
 check(_stattic_runtime_redirect_target_safe('/__first/' . str_repeat('x', 1016), 'redirect'), 'destination: the path length limit under First is the ordinary one');
-foreach (['/__zero/x', 'https://example.com/__zero/api', '/__spacefast/x', 'https://example.com/__spacefast/x', '/__sf/x', '/__span/x', '/__stattic/x'] as $destination) {
+foreach (['/__zero/x', 'https://example.com/__zero/api', '/__spacefast/x', 'https://example.com/__spacefast/x', '/__SPACEFAST/x', '/__span/x', '/__stattic/x'] as $destination) {
     check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: a redirect may not target ' . $destination);
     check(!$hostRedirectCompiles($destination), 'destination: a host redirect route may not target ' . $destination);
 }
@@ -2614,7 +2735,7 @@ check(
     trim($proxyTargetProbeOutput('https://example.com/__first/api/v1')) === 'allowed /__first/api/v1',
     'destination: the proxy lane relays to a First API upstream'
 );
-foreach (['https://example.com/__zero/x', 'https://example.com/__spacefast/x', 'https://example.com/__SF/redeem'] as $upstream) {
+foreach (['https://example.com/__zero/x', 'https://example.com/__spacefast/x', 'https://example.com/__SPACEFAST/callback'] as $upstream) {
     $probeText = $proxyTargetProbeOutput($upstream);
     check(
         str_contains($probeText, 'Proxy route cannot target runtime control paths.') && !str_contains($probeText, 'allowed'),

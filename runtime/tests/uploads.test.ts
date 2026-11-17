@@ -1302,7 +1302,7 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   // path per code is enough for that — more would re-walk the fixture.
   const rejected: Array<[string, string]> = [
     [".htaccess", "static_control_file_not_supported"],
-    ["__sf/open.html", "static_runtime_control_path_not_supported"],
+    ["__zero/open.html", "static_runtime_control_path_not_supported"],
     ["nested/../evil.html", "invalid_file_path"],
   ];
   let index = 0;

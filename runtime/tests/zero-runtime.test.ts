@@ -10,7 +10,7 @@ import {
   deploy,
   finalizeRaw,
   get,
-  postAccessCallback,
+  redeemHandoff,
   publicAccessConfig,
   putRoute,
   RESPONSES,
@@ -649,7 +649,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       concurrent.map(async (response) => (await response.json()).auth),
     );
     expect(firstIdentity).toMatchObject({ isGuest: true, isAuthenticated: false });
-    expect(firstIdentity.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+    expect(firstIdentity.userId).toMatch(/^guest:pg1_[A-Za-z0-9_-]{43}$/);
     expect(secondIdentity.userId).toBe(firstIdentity.userId);
     const guestUserId = firstIdentity.userId;
 
@@ -674,7 +674,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       /^spacefast_session(?:_dev)?=sfa1_[A-Za-z0-9_-]+\.[a-f0-9]{64}$/,
     );
     let envelope = JSON.parse(readFileSync(capturePath, "utf8"));
-    expect(envelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+    expect(envelope.auth.userId).toMatch(/^guest:pg1_[A-Za-z0-9_-]{43}$/);
     expect(envelope.auth.userId).not.toBe(guestUserId);
 
     const now = Math.floor(Date.now() / 1000);
@@ -706,7 +706,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       },
     });
 
-    const handoff = await postAccessCallback(idRuntime, host, token, "/api/whoami");
+    const handoff = await redeemHandoff(idRuntime, host, token, "/api/whoami");
     expect(handoff.status).toBe(303);
     expect(handoff.headers.get("location")).toBe("/api/whoami");
     const sessionCookie = (handoff.headers.get("set-cookie") ?? "").split(";", 1)[0];
@@ -914,7 +914,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       expect(webhook.status).toBe(201);
       expect(webhook.headers.get("set-cookie")).toBeNull();
       const webhookEnvelope = JSON.parse(readFileSync(capturePath, "utf8"));
-      expect(webhookEnvelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+      expect(webhookEnvelope.auth.userId).toMatch(/^guest:pg1_[A-Za-z0-9_-]{43}$/);
       expect(webhookEnvelope.request.headers.cookie).toBeUndefined();
       expect(readFileSync(`${capturePath}.content-cookie`, "utf8")).toBe("");
     }
@@ -1065,7 +1065,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       headers: {
         cookie: [
           "tenant_cookie=keep",
-          "__Host-spacefast_session=drop-session",
+          `__Host-spacefast_session=sfa1_drop-session.pg1_${"G".repeat(43)}`,
           "__Host-spacefast_frame=drop-frame",
           "__Host-sfi_session=app-session",
           "theme=dark",
@@ -1082,6 +1082,8 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     );
     expect(envelope.request.headers.authorization).toBe("Bearer customer-application-token");
     expect(envelope.request.headers["x-sf-authorization"]).toBeUndefined();
+    // The guest id inside the session cookie reaches no tenant header.
+    expect(JSON.stringify(envelope.request.headers)).not.toContain("pg1_");
 
     const storageUpload = await get(idRuntime, host, "/storage", {
       method: "POST",
@@ -1114,12 +1116,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       exp: now + 3600,
       jti: "jti_zero_identity_capability_only",
     });
-    const capabilityHandoff = await postAccessCallback(
-      idRuntime,
-      host,
-      capabilityOnly,
-      "/api/whoami",
-    );
+    const capabilityHandoff = await redeemHandoff(idRuntime, host, capabilityOnly, "/api/whoami");
     expect(capabilityHandoff.status).toBe(303);
     const capabilityCookie = (capabilityHandoff.headers.get("set-cookie") ?? "").split(";", 1)[0];
     rmSync(capturePath, { force: true });
@@ -1132,7 +1129,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       isGuest: true,
       isAuthenticated: false,
     });
-    expect(envelope.auth.userId).toMatch(/^guest:anon_[a-f0-9]{32}$/);
+    expect(envelope.auth.userId).toMatch(/^guest:pg1_[A-Za-z0-9_-]{43}$/);
 
     // An invited Person who accepted has no platform account and is still
     // somebody: the principal names them, so Zero sees a signed-in identity.
@@ -1155,7 +1152,7 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
       jti: "jti_zero_identity_person",
       profile: { name: "Invited Reviewer" },
     });
-    const personHandoff = await postAccessCallback(idRuntime, host, personToken, "/api/whoami");
+    const personHandoff = await redeemHandoff(idRuntime, host, personToken, "/api/whoami");
     expect(personHandoff.status).toBe(303);
     const personCookie = (personHandoff.headers.get("set-cookie") ?? "").split(";", 1)[0];
     rmSync(capturePath, { force: true });
@@ -2042,7 +2039,7 @@ test("an access-protected Zero endpoint pins private revalidation over a runner-
     exp: now + 3600,
     jti: "jti_zero_cache_private",
   });
-  const handoff = await postAccessCallback(rt, host, token, "/api/private-cached");
+  const handoff = await redeemHandoff(rt, host, token, "/api/private-cached");
   expect(handoff.status).toBe(303);
   const sessionCookie = (handoff.headers.get("set-cookie") ?? "").split(";", 1)[0];
   expect(sessionCookie).toMatch(/^spacefast_session(?:_dev)?=sfv2_[A-Za-z0-9_-]+\.[a-f0-9]{64}$/);

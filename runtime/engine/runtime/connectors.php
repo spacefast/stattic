@@ -252,7 +252,7 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
     if ($requestId !== '' && strlen($requestId) <= 255 && preg_match('/[\x00-\x1F\x7F]/', $requestId) !== 1) {
         $call['requestId'] = $requestId;
     }
-    $result = _stattic_connectors_post($apiUrl . '/v1/runtime/connectors/calls', $token, $call, STATTIC_CONNECTORS_CALL_TIMEOUT_SECONDS);
+    $result = _stattic_connectors_post($apiUrl . '/v1/runtime/connectors/calls', $token, $call, STATTIC_CONNECTORS_CALL_TIMEOUT_SECONDS, $serving);
     $answer = json_decode($result['body'], true);
     if ($result['error'] !== null || !is_array($answer)) {
         _stattic_connectors_refuse(502, 'connectors_unavailable', 'Connections are unavailable. Try again.');
@@ -309,18 +309,32 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
     );
 }
 
-/** A JSON POST to the control plane under the version's connectors credential. */
-function _stattic_connectors_post(string $url, string $token, array $body, int $timeout): array
+/**
+ * A JSON POST to the control plane: under the Space token and the version it
+ * serves when the control plane has registered this box's key, else (or when a
+ * rolled-back control plane refuses it) under the version's connectors
+ * credential.
+ */
+function _stattic_connectors_post(string $url, string $token, array $body, int $timeout, array $serving = []): array
 {
-    return _stattic_http_request([
-        'url' => $url,
-        'method' => 'POST',
-        'headers' => ['Authorization: Bearer ' . $token, 'Content-Type: application/json'],
-        'body' => json_encode($body, JSON_UNESCAPED_SLASHES),
-        'connect_timeout' => 5,
-        'timeout' => $timeout,
-        'schemes' => ['https', 'http'],
-    ]);
+    require_once __DIR__ . '/../shared/space-identity.php';
+    $versionId = is_string($serving['version_id'] ?? null) ? $serving['version_id'] : '';
+    return _stattic_space_identity_send(
+        $versionId !== '' ? $serving : [],
+        static fn (?string $authorization): array => _stattic_http_request([
+            'url' => $url,
+            'method' => 'POST',
+            'headers' => [
+                $authorization ?? 'Authorization: Bearer ' . $token,
+                ...($authorization !== null ? ['Spacefast-Version-Id: ' . $versionId] : []),
+                'Content-Type: application/json',
+            ],
+            'body' => json_encode($body, JSON_UNESCAPED_SLASHES),
+            'connect_timeout' => 5,
+            'timeout' => $timeout,
+            'schemes' => ['https', 'http'],
+        ]),
+    );
 }
 
 function _stattic_connectors_send(array $body): never
@@ -368,7 +382,7 @@ function _stattic_connectors_serve_visitor(array $serving, string $host, string 
         $payload['state'] = $_GET['state'];
     }
     $action = match ($operation) { 'connect' => 'start', 'callback' => 'complete', default => 'revoke' };
-    $result = _stattic_connectors_post($apiUrl . '/v1/runtime/connectors/visitor-connections/' . $action, $token, $payload, 30);
+    $result = _stattic_connectors_post($apiUrl . '/v1/runtime/connectors/visitor-connections/' . $action, $token, $payload, 30, $serving);
     $answer = json_decode($result['body'], true);
     if ($result['error'] === null && $result['status'] >= 400 && $result['status'] < 500 && $result['status'] !== 401 && is_string($answer['code'] ?? null)) {
         // The control plane's verdict with its code, as on a call: an expired

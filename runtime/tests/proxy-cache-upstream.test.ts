@@ -11,8 +11,8 @@ import {
   finalizeRaw,
   get,
   type HostRouteFixture,
-  postAccessCallback,
   prependHostRoutes,
+  redeemHandoff,
   readBlob,
   type Runtime,
   sha256,
@@ -532,12 +532,7 @@ beforeAll(async () => {
   prependHostRoutes(rt, PUBLIC_HOST, routeFixture);
   // Install the content-addressed route fixture before the visitor path first
   // reads the pointer.
-  const callback = await postAccessCallback(
-    rt,
-    ACCESS_HOST,
-    visitorToken(ACCESS_HOST),
-    "/access/token",
-  );
+  const callback = await redeemHandoff(rt, ACCESS_HOST, visitorToken(ACCESS_HOST), "/access/token");
   expect(callback.status).toBe(303);
   accessCookie = (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
 });
@@ -571,7 +566,7 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(denied.status).toBe(403);
     expect(denied.headers.get("cache-control")).toBe("private, no-store");
 
-    const callback = await postAccessCallback(
+    const callback = await redeemHandoff(
       rt,
       ACCESS_HOST_ROUTE,
       visitorToken(ACCESS_HOST_ROUTE),

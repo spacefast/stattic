@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:718d53676b8bb3d02dffa303c6469340072aa24cba682f62daf652995eb91fdc",
+  "digest": "sha256:06861ac76fed1cf1572ea1efd10a6f00a7d191ebd439275d59c7b8baa50e4189",
   "components": [
     {
       "id": "spacefast-identity",
@@ -41,6 +41,14 @@
       "provides": [
         "runtime.access.browser-state.v1",
         "runtime.access.account-hint.v1",
+        "runtime.siws.v1",
+        "runtime.platform-jwks.v1",
+        "runtime.space-subjects.v1",
+        "runtime.space-bar.v1",
+        "runtime.space-identity.v1",
+        "runtime.session-keys.v1",
+        "runtime.functions.space-token.v1",
+        "runtime.access.in.v1",
         "runtime.security.tenant-containment.v1",
         "runtime.version-evidence.read-only.v1",
         "runtime.functions.ownership.v1",

@@ -7,7 +7,7 @@ import path from "node:path";
 import {
   deploy,
   get,
-  postAccessCallback,
+  redeemHandoff,
   putRoute,
   signEd25519Jwt,
   type Runtime,
@@ -170,11 +170,7 @@ async function openAuthorities(
   spaceId: string,
   authorities: string[],
 ): Promise<string> {
-  const callback = await postAccessCallback(
-    runtime,
-    host,
-    visitorToken(host, spaceId, authorities),
-  );
+  const callback = await redeemHandoff(runtime, host, visitorToken(host, spaceId, authorities));
   expect(callback.status).toBe(303);
   return (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
 }

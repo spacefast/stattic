@@ -17,6 +17,8 @@ import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:cr
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+import { z } from "zod";
+
 import { runtimeSecurityTelemetrySchema } from "../../packages/common/src/contracts/security-telemetry.ts";
 import { RUNTIME_ACCESS_SESSION_PATH } from "../../packages/common/src/utils/runtime-paths.ts";
 import {
@@ -30,12 +32,13 @@ import {
   healthServing,
   journalRecords,
   PHP_BINARY,
-  postAccessCallback,
+  redeemHandoff,
   putRoute,
   RUNTIME_HTTP_API_BASE,
   sha256,
   signEd25519Jwt,
   spaceRoot,
+  spaceSessionKey,
   startRuntime,
   type Runtime,
   visitorIssuer,
@@ -479,7 +482,7 @@ async function openAuthorities(
     principal: options.principal,
     identity: options.identity,
   });
-  const callback = await postAccessCallback(runtime, host, token, "/", options.cookie);
+  const callback = await redeemHandoff(runtime, host, token, "/", options.cookie);
   expect(callback.status).toBe(303);
   const cookie = setCookieValue(callback);
   expect(cookie).toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
@@ -531,8 +534,11 @@ const AUTHORITY_KEYS = [
   ["expiresAt", "x"],
 ] as const;
 
-function sessionSigningKey(label: string): string {
-  return createHmac("sha256", EXCHANGE_CREDENTIAL).update(label).digest("hex");
+/** The key the box signs this host's sessions with, so a cookie built here is one it minted. */
+function sessionSigningKey(host: string, label: string): string {
+  return createHmac("sha256", spaceSessionKey(runtime, spaceForHost(host)))
+    .update(label)
+    .digest("hex");
 }
 
 function cookieCredential(cookie: string): string {
@@ -575,7 +581,7 @@ function encodeSession(host: string, claims: SessionClaims): string {
   const encoded = Buffer.from(JSON.stringify({ ...claims, authorities: packed }), "utf8").toString(
     "base64url",
   );
-  const signature = createHmac("sha256", sessionSigningKey("spacefast-access-session"))
+  const signature = createHmac("sha256", sessionSigningKey(host, "spacefast-access-session"))
     .update(`${host}\0${encoded}`)
     .digest("hex");
   return `${COOKIE_NAME}=${SESSION_PREFIX}${encoded}.${signature}`;
@@ -614,7 +620,7 @@ function anonymousSessionCookie(
   const encoded = Buffer.from(JSON.stringify({ ...payload, sv: sessionVersion }), "utf8").toString(
     "base64url",
   );
-  const signature = createHmac("sha256", sessionSigningKey("spacefast-anonymous-session"))
+  const signature = createHmac("sha256", sessionSigningKey(host, "spacefast-anonymous-session"))
     .update(`${host}\0${encoded}`)
     .digest("hex");
   return `${COOKIE_NAME}=${ANONYMOUS_PREFIX}${encoded}.${signature}`;
@@ -1109,31 +1115,31 @@ test("a Space with no visitor lanes denies uniformly and discloses nothing", asy
 test("access callback handoffs require both the Space audience and request host", async () => {
   const authorities = ["member:mem_owner"];
 
-  const missingAudience = await postAccessCallback(
+  const missingAudience = await redeemHandoff(
     runtime,
     PRIVATE_HOST,
     callbackToken(PRIVATE_HOST, authorities, { audience: null }),
   );
-  expect(missingAudience.status).toBe(403);
+  expect(missingAudience.status).toBe(404);
   expect(missingAudience.headers.get("set-cookie")).toBeNull();
 
-  const mismatchedAudience = await postAccessCallback(
+  const mismatchedAudience = await redeemHandoff(
     runtime,
     PRIVATE_HOST,
     callbackToken(PRIVATE_HOST, authorities, { audience: "spc_access_elsewhere" }),
   );
-  expect(mismatchedAudience.status).toBe(403);
+  expect(mismatchedAudience.status).toBe(404);
   expect(mismatchedAudience.headers.get("set-cookie")).toBeNull();
 
-  const mismatchedHost = await postAccessCallback(
+  const mismatchedHost = await redeemHandoff(
     runtime,
     PRIVATE_HOST,
     callbackToken(PRIVATE_HOST, authorities, { tokenHost: OTHER_PRIVATE_HOST }),
   );
-  expect(mismatchedHost.status).toBe(403);
+  expect(mismatchedHost.status).toBe(404);
   expect(mismatchedHost.headers.get("set-cookie")).toBeNull();
 
-  const matching = await postAccessCallback(
+  const matching = await redeemHandoff(
     runtime,
     PRIVATE_HOST,
     callbackToken(PRIVATE_HOST, authorities),
@@ -1141,25 +1147,6 @@ test("access callback handoffs require both the Space audience and request host"
   expect(matching.status).toBe(303);
   expect(matching.headers.get("referrer-policy")).toBe("no-referrer");
   expect(setCookieValue(matching)).toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
-
-  // The browser handoff reads `sf_token` from a GET and `token` from a POST
-  // body. A scanner replaying the POST field name in a query admits nothing and
-  // echoes nothing back; a HEAD probe is not a lane.
-  const token = callbackToken(PRIVATE_HOST, authorities);
-  for (const [method, status] of [
-    ["GET", 403],
-    ["HEAD", 405],
-  ] as const) {
-    const scanner = await get(
-      runtime,
-      PRIVATE_HOST,
-      `/__sf/redeem?token=${encodeURIComponent(token)}&return=%2Fdocs%2F`,
-      { method },
-    );
-    expect(scanner.status, method).toBe(status);
-    expect(scanner.headers.get("set-cookie")).toBeNull();
-    expect(await scanner.text()).not.toContain(token);
-  }
 });
 
 test("a signed platform header admits directly without creating a browser cookie", async () => {
@@ -1233,6 +1220,21 @@ test("the cookie decides the request and the record only revokes it", async () =
   expect(record.sid).toBe(claims.sid);
   expect(record.spaceId).toBe(SESSION_SPACE);
   expect(record).not.toHaveProperty("authorities");
+
+  // The same claims signed the older way, under a key derived from the
+  // exchange credential the control plane computes from its own secret, are
+  // refused: once the box has its own session key, nothing outside it can
+  // mint a session, and the browser gets the authority-less form.
+  const encodedClaims = cookieCredential(cookie).slice(SESSION_PREFIX.length).split(".")[0] ?? "";
+  const olderKey = createHmac("sha256", EXCHANGE_CREDENTIAL)
+    .update("spacefast-access-session")
+    .digest("hex");
+  const forged = `${COOKIE_NAME}=${SESSION_PREFIX}${encodedClaims}.${createHmac("sha256", olderKey)
+    .update(`${SESSION_HOST}\0${encodedClaims}`)
+    .digest("hex")}`;
+  const refused = await get(runtime, SESSION_HOST, "/", { headers: { cookie: forged } });
+  expect(refused.status).toBe(403);
+  expect(refused.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=${ANONYMOUS_PREFIX}`);
 
   // Hot lane (D120): fresh claims read no file, so a missing record changes
   // nothing until the claims go stale.
@@ -1346,6 +1348,28 @@ test("a durable session survives an access-generation move but not losing its Gr
   const journalStart = journalRecords(runtime).length;
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   try {
+    // A revoked Space connection reaches the box as the same route without
+    // its consent's Grants, at the same access generation. The session that
+    // consent opened is refused on its very next request.
+    const consent = externalAuthorityReference("share-consent-session");
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({ memberRefs: ["member:mem_session", consent] }),
+    });
+    const consentCookie = await openAuthorities(SESSION_HOST, [consent]);
+    expect(
+      (await get(runtime, SESSION_HOST, "/", { headers: { cookie: consentCookie } })).status,
+    ).toBe(200);
+    await putRoute(runtime, SESSION_SPACE, "production", {
+      version_id: SESSION_VERSION,
+      config: projection({ memberRefs: ["member:mem_session"] }),
+    });
+    expect(
+      (await get(runtime, SESSION_HOST, "/", { headers: { cookie: consentCookie } })).status,
+    ).toBe(403);
+    // Everyone else's session is untouched.
+    expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
+
     // Ordinary Grant edits rotate the generation so stale handoffs cannot be
     // redeemed. A browser session follows its own still-live authority instead,
     // which is what lets a scoped Link created before a Space is claimed keep
@@ -1436,7 +1460,7 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
       config: projection({ team: { ...team, grantTeamId: "team_other" } }),
     });
     const foreignToken = callbackToken(SESSION_HOST, ["member:mem_never_projected"]);
-    const foreign = await postAccessCallback(runtime, SESSION_HOST, foreignToken, "/");
+    const foreign = await redeemHandoff(runtime, SESSION_HOST, foreignToken, "/");
     expect(setCookieValue(foreign)).not.toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
     const foreignDirect = await get(runtime, SESSION_HOST, "/", {
       headers: { "x-sf-authorization": `Bearer ${foreignToken}` },
@@ -1466,7 +1490,7 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
     // epoch, not per member, and the control plane decides who gets a new
     // handoff. Handoffs are bound to the projection generation they were cut
     // for, so the token names the moved one.
-    const reopenedCallback = await postAccessCallback(
+    const reopenedCallback = await redeemHandoff(
       runtime,
       SESSION_HOST,
       callbackToken(SESSION_HOST, ["member:mem_never_projected"], { generation: 1 }),
@@ -1555,7 +1579,9 @@ test("logout revokes only the presented session and fails closed when the record
       body: new URLSearchParams({ return: "/" }),
     });
 
-  const firstCookie = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
+  const firstCookie = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"], {
+    principal: "account:ps1_logout_owner",
+  });
   const secondCookie = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
   expect((await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: firstCookie } })).status).toBe(
     200,
@@ -1575,9 +1601,48 @@ test("logout revokes only the presented session and fails closed when the record
     },
   });
   expect(subresource.status).toBe(403);
+  // A navigation without Fetch Metadata ends nothing either, but it is not a
+  // dead end: it asks, and its button posts back same-origin.
+  const unproven = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout?return=/docs/", {
+    headers: { cookie: firstCookie, accept: "text/html" },
+  });
+  expect(unproven.status).toBe(403);
+  expect(unproven.headers.get("set-cookie")).toBeNull();
+  const confirm = await unproven.text();
+  expect(confirm).toContain("<h1>Sign out of this Space?</h1>");
+  expect(confirm).toContain('<form method="post" action="/__spacefast/access/logout">');
+  expect(confirm).toContain('<input type="hidden" name="return" value="/docs/">');
+  expect(confirm).toContain('href="/docs/">Stay Signed In</a>');
+  expect(unproven.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+  // Its own post must carry a real Origin, which no-referrer would blank.
+  expect(unproven.headers.get("referrer-policy")).toBe("same-origin");
+  // Another site's form post is refused whatever Fetch Metadata says, or omits.
+  for (const origin of ["https://evil.example", "null"]) {
+    const forged = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
+      method: "POST",
+      headers: { origin, cookie: firstCookie, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ return: "/" }),
+    });
+    expect(forged.status).toBe(403);
+    expect(await forged.text()).toContain("<h1>Sign out of this Space?</h1>");
+  }
   expect((await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: firstCookie } })).status).toBe(
     200,
   );
+  // The confirmation's own post carries this Space's Origin and nothing else:
+  // a browser that sends no Fetch Metadata still signs out.
+  const confirmed = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
+    method: "POST",
+    headers: {
+      origin: `${RUNTIME_SCHEME}://${PRIVATE_HOST}`,
+      cookie: secondCookie,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ return: "/docs/" }),
+  });
+  expect(confirmed.status).toBe(303);
+  expect(existsSync(sessionRecordPath(PRIVATE_SPACE, secondCookie))).toBe(false);
+  const secondCookieRestored = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
 
   const callsBefore = collaborationLogoutCalls.length;
   // Signed out here means staying out: the returning-account marker goes with
@@ -1596,13 +1661,19 @@ test("logout revokes only the presented session and fails closed when the record
   expect(loggedOut.headers.get("set-cookie")).toContain("Max-Age=0");
   const revokes = collaborationLogoutCalls.slice(callsBefore);
   expect(revokes).toHaveLength(1);
-  const revoked = revokes[0] as {
-    spaceId: string;
-    sessionId: string;
-    runtimeHost: string;
-    returnUrl: string;
-  };
+  const revoked = z
+    .object({
+      spaceId: z.string(),
+      sessionId: z.string(),
+      runtimeHost: z.string(),
+      returnUrl: z.string(),
+      principal: z.string(),
+    })
+    .parse(revokes[0]);
   expect(revoked.spaceId).toBe(PRIVATE_SPACE);
+  // The control plane is told whose session ended, so the browser's hop
+  // through the clear URL keeps that account signed out of this Space.
+  expect(revoked.principal).toBe("account:ps1_logout_owner");
   expect(revoked.runtimeHost).toBe(PRIVATE_HOST);
   expect(revoked.returnUrl).toBe(`${RUNTIME_SCHEME}://${PRIVATE_HOST}/`);
   // Ending the access session ends its Cast session: one id names both. That id
@@ -1626,7 +1697,7 @@ test("logout revokes only the presented session and fails closed when the record
   expect(replayed.status).toBe(403);
   expect(replayed.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=${ANONYMOUS_PREFIX}`);
   expect(
-    (await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: secondCookie } })).status,
+    (await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: secondCookieRestored } })).status,
   ).toBe(200);
 
   // Nothing to revoke is a successful logout, not an error.
@@ -2042,7 +2113,7 @@ test("an exposure fence denies an existing session before the stale projection s
 
     // A fenced Space accepts no handoff either: a session minted mid-fence
     // would outlive the hold it was supposed to be kept behind.
-    const handoff = await postAccessCallback(
+    const handoff = await redeemHandoff(
       runtime,
       PRIVATE_HOST,
       callbackToken(PRIVATE_HOST, ["member:mem_owner"]),
@@ -2150,9 +2221,7 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
     principal: "account:usr_scoped",
     identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "another_user" },
   });
-  expect((await postAccessCallback(runtime, SCOPED_HOST, mismatchedIdentity, "/")).status).toBe(
-    403,
-  );
+  expect((await redeemHandoff(runtime, SCOPED_HOST, mismatchedIdentity, "/")).status).toBe(404);
   expect(authorityReferences(accountByLink)).toEqual(["link:lnk_shared", "member:mem_owner"]);
 
   // The authority-less form: what a visitor holds before they prove anything.
@@ -2161,7 +2230,7 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   // visitor in place, keeping the pseudonym they had.
   const carried = {
     sid: "a".repeat(64),
-    anonymousId: `anon_${"b".repeat(32)}`,
+    anonymousId: `pg1_${"b".repeat(43)}`,
   };
   const stateless = anonymousSessionCookie(SCOPED_HOST, carried);
   const storedBefore = sessionRecordFiles(SCOPED_SPACE).length;
@@ -2178,6 +2247,13 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect(upgradedClaims.sid).not.toBe(carried.sid);
   expect(upgradedClaims.anonymousId).toBe(carried.anonymousId);
   expect(upgradedClaims.principal).toBe("anonymous");
+  // A browser that got its id from an engine before `pg1_` keeps it: the guest
+  // who commented then is the same guest now.
+  const older = { sid: "c".repeat(64), anonymousId: `anon_${"d".repeat(32)}` };
+  const olderUpgraded = await openAuthorities(SCOPED_HOST, ["link:lnk_shared"], {
+    cookie: anonymousSessionCookie(SCOPED_HOST, older),
+  });
+  expect(decodeSession(olderUpgraded).anonymousId).toBe(older.anonymousId);
 
   // A broad Grant does not reach into a scope carved out from under it; the
   // narrower Grant on that scope is the only thing that opens it.
@@ -2513,7 +2589,7 @@ test("authority entries expire independently and unrelated use does not extend t
   expect(authorityReferences(setCookieValue(afterAbsolute))).toEqual(["person:per_lru_4"]);
 
   const deadline = now + 1200;
-  const providerCallback = await postAccessCallback(
+  const providerCallback = await redeemHandoff(
     runtime,
     AUTHORITY_LRU_HOST,
     callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], {
@@ -2539,15 +2615,15 @@ test("authority entries expire independently and unrelated use does not extend t
       })
     ).status,
   ).toBe(403);
-  const expiredCallback = await postAccessCallback(
+  const expiredCallback = await redeemHandoff(
     runtime,
     AUTHORITY_LRU_HOST,
     callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], { authorityExpiresAt: now - 1 }),
     "/",
   );
-  expect(expiredCallback.status).toBe(403);
+  expect(expiredCallback.status).toBe(404);
 
-  const principalCallback = await postAccessCallback(
+  const principalCallback = await redeemHandoff(
     runtime,
     AUTHORITY_LRU_HOST,
     callbackToken(AUTHORITY_LRU_HOST, ["person:per_lru_3"], {
@@ -2772,7 +2848,7 @@ test("editing the Grant set behind an authority retires the session and degrades
   });
   const carried = {
     sid: "c".repeat(64),
-    anonymousId: `anon_${"d".repeat(32)}`,
+    anonymousId: `pg1_${"d".repeat(43)}`,
   };
   const cookie = await openAuthorities(CREDENTIAL_SCOPE_HOST, ["link:lnk_unrelated"], {
     cookie: anonymousSessionCookie(CREDENTIAL_SCOPE_HOST, carried),

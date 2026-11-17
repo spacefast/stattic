@@ -703,15 +703,18 @@ function _stattic_v4_authorization_projection(array $overlay): ?array
         'sessionVersion' => is_int($overlay['session_ver'] ?? null) ? $overlay['session_ver'] : 0,
         'fence' => is_string($overlay['fence'] ?? null) ? $overlay['fence'] : 'none',
         'acquireUrl' => $exchange['acquire_url'],
-        // Without this the sfv2_/sfa1_ HMAC key cannot be derived
-        // (access-rules.php `_stattic_access_session_hmac_key` reads
-        // `accessPage.exchange.credential`), so a protected Space could neither
-        // mint nor verify a session: permanently deny-only. The overlay carries
+        // Without this a protected Space holds no sfv2_/sfa1_ session
+        // (access-rules.php `_stattic_access_session_hmac_key` needs
+        // `accessPage.exchange`), so it could neither mint nor verify one:
+        // permanently deny-only. The overlay carries
         // the descriptor verbatim under `access_page`; access-rules.php
         // re-validates every field before use.
         'accessPage' => is_array($overlay['access_page'] ?? null)
             ? $overlay['access_page']
             : null,
+        // Absent on an overlay an older engine wrote: the session key then
+        // comes from the exchange credential until the next route sync.
+        'sessionKey' => is_string($overlay['session_key'] ?? null) ? $overlay['session_key'] : null,
         'spaceClaimed' => ($overlay['space_claimed'] ?? null) === true,
         'grantIndex' => $grants,
     ];

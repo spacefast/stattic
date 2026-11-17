@@ -14,8 +14,8 @@ type Fixture = {
   host: string;
   pageUrl: string;
   defaultPageUrl: string;
-  // The share link as a recipient receives it: the customer page with its
-  // lane-prefixed durable token in `?__=` on the Space's own host.
+  // The share link as a recipient opens it: `/__spacefast/in/<token>` on the
+  // Space's own host, deep-linked to the page.
   linkPageUrl: string;
   requestLifecycleEmail: string;
   requestStateUrl: string;
@@ -26,8 +26,7 @@ type Fixture = {
 
 const EXPECTED_REACHABLE_STATES = {
   "invalid-password": "That password didn't work.",
-  "request-confirm":
-    "Check your email to finish your request. Open the confirmation link we sent. It expires in 30 minutes.",
+  "request-sent": "Request sent. We'll email you if the owner lets you in.",
   "request-failed": "That request didn't go through. Try again in a moment.",
   "email-sent": "Check your email. Use the confirmation link we sent to finish opening this page.",
   "email-failed": "Couldn't send that confirmation. Enter the password and try again.",
@@ -44,7 +43,8 @@ const EXPECTED_REACHABLE_STATES = {
 const UNREACHABLE_IN_THIS_FIXTURE = {
   checked: "requires a signed-out central account probe",
   "no-grant": "requires a signed-in central account with no matching Grant",
-  "request-pending": "requires a central account hint for the requested address",
+  "request-pending": "requires an older control plane answering the request lane `pending`",
+  "request-confirm": "requires an older control plane that mails a request confirmation",
   "link-expired": "requires an expired central Link credential",
   "link-revoked": "requires a revoked central Link credential",
   "link-invalid": "requires a centrally rejected live Link credential",
@@ -121,9 +121,12 @@ test("custom access page CSP permits its same-origin script and forms", async ()
     height: 16,
   });
 
-  const popupPromise = passwordContext.waitForEvent("page");
-  await passwordPage.getByRole("link", { name: "Continue with Spacefast", exact: true }).click();
-  const popup = await popupPromise;
+  // Sign-in opens in the same tab now; the gate offers it as a plain link.
+  const signIn = passwordPage.getByRole("link", { name: "Continue with Spacefast", exact: true });
+  expect(await signIn.getAttribute("target")).toBeNull();
+  // A second window of the same browser holds the password form, so the page
+  // that unlocks it can be reloaded afterwards.
+  const popup = await passwordContext.newPage();
   await popup.goto(fixture.pageUrl);
   const passwordInput = popup.locator('input[name="password"]');
   const trimButton = popup.getByRole("button", { name: "Remove surrounding whitespace" });
@@ -220,8 +223,8 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   const inviteHeaders = await inviteResponse.request().allHeaders();
   expect(inviteHeaders.origin).toBe("null");
   expect(inviteHeaders["sec-fetch-site"]).toBe("same-origin");
-  await invitePage.waitForURL(/[?&]sf_access=request-confirm(?:&|$)/);
-  await invitePage.locator(".sf-access-status-action").waitFor();
+  await invitePage.waitForURL(/[?&]sf_access=request-sent(?:&|$)/);
+  await invitePage.getByText("Request sent.").waitFor();
   await inviteContext.close();
 });
 
@@ -259,7 +262,7 @@ test("production transitions render every locally reachable state with independe
     await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill("visitor@example.com");
     await page.getByRole("button", { name: "Request access", exact: true }).click();
-    await expectStatus(page, "request-confirm");
+    await expectStatus(page, "request-sent");
 
     await context.clearCookies();
     await page.goto(fixture.defaultPageUrl);
@@ -393,8 +396,8 @@ test("denied and expired requests can be replaced through the production request
     await page.locator("details.sf-access-request summary").click();
     await page.locator('input[name="email"]').fill(fixture.requestLifecycleEmail);
     await page.getByRole("button", { name: "Request access", exact: true }).click();
-    await page.waitForURL(/[?&]sf_access=request-confirm(?:&|$)/);
-    await page.locator(".sf-access-status-action").waitFor();
+    await page.waitForURL(/[?&]sf_access=request-sent(?:&|$)/);
+    await page.getByText("Request sent.").waitFor();
   };
   const moveRequestTo = async (action: "deny" | "expire") => {
     const response = await fetch(fixture.requestStateUrl, {
@@ -403,27 +406,6 @@ test("denied and expired requests can be replaced through the production request
       body: JSON.stringify({ action }),
     });
     expect(response.status).toBe(204);
-  };
-  const verifyRequest = async () => {
-    const response = await fetch(fixture.requestStateUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "verification-url" }),
-    });
-    expect(response.status, await response.clone().text()).toBe(200);
-    const payload: unknown = await response.json();
-    if (
-      typeof payload !== "object" ||
-      payload === null ||
-      !("url" in payload) ||
-      typeof payload.url !== "string"
-    ) {
-      throw new Error("request verification probe returned an invalid payload");
-    }
-    await page.goto(payload.url);
-    await page.locator('input[name="displayName"]').fill("Lifecycle Visitor");
-    await page.getByRole("button", { name: "Verify email and send request" }).click();
-    await page.getByRole("heading", { name: "Waiting for approval" }).waitFor();
   };
   const requestStatuses = async () => {
     const response = await fetch(fixture.requestStateUrl);
@@ -444,19 +426,16 @@ test("denied and expired requests can be replaced through the production request
     return payload;
   };
 
+  // No confirmation step: each request goes straight to the owners.
   await submitRequest();
-  await verifyRequest();
   await moveRequestTo("deny");
   await submitRequest();
-  expect((await requestStatuses()).map(({ status }) => status)).toEqual([
-    "verification_pending",
-    "denied",
-  ]);
+  expect((await requestStatuses()).map(({ status }) => status)).toEqual(["pending", "denied"]);
 
   await moveRequestTo("expire");
   await submitRequest();
   expect((await requestStatuses()).map(({ status }) => status)).toEqual([
-    "verification_pending",
+    "pending",
     "expired",
     "denied",
   ]);
@@ -474,7 +453,7 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     if (!opened) throw new Error("share link navigation returned no response");
     expect(opened.status()).toBe(200);
     // The token request sets the cookie and takes exactly one redirect to the
-    // clean page. Customer scripts never run with the token in location.search.
+    // clean page. Customer scripts never run with the token in their URL.
     expect(page.url()).toBe(fixture.pageUrl);
     const firstRequest = opened.request().redirectedFrom();
     if (!firstRequest) throw new Error("share link did not redirect to its clean page");
@@ -482,7 +461,7 @@ test("a share link opens its clean page in one navigation, with no gate in betwe
     expect(firstRequest.url()).toBe(fixture.linkPageUrl);
     const entryResponse = await firstRequest.response();
     if (!entryResponse) throw new Error("share link entry returned no response");
-    expect(entryResponse.status()).toBe(302);
+    expect(entryResponse.status()).toBe(303);
     const entryHeaders = await entryResponse.allHeaders();
     expect(entryHeaders.location).toBe(new URL(fixture.pageUrl).pathname);
     expect(entryHeaders["cache-control"]).toBe("private, no-store");

@@ -636,7 +636,21 @@ function _stattic_runtime_job_type_registry(): array
 {
     return [
         'maintenance_tick' => ['lane' => 'bulk', 'stepper' => '_stattic_runtime_job_step_maintenance_tick'],
+        'space_subjects_inventory' => ['lane' => 'bulk', 'stepper' => '_stattic_runtime_job_step_space_subjects_inventory'],
+        'space_subjects_rewrite' => ['lane' => 'bulk', 'stepper' => '_stattic_runtime_job_step_space_subjects_rewrite'],
     ];
+}
+
+function _stattic_runtime_job_step_space_subjects_inventory(string $privateRoot, array $job, float $_deadline): array
+{
+    require_once __DIR__ . '/space-subjects.php';
+    return _stattic_space_subjects_inventory($privateRoot, $job);
+}
+
+function _stattic_runtime_job_step_space_subjects_rewrite(string $privateRoot, array $job, float $_deadline): array
+{
+    require_once __DIR__ . '/space-subjects.php';
+    return _stattic_space_subjects_rewrite($privateRoot, $job);
 }
 
 /**

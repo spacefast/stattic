@@ -275,7 +275,8 @@ function _stattic_functions_dispatch_headers(
     string $dispatchToken,
     string $originBaseUrl,
     string $egressScope,
-    ?string $assetsNonce = null
+    ?string $assetsNonce = null,
+    ?string $spaceToken = null
 ): array {
     $host = $config['host'];
     $artifact = $config['artifact'];
@@ -381,6 +382,12 @@ function _stattic_functions_dispatch_headers(
     ) {
         $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['usageUrl']] = (string) $usage['url'];
         $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['usageToken']] = (string) $usage['token'];
+        // The Space's five-minute token rides the same admission check, which
+        // is where the control plane verifies it. A version with no usage
+        // channel has no admission check to carry it to.
+        if ($spaceToken !== null && $spaceToken !== '') {
+            $headers[SPACEFAST_FUNCTIONS_DISPATCH_HEADERS['spaceToken']] = $spaceToken;
+        }
     }
     return $headers;
 }
@@ -550,6 +557,23 @@ function _stattic_functions_edge_cache_directive(array $cachePolicy, array $sent
     );
 }
 
+/**
+ * The Space token for a Functions dispatch, or null: the route config names no
+ * registered key, grants no Functions scope (a control plane that predates
+ * it), or the token endpoint refused. Null sends nothing new, and the host
+ * checks admission with the version's token alone, as before.
+ */
+function _stattic_functions_space_token(array $serving): ?string
+{
+    $identity = $serving['authorization']['accessPage']['identity'] ?? null;
+    $scope = is_array($identity) && is_string($identity['scope'] ?? null) ? $identity['scope'] : '';
+    if (!in_array('space-runtime:functions', explode(' ', $scope), true)) {
+        return null;
+    }
+    require_once __DIR__ . '/../shared/space-identity.php';
+    return _stattic_space_identity_token($serving);
+}
+
 // Never returns when it dispatches; returns normally only when this request is
 // not the worker's to answer, so the caller continues the static fallback chain.
 function _stattic_functions_dispatch(
@@ -620,7 +644,10 @@ function _stattic_functions_dispatch(
         $dispatchToken,
         'https://' . $requestHost,
         _stattic_egress_scope($serving),
-        $assetsNonce
+        $assetsNonce,
+        // Once the route config names this box's key and grants the Functions
+        // scope; disabling the Space client then ends this Space's Workers.
+        is_array($config['usage'] ?? null) ? _stattic_functions_space_token($serving) : null
     ) as $name => $value) {
         $headers[$name] = $value;
     }

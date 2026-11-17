@@ -15,6 +15,7 @@ require_once __DIR__ . '/../shared/application-journal.php';
 require_once __DIR__ . '/../shared/security-telemetry.php';
 require_once __DIR__ . '/upload-policy.php';
 require_once __DIR__ . '/../shared/storage.php';
+require_once __DIR__ . '/../shared/space-identity.php';
 require_once __DIR__ . '/generate.php';
 require_once __DIR__ . '/finalize-rust.php';
 require_once __DIR__ . '/upload.php';

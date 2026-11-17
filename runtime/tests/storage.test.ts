@@ -886,11 +886,11 @@ test("visitor cookies require exact-origin writes while explicit storage credent
     exp: now + 300,
     jti: randomUUID(),
   });
-  const callback = await get(strict, host, "/__sf/redeem", {
-    method: "POST",
-    headers: { origin: `https://${host}`, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ token, return: "/" }),
-  });
+  const callback = await get(
+    strict,
+    host,
+    `/__spacefast/in/${encodeURIComponent(token)}?return=%2F`,
+  );
   expect(callback.status, await callback.clone().text()).toBe(303);
   const cookie = callback.headers.get("set-cookie")?.split(";")[0] ?? "";
   expect(cookie).toStartWith("__Host-spacefast_session=sfv2_");

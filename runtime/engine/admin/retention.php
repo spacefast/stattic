@@ -9,8 +9,8 @@ require_once __DIR__ . '/upload.php';
 
 // The record stores the bulk tick expires. Only bookkeeping that holds no
 // customer data or history is listed here: security-telemetry gap markers,
-// publish pins and the version-to-session pointers. Everything else the engine
-// writes (versions, blobs, staging trees, compiled releases, rolled journals,
+// publish pins and version-to-session pointers.
+// Everything else the engine writes (versions, blobs, staging trees, compiled releases, rolled journals,
 // job records, publish sessions, route shards) is kept until the control plane
 // asks for an explicit delete.
 

@@ -1,0 +1,1 @@
+var n=new WeakMap;function a(t,d){let S=n.get(t);S===void 0&&(S=new Map,n.set(t,S));let e=S.get(d);e===void 0&&(e=new CSSStyleSheet,e.replaceSync(d),S.set(d,e)),!t.adoptedStyleSheets.includes(e)&&(t.adoptedStyleSheets=[...t.adoptedStyleSheets,e])}export{a};

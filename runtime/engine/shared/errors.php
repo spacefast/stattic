@@ -148,9 +148,8 @@ const STATTIC_PLATFORM_PAGE_COPY = [
     'checkout' => ['Confirming your payment', ''],
     'checkout-cancel' => ['Checkout closed', 'Return to the shop when you’re ready.'],
     '404' => ['Page not found', ''],
-    'login' => ['This space is for members', 'Sign in to continue — you’ll come right back here.'],
     'denied' => ['Access denied', ''],
-    'access' => ['This space is private', ''],
+    'access' => ['This Space is private', ''],
     'index' => ['Files unavailable', 'The directory listing could not be loaded.'],
     'preview' => ['Preview unavailable', 'This file preview could not be loaded.'],
     'undeployed' => ['Waiting for launch', 'This space hasn’t been published yet. Check back soon.'],
@@ -164,6 +163,11 @@ const STATTIC_PLATFORM_PAGE_COPY = [
     'content-too-large' => ['That request is too large', 'Send a smaller request and try again.'],
     'proxy-error' => ['The upstream missed the connection', 'Try again in a moment.'],
     'runtime-error' => ['Something broke on our side', 'The runtime hit an error serving this page. Try again in a moment.'],
+    // Access routes that never serve content. The first takes its line from
+    // the caller: a spent link and a mis-shaped one say different things.
+    'access-route-not-found' => ['That link doesn’t work here', ''],
+    'sign-in-restart' => ['Sign-in didn’t finish', 'This sign-in began in another browser or timed out. Start sign-in again in this browser.'],
+    'sign-out' => ['Sign out of this Space?', 'You’ll need to sign in again to open its private pages.'],
 ];
 
 function _stattic_platform_page_html(string $pageId, string $message, string $fragment = '', string $titleOverride = ''): string
@@ -183,6 +187,15 @@ function _stattic_platform_page_html(string $pageId, string $message, string $fr
     $layout = in_array($pageId, ['index', 'preview'], true) ? 'content' : 'message';
     if ($pageId === '404') {
         $description = '<p class="sf-copy">Nothing is published at this address. It may have been renamed or removed.</p><div class="sf-actions"><a class="sf-button" href="/">Go to index</a></div>';
+    }
+    // Each access dead end keeps a way back: the Space itself shows every way in.
+    if ($pageId === 'access-route-not-found') {
+        $description = '<p class="sf-copy">' . _stattic_html_escape(trim($message) !== '' ? trim($message) : 'This link may have expired or already been used.')
+            . '</p><div class="sf-actions"><a class="sf-button" href="/">Go to the Space</a></div>';
+    } elseif ($pageId === 'sign-out') {
+        $description .= $fragment;
+    } elseif ($pageId === 'sign-in-restart') {
+        $description .= '<div class="sf-actions"><a class="sf-button" href="' . _stattic_html_escape(STATTIC_SHARE_OAUTH_START_PATH) . '?return=%2F">Sign In Again</a></div>';
     }
     if ($pageId === 'denied') {
         $description .= $fragment;
@@ -228,6 +241,11 @@ function _stattic_compose_page_artifact(string $html, string $pageId, array $con
         $lanesFragment = is_string($context['lanes_fragment'] ?? null)
             ? $context['lanes_fragment']
             : $fragment;
+        // The heading names the Space when the projection carries its title.
+        $title = is_string($context['title'] ?? null) ? $context['title'] : '';
+        if ($title !== '') {
+            $html = _stattic_replace_page_runtime_slot($html, 'access-title', _stattic_html_escape($title));
+        }
         $html = _stattic_replace_page_runtime_slot($html, 'access-status', $statusFragment);
         return _stattic_replace_page_runtime_slot($html, 'access-lanes', $lanesFragment);
     }
@@ -254,7 +272,11 @@ function _stattic_serve_page(string $pageId, array $context = []): void
         $headers = _stattic_private_content_response_headers($headers);
         _stattic_clear_private_content_response_headers();
     }
-    $ambiguousDefault = $pageId === 'denied' || $pageId === 'access' ? 'html' : 'text';
+    // Only a browser follows a link or a sign-in to these, so an Accept that
+    // names nothing still gets the page.
+    $ambiguousDefault = in_array($pageId, ['denied', 'access', 'access-route-not-found', 'sign-in-restart', 'sign-out'], true)
+        ? 'html'
+        : 'text';
     $negotiable = _stattic_page_may_negotiate($headers);
     $representation = $negotiable ? _stattic_page_representation($ambiguousDefault) : 'html';
     $requestMethod = _stattic_runtime_request_method();

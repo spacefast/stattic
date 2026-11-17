@@ -112,6 +112,22 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
         return null;
     }
 
+    $jwks = _stattic_runtime_fetch_platform_jwks($reason);
+    if ($jwks === null) {
+        return null;
+    }
+    if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
+        _stattic_runtime_write_json_atomic($cachePath, ['fetched_at' => time(), 'jwks' => $jwks]);
+    }
+    return $jwks;
+}
+
+// The API's published key set over https, or null with `$reason`. https only:
+// the JWKS is the runtime's trust anchor, so a cleartext fetch, tamperable in
+// flight, is refused even when the API base is http. A malformed or empty
+// response is a failed fetch, never a document worth keeping.
+function _stattic_runtime_fetch_platform_jwks(?string &$reason = null): ?array
+{
     require_once __DIR__ . '/http.php';
 
     $apiBaseUrl = _stattic_runtime_api_base_url();
@@ -119,25 +135,130 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
         $reason = 'api_base_url_missing';
         return null;
     }
-    // https only: the JWKS is the runtime's trust anchor, so a cleartext fetch,
-    // tamperable in flight, is refused even when the API base is http.
     $result = _stattic_http_request([
         'url' => $apiBaseUrl . '/.well-known/spacefast-runtime-jwks.json',
         'schemes' => ['https'],
         'max_body_bytes' => 262144,
+        'connect_timeout_ms' => 2000,
+        'timeout_ms' => 3000,
     ]);
     $jwks = $result['ok'] ? json_decode($result['body'], true) : null;
-    // A malformed or empty response is a retryable fetch failure (500), never a
-    // doc worth persisting: caching garbage 401s every privileged request for
-    // 300s. Only a well-formed Ed25519 OKP key set is cached.
     if (!_stattic_runtime_jwks_usable($jwks)) {
         $reason = 'jwks_fetch_failed';
         return null;
     }
-    if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
-        _stattic_runtime_write_json_atomic($cachePath, ['fetched_at' => time(), 'jwks' => $jwks]);
-    }
     return $jwks;
+}
+
+// The one trust path for platform keys on a box: the API's published JWKS.
+// The local copies (provider persistent data, a JWKS file, the jwks.json
+// cache, a route's `visitor_jwks`) are what the box was given at install or at
+// its last route write; none of them learns a rotation key or forgets a
+// retired one. So:
+//
+//   - a management or upload token whose kid no copy knows makes the box read
+//     the published set (at most once a minute, short timeout); after that the
+//     management lane rereads it once it is an hour old, and a failed read
+//     keeps the last good set;
+//   - once a box holds a fetched set, that set decides: a local key verifies
+//     only while the set still publishes it under the same kid, and a key in
+//     the set verifies even if no local copy has it yet;
+//   - serving lanes (visitor, blob gate) only read the fetched set, never
+//     wait on the network;
+//   - before its first fetch a box trusts its local copies, as it always did.
+//
+// Kept apart from jwks.json, so an engine rolled back to an older release reads
+// its own cache exactly as it wrote it.
+const STATTIC_PLATFORM_JWKS_REFRESH_SECONDS = 3600;
+const STATTIC_PLATFORM_JWKS_RETRY_FLOOR_SECONDS = 60;
+
+function _stattic_runtime_platform_jwks_path(string $privateRoot): string
+{
+    return $privateRoot . '/runtime/platform-jwks.json';
+}
+
+/**
+ * The fetched platform keys, or null before this box's first fetch.
+ * `$refresh`: 'none' reads only; 'stale' rereads a set this box already holds
+ * once it is an hour old; 'unknown_kid' reads it now. Either waits a minute
+ * after any attempt.
+ *
+ * @return list<array>|null
+ */
+function _stattic_runtime_platform_jwks(string $privateRoot, string $refresh = 'none', ?string &$reason = null): ?array
+{
+    if ($privateRoot === '') {
+        return null;
+    }
+    $path = _stattic_runtime_platform_jwks_path($privateRoot);
+    $cached = _stattic_runtime_read_json($path);
+    $cached = is_array($cached) ? $cached : [];
+    $keys = _stattic_runtime_jwks_usable($cached['jwks'] ?? null) ? array_values($cached['jwks']['keys']) : null;
+    $now = time();
+    $due = $refresh !== 'none'
+        && $now - (int) ($cached['attempted_at'] ?? 0) >= STATTIC_PLATFORM_JWKS_RETRY_FLOOR_SECONDS
+        && (
+            $refresh === 'unknown_kid'
+            || ($keys !== null && $now - (int) ($cached['fetched_at'] ?? 0) >= STATTIC_PLATFORM_JWKS_REFRESH_SECONDS)
+        );
+    if (!$due || !_stattic_runtime_mkdir_soft(dirname($path))) {
+        return $keys;
+    }
+    $fetched = _stattic_runtime_fetch_platform_jwks($reason);
+    if ($fetched === null) {
+        _stattic_runtime_write_json_atomic($path, [...$cached, 'attempted_at' => $now]);
+        return $keys;
+    }
+    _stattic_runtime_write_json_atomic($path, ['fetched_at' => $now, 'attempted_at' => $now, 'jwks' => $fetched]);
+    return array_values($fetched['keys']);
+}
+
+/**
+ * The keys a token with `$kid` may be signed by: the local candidates the
+ * fetched set still publishes, plus the fetched set's own. Before the first
+ * fetch, the local candidates alone.
+ *
+ * @param list<array> $local keys in `$xField`/`kid` form
+ * @param list<array>|null $platform
+ * @return list<array>
+ */
+function _stattic_runtime_trusted_keys(array $local, ?array $platform, string $kid, string $xField = 'x'): array
+{
+    if ($platform === null) {
+        return $local;
+    }
+    $published = [];
+    foreach ($platform as $key) {
+        if (is_array($key) && is_string($key['kid'] ?? null) && is_string($key['x'] ?? null)) {
+            $published[$key['kid'] . "\0" . $key['x']] = true;
+        }
+    }
+    $trusted = [];
+    foreach ($local as $key) {
+        $id = (string) ($key['kid'] ?? '') . "\0" . (string) ($key[$xField] ?? '');
+        if (isset($published[$id])) {
+            $trusted[$id] = $key;
+        }
+    }
+    foreach (_stattic_runtime_jwks_for_kid($platform, $kid) as $key) {
+        $id = (string) ($key['kid'] ?? '') . "\0" . (string) ($key['x'] ?? '');
+        $trusted[$id] ??= $xField === 'x'
+            ? $key
+            : ['kid' => (string) ($key['kid'] ?? ''), 'alg' => 'EdDSA', $xField => (string) ($key['x'] ?? '')];
+    }
+    return array_values($trusted);
+}
+
+/** @return list<array> the Ed25519 keys in `$keys` a token with this kid may be signed by. */
+function _stattic_runtime_jwks_for_kid(array $keys, string $kid): array
+{
+    $candidates = [];
+    foreach ($keys as $key) {
+        if (is_array($key) && ($key['kty'] ?? null) === 'OKP' && ($key['crv'] ?? null) === 'Ed25519' && ($kid === '' || ($key['kid'] ?? null) === $kid)) {
+            $candidates[] = $key;
+        }
+    }
+    return $candidates;
 }
 
 // Usable = at least one Ed25519 OKP signing key with a public component. The
@@ -158,19 +279,25 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
 
 /**
  * @return list<array> every Ed25519 key for this kid; a kid-less token matches
- *         them all, and the caller stops at the first that verifies.
+ *         them all, and the caller stops at the first that verifies. Local
+ *         anchors first, then the fetched platform set
+ *         (_stattic_runtime_platform_jwks), refreshed on an unknown kid only
+ *         where the lane may fetch.
  */
 function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null, bool $readOnly = false): array
 {
-    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $reason, $readOnly);
-    $candidates = [];
-    foreach (($jwks['keys'] ?? []) as $key) {
-        if (is_array($key) && ($key['kty'] ?? null) === 'OKP' && ($key['crv'] ?? null) === 'Ed25519' && ($kid === '' || ($key['kid'] ?? null) === $kid)) {
-            $candidates[] = $key;
-        }
-    }
+    $localReason = null;
+    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $localReason, $readOnly);
+    $local = _stattic_runtime_jwks_for_kid(is_array($jwks['keys'] ?? null) ? $jwks['keys'] : [], $kid);
+    $platformReason = null;
+    $platform = _stattic_runtime_platform_jwks(
+        $privateRoot,
+        !$allowFetch || $readOnly ? 'none' : ($local === [] && $kid !== '' ? 'unknown_kid' : 'stale'),
+        $platformReason,
+    );
+    $candidates = _stattic_runtime_trusted_keys($local, $platform, $kid);
     if ($candidates === []) {
-        $reason ??= 'key_missing';
+        $reason ??= $local === [] ? ($localReason ?? $platformReason ?? 'key_missing') : 'key_missing';
     }
     return $candidates;
 }
@@ -515,6 +642,15 @@ function _stattic_visitor_verify(string $token, array $options): ?array
     }
     $issuers = is_array($options['issuers'] ?? null) ? $options['issuers'] : [];
     $candidates = _stattic_jwt_issuers_for_kid($issuers, $kid);
+    // The route's `visitor_jwks` is the copy the control plane last wrote; the
+    // fetched platform set decides which of its keys still verify and adds one
+    // rotated in since. Read only: a visitor never waits on a key fetch.
+    $candidates = _stattic_runtime_trusted_keys(
+        $candidates,
+        _stattic_runtime_platform_jwks(is_string($options['privateRoot'] ?? null) ? $options['privateRoot'] : ''),
+        $kid,
+        'publicKey',
+    );
     if ($candidates === []) {
         return null;
     }

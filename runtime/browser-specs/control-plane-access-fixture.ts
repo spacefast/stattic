@@ -14,8 +14,8 @@ if (runtimeBin === undefined) {
 const [
   { deliveryExchangeContractRoutes },
   { createApp },
-  { createAccessShareLink, logoutAllSpaceSessions, setAccessRequestClockForTests },
-  { createPasswordCredential },
+  { logoutAllSpaceSessions, setAccessRequestClockForTests },
+  { writeLinkCreate, writePasswordCreate },
   { env },
   { db },
   { authMembers },
@@ -32,7 +32,7 @@ const [
   import("../../apps/control-plane/src/api-contracts/delivery/exchange.ts"),
   import("../../apps/control-plane/src/app.ts"),
   import("../../apps/control-plane/src/access/canonical.ts"),
-  import("../../apps/control-plane/src/access/credentials.ts"),
+  import("../../apps/control-plane/src/access/space-access-service.ts"),
   import("../../apps/control-plane/src/config/env.ts"),
   import("../../apps/control-plane/src/db/client.ts"),
   import("../../apps/control-plane/src/db/schema/auth.ts"),
@@ -127,10 +127,10 @@ try {
     dnsInstructionsJson: [],
   });
 
-  // Production credential creation owns the password proof and its canonical
+  // The access list's password writer owns the password proof and its canonical
   // Grant. No fixture code invents a credential id, authority reference, Grant
   // projection, exchange credential, or handoff token.
-  await createPasswordCredential({
+  await writePasswordCreate({
     spaceId: seed.spaceId,
     credential: {
       name: "Private studio password",
@@ -141,7 +141,7 @@ try {
       target: { kind: "live" },
     },
   });
-  await createPasswordCredential({
+  await writePasswordCreate({
     spaceId: seed.spaceId,
     credential: {
       name: "Private studio verified-email password",
@@ -223,33 +223,6 @@ try {
         if (!current || !controlPlane) {
           return new Response("request lifecycle fixture state missing", { status: 409 });
         }
-        if (action === "verification-url") {
-          const email = await db.query.sentEmails.findFirst({
-            columns: { props: true },
-            where: (emails, { and, eq: equals }) =>
-              and(
-                equals(emails.to, requestLifecycleEmail),
-                equals(emails.subject, "Verify your Spacefast access request"),
-              ),
-            orderBy: (emails, { desc }) => [desc(emails.createdAt)],
-          });
-          const links = email?.props.links;
-          const actionUrl = Array.isArray(links)
-            ? links.find(
-                (link): link is { label: string; url: string } =>
-                  typeof link === "object" &&
-                  link !== null &&
-                  "label" in link &&
-                  typeof link.label === "string" &&
-                  "url" in link &&
-                  typeof link.url === "string",
-              )?.url
-            : undefined;
-          if (current.status !== "verification_pending" || typeof actionUrl !== "string") {
-            return new Response("request verification fixture state missing", { status: 409 });
-          }
-          return Response.json({ url: actionUrl });
-        }
         if (action === "deny") {
           const denied = await controlPlane.handle(
             new Request(
@@ -327,9 +300,12 @@ try {
     throw new Error(`access page compilation failed: ${JSON.stringify(compileErrors)}`);
   }
 
-  // Mint a real share link and open its token on the canonical document path.
-  // This measures the credential hop without a separate directory-slash hop.
-  const link = await createAccessShareLink({
+  // Mint a real share link and open its token through the one way in,
+  // `/__spacefast/in/<token>`, as a deep link to the canonical document path
+  // (`?return=/custom/`). The stored landing path is normalized without its
+  // trailing slash, so landing there would add a directory-slash hop that has
+  // nothing to do with the credential.
+  const link = await writeLinkCreate({
     spaceId: seed.spaceId,
     name: "Browser share link fixture",
     landingPath: "/custom/",
@@ -339,11 +315,8 @@ try {
     target: { kind: "live" },
     createdBy: seed.userId,
   });
-  const linkUrl = new URL(link.url);
-  linkUrl.pathname = "/custom/";
-  if (!linkUrl.searchParams.get("__")) {
-    throw new Error("share link fixture produced no branded URL token");
-  }
+  const linkToken = new URL(link.url).searchParams.get("__");
+  if (!linkToken) throw new Error("share link fixture produced no branded URL token");
 
   const space = await db.query.spaces.findFirst({
     where: (spaces, { eq: equals }) => equals(spaces.id, seed.spaceId),
@@ -391,7 +364,7 @@ try {
       host: hostname,
       pageUrl: `http://${hostname}:${port}/custom/`,
       defaultPageUrl: `http://${hostname}:${port}/`,
-      linkPageUrl: `http://${hostname}:${port}${linkUrl.pathname}${linkUrl.search}`,
+      linkPageUrl: `http://${hostname}:${port}/__spacefast/in/${encodeURIComponent(linkToken)}?return=${encodeURIComponent("/custom/")}`,
       requestLifecycleEmail,
       requestStateUrl: `http://127.0.0.1:${exchange.port}/__fixture/request-state`,
       exchangeEffectsUrl: `http://127.0.0.1:${exchange.port}/__fixture/exchange-effects`,

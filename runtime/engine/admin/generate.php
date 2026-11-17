@@ -13,6 +13,7 @@ require_once __DIR__ . '/../shared/native-process.php';
 // A published capsule's schema is created here, over the same MySQL broker the
 // serving lanes use, never a subprocess.
 require_once __DIR__ . '/../shared/db-broker.php';
+require_once __DIR__ . '/../shared/space-identity.php';
 
 function _stattic_runtime_routes_from_hostname_intent(string $routeName, array $intent): array
 {
@@ -1348,7 +1349,6 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     // (packages/common runtimePublicExposureDescriptorSchema, v>=1, `public`);
     // absent or malformed means not public, which is the fail-closed answer.
     $open = _stattic_runtime_overlay_open($config, $authorization, $grantIndex, $fence, $versions);
-
     _stattic_runtime_write_space_overlay($privateRoot, $spaceId, [
         'users' => $config['users'] ?? null,
         'usersProviderConfig' => $config['usersProviderConfig'] ?? null,
@@ -1367,14 +1367,19 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         // loading access-rules.php to learn the marker.
         'compiled_version' => $authorization['compiledVersion'] ?? null,
         'space_claimed' => ($authorization['spaceClaimed'] ?? null) === true,
-        // Required, not presentation trivia: `exchange.credential` is the
-        // material every sfv2_/sfa1_ session key derives from (access-rules.php
+        // Required, not presentation trivia: a Space without an `exchange`
+        // holds no sfv2_/sfa1_ session (access-rules.php
         // _stattic_access_session_hmac_key), so without it a protected Space is
         // permanently deny-only. Carried verbatim; access-rules.php re-validates
         // every URL in it against the platform destination allowlist.
         'access_page' => is_array($authorization['accessPage'] ?? null)
             ? $authorization['accessPage']
             : null,
+        // The box's own visitor-session key (space-identity.php
+        // `_stattic_space_session_key`). The overlay is a private-root artifact
+        // like the key file, so the key stays on this box; carrying it here
+        // keeps the hot path at one HMAC and no extra file read.
+        'session_key' => _stattic_space_session_key($privateRoot, $spaceId),
         'exchange' => [
             'acquire_url' => is_string($authorization['acquireUrl'] ?? null) ? $authorization['acquireUrl'] : null,
             'issuer' => is_string($config['visitor_issuer'] ?? null) ? $config['visitor_issuer'] : null,

@@ -398,14 +398,12 @@ test("a published config role reads once for every viewer and writes only for a 
     jti: randomUUID(),
     authorityExpiresAt: now + 3600,
   });
-  const redeemed = await get(runtime, host, "/__sf/redeem", {
-    method: "POST",
-    headers: {
-      origin: `http://${host}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ token, return: "/" }).toString(),
-  });
+  // A handoff lands the way a browser carries it: `/__spacefast/in/<token>`.
+  const redeemed = await get(
+    runtime,
+    host,
+    `/__spacefast/in/${encodeURIComponent(token)}?return=${encodeURIComponent("/")}`,
+  );
   expect(redeemed.status, await redeemed.clone().text()).toBe(303);
   const member = (redeemed.headers.get("set-cookie") ?? "").split(";", 1)[0] ?? "";
   expect(member).toContain("sfv2_");

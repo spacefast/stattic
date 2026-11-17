@@ -351,6 +351,31 @@ function _stattic_spacefast_sdk_bootstrap(
     // stay short-lived and revalidated instead of pinning immutably.
     $query = $previewToken === null ? '' : '?preview=' . rawurlencode($previewToken);
     $ui = _stattic_spacefast_collab_ui($serving);
+    // The Space bar replaces the collab overlay where the control plane
+    // projected it (only to engines with `runtime.space-bar.v1`) and the Space
+    // is private. A public Space keeps today's overlay: the bar is for people
+    // signed in to a Space they were let into, and the chunk checks who is
+    // signed in before it draws anything.
+    //
+    // This response is shared by every visitor, so it cannot know whether the
+    // bar will boot. client.js does: it boots the bar for a Spacefast account
+    // and loads this same overlay for anyone else (a share-link or password
+    // holder, a guest on a public path), so they keep Comments.
+    $bar = $previewToken === null && $review === null && $on('space-bar')
+        ? _stattic_spacefast_bar_config($serving, $requestHost)
+        : null;
+    if ($bar !== null && $commentsAvailable) {
+        $bar['collab'] = [
+            'theme' => STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query,
+            'module' => $ui === 'default' && $collabBase !== null
+                ? rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js'
+                : null,
+            'config' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query,
+        ];
+    }
+    if ($bar !== null) {
+        $commentsAvailable = false;
+    }
     // Nothing to join costs the page zero collaboration bytes: no stylesheet,
     // no placeholder orb, no module loader, not even a disabled copy. `custom`
     // gets the Space's look and nothing else — the page brought its own UI and
@@ -415,7 +440,9 @@ function _stattic_spacefast_sdk_bootstrap(
             ? 'if(!root.zeroRealtime){root.zeroRealtime=true;var z=document.createElement("script");z.src=' . json_encode(STATTIC_ZERO_V2_REALTIME_PATH) . ';document.head.appendChild(z);}'
             : '') .
         $tagLoader .
-        _stattic_spacefast_tracker_loader($serving, $previewToken) .
+        ($bar === null
+            ? _stattic_spacefast_tracker_loader($serving, $previewToken)
+            : _stattic_spacefast_bar_loader($bar, _stattic_spacefast_tracker_for_page($serving, $previewToken))) .
         $collab;
     $reviewModule = '';
     if ($review !== null && $collabBase !== null && $on('review')) {
@@ -447,6 +474,68 @@ function _stattic_spacefast_sdk_bootstrap(
         ($embeddedTagBody !== '' ?
             'if(!root.tagBodyStarted){root.tagBodyStarted=true;' . "\n" . $embeddedTagBody . "\n}" : '') .
         '})();';
+}
+
+/**
+ * The Space bar's projection for this request, or null when the page keeps
+ * the separate overlay: no projection (an old control plane, or a box whose
+ * engine the control plane did not credit with `runtime.space-bar.v1`), a
+ * frame URL that is not an https platform URL, or a Space anyone may open.
+ */
+function _stattic_spacefast_bar_config(array $serving, string $requestHost): ?array
+{
+    $bar = _stattic_spacefast_sdk_config($serving)['bar'] ?? null;
+    if (!is_array($bar)) {
+        return null;
+    }
+    $frame = is_string($bar['frame_url'] ?? null) ? $bar['frame_url'] : '';
+    $dashboard = is_string($bar['dashboard_url'] ?? null) ? $bar['dashboard_url'] : '';
+    foreach ([$frame, $dashboard] as $url) {
+        $scheme = parse_url($url, PHP_URL_SCHEME);
+        if (
+            ($scheme !== 'https' && !($scheme === 'http' && _stattic_spacefast_sdk_host_is_local(parse_url($url, PHP_URL_HOST))))
+            || preg_match('/[\x00-\x20"\'<>`\\\\]/', $url) === 1
+            || strlen($url) > 2000
+        ) {
+            return null;
+        }
+    }
+    if (_stattic_access_anonymous_admits($serving, _stattic_canonicalize_host($requestHost), '/')) {
+        return null;
+    }
+    return ['frame' => $frame, 'dashboard' => $dashboard];
+}
+
+/**
+ * The one platform tag: `client.js`, told where the bar's frame lives and, on
+ * a live view, which tracker to start. client.js loads the bar chunk only for
+ * a signed-in account, and adds the tracker itself: its bytes still come from
+ * this host's `/__spacefast/t.js`, the Beacon copy, so the page always runs
+ * the tracker Beacon's wire format expects. With Comments on, it is also told
+ * the overlay's theme, module and manifest, which it loads for a visitor the
+ * bar does not boot for.
+ */
+function _stattic_spacefast_bar_loader(array $bar, ?array $tracker): string
+{
+    $data = static fn (string $key, string $value): string =>
+        'm.dataset.' . $key . '=' . json_encode($value, JSON_UNESCAPED_SLASHES) . ';';
+    return 'if(!root.barLoader){root.barLoader=true;root.trackerLoader=true;' .
+        'var m=document.createElement("script");m.type="module";' .
+        'm.src=' . json_encode(STATTIC_SPACE_CLIENT_PATH, JSON_UNESCAPED_SLASHES) . ';' .
+        $data('sfBarFrame', $bar['frame']) .
+        $data('sfBarDashboard', $bar['dashboard']) .
+        ($tracker === null ? '' : (
+            $data('sfTracker', $tracker['src']) .
+            $data('sfTrackerSite', $tracker['key']) .
+            $data('sfTrackerEndpoint', $tracker['endpoint']) .
+            ($tracker['wait'] ? $data('sfTrackerConsent', 'wait') : '')
+        )) .
+        (!is_array($bar['collab'] ?? null) ? '' : (
+            $data('sfCollabTheme', $bar['collab']['theme']) .
+            $data('sfCollabConfig', $bar['collab']['config']) .
+            ($bar['collab']['module'] === null ? '' : $data('sfCollab', $bar['collab']['module']))
+        )) .
+        'document.head.appendChild(m);}';
 }
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
@@ -509,14 +598,8 @@ function _stattic_spacefast_tracker_config(array $serving): ?array
  */
 function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken): string
 {
-    $tracker = _stattic_spacefast_tracker_config($serving);
-    if (
-        $tracker === null
-        || $previewToken !== null
-        || isset($_GET['review'])
-        || _stattic_system_view_review() !== null
-        || _stattic_spacefast_preview_surface($serving)
-    ) {
+    $tracker = _stattic_spacefast_tracker_for_page($serving, $previewToken);
+    if ($tracker === null) {
         return '';
     }
     return 'if(!root.trackerLoader){root.trackerLoader=true;' .
@@ -526,6 +609,23 @@ function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken
         'a.dataset.endpoint=' . json_encode($tracker['endpoint'], JSON_UNESCAPED_SLASHES) . ';' .
         ($tracker['wait'] ? 'a.dataset.consent="wait";' : '') .
         'a.dataset.injected="";document.head.appendChild(a);}';
+}
+
+// The tracker this page view counts with, or null: only a visitor's view of
+// the live surface counts.
+function _stattic_spacefast_tracker_for_page(array $serving, ?string $previewToken): ?array
+{
+    $tracker = _stattic_spacefast_tracker_config($serving);
+    if (
+        $tracker === null
+        || $previewToken !== null
+        || isset($_GET['review'])
+        || _stattic_system_view_review() !== null
+        || _stattic_spacefast_preview_surface($serving)
+    ) {
+        return null;
+    }
+    return $tracker;
 }
 
 /**
@@ -990,7 +1090,7 @@ function _stattic_spacefast_collab_manifest(
     $uploads = is_array($overlay['uploads'] ?? null) ? $overlay['uploads'] : null;
     // Null while the Space is unclaimed: there is no account to continue
     // with. The descriptor's own `accountUrl` is the gate; the URL the page
-    // goes to is this host's account start route.
+    // goes to is this host's account start, which runs the Space's sign-in.
     $accountStart = is_array($descriptor)
         && is_string($descriptor['accountUrl'] ?? null)
         && $origin !== null
@@ -1040,10 +1140,10 @@ function _stattic_spacefast_collab_manifest(
         'apiBase' => _stattic_spacefast_sdk_api_base_url(),
         'accountUrl' => $accountStart,
         // The one cookie name this engine writes when an account signs in here
-        // and spends on a silent start. Naming it is the promise that the
-        // account start honours `silent=1`, so an engine that predates the
-        // renewal says nothing and the overlay never tries.
-        'returningAccountCookie' => $accountStart !== null
+        // and spends on a silent start. Naming it is the promise that the start
+        // renews with the Space's own sign-in (`prompt=none`), so a Space that
+        // does not sign in that way says nothing and the overlay never tries.
+        'returningAccountCookie' => $accountStart !== null && _stattic_share_oauth_url($serving) !== null
             ? _stattic_returning_account_cookie_name()
             : null,
         'features' => [

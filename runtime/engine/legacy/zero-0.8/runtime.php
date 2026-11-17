@@ -64,7 +64,7 @@ function _stattic_invoke_zero(
         _stattic_zero_send_auth_redirect($config, $serving, $operation, $requestMethod, $requestHost);
     }
     if ($operation === 'realtime_events') {
-        _stattic_zero_send_realtime_events($config, $requestMethod);
+        _stattic_zero_send_realtime_events($config, $requestMethod, $serving);
     }
     if ($operation === 'run') {
         _stattic_zero_send_run_response($config, $versionRoot, $serving, $requestMethod, $requestHost);
@@ -745,7 +745,7 @@ function _stattic_zero_sessionless_guest(): array
     return _stattic_zero_guest_auth_context(_stattic_collab_mint_anonymous_id());
 }
 
-function _stattic_zero_send_realtime_events(array $config, string $requestMethod): void
+function _stattic_zero_send_realtime_events(array $config, string $requestMethod, array $serving = []): void
 {
     require_once __DIR__ . '/../../shared/http.php';
 
@@ -755,13 +755,27 @@ function _stattic_zero_send_realtime_events(array $config, string $requestMethod
         _stattic_problem_refused(404, 'zero_replay_unavailable', 'Zero realtime replay is unavailable.');
     }
     $query = _stattic_zero_replay_query_string($requestMethod);
-    $result = _stattic_http_request([
-        'url' => $query === '' ? $replayUrl : $replayUrl . (str_contains($replayUrl, '?') ? '&' : '?') . $query,
-        'headers' => _stattic_zero_replay_headers($config),
-        'connect_timeout' => STATTIC_ZERO_CALLBACK_TIMEOUT_SECONDS,
-        'timeout' => STATTIC_ZERO_CALLBACK_TIMEOUT_SECONDS,
-        'schemes' => ['https', 'http'],
-    ]);
+    // The Space token replaces the older Authorization when the control plane
+    // has registered this box's key; a refusal (an older control plane) is
+    // retried with the older headers.
+    require_once __DIR__ . '/../../shared/space-identity.php';
+    $privateRoot = _stattic_access_private_root();
+    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
+    $result = _stattic_space_identity_send(
+        $serving,
+        static fn (?string $authorization): array => _stattic_http_request([
+            'url' => $query === '' ? $replayUrl : $replayUrl . (str_contains($replayUrl, '?') ? '&' : '?') . $query,
+            'headers' => $authorization === null
+                ? _stattic_zero_replay_headers($config)
+                : ['Accept: application/json', $authorization],
+            'connect_timeout' => STATTIC_ZERO_CALLBACK_TIMEOUT_SECONDS,
+            'timeout' => STATTIC_ZERO_CALLBACK_TIMEOUT_SECONDS,
+            'schemes' => ['https', 'http'],
+        ]),
+        [401, 403],
+        $privateRoot,
+        $spaceId,
+    );
     if ($result['error'] !== null) {
         _stattic_problem_refused(502, 'zero_replay_failed', 'Zero realtime replay failed.');
     }
@@ -926,22 +940,34 @@ function _stattic_zero_post_callback_event(string $url, string $token, array $ev
     if (!is_string($payload) || strlen($payload) > STATTIC_ZERO_CALLBACK_EVENT_MAX_BYTES) {
         return;
     }
-    // The callback is deliberately best effort, but PHP 8.5's NoDiscard
-    // contract requires the caller to acknowledge the transport receipt.
-    $receipt = _stattic_http_request([
-        'url' => $url,
-        'method' => 'POST',
-        'headers' => [
-            'Content-Type: application/json',
-            'Authorization: Bearer ' . $token,
-        ],
-        'body' => $payload,
-        'connect_timeout_ms' => $timeoutMs,
-        'timeout_ms' => $timeoutMs,
-        'schemes' => ['https', 'http'],
-        // The receipt is not read; cap it so a chatty endpoint cannot make the
-        // worker hold a body it will discard.
-        'max_body_bytes' => 4096,
-    ]);
+    // The Space token when the control plane has registered this box's key;
+    // the version's callback JWT otherwise, or when a rolled-back control
+    // plane refuses the token. The callback is deliberately best effort, but
+    // PHP 8.5's NoDiscard contract requires the caller to acknowledge the
+    // transport receipt.
+    require_once __DIR__ . '/../../shared/space-identity.php';
+    $spaceId = is_string($event['space_id'] ?? null) ? $event['space_id'] : '';
+    $privateRoot = _stattic_access_private_root();
+    $receipt = _stattic_space_identity_send(
+        _stattic_space_identity_serving($privateRoot, $spaceId),
+        static fn (?string $authorization): array => _stattic_http_request([
+            'url' => $url,
+            'method' => 'POST',
+            'headers' => [
+                'Content-Type: application/json',
+                $authorization ?? 'Authorization: Bearer ' . $token,
+            ],
+            'body' => $payload,
+            'connect_timeout_ms' => $timeoutMs,
+            'timeout_ms' => $timeoutMs,
+            'schemes' => ['https', 'http'],
+            // The receipt is not read; cap it so a chatty endpoint cannot make the
+            // worker hold a body it will discard.
+            'max_body_bytes' => 4096,
+        ]),
+        [403],
+        $privateRoot,
+        $spaceId,
+    );
     unset($receipt);
 }

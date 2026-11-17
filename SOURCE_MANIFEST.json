@@ -1,7 +1,7 @@
 {
-  "revision": "abf1f994e4d3837e9cd9f4b1f2577df1863b266f",
-  "sourceHash": "b8ce43ea533729d467431c089cc517d24b8b002ecd4c5a19d39fe51b65be69e2",
-  "manifestSha256": "f6686e7b96039d776561df54c487ba9d015b987f6d4ccb0d090725363150d54d",
+  "revision": "2eab2c5f574763437106dcb08bef2493d952de96",
+  "sourceHash": "eff1ef954a33df57a356d384ee5f118753f275cb2894bce8903bbbed907dca38",
+  "manifestSha256": "ca612ec8c72489f5af0cabc47e636cbe0ae4de69f8d60ff4ea1276d37a22d18f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "92fbd7866ce24f5a9b7abf8eb8f262b9ef5842a6202d9958487eabe2f5ea3516"
+      "sha256": "7f389f91a3b81bf69ca52b532e318b71266e8e1040bb862d3267ee681e205540"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "08cd9a0c7d1a41a286a447486d4e5b5992b2718d55b35ecf7b57c8ca5fa362b7"
+      "sha256": "c09472723ad2979717fdfbcf3aac82b664f456021e008a65d03f34ab43f56aec"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -13772,12 +13772,12 @@
       "sha256": "5c95c07f7e5ec697638a9b70ae5d5ca46a4ab68405206c5c06fa2e0f51e7f3ee"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-I5EALKOJ.js",
-      "sha256": "896722908a5fc62d56d444a1497159cf21fb988488ad69c81ab0c9ac7c0aee3c"
+      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-S4IHL4KZ.js",
+      "sha256": "c98aa2be1e9561cb554f45fad812724bc90122a2c947bae018393c0905e927cb"
     },
     {
       "path": "runtime/engine/runtime/space-client/client.js",
-      "sha256": "05321276f9eba482110b943d2289f368a8b2b0ddf1b5cd9569b05a4f084deb0d"
+      "sha256": "a5099d0c69806efe030ebd157859006e94717a4ca2dae1fde33ed7cf69d5306c"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -14049,7 +14049,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "c869d5ad936bf35374d289980e8dcdd3b86059527295f121cb235b7a0054ad2a"
+      "sha256": "a6b147969fcbf36620b6f7e725877a688c2c234899a83db2889c8eb56c7cb316"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",

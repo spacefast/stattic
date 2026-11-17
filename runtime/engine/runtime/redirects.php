@@ -145,9 +145,9 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
         }
 
         $queryRule = $rule['query'] ?? null;
-        if (!is_array($queryRule) || count($queryRule) === 0) {
-            $target = _stattic_append_current_query_to_url($target);
-        }
+        $location = !is_array($queryRule) || count($queryRule) === 0
+            ? _stattic_append_current_query_to_url($target)
+            : $target;
         // An EXACT unconditional rule names one purgeable URL, so it states the
         // same `revalidate` class the compiler bakes into that rule's table
         // entry. A PATTERN expands to URLs no purge can name, so it keeps the
@@ -155,12 +155,16 @@ function _stattic_apply_redirects(array $redirects, array $serving, callable $pa
         _stattic_send_cache_policy_headers(
             false,
             empty($rule['conditions'])
-                ? ($useExact && !$editedInPlace
-                    ? _sf_cache_control(STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE, true)
-                    : STATTIC_DEFAULT_EDGE_CACHE_CONTROL)
+                ? _stattic_redirect_cache_control(
+                    $location,
+                    $target,
+                    $useExact && !$editedInPlace
+                        ? _sf_cache_control(STATTIC_RUNTIME_CACHE_CLASS_REVALIDATE, true)
+                        : STATTIC_DEFAULT_EDGE_CACHE_CONTROL
+                )
                 : STATTIC_CACHE_CONTROL_NO_STORE
         );
-        header('Location: ' . $target, true, $status);
+        header('Location: ' . $location, true, $status);
         exit;
     }, true);
 

@@ -1939,6 +1939,16 @@ function _stattic_append_current_query_to_url(string $target): string
     return $target;
 }
 
+// The cache policy for a redirect whose Location went through
+// _stattic_append_current_query_to_url. The edge leaves tracking parameters
+// such as utm_source and fbclid out of its cache key, so a stored redirect that
+// copied one visitor's query string would send those tags to the next visitor
+// on the same path. A redirect that copied nothing keeps its shared policy.
+function _stattic_redirect_cache_control(string $location, string $destination, string $sharedPolicy): string
+{
+    return $location === $destination ? $sharedPolicy : STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+}
+
 function _stattic_runtime_cors_headers(): void
 {
     $origin = isset($_SERVER['HTTP_ORIGIN']) && is_string($_SERVER['HTTP_ORIGIN'])

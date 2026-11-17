@@ -1066,7 +1066,8 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         if (!in_array($method, STATTIC_VISITOR_METHODS, true)) {
             _stattic_render_method_not_allowed_lazy(STATTIC_VISITOR_METHODS);
         }
-        $headers['location'] = _stattic_append_current_query_to_url($headers['location']);
+        $redirectDestination = $headers['location'];
+        $headers['location'] = _stattic_append_current_query_to_url($redirectDestination);
     } elseif (!in_array($method, ['GET', 'HEAD'], true)) {
         // A static entry serves representations and owns no verbs beyond them,
         // so a non-GET/HEAD request is not its to TERMINATE: it records
@@ -1125,6 +1126,10 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         $headers['cache-control'] = STATTIC_DEFAULT_EDGE_CACHE_CONTROL;
     }
     if ($noStore) {
+        $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
+    }
+    if ($isRedirect && $headers['location'] !== $redirectDestination) {
+        // Copied the visitor's query string: see _stattic_redirect_cache_control.
         $headers['cache-control'] = STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE;
     }
     $headers = _stattic_v4_platform_response_headers($context, $headers, $privateCache);
@@ -1897,14 +1902,13 @@ function _stattic_v4_route_redirect_private(bool $open, array $serving, string $
 
 function _stattic_send_route_redirect(array $action, string $remainder, bool $privateCache = false): never
 {
-    _stattic_send_cache_policy_headers($privateCache, STATTIC_DEFAULT_EDGE_CACHE_CONTROL);
-    header(
-        'Location: ' . _stattic_append_current_query_to_url(
-            _stattic_append_path_to_url((string) $action['destination'], $remainder)
-        ),
-        true,
-        (int) ($action['status'] ?? 302)
+    $destination = _stattic_append_path_to_url((string) $action['destination'], $remainder);
+    $location = _stattic_append_current_query_to_url($destination);
+    _stattic_send_cache_policy_headers(
+        $privateCache,
+        _stattic_redirect_cache_control($location, $destination, STATTIC_DEFAULT_EDGE_CACHE_CONTROL)
     );
+    header('Location: ' . $location, true, (int) ($action['status'] ?? 302));
     exit;
 }
 

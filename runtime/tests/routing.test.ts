@@ -181,6 +181,9 @@ beforeAll(async () => {
         "/guide/* /guide.html 200!",
         `/preserve/* ${redirectReceiverUrl("/receiver")} 307`,
         "/escape/* /:splat 302",
+        // Matches on its own query and builds the destination from it, so it
+        // copies nothing of the visitor's query string.
+        "/campaign utm_source=:source /landing/:source 302",
       ].join("\n"),
     },
     activate: {
@@ -654,6 +657,39 @@ test("ordered redirects preserve the request query and RFC method semantics", as
   expect(rejected.status).toBe(405);
   expect(rejected.headers.get("allow")).toBe("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
   expect(rejected.headers.get("location")).toBeNull();
+});
+
+// The edge leaves tracking parameters such as utm_source out of its cache key.
+// A stored redirect that copied one visitor's query string would send those
+// tags to the next visitor on the path, so only a redirect that copied nothing
+// may be shared.
+test("a redirect that copies the visitor's query string is never shared-cached", async () => {
+  const places: [string, string, string, string][] = [
+    // [label, host, path, location without the query]
+    ["canonical address", SITE, "/docs", "/docs/"],
+    ["exact rule", SITE, "/found", "/about.html"],
+    ["pattern rule", SITE, "/preserve/resource", redirectReceiverUrl("/receiver")],
+    ["host redirect", WWW, "/blog/post.html", "https://site.test/blog/post.html"],
+  ];
+  for (const [label, host, path, location] of places) {
+    const plain = await get(rt, host, path);
+    expect(plain.headers.get("location"), label).toBe(location);
+    expect(plain.headers.get("cache-control"), label).toContain("public");
+    expect(plain.headers.get("a8c-edge-cache"), label).not.toBe("no-cache");
+
+    for (const source of ["a", "b"]) {
+      const tagged = await get(rt, host, `${path}?utm_source=${source}`);
+      expect(tagged.headers.get("location"), label).toBe(`${location}?utm_source=${source}`);
+      expect(tagged.headers.get("cache-control"), label).toBe("private, no-store");
+      expect(tagged.headers.get("a8c-edge-cache"), label).toBe("no-cache");
+    }
+  }
+
+  // A rule that matches on its own query copies nothing, so it stays shared.
+  const ruled = await get(rt, SITE, "/campaign?utm_source=a");
+  expect(ruled.status).toBe(302);
+  expect(ruled.headers.get("location")).toBe("/landing/a");
+  expect(ruled.headers.get("cache-control")).toContain("public");
 });
 
 test("capture expansion cannot turn a same-origin redirect into an authority", async () => {

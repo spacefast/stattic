@@ -1,7 +1,7 @@
 {
-  "revision": "78214cf96b1c70d56ebebf1826ddea70f31301b7",
-  "sourceHash": "42971728b2155a7273e25fd6cdf236b1ab9413732c54fce13e125f6282180b91",
-  "manifestSha256": "f9514d68e60264ea3386c494d2045af8b13df6c75f6554d7addbaf2f1e3546f4",
+  "revision": "3a9eaa9d2426ec9eefd4292099b7dad0dcc1a129",
+  "sourceHash": "118532d36b57393620bbfd280f65d0c79df90de02fe4736bd980a93909d6e91a",
+  "manifestSha256": "20aed69581c01e4f7b1aa480f0e1b6dabcdf345e482ab980f02562316878d476",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a45e700a690c4d4ed7de94e5216a9524f5ea7739705f263386ea9d094e4ad87a"
+      "sha256": "aee72d790427823fb96c059b328395a3e26c385e917c8b9eb65d937280604715"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "101db0fa8ad080eb266de65f89d5364abd46f4e6f7dfa2e8e5cf357c23816a49"
+      "sha256": "9a2e97f67fa9c78438e61506b365668953cb5b3137acfd822295f23da74f9378"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14281,7 +14281,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "65a33fabe39e7e38e0fe4ae5963d1e5d66671d3a8cbb25955386a62d9e58cabb"
+      "sha256": "adf906502a5592ef53c3413fce17253dd322ebdfcbff6acf2209030f8736b463"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -14805,7 +14805,7 @@
     },
     {
       "path": "runtime/tests/run-context-playground.mjs",
-      "sha256": "e06c9446d32ecd7b368b414f0a399aaf88bc54d1a8c12fb1a0810532231f62af"
+      "sha256": "899367fe2096cfd076cf7ff610f129735557625a3f0e0f27c153065e6bcb4526"
     },
     {
       "path": "runtime/tests/run.sh",

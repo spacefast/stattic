@@ -1,12 +1,12 @@
 /**
  * Real WordPress/SQLite acceptance. Run through pinned wp-playground-cli, not a
- * database substitute. WordPress and the Gutenberg plugin are the exact
- * archives the platform component lock pins for every Space.
+ * database substitute. WordPress is the exact archive the platform component
+ * lock pins. Gutenberg is wp.cloud-managed at `latest` on every box, so this
+ * runs WordPress.org's current stable release, the same code.
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, openSync } from "node:fs";
+import { openSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,28 +53,24 @@ const config = {
 };
 await writeFile(path.join(output, "config.json"), JSON.stringify(config));
 
-/** The locked plugin archive, verified against the lock and unpacked once. */
-async function lockedPlugin(component, folder) {
-  const cache = path.join(root, ".cache/wordpress-components");
-  const unpacked = path.join(cache, `${folder}-${component.version}`);
-  if (existsSync(path.join(unpacked, folder))) return path.join(unpacked, folder);
+/**
+ * WordPress.org's current stable release of a plugin wp.cloud manages at
+ * `latest`, fetched fresh on each run so it never lags what boxes link.
+ */
+async function latestPlugin(folder) {
+  const unpacked = path.join(root, ".cache/wordpress-components", `${folder}-latest`);
+  await rm(unpacked, { recursive: true, force: true });
   await mkdir(unpacked, { recursive: true });
-  const response = await fetch(component.archiveUrl);
-  assert.equal(response.ok, true, `Download ${component.archiveUrl}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  assert.equal(bytes.length, component.archiveBytes, `${folder} archive size must match the lock`);
-  assert.equal(
-    `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
-    component.archiveSha256,
-    `${folder} archive digest must match the lock`,
-  );
+  const url = `https://downloads.wordpress.org/plugin/${folder}.latest-stable.zip`;
+  const response = await fetch(url);
+  assert.equal(response.ok, true, `Download ${url}`);
   const archive = path.join(unpacked, "archive.zip");
-  await writeFile(archive, bytes);
+  await writeFile(archive, Buffer.from(await response.arrayBuffer()));
   assert.equal(spawnSync("unzip", ["-q", archive, "-d", unpacked]).status, 0, `Unpack ${folder}`);
   await rm(archive);
   return path.join(unpacked, folder);
 }
-const gutenberg = await lockedPlugin(release.gutenberg, "gutenberg");
+const gutenberg = await latestPlugin("gutenberg");
 
 // The kernel loads as a must-use plugin, as on a box: before `init`, which is
 // where the Gutenberg plugin reads its collaboration switch.

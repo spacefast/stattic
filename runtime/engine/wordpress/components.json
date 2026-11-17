@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:06861ac76fed1cf1572ea1efd10a6f00a7d191ebd439275d59c7b8baa50e4189",
+  "digest": "sha256:eac02369e408510faf52e6a78de0b79daabf0975af530a069bdcee7ff533814e",
   "components": [
     {
       "id": "spacefast-identity",
@@ -120,12 +120,11 @@
     {
       "id": "secure-custom-fields",
       "kind": "plugin",
-      "version": "6.9.7",
-      "sha256": "sha256:5b10edab948f64b84d44d81a29fd5794a2573205e0d5e7ea9538024fc93ff52c",
+      "version": "latest",
+      "sha256": "sha256:896950d25a87fddd914cadb3e0f1674c6286a39d82bab889ec84827135435889",
       "source": {
-        "kind": "archive",
-        "url": "https://downloads.wordpress.org/plugin/secure-custom-fields.6.9.7.zip",
-        "bytes": 5127456
+        "kind": "provider-managed",
+        "software": "plugins/secure-custom-fields/latest"
       },
       "provides": ["wordpress.scf"],
       "activation": "always"
@@ -146,12 +145,11 @@
     {
       "id": "mcp-adapter",
       "kind": "plugin",
-      "version": "0.7.1",
-      "sha256": "sha256:719d81aa1250615acfd8256f0acc8c13f1712f1ae398c3d5883c8b166024fe9b",
+      "version": "latest",
+      "sha256": "sha256:1bdf109a5e21a6c98c314ee442ccb62e3b085a1b9a472e6b20307fed3907e807",
       "source": {
-        "kind": "archive",
-        "url": "https://downloads.wordpress.org/plugin/mcp-adapter.0.7.1.zip",
-        "bytes": 450211
+        "kind": "provider-managed",
+        "software": "plugins/mcp-adapter/latest"
       },
       "provides": ["wordpress.mcp-adapter"],
       "activation": "always"
@@ -172,12 +170,11 @@
     {
       "id": "gutenberg",
       "kind": "plugin",
-      "version": "24.1.0",
-      "sha256": "sha256:8cef24dcb3ee8816a7552e7f39e6f0b07a072131900b9ec27642b2549f4ba82c",
+      "version": "latest",
+      "sha256": "sha256:66fbcfe1d5e537e51fe9dbbaeb4bfc96bca5e89f09bdb4e3a860888692b33f17",
       "source": {
-        "kind": "archive",
-        "url": "https://downloads.wordpress.org/plugin/gutenberg.24.1.0.zip",
-        "bytes": 49349545
+        "kind": "provider-managed",
+        "software": "plugins/gutenberg/latest"
       },
       "provides": ["wordpress.gutenberg", "wordpress.collaboration"],
       "activation": "always"

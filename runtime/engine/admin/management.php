@@ -2617,11 +2617,23 @@ function _stattic_runtime_version_files_cursor_decode(string $cursor): ?string
     return $decoded !== '' ? $decoded : null;
 }
 
-// Sends the follow-up purges that are due on this box. A Space owns its box, so
-// that includes a hostname the Space no longer serves.
+// Recover first purges as well as follow-ups: a new alias's first purge can
+// fail before the provider attaches it. A Space owns its box, including purge
+// obligations for hostnames it no longer serves.
 function _stattic_runtime_settle_space_purge_route(string $privateRoot, string $spaceId, array $claims): void
 {
-    $settle = _stattic_runtime_purge_settle_drain($privateRoot, microtime(true) + 20);
+    $deadline = microtime(true) + 20;
+    $drained = _stattic_runtime_purge_drain($privateRoot, $deadline);
+    $settle = _stattic_runtime_purge_settle_drain($privateRoot, $deadline);
+    if (!$drained) {
+        $settle['complete'] = false;
+        // The enqueue can die before writing its follow-up record. Keep the
+        // existing control-plane recovery scheduled even without that record.
+        $settle['next_due_in'] = min(
+            $settle['next_due_in'] ?? STATTIC_RUNTIME_PURGE_SETTLE_SECONDS,
+            STATTIC_RUNTIME_PURGE_SETTLE_SECONDS,
+        );
+    }
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'settle' => $settle,

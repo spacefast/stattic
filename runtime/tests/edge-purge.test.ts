@@ -200,36 +200,59 @@ test("every purge is followed by a second one once in-flight fills have landed",
   expect(f.actions).toHaveLength(3);
 });
 
-test("a follow-up purge waits for its first purge and housekeeping sends it", async () => {
+test("scheduled purge recovery retries the first purge before sending its follow-up", async () => {
   await using f = await fixture();
   const queued = await f.run(
     `_stattic_runtime_purge_enqueue($root, ['first.test'], 'hostname_intent_updated');`,
   );
   expect(queued.exitCode, queued.stderr).toBe(0);
-  // The first purge has not landed, so the follow-up must not go ahead of it.
-  f.enableGateway();
-  const waiting = await f.run(
-    `echo json_encode(_stattic_runtime_purge_settle_drain($root, microtime(true) + 20, time() + 61));`,
-  );
+  const settle = () =>
+    f.run(`
+      require '${engine}/admin/management.php';
+      _stattic_runtime_settle_space_purge_route($root, 'spc_purge', []);
+    `);
+  const waiting = await settle();
   expect(waiting.exitCode, waiting.stderr).toBe(0);
-  expect(JSON.parse(waiting.stdout).complete).toBe(true);
+  expect(JSON.parse(waiting.stdout).settle.complete).toBe(false);
+  expect(JSON.parse(waiting.stdout).settle.next_due_in).toBeGreaterThan(0);
   expect(f.actions).toEqual([]);
 
-  const tick = await f.run(`
-    $pass = _stattic_runtime_job_maintenance_tick($root, [], microtime(true) + 20);
-    echo json_encode(in_array('edge_purge', $pass['steps'], true));
+  // Retry is now due and the provider accepts the newly attached hostname.
+  // Move the durable clocks instead of sleeping through backoff and settle.
+  const due = await f.run(`
+    $store = _stattic_runtime_purge_store($root);
+    $record = _stattic_runtime_purge_read($store, 'first.test');
+    _stattic_record_store_put($store, 'first.test', [...$record, 'next_attempt_at' => 0]);
+    $settles = _stattic_runtime_purge_settle_store($root);
+    $followup = _stattic_runtime_purge_read($settles, 'first.test');
+    _stattic_record_store_put($settles, 'first.test', [...$followup, 'due_at' => 0]);
   `);
-  expect(tick.exitCode, tick.stderr).toBe(0);
-  expect(tick.stdout).toBe("true");
-  expect(f.actions).toEqual(["spacefast:hostname_intent_updated"]);
-  const later = await f.run(
-    `echo json_encode(_stattic_runtime_purge_settle_drain($root, microtime(true) + 20, time() + 61));`,
-  );
-  expect(JSON.parse(later.stdout)).toEqual({ complete: true, next_due_in: null });
+  expect(due.exitCode, due.stderr).toBe(0);
+  f.enableGateway();
+  const recovered = await settle();
+  expect(recovered.exitCode, recovered.stderr).toBe(0);
+  expect(JSON.parse(recovered.stdout).settle).toEqual({ complete: true, next_due_in: null });
   expect(f.actions).toEqual([
     "spacefast:hostname_intent_updated",
     "spacefast:hostname_intent_updated_settle",
   ]);
+  const pending = await f.run(`
+    echo json_encode(_stattic_runtime_purge_read(_stattic_runtime_purge_store($root), 'first.test'));
+  `);
+  expect(pending.stdout, pending.stderr).toBe("null");
+  expect(JSON.parse((await settle()).stdout).settle).toEqual({ complete: true, next_due_in: null });
+  expect(f.actions).toHaveLength(2);
+
+  // A process can die between persisting the first purge and its follow-up.
+  const interrupted = await f.run(`
+    _stattic_record_store_put(_stattic_runtime_purge_store($root), 'interrupted.test', [
+      'generation' => 'interrupted', 'reason' => 'publish', 'next_attempt_at' => time() + 300,
+    ]);
+  `);
+  expect(interrupted.exitCode, interrupted.stderr).toBe(0);
+  const retry = await settle();
+  expect(retry.exitCode, retry.stderr).toBe(0);
+  expect(JSON.parse(retry.stdout).settle).toEqual({ complete: false, next_due_in: 60 });
 });
 
 test("content redirect publication refuses a serving write when its purge cannot be persisted", async () => {

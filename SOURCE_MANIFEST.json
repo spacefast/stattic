@@ -1,7 +1,7 @@
 {
-  "revision": "bd02c87b4bbd88cfe35d0745ac5281c68c13d27b",
+  "revision": "354cfe0ba88d2b4b6132ca935cfcadbe46b37392",
   "sourceHash": "447ea5d9dc1bc63918c6418f8e96503e746a7aedd7dd6e03e033a765ba10f98c",
-  "manifestSha256": "d9d29f5d82c27cf2fe6c9018b1df18b4f32c2da4459589b315dad99bbfcf5685",
+  "manifestSha256": "ce38bdc71bb37ec45fae01ce783e27c4486195993903f6aa473298042ef424bd",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "16bb1a2f0caf9fd66267a047ed65641dde7a94b415b306a30f3ede812d6b576f"
+      "sha256": "04287797c81d62862da5003cf0f04b1430efebb190d97114f1ca0ffd9b78897e"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "6f0256f235918876da6e6e022b5ac8d08d081ee028b4f7c379ecbd08e605bb33"
+      "sha256": "5ad9b81e2c61afb703bde3edb6a61c7b4fd2c3463498a547b709b7bb19b0b855"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -14581,7 +14581,7 @@
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",
-      "sha256": "6fe5f08159c3bbd9c21596c3b454e3bc31ca38eabb9f4afbfa512940644c11d6"
+      "sha256": "c1971d452391e347c5a1ffefa0b35d5188b6e682d2930e41d5cb6bea7f2708c0"
     },
     {
       "path": "runtime/tests/fixtures/admission-counter-generation.php",
@@ -14701,7 +14701,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "ab421ea9b7612e3de4372ca21cd5713f54f0f3a15a5ecfb678206d3090ad10d1"
+      "sha256": "094df1e0e560886e39969625bf7cce7741bbedc75370f6d28cf8ceeea0561b9b"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -14816,6 +14816,10 @@
       "sha256": "4dafa82b8ff8687a001d58bb4f47c329f3863c500c4f7af0ea26934313698689"
     },
     {
+      "path": "runtime/tests/runtime-native-binary.ts",
+      "sha256": "9a4c2891ea648f211fef2bc9e33c3b57e6fcbcd4aa4f205e836cff5270677a39"
+    },
+    {
       "path": "runtime/tests/sell-client-drift.test.ts",
       "sha256": "f61175514bf52493bc0667a7539fd905ef990fc328847ee8989732c4fd09ede7"
     },
@@ -14925,7 +14929,7 @@
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",
-      "sha256": "364b67f3ab76b50673ae64516063632a692d907f43da21f2ac049c689c8b8f7a"
+      "sha256": "a548caa1c446a0b3a5c9c753a0593b94280b63b274d8def2edf47dc01a5f08eb"
     },
     {
       "path": "runtime/tests/zero-v2-cordon.test.ts",

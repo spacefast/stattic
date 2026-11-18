@@ -26,11 +26,11 @@ import {
   readBlob,
   responseEntry,
   type Runtime,
-  runtimeBinaryPath,
   startRuntime,
   uploadSessionBlobs,
   versionRoot,
 } from "./harness.ts";
+import { runtimeBinaryPath } from "./runtime-native-binary.ts";
 
 const RUNTIME_ENGINE = path.resolve(import.meta.dir, "../engine");
 const HOST = "native-finalize.test";

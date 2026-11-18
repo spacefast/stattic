@@ -22,7 +22,6 @@ import {
   type Runtime,
   sha256,
   spaceRoot,
-  runtimeBinaryPath,
   startRuntime,
   versionRoot,
 } from "./harness.ts";
@@ -32,6 +31,7 @@ import {
   startMysqlContainer,
   stopMysqlContainers,
 } from "./mysql-container.ts";
+import { runtimeBinaryPath } from "./runtime-native-binary.ts";
 
 let rt: Runtime;
 let runtimePath: string;

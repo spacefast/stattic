@@ -1,0 +1,98 @@
+@use "@wordpress/base-styles/colors";
+@use "@wordpress/base-styles/variables";
+
+.first-admin-dashboard-widget {
+	display: flex;
+	flex-direction: column;
+	background: var( --wpds-color-bg-surface-neutral-strong );
+	box-sizing: border-box;
+	overflow: hidden;
+
+	// WordPress Card component wraps children in an inner View with height: 100%.
+	// This inner wrapper needs flex properties to pass height correctly to children.
+	> :first-child {
+		display: flex;
+		flex-direction: column;
+		flex: 1;
+		min-height: 0;
+	}
+}
+
+.first-admin-dashboard-widget--fixed-height {
+	height: 100%;
+}
+
+.first-admin-dashboard-widget__header {
+	padding: calc( 4 * var( --wpds-dimension-base ) );
+}
+
+.first-admin-dashboard-widget__settings {
+	position: absolute;
+	top: variables.$grid-unit-20;
+	right: variables.$grid-unit-20;
+	z-index: 1;
+	background-color: var( --wpds-color-bg-surface-neutral-strong );
+}
+
+.first-admin-dashboard-widget__content {
+	overflow: auto;
+	padding: 0 calc( 4 * var( --wpds-dimension-base ) )
+		calc( 4 * var( --wpds-dimension-base ) );
+	flex: 1;
+	min-height: 0; // Allows flex item to shrink and overflow
+}
+
+.first-admin-dashboard-widget__content--no-padding {
+	padding: 0;
+}
+
+.first-admin-dashboard-widget--fade-overlay {
+	&::after {
+		content: "";
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		right: 1rem; // Leave space for scrollbar
+		height: 48px;
+		background: linear-gradient(
+			to top,
+			var( --wpds-color-bg-surface-neutral-strong ) 0%,
+			transparent 100%
+		);
+		pointer-events: none;
+		z-index: 1;
+	}
+}
+
+.first-admin-dashboard-widget__title {
+	margin: 0;
+	padding: 0;
+	color: var( --wpds-color-fg-content-neutral );
+	font-family: var( --wpds-font-family-heading );
+	font-size: var( --wpds-font-size-lg );
+	font-weight: 590;
+	line-height: var( --wpds-font-line-height-md );
+}
+
+.first-admin-dashboard-widget__description {
+	color: var( --wpds-color-fg-content-neutral-weak );
+}
+
+.first-admin-dashboard-widget-actions {
+	position: absolute;
+	top: variables.$grid-unit-10;
+	right: variables.$grid-unit-10;
+	padding: variables.$grid-unit-10;
+	z-index: 1;
+	box-sizing: border-box;
+}
+
+.first-admin-dashboard-widget__info-icon {
+	color: var( --wpds-color-fg-content-neutral-weak );
+	display: flex;
+}
+
+.first-admin-dashboard-widget__info-tooltip {
+	max-width: 240px;
+	text-align: left;
+}

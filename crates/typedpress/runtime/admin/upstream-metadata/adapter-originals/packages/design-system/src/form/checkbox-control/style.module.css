@@ -1,0 +1,36 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.root {
+		/* Checkbox and label will be aligned correctly as far as the checkbox height
+		is less or equal than the label's line height */
+		--wp-ui-checkbox-control-checkbox-height: 16px;
+
+		/* Use the highest number between the target line height for the label text,
+		and the checkbox height. This will ensure that the first line of the label
+		and the checkbox are always vertically centered. */
+		--wp-ui-checkbox-control-label-line-height: max(
+			var( --wp-ui-checkbox-control-checkbox-height ),
+			/* TODO: use token for line-height */
+				calc( 1.4 * var( --wpds-font-size-md ) )
+		);
+	}
+
+	.checkbox-wrapper {
+		display: flex;
+		align-items: center;
+		line-height: var( --wp-ui-checkbox-control-label-line-height );
+	}
+
+	.checkbox {
+		--wp-ui-checkbox-input-size: var(
+			--wp-ui-checkbox-control-checkbox-height
+		);
+	}
+
+	.label {
+		--wp-ui-field-label-line-height: var(
+			--wp-ui-checkbox-control-label-line-height
+		);
+	}
+}

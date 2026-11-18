@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": [],
+    "paths": {
+      "typedpress": ["../../types/typedpress/index.d.ts"]
+    }
+  },
+  "include": ["typedpress.config.ts", "tp/_generated/db.d.ts", "tp/lib/**/*.ts"]
+}

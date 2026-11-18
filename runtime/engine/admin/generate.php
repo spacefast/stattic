@@ -1356,7 +1356,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         'fence' => $fence === 'none' ? null : $fence,
         // A tuple, never summed (D30).
         'ownership_revision' => $config['ownership_revision'] ?? null,
-        'zero_generation' => in_array($config['zero_generation'] ?? null, ['none', 'legacy_0_8', 'v2'], true) ? $config['zero_generation'] : 'none',
+        'zero_generation' => in_array($config['zero_generation'] ?? null, ['none', 'legacy_0_8', 'v2', 'tp_v1'], true) ? $config['zero_generation'] : 'none',
         'zero_generation_set_at' => $config['zero_generation_set_at'] ?? null,
         'live_hostname' => _stattic_runtime_affected_intent_hostnames($privateRoot, $spaceId, 'production')[0] ?? null,
         'access_gen' => is_int($authorization['generation'] ?? null) ? $authorization['generation'] : 0,

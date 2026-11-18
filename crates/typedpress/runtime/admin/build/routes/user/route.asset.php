@@ -1,0 +1,1 @@
+<?php return array('name' => 'user', 'dependencies' => array(), 'moduleDependencies' => array('@typedpress-admin/core-data-next', '@wordpress/route'), 'version' => 'fdb482aa5296c121c9d5');

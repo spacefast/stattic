@@ -1,0 +1,43 @@
+@use "@wordpress/base-styles/variables";
+@use "@wordpress/base-styles/colors";
+@use "@wordpress/base-styles/mixins";
+
+.first-admin-global-styles-variations_item {
+	box-sizing: border-box;
+	// To round the outline in Windows 10 high contrast mode.
+	cursor: pointer;
+
+	.first-admin-global-styles-variations_item-preview {
+		border-radius: variables.$radius-small;
+		outline: variables.$border-width solid
+			var( --wpds-color-stroke-interactive-neutral );
+		outline-offset: calc( -1 * #{variables.$border-width} );
+		overflow: hidden;
+		position: relative;
+		@media not ( prefers-reduced-motion ) {
+			// Add the same transition that block style variations and other buttons have.
+			transition: outline 0.1s linear;
+		}
+
+		&.is-pill {
+			height: variables.$button-size-compact;
+
+			.block-editor-iframe__scale-container {
+				overflow: hidden;
+			}
+		}
+	}
+
+	&:not( .is-active ):hover
+		.first-admin-global-styles-variations_item-preview {
+		outline-color: var( --wpds-color-stroke-interactive-neutral-active );
+	}
+
+	&.is-active .first-admin-global-styles-variations_item-preview,
+	&:focus-visible .first-admin-global-styles-variations_item-preview,
+	&:focus-visible {
+		outline-color: var( --wpds-color-stroke-focus-brand );
+		outline-offset: variables.$border-width;
+		outline-width: var( --wpds-border-width-focus );
+	}
+}

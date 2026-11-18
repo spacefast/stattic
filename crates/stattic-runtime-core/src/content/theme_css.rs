@@ -385,10 +385,8 @@ fn parse_fluid_length(value: &str) -> Option<CssLength> {
         (number, "rem")
     } else if let Some(number) = value.strip_suffix("em") {
         (number, "em")
-    } else if let Some(number) = value.strip_suffix("px") {
-        (number, "px")
     } else {
-        return None;
+        (value.strip_suffix("px")?, "px")
     };
     let number = number.trim().parse::<f64>().ok()?;
     (number.is_finite() && number >= 0.0).then_some(CssLength {

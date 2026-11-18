@@ -777,6 +777,14 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
     }
 
+    if (_stattic_typedpress_try_serve($sendContext, $requestPath, $requestMethod)) {
+        $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
+            'private_root' => $privateRoot, 'method' => $requestMethod, 'uri' => $requestUri,
+            'path' => $requestPath, 'host' => $requestHost,
+        ];
+        return;
+    }
+
     // Pattern-matched Zero endpoints and Function routes cannot be table keys;
     // their exact forms already were, so a committed file still wins.
     _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
@@ -1429,7 +1437,7 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         }
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_ZERO) {
-        if (($serving['zero_generation'] ?? null) === 'v2') {
+        if (in_array($serving['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) {
             _stattic_problem_response(410, 'zero_legacy_retired', 'This Zero 0.8 version is retired. Open the Space live hostname.', ['details' => ['live_hostname' => $serving['live_hostname'] ?? null]]);
         }
         _stattic_legacy_zero_dispatch_action($context, $action, $requestPath);

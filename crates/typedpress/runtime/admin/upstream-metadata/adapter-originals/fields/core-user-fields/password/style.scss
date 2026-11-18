@@ -1,0 +1,46 @@
+@use "@wordpress/base-styles/colors";
+@use "@wordpress/base-styles/variables";
+
+.dataforms-layouts-regular__field:has( .fields-controls__password ) {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: variables.$grid-unit-20;
+	align-items: end;
+
+	// Password field takes most space.
+	.fields-controls__password {
+		grid-column: 1;
+	}
+
+	// Generate button aligns with the input (after the label).
+	.fields-controls__password-generate {
+		grid-column: 2;
+		grid-row: 1;
+		align-self: end;
+	}
+}
+
+.fields-controls__password-generate {
+	margin-top: 0;
+}
+
+.fields-controls__password-strength-container {
+	font-size: variables.$font-size-small;
+
+	span {
+		font-weight: variables.$font-weight-regular;
+	}
+}
+
+.fields-controls__password-strength-meter {
+	width: 100px;
+	height: 4px;
+	background-color: colors.$gray-100;
+	border-radius: variables.$radius-small;
+	overflow: hidden;
+
+	div {
+		height: 100%;
+		transition: all 0.2s ease;
+	}
+}

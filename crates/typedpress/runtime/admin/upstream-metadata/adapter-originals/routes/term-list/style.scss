@@ -1,0 +1,6 @@
+@use "@wordpress/base-styles/variables";
+@use "@wordpress/base-styles/colors";
+
+.first-admin-terms-list-content__no-terms {
+	margin-block-start: calc( 16 * var( --wpds-dimension-base ) );
+}

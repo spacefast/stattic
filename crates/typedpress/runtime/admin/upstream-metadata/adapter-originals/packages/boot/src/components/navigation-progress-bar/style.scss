@@ -1,0 +1,19 @@
+.navigation-progress-bar {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 3px;
+	z-index: 999999;
+	background-color: transparent;
+	overflow: hidden;
+	pointer-events: none;
+
+	&__fill {
+		height: 100%;
+		background: var( --wpds-color-bg-interactive-brand-strong );
+		box-shadow: 0 0 10px var( --wpds-color-bg-interactive-brand-strong );
+		transition: transform 0.2s ease-out;
+		will-change: transform;
+	}
+}

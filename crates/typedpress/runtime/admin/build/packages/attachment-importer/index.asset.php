@@ -1,0 +1,1 @@
+<?php return array('name' => '@typedpress-admin/attachment-importer', 'dependencies' => array('wp-api-fetch', 'wp-core-data', 'wp-notices'), 'moduleDependencies' => array(), 'version' => '362ed94acc144ba5bd5d');

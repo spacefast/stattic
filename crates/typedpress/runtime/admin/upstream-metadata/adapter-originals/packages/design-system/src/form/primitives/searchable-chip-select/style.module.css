@@ -1,0 +1,32 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.chips-edit-area {
+		padding: calc( var( --wpds-dimension-base ) * 2 )
+			calc( var( --wpds-dimension-base ) * 3 ) 0;
+	}
+
+	.chips-list {
+		flex-grow: 1;
+	}
+
+	.input {
+		border: none;
+		outline: none;
+		min-height: 40px;
+		padding: calc( var( --wpds-dimension-base ) * 3 );
+		font-family: inherit;
+		font-size: inherit;
+		line-height: inherit;
+		background-color: transparent;
+	}
+}
+
+@layer wp-ui-compositions {
+	.input-layout {
+		display: flex;
+		flex-direction: column;
+		width: 100%;
+		height: auto;
+	}
+}

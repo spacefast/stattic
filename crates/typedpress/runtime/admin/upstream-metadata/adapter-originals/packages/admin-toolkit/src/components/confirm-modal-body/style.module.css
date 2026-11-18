@@ -1,0 +1,26 @@
+.heading {
+	margin: 0;
+	font-size: var( --wpds-font-size-xl );
+	font-weight: 590;
+	line-height: var( --wpds-font-line-height-xl );
+	color: var( --wpds-color-fg-content-neutral );
+}
+
+.message {
+	margin: 0;
+}
+
+.destructive-action {
+	--wp-ui-button-background-color: var(
+		--wpds-color-bg-interactive-error-strong
+	);
+	--wp-ui-button-background-color-active: var(
+		--wpds-color-bg-interactive-error-strong-active
+	);
+	--wp-ui-button-foreground-color: var(
+		--wpds-color-fg-interactive-error-strong
+	);
+	--wp-ui-button-foreground-color-active: var(
+		--wpds-color-fg-interactive-error-strong-active
+	);
+}

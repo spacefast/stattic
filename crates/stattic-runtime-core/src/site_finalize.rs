@@ -521,9 +521,11 @@ fn validate_zero_generation(
     input: &SiteFinalizeInput,
     files: &BTreeMap<String, FileMeta>,
 ) -> Result<()> {
-    let source = files
-        .keys()
-        .any(|path| path == "zero.config.ts" || path.starts_with(".zero-source/"));
+    let source = files.keys().any(|path| {
+        path == "zero.config.ts"
+            || path.starts_with(".zero-source/")
+            || crate::typedpress::declared(path)
+    });
     // `zero/` is an ordinary tenant folder; only the platform deploy manifest
     // or a declared capsule marks a 0.8 version.
     let legacy = input.body.get("zero").is_some_and(Value::is_object)
@@ -537,14 +539,22 @@ fn validate_zero_generation(
             "A version cannot combine Zero v2 source and Zero 0.8 capsules.",
         );
     }
-    if legacy && generation == Some("v2") {
+    if legacy && matches!(generation, Some("v2" | "tp_v1")) {
         return invalid(
             "zero_generation_locked",
             "A Zero v2 Space cannot finalize a Zero 0.8 capsule.",
         );
     }
     if source {
-        if !matches!(generation, Some("none" | "legacy_0_8" | "v2")) {
+        let typedpress = files.keys().any(|path| crate::typedpress::declared(path));
+        if (typedpress && generation == Some("v2")) || (!typedpress && generation == Some("tp_v1"))
+        {
+            return invalid(
+                "zero_generation_locked",
+                "This source belongs to a different runtime.",
+            );
+        }
+        if !matches!(generation, Some("none" | "legacy_0_8" | "v2" | "tp_v1")) {
             return invalid(
                 "zero_generation_locked",
                 "Zero source requires server-owned Space generation.",
@@ -620,7 +630,9 @@ fn run_finalize_pipeline(
                         .values()
                         .flat_map(|files| files.keys()),
                 )
-                .any(|path| path.starts_with(".zero-source/"))
+                .any(|path| {
+                    path.starts_with(".zero-source/") || path.starts_with(".typedpress-source/")
+                })
         {
             return invalid(
                 "zero_v2_source_transformed",
@@ -788,7 +800,7 @@ fn run_finalize_pipeline(
             .keys()
             .chain(pipeline.generated.iter())
             .filter(|path| {
-                path.starts_with(".zero-source/")
+                (path.starts_with(".zero-source/") || path.starts_with(".typedpress-source/"))
                     || path.starts_with("_spacefast/pages/documents/")
                     || (pages.is_some() && path.starts_with("pages/"))
             })
@@ -2460,6 +2472,16 @@ mod tests {
     fn finalize_enforces_server_owned_zero_generation() {
         for (files, body, code) in [
             (
+                vec![("zero.config.ts", b"export default {};".as_slice())],
+                json!({"zero_generation":"tp_v1"}),
+                "zero_generation_locked",
+            ),
+            (
+                vec![("typedpress.config.ts", b"export default {};".as_slice())],
+                json!({"zero_generation":"v2"}),
+                "zero_generation_locked",
+            ),
+            (
                 vec![(".zero-source/manifest.json", b"{}".as_slice())],
                 json!({}),
                 "zero_generation_locked",
@@ -2508,6 +2530,35 @@ mod tests {
             );
             assert!(result.is_ok(), "{generation}: {result:?}");
         }
+    }
+
+    #[test]
+    fn finalize_compiles_typedpress_and_keeps_source_private() {
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                ("typedpress.config.ts", br#"import { defineConfig } from "typedpress"; export default defineConfig({ name: "hosted", admin: false });"#),
+                ("public/index.html", b"typedpress app"),
+                ("notes.md", b"private source"),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"none"}),
+        );
+        result.unwrap();
+        let catalog = finalized_catalog(&private);
+        assert!(!catalog.paths["typedpress.config.ts"].public);
+        assert!(!catalog.paths["notes.md"].public);
+        assert_eq!(served_body(&private, "v", "index.html"), b"typedpress app");
+        let root = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["format"], "typedpress.hosted.v1");
+        assert_eq!(manifest["hostContract"], 1);
+        assert!(root
+            .join(format!(
+                "store/build/{}.json",
+                manifest["build"].as_str().unwrap()
+            ))
+            .is_file());
     }
 
     #[test]

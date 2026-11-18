@@ -1,0 +1,295 @@
+{
+  "version": 2,
+  "tables": {
+    "locations": {
+      "editor": false,
+      "drafts": false,
+      "columns": {
+        "id": {
+          "type": "integer",
+          "notNull": true,
+          "primaryKey": true,
+          "autoIncrement": true,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "name": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "kind": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": [
+            "fridge",
+            "freezer",
+            "pantry"
+          ],
+          "default": "pantry",
+          "references": null
+        }
+      }
+    },
+    "items": {
+      "editor": false,
+      "drafts": false,
+      "columns": {
+        "id": {
+          "type": "integer",
+          "notNull": true,
+          "primaryKey": true,
+          "autoIncrement": true,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "name": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "slug": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": true,
+          "max": 191.0,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "quantity": {
+          "type": "integer",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": 1,
+          "references": null
+        },
+        "unit": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": [
+            "pcs",
+            "g",
+            "kg",
+            "ml",
+            "l"
+          ],
+          "default": "pcs",
+          "references": null
+        },
+        "lowStockAt": {
+          "type": "integer",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": 1,
+          "references": null
+        },
+        "expiresOn": {
+          "type": "date",
+          "notNull": false,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "opened": {
+          "type": "boolean",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": false,
+          "references": null
+        },
+        "locationId": {
+          "type": "integer",
+          "notNull": false,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": {
+            "table": "locations",
+            "column": "id",
+            "onDelete": "set null",
+            "onUpdate": null,
+            "unsigned": true
+          }
+        },
+        "tags": {
+          "type": "json",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "updatedAt": {
+          "type": "timestamp",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        }
+      },
+      "queried": [
+        "expiresOn",
+        "id",
+        "quantity"
+      ]
+    },
+    "shopping_list": {
+      "editor": false,
+      "drafts": false,
+      "columns": {
+        "id": {
+          "type": "integer",
+          "notNull": true,
+          "primaryKey": true,
+          "autoIncrement": true,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "itemId": {
+          "type": "integer",
+          "notNull": false,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": true,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": {
+            "table": "items",
+            "column": "id",
+            "onDelete": "cascade",
+            "onUpdate": null,
+            "unsigned": true
+          }
+        },
+        "name": {
+          "type": "text",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "done": {
+          "type": "boolean",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": false,
+          "references": null
+        },
+        "notifiedAt": {
+          "type": "timestamp",
+          "notNull": false,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "createdAt": {
+          "type": "timestamp",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        },
+        "updatedAt": {
+          "type": "timestamp",
+          "notNull": true,
+          "primaryKey": false,
+          "autoIncrement": false,
+          "unique": false,
+          "max": null,
+          "enum": null,
+          "default": null,
+          "references": null
+        }
+      },
+      "queried": [
+        "itemId"
+      ]
+    }
+  }
+}

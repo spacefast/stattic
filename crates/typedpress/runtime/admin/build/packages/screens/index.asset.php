@@ -1,0 +1,1 @@
+<?php return array('name' => '@typedpress-admin/screens', 'dependencies' => array('react', 'react-dom', 'wp-api-fetch', 'wp-components'), 'moduleDependencies' => array('@typedpress-admin/dataviews', '@typedpress-admin/views'), 'version' => 'efd09be8dcb4c249b36f');

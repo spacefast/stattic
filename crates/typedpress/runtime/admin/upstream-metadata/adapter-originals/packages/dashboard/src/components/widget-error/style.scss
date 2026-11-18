@@ -1,0 +1,11 @@
+.first-admin-dashboard-widget-error {
+	text-align: center;
+	height: 100%;
+
+	.first-admin-dashboard-widget-error__message {
+		color: var( --wpds-color-fg-content-neutral-weak );
+		font-size: var( --wpds-font-size-md );
+		line-height: var( --wpds-font-line-height-sm );
+		margin: 0;
+	}
+}

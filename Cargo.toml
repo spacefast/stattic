@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/zero",
+  "crates/typedpress",
   "crates/stattic-runtime-egress",
   "crates/stattic-runtime-compiler",
   "crates/stattic-runtime-core",
@@ -9,6 +10,9 @@ members = [
   "crates/stattic-zero-runner",
 ]
 resolver = "2"
+
+[patch.crates-io]
+oxc-browserslist = { path = "crates/typedpress/crates/oxc-browserslist" }
 
 [workspace.package]
 edition = "2021"

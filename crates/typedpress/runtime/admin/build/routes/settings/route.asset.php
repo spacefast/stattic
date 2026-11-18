@@ -1,0 +1,1 @@
+<?php return array('name' => 'settings', 'dependencies' => array(), 'moduleDependencies' => array('@wordpress/route'), 'version' => 'cab7e662d48636502b9f');

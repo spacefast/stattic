@@ -1,0 +1,33 @@
+{
+	"name": "@typedpress-admin/design-navigation-list",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/design/navigation/list",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "navigation_list",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@typedpress-admin/admin-toolkit": "workspace:*",
+		"@typedpress-admin/design-system": "workspace:*",
+		"@typedpress-admin/fields-next": "workspace:*",
+		"@typedpress-admin/views": "workspace:*",
+		"@typedpress-admin/telemetry": "workspace:*",
+		"@typedpress-admin/dataviews": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	}
+}

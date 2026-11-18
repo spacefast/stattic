@@ -1,0 +1,11 @@
+{
+	"name": "core-taxonomy-term-fields",
+	"version": "1.0.0",
+	"dependencies": {
+		"@zero-admin/design-system": "workspace:*",
+		"@wordpress/core-data": "next",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/html-entities": "next",
+		"@wordpress/i18n": "next"
+	}
+}

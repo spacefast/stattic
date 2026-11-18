@@ -1,0 +1,14 @@
+{
+	"name": "@zero-admin/load-assets",
+	"version": "1.0.0",
+	"description": "A small package used to lazy-load editor settings",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {}
+}

@@ -1,0 +1,44 @@
+{
+	"name": "@zero-admin/post-list",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/list/$slug",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "post_list",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/attachment-importer": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/fields-next": "workspace:*",
+		"@zero-admin/image-cropper": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/block-editor": "next",
+		"@wordpress/commands": "next",
+		"@wordpress/components": "next",
+		"@wordpress/compose": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/dom": "next",
+		"@wordpress/editor": "next",
+		"@wordpress/element": "next",
+		"@wordpress/fields": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/keycodes": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/route": "next",
+		"@wordpress/ui": "next",
+		"clsx": "^2.1.1",
+		"dequal": "^2.0.3"
+	}
+}

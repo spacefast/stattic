@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-weather', 'dependencies' => array('react'), 'moduleDependencies' => array(), 'version' => '4941a15d6bfb0ab015a2');

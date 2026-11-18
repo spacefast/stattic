@@ -35,6 +35,7 @@ require_once __DIR__ . '/../engine/shared/space-mail.php';
 require_once __DIR__ . '/../engine/runtime/php-functions.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
 require_once __DIR__ . '/../engine/runtime/space-users.php'; // app-session cookie read before WordPress loads
+require_once __DIR__ . '/../engine/shared/typedpress.php'; // hosted-build manifest read on every Zero v2 request
 
 $assertions = 0;
 $failures = [];
@@ -4337,6 +4338,19 @@ check(
         === 'https://api.example.test/v1/screenshots/page?url=https%3A%2F%2Fh.test%2Fdocs%2Fa%252520b%2520%25231&version=ver_1',
     'social card URL encodes the decoded path once per segment'
 );
+
+// A Zero v2 version's manifest is read on every request: one that is not a
+// TypedPress build, readable or not, is simply not TypedPress.
+$typedPressRoot = sys_get_temp_dir() . '/stattic-typedpress-manifest-' . bin2hex(random_bytes(4));
+mkdir($typedPressRoot);
+foreach (['{"format":"zero.v2"}', '{"format":', str_repeat('[', 40) . str_repeat(']', 40)] as $manifestBody) {
+    file_put_contents($typedPressRoot . '/manifest.json', $manifestBody);
+    check(_stattic_typedpress_manifest($typedPressRoot) === null, 'a non-TypedPress manifest is not TypedPress: ' . substr($manifestBody, 0, 12));
+}
+file_put_contents($typedPressRoot . '/manifest.json', '{"format":"typedpress.hosted.v1","appHash":"a"}');
+check((_stattic_typedpress_manifest($typedPressRoot)['appHash'] ?? null) === 'a', 'a TypedPress manifest is read');
+unlink($typedPressRoot . '/manifest.json');
+rmdir($typedPressRoot);
 
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");

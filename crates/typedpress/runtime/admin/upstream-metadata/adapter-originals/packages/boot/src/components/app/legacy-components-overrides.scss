@@ -1,0 +1,137 @@
+@use "@wordpress/base-styles/variables";
+
+/*
+ * This file includes temporary style overrides, mostly to integrate the new
+ * DS color tokens instead of hardcoded colors.
+ * Ideally, we should bring those changes directly to the components upstream
+*/
+
+// TextControl
+.components-text-control__input,
+.components-text-control__input[type="text"],
+.components-text-control__input[type="tel"],
+.components-text-control__input[type="time"],
+.components-text-control__input[type="url"],
+.components-text-control__input[type="week"],
+.components-text-control__input[type="password"],
+.components-text-control__input[type="color"],
+.components-text-control__input[type="date"],
+.components-text-control__input[type="datetime"],
+.components-text-control__input[type="datetime-local"],
+.components-text-control__input[type="email"],
+.components-text-control__input[type="month"],
+.components-text-control__input[type="number"] {
+	border-color: var( --wpds-color-stroke-interactive-neutral );
+}
+
+// Tertiary Button
+.components-button.is-tertiary.is-tertiary {
+	color: var( --wpds-color-fg-interactive-neutral );
+	background: transparent;
+
+	/* States */
+	&:hover,
+	&:active:not( :disabled, [aria-disabled="true"] ),
+	&:focus {
+		background: var( --wpds-color-bg-interactive-neutral-weak );
+		color: var( --wpds-color-fg-interactive-neutral-active );
+	}
+
+	&:disabled,
+	&[aria-disabled="true"] {
+		background: var( --wpds-color-bg-interactive-neutral-weak-disabled );
+		color: var( --wpds-color-fg-interactive-neutral-disabled );
+	}
+}
+
+// DataForms regular layout — field min-height
+//
+// @wordpress/dataviews sets min-height: 32px on .dataforms-layouts-regular__field
+// to accommodate varying field types. For compact toggle rows, this adds ~16px of
+// dead vertical space vs Figma's layout (content-height + 16px gap = 36px per row).
+//
+// TODO: Remove once DataForms provides a compact density option or reduces the
+// default min-height for toggle-type fields.
+.dataforms-layouts-regular__field {
+	min-height: 0;
+}
+
+// BaseControl label color (RadioControl, CheckboxControl group headers)
+//
+// @wordpress/components BaseControl renders group labels (e.g. "Size", "Shape")
+// with a hardcoded grey color. Figma specifies --wpds-color-fg-content-neutral
+// (same as InputControl labels) for all form field labels.
+//
+// TODO: Remove once @wordpress/components BaseControl adopts WPDS color tokens.
+.components-base-control__label.components-base-control__label {
+	color: var( --wpds-color-fg-content-neutral );
+}
+
+// InputControl label color
+//
+// @wordpress/components InputControl renders its label with a hardcoded
+// grey color (#757575). The design specifies gray-900 (#1e1e1e) for input
+// labels, which maps to --wpds-color-fg-content-neutral.
+//
+// TODO: Remove once @wordpress/components InputControl adopts WPDS color tokens.
+// Double class to override the more-specific DataForms rule
+// (.dataforms-layouts-regular__field .components-input-control__label).
+.components-input-control__label.components-input-control__label {
+	color: var( --wpds-color-fg-content-neutral );
+}
+
+// SearchControl
+.components-search-control.components-search-control
+	.components-input-control__backdrop.components-input-control__backdrop {
+	border-color: var( --wpds-color-stroke-interactive-neutral );
+
+	&:disabled {
+		border-color: var( --wpds-color-stroke-interactive-neutral-disabled );
+	}
+}
+
+// Card Header — block padding alignment
+//
+// @wordpress/components CardHeader uses a hardcoded space() utility
+// (calc(4px * N)) rather than WPDS dimension tokens:
+//   - String size="medium" → padding: space(4) space(6) → padding-block-start: 16px
+//   - Object size { blockStart: "medium" } (DataForms) → space(6) → 24px
+// Override to consistent 24px (--wpds-dimension-padding-2xl) top and bottom.
+//
+// TODO: Remove once @wordpress/components Card adopts WPDS padding tokens upstream.
+.dataforms-layouts-card__field-header.dataforms-layouts-card__field-header,
+.woopayments-settings-card__header.woopayments-settings-card__header {
+	padding-block: var( --wpds-dimension-padding-2xl );
+}
+
+// Same root cause as above: string size="medium" CardBody resolves to
+// padding: space(4) space(6) → 16px top/bottom. Override to match the
+// DataForms pattern (0 top, padding-2xl bottom).
+// TODO: Remove once @wordpress/components Card adopts WPDS padding tokens upstream.
+.woopayments-settings-card__control.woopayments-settings-card__control {
+	padding-block-start: 0;
+	padding-block-end: var( --wpds-dimension-padding-2xl );
+}
+
+// DataForms Card Header — inner wrapper height
+//
+// When a DataForms card is not collapsible, the inner header div gets an inline
+// style of `height: 40px` to reserve space equal to the collapse/expand button
+// used in collapsible cards. This adds ~20px of dead vertical space (20px text
+// centred in a 40px container). The design specifies no such reserved height —
+// the heading should size to its content.
+//
+// !important is necessary to override the inline style set by DataForms JS.
+// TODO: Remove once DataForms removes the fixed-height reservation upstream.
+.dataforms-layouts-card__field-header > div {
+	// stylelint-disable-next-line declaration-no-important
+	height: auto !important;
+}
+
+.components-editor-notices__snackbar {
+	position: fixed;
+	right: 0;
+	bottom: 16px;
+	padding-left: 16px;
+	padding-right: 16px;
+}

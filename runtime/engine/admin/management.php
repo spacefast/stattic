@@ -1845,7 +1845,7 @@ function _stattic_runtime_route_config(mixed $raw): array
             ? $raw['visitor_jwks']
             : null;
     }
-    $config['zero_generation'] = in_array($raw['zero_generation'] ?? null, ['none', 'legacy_0_8', 'v2'], true) ? $raw['zero_generation'] : 'none';
+    $config['zero_generation'] = in_array($raw['zero_generation'] ?? null, ['none', 'legacy_0_8', 'v2', 'tp_v1'], true) ? $raw['zero_generation'] : 'none';
     $config['zero_generation_set_at'] = is_string($raw['zero_generation_set_at'] ?? null) ? $raw['zero_generation_set_at'] : null;
     if (array_key_exists('ownership_revision', $raw)) {
         $config['ownership_revision'] = is_string($raw['ownership_revision']) ? $raw['ownership_revision'] : null;

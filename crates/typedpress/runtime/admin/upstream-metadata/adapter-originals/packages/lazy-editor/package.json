@@ -1,0 +1,24 @@
+{
+	"name": "@zero-admin/lazy-editor",
+	"version": "1.0.0",
+	"description": "A lazy editor loader that provides editor settings and assets loading hooks.",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/global-styles-engine": "workspace:*",
+		"@zero-admin/load-assets": "workspace:*",
+		"@zero-admin/theme": "workspace:*",
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/element": "next",
+		"react": "^18.3.1"
+	}
+}

@@ -1,0 +1,1 @@
+<?php return array('name' => 'screen', 'dependencies' => array('react'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/screens', '@wordpress/route'), 'version' => 'f65917987e8f0f23e8bf');

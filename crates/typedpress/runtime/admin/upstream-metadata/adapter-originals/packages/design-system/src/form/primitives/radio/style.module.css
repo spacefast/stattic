@@ -1,0 +1,67 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.root {
+		--wp-ui-radio-input-size: 16px;
+
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex-shrink: 0;
+		appearance: none;
+		border: 1px solid var( --wpds-color-stroke-interactive-neutral );
+		border-radius: 50%;
+		width: var( --wp-ui-radio-input-size );
+		height: var( --wp-ui-radio-input-size );
+		padding: 0;
+		background-color: var( --wpds-color-bg-interactive-neutral-weak );
+
+		&:hover {
+			border-color: var( --wpds-color-stroke-interactive-neutral-active );
+		}
+
+		&[data-checked] {
+			border-color: transparent;
+			background-color: var( --wpds-color-bg-interactive-brand-strong );
+		}
+
+		&[data-disabled] {
+			background-color: var(
+				--wpds-color-bg-interactive-neutral-weak-disabled
+			);
+			border-color: var(
+				--wpds-color-stroke-interactive-neutral-disabled
+			);
+
+			@media ( forced-colors: active ) {
+				border-color: GrayText;
+			}
+		}
+	}
+
+	.indicator {
+		width: calc( var( --wp-ui-radio-input-size ) / 2 );
+		aspect-ratio: 1;
+		border-radius: 50%;
+		background-color: var( --wpds-color-fg-interactive-brand-strong );
+		opacity: 0;
+
+		&[data-checked] {
+			opacity: 1;
+
+			@media ( forced-colors: active ) {
+				background-color: CanvasText;
+
+				&[data-disabled] {
+					background-color: GrayText;
+				}
+			}
+		}
+
+		&[data-disabled] {
+			background-color: var(
+				--wpds-color-fg-interactive-neutral-disabled
+			);
+		}
+	}
+}

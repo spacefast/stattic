@@ -1,11 +1,12 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . "/typedpress.php";
 
 /** Only the authenticated control plane supplies generation authority. */
 function _stattic_zero_generation(array $authority): string
 {
     $generation = $authority['zero_generation'] ?? 'none';
-    return in_array($generation, ['none', 'legacy_0_8', 'v2'], true) ? $generation : 'none';
+    return in_array($generation, ['none', 'legacy_0_8', 'v2', 'tp_v1'], true) ? $generation : 'none';
 }
 
 /**
@@ -24,13 +25,17 @@ function _stattic_zero_generation_refusal(string $versionRoot, array $serving): 
         || is_dir($versionRoot . '/zero/actions')
         || is_file($versionRoot . '/zero/endpoints-index.json')
         || is_file($versionRoot . '/zero/runs-index.json');
-    if ($generation === 'v2' && $legacy) {
+    if (in_array($generation, ['v2', 'tp_v1'], true) && $legacy) {
         return [410, 'zero_legacy_retired', 'This Zero 0.8 version is retired. Open the Space live hostname.', [
             'details' => ['live_hostname' => $serving['live_hostname'] ?? null],
         ]];
     }
-    if ($generation !== 'v2' && is_file($versionRoot . '/.zero-compiled/manifest.json')) {
+    if (!in_array($generation, ['v2', 'tp_v1'], true) && is_file($versionRoot . '/.zero-compiled/manifest.json')) {
         return [409, 'zero_generation_locked', 'This Space has not activated Zero v2.', []];
+    }
+    if (is_file($versionRoot . '/.zero-compiled/manifest.json')) {
+        $typedpress = _stattic_typedpress_manifest($versionRoot . '/.zero-compiled') !== null;
+        if ($typedpress !== ($generation === 'tp_v1')) return [409, 'zero_generation_locked', 'This version belongs to a different runtime.', []];
     }
     return null;
 }
@@ -48,7 +53,7 @@ function _stattic_zero_v2_select(string $privateRoot, string $spaceId, string $v
 {
     $root = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId . '/.zero-compiled';
     if (!is_file($root . '/manifest.json')) return false;
-    if (!$initializing && _stattic_zero_generation($authority) !== 'v2') throw new RuntimeException('This Space has not activated Zero v2.');
+    if (!$initializing && !in_array(_stattic_zero_generation($authority), ['v2', 'tp_v1'], true)) throw new RuntimeException('This Space has not activated Zero v2.');
     if (!$initializing && !is_file($root . '/ready.json')) throw new RuntimeException('Zero v2 initialization is incomplete.');
     if (isset($GLOBALS['SPACEFAST_ZERO_V2_ROOT']) && $GLOBALS['SPACEFAST_ZERO_V2_ROOT'] !== $root) {
         throw new RuntimeException('Only one Zero version may load in a request.');
@@ -94,6 +99,10 @@ function _stattic_zero_v2_mount(): void
     $root = $GLOBALS['SPACEFAST_ZERO_V2_ROOT'] ?? null;
     if (!is_string($root)) return;
     $manifest = json_decode(file_get_contents($root . '/manifest.json'), true, 32, JSON_THROW_ON_ERROR);
+    if (($manifest['format'] ?? null) === 'typedpress.hosted.v1') {
+        _stattic_typedpress_mount($root, $manifest);
+        return;
+    }
     $name = $manifest['app'] ?? '';
     if (!is_string($name) || preg_match('/\A[a-z0-9-]+\z/D', $name) !== 1) throw new RuntimeException('Invalid compiled Zero manifest.');
     $variables = is_file($root . '/variables.json') ? _stattic_runtime_read_json_strict($root . '/variables.json') : [];
@@ -220,6 +229,13 @@ function _stattic_zero_v2_initialize(string $privateRoot, string $spaceId, strin
     $bootstrap = dirname($privateRoot, 2) . '/wp-load.php';
     if (!is_file($bootstrap)) throw new RuntimeException('WordPress is required for Zero v2.');
     (static function (string $file): void { require_once $file; })($bootstrap);
+    $typedpress = _stattic_typedpress_manifest($root);
+    if ($typedpress !== null) {
+        \TypedPress\Loader\Loader::initialize($root . '/store', $typedpress['build']);
+        _stattic_runtime_write_json_atomic($root . '/ready.json', ['version_id' => $versionId]);
+        _stattic_runtime_write_json_atomic($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json', ['version_id' => $versionId]);
+        return;
+    }
     if (!class_exists(\Zero\Wp\Runtime::class, false) || !\Zero\Wp\Runtime::managed()) throw new RuntimeException('The managed Zero runtime did not load.');
     \Zero\Wp\Runtime::initialize();
     if (is_dir($root . '/seed')) {
@@ -267,7 +283,7 @@ function _stattic_zero_v2_finalize_lock(string $privateRoot, string $spaceId, ar
     $reusable = $session['reusable_version_id'] ?? null;
     $inheritsZero = ($session['retention'] ?? null) === 'all' && is_string($reusable)
         && is_file($privateRoot . '/spaces/' . $spaceId . '/versions/' . $reusable . '/.zero-compiled/manifest.json');
-    if (!$inheritsZero && !array_any($files, static fn ($file): bool => is_array($file) && (($file['path'] ?? '') === 'zero.config.ts' || str_starts_with((string) ($file['path'] ?? ''), '.zero-source/')))) return null;
+    if (!$inheritsZero && !array_any($files, static fn ($file): bool => is_array($file) && (($file['path'] ?? '') === 'zero.config.ts' || ($file['path'] ?? '') === 'typedpress.config.ts' || str_starts_with((string) ($file['path'] ?? ''), '.typedpress-source/') || str_starts_with((string) ($file['path'] ?? ''), '.zero-source/')))) return null;
     return _stattic_zero_v2_lock($privateRoot, $spaceId);
 }
 
@@ -285,7 +301,8 @@ function _stattic_zero_v2_lock(string $privateRoot, string $spaceId): mixed
 /** WP-CLI bootstrap for the scheduled worker, which runs from cron in the CLI namespace. */
 function _stattic_zero_v2_wp_bootstrap(string $privateRoot, string $spaceId, string $versionId, bool $initializing = false): string
 {
-    $authority = ['zero_generation' => 'v2', 'users' => ['enabled' => _stattic_zero_v2_users_enabled($privateRoot, $spaceId)]];
+    $generation = _stattic_typedpress_manifest($privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId . '/.zero-compiled') !== null ? 'tp_v1' : 'v2';
+    $authority = ['zero_generation' => $generation, 'users' => ['enabled' => _stattic_zero_v2_users_enabled($privateRoot, $spaceId)]];
     return 'require_once ' . var_export(__DIR__ . '/context.php', true) . ';'
         . 'require_once ' . var_export(__DIR__ . '/storage.php', true) . ';'
         . 'require_once ' . var_export(__FILE__, true) . ';'

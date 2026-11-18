@@ -1,0 +1,43 @@
+@use "@wordpress/base-styles/colors";
+@use "@wordpress/base-styles/variables";
+
+$header-height: variables.$header-height;
+
+.first-admin-site-editor {
+	height: 100%;
+	width: 100%;
+	position: relative;
+}
+
+.first-admin-site-editor .interface-interface-skeleton {
+	position: relative;
+	height: 100%;
+	top: 0;
+	left: 0;
+}
+
+.first-admin-layout__canvas:not( .is-full-canvas )
+	.interface-interface-skeleton__header {
+	display: none;
+}
+
+// Remove the header slide-in animation so the back logo does not move.
+.interface-interface-skeleton__header {
+	margin-top: 0 !important;
+}
+
+.first-admin-site-editor__hyperlink {
+	pointer-events: none;
+	position: absolute;
+	inset: calc( 2 * var( --wpds-border-width-focus ) );
+	// In order to use the correct radius, add the distance from the outer border
+	// of the .first-admin-site-editor (which is var( --wpds-border-width-focus )).
+	border-radius: calc(
+		var( --wpds-border-radius-sm ) + var( --wpds-border-width-focus )
+	);
+
+	&:focus-visible {
+		outline: calc( 3 * var( --wpds-border-width-focus ) ) solid
+			var( --wpds-color-stroke-focus-brand );
+	}
+}

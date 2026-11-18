@@ -1,0 +1,19 @@
+/**
+ * Temporary and targeted design token backwards-compatibility shim for plugins
+ * which are managed externally and need to be updated independently to use new
+ * token values.
+ */
+
+/* stylelint-disable plugin-wpds/no-setting-wpds-custom-properties */
+
+.first-admin-page[class*="woocommerceAnalyticsDashboard"] {
+	--wpds-border-radius-large: var( --wpds-border-radius-lg );
+	--wpds-border-radius-small: var( --wpds-border-radius-sm );
+	--wpds-border-radius-medium: var( --wpds-border-radius-md );
+	--wpds-font-size-small: var( --wpds-font-size-sm );
+	--wpds-font-size-medium: var( --wpds-font-size-md );
+	--wpds-font-size-large: var( --wpds-font-size-lg );
+	--wpds-font-line-height-x-small: var( --wpds-font-line-height-xs );
+	--wpds-font-line-height-small: var( --wpds-font-line-height-sm );
+	--wpds-font-line-height-x-large: var( --wpds-font-line-height-xl );
+}

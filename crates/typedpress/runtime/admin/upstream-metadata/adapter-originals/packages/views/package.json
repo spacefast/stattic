@@ -1,0 +1,23 @@
+{
+	"name": "@zero-admin/views",
+	"version": "1.0.0",
+	"description": "View persistence and management for WordPress DataViews",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@zero-admin/core-data-next": "workspace:*",
+		"@wordpress/base-styles": "next",
+		"@wordpress/data": "next",
+		"@zero-admin/dataviews": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@wordpress/element": "next",
+		"@wordpress/preferences": "next",
+		"dequal": "2.0.3"
+	}
+}

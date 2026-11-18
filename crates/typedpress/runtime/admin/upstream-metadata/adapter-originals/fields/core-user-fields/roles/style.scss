@@ -1,0 +1,11 @@
+.roles-field-details {
+	a {
+		color: var( --wpds-color-fg-interactive-brand );
+		text-decoration: none;
+
+		&:hover,
+		&:active {
+			color: var( --wpds-color-fg-interactive-brand-active );
+		}
+	}
+}

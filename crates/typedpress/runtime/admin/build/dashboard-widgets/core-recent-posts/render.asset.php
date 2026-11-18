@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-recent-posts', 'dependencies' => array('react'), 'moduleDependencies' => array(), 'version' => '532df334ee8452b8ac55');

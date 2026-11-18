@@ -1,0 +1,12 @@
+{
+	"name": "@zero-admin/post",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type",
+		"beforeLoad": true
+	},
+	"dependencies": {
+		"@wordpress/route": "next"
+	}
+}

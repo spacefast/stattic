@@ -1,0 +1,19 @@
+{
+	"name": "@zero-admin/legacy-admin",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/legacy/$slug",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "legacy_admin"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@wordpress/route": "next",
+		"@types/react": "^18.3.20",
+		"@wordpress/compose": "next"
+	}
+}

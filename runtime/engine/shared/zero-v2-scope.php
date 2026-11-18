@@ -74,7 +74,12 @@ function _stattic_zero_v2_bind_wordpress(): void
     }
     $platform = get_option('active_plugins', []);
     $hostTheme = get_option('template');
-    $platform = array_values(array_filter($platform, static fn (string $plugin): bool => in_array(explode('/', $plugin)[0], ['secure-custom-fields', 'action-scheduler', 'mcp-adapter', 'polylang'], true)));
+    $allowed = ['secure-custom-fields', 'action-scheduler', 'mcp-adapter', 'polylang'];
+    $platform = array_values(array_filter($platform, static fn (string $plugin): bool => in_array(explode('/', $plugin)[0], $allowed, true)));
+    // Two Factor is installed only on boxes that serve TypedPress, and active for
+    // none (box-plugins.ts): only a TypedPress app loads it, for its Identity
+    // sign-in step.
+    if (_stattic_typedpress_manifest($GLOBALS['SPACEFAST_ZERO_V2_ROOT']) !== null) $platform[] = 'two-factor/two-factor.php';
     $cache = new Spacefast_Zero_Cache($wp_object_cache, $scope);
     $table_prefix = $scope;
     $wpdb->set_prefix($scope);

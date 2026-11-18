@@ -7,6 +7,7 @@ set -euo pipefail
 RUNTIME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$RUNTIME_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+node scripts/prepare-typedpress.ts
 
 # Prepare the shared pinned library before independent workers read it. A cold
 # checkout should fetch once, rather than every shard racing the release host.
@@ -37,6 +38,10 @@ if bash "$RUNTIME_DIR/tests/runtime-binary.sh" --packaged; then
   echo "==> native runtime: testing the restored packaged binary"
 else
   echo "==> native runtime test tools"
+  # Install the pinned toolchain under the shared lock first: a bare cargo call
+  # lets rustup's proxy install it unlocked, racing the WASI build's install on
+  # a runner that lacks it ("detected conflict: 'bin/cargo'").
+  node -e 'import("./scripts/lib/rust-toolchain.mjs").then((m) => m.ensureRustTarget("wasm32-wasip1"))'
   cargo build --locked -p stattic-runtime-compiler --bin stattic-runtime || cargo_status=$?
 fi
 dashboard_and_lint_status=0

@@ -1,0 +1,24 @@
+{
+	"name": "@zero-admin/user",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/users",
+		"beforeLoad": true
+	},
+	"dependencies": {
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/user-data": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/route": "next",
+		"@wordpress/ui": "next"
+	}
+}

@@ -1,0 +1,1 @@
+<?php return array('name' => '@typedpress-admin/user-data', 'dependencies' => array('wp-api-fetch', 'wp-core-data', 'wp-data', 'wp-i18n'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit'), 'version' => '2b222a3ce20afbc0ff3c');

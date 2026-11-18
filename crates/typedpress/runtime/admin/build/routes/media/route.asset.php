@@ -1,0 +1,1 @@
+<?php return array('name' => 'media', 'dependencies' => array(), 'moduleDependencies' => array(), 'version' => 'c50a32504bf88c2fc636');

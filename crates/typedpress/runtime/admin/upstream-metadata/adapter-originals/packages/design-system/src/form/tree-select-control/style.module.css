@@ -1,0 +1,134 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.field {
+		position: relative;
+	}
+
+	.tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive gap token */
+		padding: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+		padding-inline-end: 0;
+
+		button {
+			height: 24px;
+		}
+	}
+
+	.tag {
+		align-items: center;
+		background: var( --wpds-color-bg-interactive-neutral-weak-disabled );
+		border-radius: var( --wpds-border-radius-xs );
+		display: inline-flex;
+		font-size: var( --wpds-font-size-sm );
+		overflow: hidden;
+		padding-inline-start: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+		text-overflow: ellipsis;
+		transition: all 0.2s cubic-bezier( 0.4, 1, 0.4, 1 );
+		white-space: nowrap;
+		height: 24px;
+		cursor: pointer;
+		user-select: none;
+
+		&:hover {
+			background: var( --wpds-color-bg-interactive-neutral-weak-active );
+		}
+	}
+
+	.tag--non-removable {
+		padding-inline-end: calc(
+			2 * var( --wpds-dimension-base )
+		); /* Balance padding since there's no remove button */
+		opacity: 0.7;
+		cursor: pointer;
+	}
+
+	.control {
+		flex-wrap: wrap;
+		height: initial; /* 40px per line */
+	}
+
+	.control-input {
+		background: transparent;
+		border: none;
+		flex-grow: 1;
+		max-height: 100%;
+		outline: none;
+	}
+
+	.positioner {
+		z-index: var( --wp-ui-tree-select-z-index, initial );
+	}
+
+	.tree {
+		box-sizing: border-box;
+		background-color: var( --wpds-color-bg-surface-neutral-strong );
+		border-radius: var( --wpds-border-radius-md );
+		border: 1px solid var( --wpds-color-stroke-surface-neutral );
+		box-shadow: var( --wpds-elevation-md );
+		color: var( --wpds-color-fg-interactive-neutral );
+		font-family: var( --wpds-font-family-body );
+		font-size: var( --wpds-font-size-md );
+		line-height: 1.4;
+		max-height: min( var( --available-height ), 350px );
+		min-height: 42px;
+		width: var( --anchor-width );
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		padding-inline: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+	}
+
+	.node {
+		padding-block-start: calc(
+			3 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+	}
+
+	.expander {
+		align-items: center;
+		background: transparent;
+		border: none;
+		cursor: pointer;
+		display: flex;
+		padding: 0;
+
+		&.is-hidden {
+			pointer-events: none;
+			visibility: hidden;
+		}
+
+		&:dir( rtl ) {
+			transform: scaleX( -1 );
+		}
+
+		svg {
+			fill: var( --wpds-color-fg-content-neutral );
+		}
+	}
+
+	.option {
+		margin-inline-start: var(
+			--wpds-dimension-base
+		); /* TODO: Use or create new control/interactive padding token */
+
+		&:hover label {
+			color: var( --wpds-color-bg-thumb-brand-active );
+		}
+	}
+
+	.children {
+		padding-inline-start: calc(
+			6 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+	}
+}

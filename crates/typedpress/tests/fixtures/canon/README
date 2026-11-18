@@ -1,0 +1,2 @@
+Canonical JSON golden (design §5.3), read by tests/php/sync_test.php and src/sync/canon.rs.
+<name>.json is any JSON value; <name>.canon is its canonical bytes; <name>.sha256 is "sha256:" + hex of them.

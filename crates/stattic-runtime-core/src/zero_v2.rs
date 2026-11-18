@@ -28,6 +28,9 @@ pub(crate) fn compile(
             );
         }
     }
+    if files.keys().any(|p| crate::typedpress::declared(p)) {
+        return crate::typedpress::compile(input, private, stage, files);
+    }
     let declared: Vec<String> = input
         .session
         .get("manifest")

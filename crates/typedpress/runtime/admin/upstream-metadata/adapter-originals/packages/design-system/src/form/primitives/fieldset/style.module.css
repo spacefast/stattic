@@ -1,0 +1,14 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.root {
+		display: flex;
+		flex-direction: column;
+		gap: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new gap token? (possibly control/interactive gap) */
+		border: 0;
+		margin: 0;
+		padding: 0;
+	}
+}

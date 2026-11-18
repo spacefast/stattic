@@ -3,12 +3,18 @@
 // JavaScript consumers ship it as `stattic-runtime-core.wasm`.
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { copyFileAtomic } from "../packages/routing/scripts/copy-file-atomic.mjs";
 import { ensureRustTarget } from "./lib/rust-toolchain.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
+// Public runtime source releases already contain the expanded compiler.
+if (existsSync(path.join(repoRoot, "packages/cli/compiler/typedpress-source.zip"))) {
+  const { prepareTypedPress } = await import("./prepare-typedpress.ts");
+  await prepareTypedPress();
+}
 const target = "wasm32-wasip1";
 const toolchain = ensureRustTarget(target);
 const compiler = spawnSync("rustup", ["which", "--toolchain", toolchain, "rustc"], {

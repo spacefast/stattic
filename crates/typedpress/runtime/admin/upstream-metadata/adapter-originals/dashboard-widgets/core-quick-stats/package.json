@@ -1,0 +1,9 @@
+{
+	"name": "widget-core-quick-stats",
+	"version": "1.0.0",
+	"private": true,
+	"dependencies": {
+		"@zero-admin/dashboard": "workspace:*",
+		"@wordpress/i18n": "next"
+	}
+}

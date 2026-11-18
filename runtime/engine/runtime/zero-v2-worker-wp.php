@@ -1,6 +1,18 @@
 <?php
 declare(strict_types=1);
 
+// TypedPress owns its bounded maintenance loop; preserve the host's worker binding.
+if (defined('WP_CLI') && WP_CLI && class_exists(\TypedPress\Wp\Runtime::class, false)
+    && \TypedPress\Wp\Runtime::managed()
+    && ($GLOBALS['SPACEFAST_ZERO_V2_ENVIRONMENT'] ?? null) === 'production') {
+    $limit = max(1, min(100, (int) ($args[0] ?? 25)));
+    $run = WP_CLI::runcommand('typedpress jobs tick --limit=' . $limit, ['return' => 'all', 'exit_error' => false, 'launch' => false]);
+    $result = json_decode($run->stdout, true);
+    if ($run->return_code !== 0 || !is_array($result['data'] ?? null)) throw new RuntimeException('TypedPress worker failed.');
+    WP_CLI::line(json_encode($result['data'], JSON_THROW_ON_ERROR));
+    return;
+}
+
 // Executed only by the engine worker through the selected version's WP-CLI boot.
 if (!defined('WP_CLI') || !WP_CLI || !\Zero\Wp\Runtime::managed()
     || ($GLOBALS['SPACEFAST_ZERO_V2_ENVIRONMENT'] ?? null) !== 'production') {

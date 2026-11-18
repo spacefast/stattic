@@ -1,0 +1,32 @@
+{
+	"name": "@zero-admin/user-profile",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/users/profile/$userId",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "user_details"
+			}
+		}
+	},
+	"dependencies": {
+		"@zero-admin/admin-toolkit": "workspace:*",
+		"@zero-admin/boot": "workspace:*",
+		"@zero-admin/core-data-next": "workspace:*",
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/views": "workspace:*",
+		"@zero-admin/telemetry": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/element": "next",
+		"@wordpress/html-entities": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/notices": "next",
+		"@wordpress/route": "next",
+		"@wordpress/ui": "next"
+	}
+}

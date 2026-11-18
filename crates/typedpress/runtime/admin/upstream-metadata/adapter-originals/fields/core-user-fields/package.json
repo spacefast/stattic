@@ -1,0 +1,16 @@
+{
+	"name": "core-user-fields",
+	"version": "1.0.0",
+	"dependencies": {
+		"@zero-admin/design-system": "workspace:*",
+		"@zero-admin/dataviews": "workspace:*",
+		"@wordpress/components": "next",
+		"@wordpress/core-data": "next",
+		"@wordpress/data": "next",
+		"@wordpress/date": "next",
+		"@wordpress/element": "next",
+		"@wordpress/i18n": "next",
+		"@wordpress/icons": "next",
+		"@wordpress/ui": "next"
+	}
+}

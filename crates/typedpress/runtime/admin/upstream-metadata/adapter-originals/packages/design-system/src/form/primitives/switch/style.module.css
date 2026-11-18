@@ -1,0 +1,87 @@
+@layer wp-ui-components {
+	.root {
+		--wp-ui-switch-height: 16px;
+		--wp-ui-switch-transition-duration: 0.2s;
+
+		display: inline-block;
+		appearance: none;
+		padding: 1px;
+		width: calc( var( --wp-ui-switch-height ) * 2 );
+		height: var( --wp-ui-switch-height );
+		border: 1px solid var( --wpds-color-stroke-interactive-neutral );
+		border-radius: 999px;
+		background-color: var( --wpds-color-bg-interactive-neutral-weak );
+
+		@media not ( prefers-reduced-motion ) {
+			&:not( :hover ):not( :active ) {
+				transition:
+					background-color var( --wp-ui-switch-transition-duration )
+						ease,
+					border-color var( --wp-ui-switch-transition-duration ) ease;
+			}
+		}
+
+		&:hover:not( [data-disabled], [data-checked] ) {
+			border-color: var( --wpds-color-stroke-interactive-neutral-active );
+		}
+
+		&[data-checked] {
+			background-color: var( --wpds-color-bg-interactive-brand-strong );
+			border-color: transparent;
+
+			@media ( forced-colors: active ) {
+				background-color: Highlight;
+			}
+
+			&[data-disabled] {
+				background-color: var(
+					--wpds-color-bg-interactive-neutral-strong-disabled
+				);
+
+				@media ( forced-colors: active ) {
+					background-color: GrayText;
+				}
+			}
+		}
+	}
+
+	.thumb {
+		display: block;
+		height: calc( var( --wp-ui-switch-height ) - 4px );
+		aspect-ratio: 1;
+		background-color: var( --wpds-color-fg-interactive-neutral );
+		border-radius: 50%;
+		box-shadow: var( --wpds-elevation-xs );
+
+		@media not ( prefers-reduced-motion ) {
+			transition:
+				background-color var( --wp-ui-switch-transition-duration )
+					ease-out,
+				transform var( --wp-ui-switch-transition-duration ) ease;
+		}
+
+		@media ( forced-colors: active ) {
+			background-color: ButtonText;
+			transition: none;
+		}
+
+		&[data-checked] {
+			background-color: var( --wpds-color-fg-interactive-brand-strong );
+			transform: translateX( var( --wp-ui-switch-height ) );
+
+			@media ( forced-colors: active ) {
+				background-color: HighlightText;
+			}
+		}
+
+		&[data-disabled]:not( [data-checked] ) {
+			background-color: var(
+				--wpds-color-fg-interactive-neutral-disabled
+			);
+
+			@media ( forced-colors: active ) {
+				background-color: GrayText;
+			}
+		}
+	}
+}

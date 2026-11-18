@@ -1,0 +1,15 @@
+@layer wp-ui-utilities, wp-ui-components, wp-ui-compositions, wp-ui-overrides;
+
+@layer wp-ui-components {
+	.input-wrapper {
+		padding-top: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+		padding-inline: calc(
+			2 * var( --wpds-dimension-base )
+		); /* TODO: Use or create new control/interactive padding token */
+		padding-bottom: var(
+			--wpds-dimension-base
+		); /* TODO: Use or create new control/interactive padding token */
+	}
+}

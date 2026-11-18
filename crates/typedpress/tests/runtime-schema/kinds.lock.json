@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "version": 4,
+  "hash": "kinds",
+  "added": {
+    "collections": {
+      "events": {
+        "label": "Events",
+        "access": { "create": "author", "delete": false },
+        "fields": {
+          "title": { "type": "text", "notNull": true, "rules": { "max": 80 } },
+          "content": { "type": "richText" },
+          "starts": { "type": "date" },
+          "venue": { "type": "group", "fields": { "name": { "type": "text" }, "city": { "type": "text" } } }
+        }
+      },
+      "press_notes": {
+        "fields": { "title": { "type": "text", "notNull": true } }
+      }
+    },
+    "globals": {
+      "banner": {
+        "label": "Site banner",
+        "access": { "update": "admin" },
+        "fields": {
+          "text": { "type": "text", "rules": { "max": 140 } },
+          "on": { "type": "boolean", "notNull": true, "default": { "value": false } }
+        }
+      },
+      "siteFooter": {
+        "fields": { "note": { "type": "text" } }
+      }
+    }
+  }
+}

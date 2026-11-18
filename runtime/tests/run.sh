@@ -75,7 +75,7 @@ test_args+=(--timeout 30000)
 # The version-delete tombstone suite drives the API against PHP the same way.
 # The two Zero v2 WordPress acceptances each install WordPress on MariaDB and
 # run for about 20s and 70s; in a general shard they set the suite's floor.
-long_files=(tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts)
+long_files=(tests/typedpress-publish.test.ts tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts)
 reports=()
 # Each process writes a JUnit report, the proof that the suite really ran.
 junit_dir="$(mktemp -d)"

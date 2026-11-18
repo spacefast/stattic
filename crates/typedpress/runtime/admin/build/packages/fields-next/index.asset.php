@@ -1,0 +1,1 @@
+<?php return array('name' => '@typedpress-admin/fields-next', 'dependencies' => array('react', 'wp-core-data', 'wp-data', 'wp-editor', 'wp-element', 'wp-html-entities', 'wp-i18n'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/core-data-next'), 'version' => '63f6a025048fb33a7b1d');

@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-comments-fields', 'dependencies' => array('react', 'react-dom', 'wp-compose', 'wp-dom', 'wp-element', 'wp-html-entities', 'wp-i18n', 'wp-primitives', 'wp-private-apis', 'wp-theme', 'wp-warning'), 'moduleDependencies' => array('@wordpress/a11y'), 'version' => 'a1a05a6417e32d148459');

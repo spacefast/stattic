@@ -1,0 +1,5 @@
+.nested-items {
+	--wp-ui-checkbox-input-indent-adjustment: calc(
+		-1 * var( --wpds-dimension-base )
+	);
+}

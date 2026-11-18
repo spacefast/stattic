@@ -1,0 +1,34 @@
+{
+	"name": "@typedpress-admin/route-dashboard",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "post_launch_dash",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@typedpress-admin/admin-toolkit": "workspace:*",
+		"@typedpress-admin/boot": "workspace:*",
+		"@typedpress-admin/dashboard": "workspace:*",
+		"@typedpress-admin/design-system": "workspace:*",
+		"@typedpress-admin/telemetry": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:"
+	}
+}

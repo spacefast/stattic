@@ -1,0 +1,1 @@
+<?php return array('name' => 'plugin-list', 'dependencies' => array('wp-core-data', 'wp-data', 'wp-i18n'), 'moduleDependencies' => array('@typedpress-admin/core-data-next'), 'version' => '822049ff74a9dada3603');

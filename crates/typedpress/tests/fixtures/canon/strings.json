@@ -1,0 +1,1 @@
+["plain", "a/b", "é ü ß", "😀", "tab\tnew\nline", "quote \" back \\", "ctl \u0001\u001f", "sep    ", "<script>&amp;</script>", ""]

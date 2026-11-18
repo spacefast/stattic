@@ -1,0 +1,65 @@
+.first-admin-nudge {
+	&.components-notice {
+		margin: 0 calc( 4 * var( --wpds-dimension-base ) )
+			calc( 4 * var( --wpds-dimension-base ) );
+		padding: calc( 2 * var( --wpds-dimension-base ) )
+			calc( 3 * var( --wpds-dimension-base ) )
+			calc( 3 * var( --wpds-dimension-base ) );
+		background: var( --nudge-bg );
+		border-radius: var( --wpds-border-radius-lg );
+		border: 1px var( --nudge-border ) solid;
+		align-self: stretch;
+	}
+
+	&__content {
+		align-items: flex-start;
+	}
+
+	&__title {
+		color: var( --nudge-title-color );
+		margin: 0;
+		font-size: var( --wpds-font-size-md );
+		font-weight: 500;
+		line-height: var( --wpds-font-line-height-sm );
+		opacity: 0.99;
+	}
+
+	&__context {
+		color: var( --nudge-context-color );
+		line-height: var( --wpds-font-line-height-sm );
+	}
+
+	&__button {
+		padding: var( --wpds-dimension-base )
+			calc( 2 * var( --wpds-dimension-base ) );
+		--wp-ui-button-font-weight: 400;
+		--wp-ui-button-font-size: var( --wpds-font-size-md );
+		--wp-ui-button-foreground-color: var( --nudge-button-color );
+		--wp-ui-button-border-color: var( --nudge-button-color );
+	}
+
+	&--info {
+		--nudge-border: var( --wpds-color-fg-interactive-neutral-disabled );
+		--nudge-title-color: var( --wpds-color-fg-content-neutral );
+		--nudge-context-color: var( --wpds-color-fg-content-neutral-weak );
+		--nudge-bg: var( --wpds-color-bg-surface-neutral );
+		--nudge-button-color: var( --wpds-color-fg-content-neutral );
+	}
+
+	&--warning {
+		--nudge-border: var( --wpds-color-fg-content-caution-weak );
+		--nudge-title-color: var( --wpds-color-fg-content-caution );
+		--nudge-context-color: var( --wpds-color-fg-content-caution-weak );
+		--nudge-bg: var( --wpds-color-bg-surface-caution-weak );
+		--nudge-button-color: var( --wpds-color-fg-content-caution );
+	}
+
+	&--error,
+	&--urgent {
+		--nudge-border: var( --wpds-color-fg-content-error-weak );
+		--nudge-title-color: var( --wpds-color-fg-content-error );
+		--nudge-context-color: var( --wpds-color-fg-content-error-weak );
+		--nudge-bg: var( --wpds-color-bg-surface-error-weak );
+		--nudge-button-color: var( --wpds-color-fg-content-error );
+	}
+}

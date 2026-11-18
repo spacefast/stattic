@@ -159,7 +159,8 @@
     "engine/runtime/zero-v2-worker-wp.php",
     "engine/runtime/zero-v2-realtime.php",
     "engine/runtime/zero-v2-realtime-publisher.php",
-    "engine/runtime/zero-realtime.js"
+    "engine/runtime/zero-realtime.js",
+    "engine/shared/typedpress.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [

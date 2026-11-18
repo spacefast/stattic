@@ -1,0 +1,1 @@
+<?php return array('name' => 'post-list-redirect', 'dependencies' => array(), 'moduleDependencies' => array('@wordpress/route'), 'version' => 'f09dbc91f32deb2024be');

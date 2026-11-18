@@ -55,3 +55,6 @@ pub use site_finalize::finalize_site;
 
 #[cfg(not(target_family = "wasm"))]
 mod zero_v2;
+
+#[cfg(not(target_family = "wasm"))]
+mod typedpress;

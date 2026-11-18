@@ -1,0 +1,32 @@
+@use "@wordpress/base-styles/variables";
+
+.first-admin-style-book {
+	// Ensure the style book fills the available vertical space.
+	// This is useful when the style book is used to fill a frame.
+	height: 100%;
+	width: 100%;
+
+	&.is-button {
+		border-radius: variables.$radius-large;
+	}
+
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.first-admin-style-book__iframe {
+	display: block;
+	height: 100%;
+	width: 100%;
+
+	&.is-button {
+		border-radius: variables.$radius-large;
+	}
+
+	&.is-focused {
+		outline: calc( 2 * var( --wpds-border-width-focus ) ) solid
+			var( --wpds-color-stroke-focus-brand );
+		outline-offset: calc( -2 * var( --wpds-border-width-focus ) );
+	}
+}

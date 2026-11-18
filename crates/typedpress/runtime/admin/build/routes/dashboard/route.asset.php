@@ -1,0 +1,1 @@
+<?php return array('name' => 'dashboard', 'dependencies' => array('wp-data'), 'moduleDependencies' => array('@typedpress-admin/boot', '@wordpress/route'), 'version' => '96e5094e46203580847e');

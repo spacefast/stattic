@@ -1,0 +1,21 @@
+{
+	"$schema": "https://schemas.wp.org/wp/7.1/theme.json",
+	"version": 3,
+	"settings": {
+		"appearanceTools": true,
+		"layout": { "contentSize": "40rem", "wideSize": "64rem" },
+		"typography": {
+			"fontFamilies": [
+				{ "slug": "system", "name": "System", "fontFamily": "system-ui, -apple-system, \"Segoe UI\", sans-serif" }
+			]
+		}
+	},
+	"styles": {
+		"typography": { "fontFamily": "var:preset|font-family|system", "lineHeight": "1.6" },
+		"spacing": { "padding": { "left": "1.25rem", "right": "1.25rem" } }
+	},
+	"templateParts": [
+		{ "name": "header", "title": "Header", "area": "header" },
+		{ "name": "footer", "title": "Footer", "area": "footer" }
+	]
+}

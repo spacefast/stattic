@@ -1,0 +1,27 @@
+[
+  {
+    "collection": "posts",
+    "basename": "hello.md",
+    "uid": "zr_34ccd108ad613ed735e1"
+  },
+  {
+    "collection": "posts",
+    "basename": "first-post.md",
+    "uid": "zr_9cbf78322530025095e0"
+  },
+  {
+    "collection": "notes",
+    "basename": "hello.md",
+    "uid": "zr_f682d48dc06217c5e3bc"
+  },
+  {
+    "collection": "posts",
+    "basename": "café-☕.md",
+    "uid": "zr_c2e976bf4970edaa4f2b"
+  },
+  {
+    "collection": "catalog",
+    "basename": "item.json",
+    "uid": "zr_990bbe0a1b005766e83e"
+  }
+]

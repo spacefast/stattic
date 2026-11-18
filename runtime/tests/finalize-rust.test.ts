@@ -127,7 +127,7 @@ process.exit(result.status ?? 1);
       SPACEFAST_RUNTIME_BIN: path.join(wrapperRoot, "does-not-exist"),
     },
   });
-});
+}, 300_000);
 
 afterAll(() => {
   rt?.stop();

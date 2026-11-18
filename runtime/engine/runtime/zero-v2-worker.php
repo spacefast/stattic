@@ -15,7 +15,7 @@ function _stattic_zero_worker_target(string $privateRoot, string $spaceId, strin
     $pointer = _stattic_runtime_read_json_strict($privateRoot . '/spaces/' . $spaceId . '/space.json');
     $overlay = _stattic_v4_overlay($privateRoot, $spaceId, $pointer);
     if ($overlay === false) throw new RuntimeException('Zero worker routing is unavailable.');
-    if (!is_array($overlay) || ($overlay['zero_generation'] ?? null) !== 'v2') return null;
+    if (!is_array($overlay) || !in_array($overlay['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) return null;
     $version = $overlay['versions']['production'] ?? null;
     if (!is_string($version) || !_stattic_id_valid($version)) return null;
     $root = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $version . '/.zero-compiled';
@@ -24,7 +24,7 @@ function _stattic_zero_worker_target(string $privateRoot, string $spaceId, strin
 }
 
 /** Native, scoped SQL only: an idle tick never loads WordPress or any app code. */
-function _stattic_zero_worker_probe(string $spaceId): array
+function _stattic_zero_worker_probe(string $spaceId, bool $typedpress = false): array
 {
     _stattic_db_broker_bind_provider();
     _stattic_db_broker_set_read_deadline_ms(2000);
@@ -42,9 +42,9 @@ function _stattic_zero_worker_probe(string $spaceId): array
     $now = gmdate('Y-m-d\TH:i:s') . '.000Z';
     $oldest = [];
     $due = false;
-    $outbox = $read('zero__outbox', 'MIN(`createdAt`) AS oldest');
+    $outbox = $read($typedpress ? 'tp__outbox' : 'zero__outbox', 'MIN(`createdAt`) AS oldest');
     if (isset($outbox[0]['oldest'])) { $due = true; $oldest[] = strtotime($outbox[0]['oldest']); }
-    $jobs = $read('zero__jobs', 'MIN(`createdAt`) AS oldest, MIN(`runAt`) AS next', "WHERE `state` IN ('pending','failed')");
+    $jobs = $read($typedpress ? 'tp__jobs' : 'zero__jobs', 'MIN(`createdAt`) AS oldest, MIN(`runAt`) AS next', "WHERE `state` IN ('pending','failed')");
     if (isset($jobs[0]['oldest'])) $oldest[] = strtotime($jobs[0]['oldest']);
     $due = $due || (isset($jobs[0]['next']) && $jobs[0]['next'] <= $now);
     $actions = $read('actionscheduler_actions', 'MIN(`scheduled_date_gmt`) AS next', "WHERE `status` = 'pending'");
@@ -73,7 +73,8 @@ function _stattic_zero_worker_run(string $privateRoot, string $spaceId, string $
         $target = _stattic_zero_worker_target($privateRoot, $spaceId, $environment);
         if ($target === null) { $status['status'] = 'inactive'; return $status; }
         $status['version_id'] = $target['version_id'];
-        $probe = _stattic_zero_worker_probe($spaceId);
+        $typedpress = _stattic_typedpress_manifest($spaceRoot . '/versions/' . $target['version_id'] . '/.zero-compiled') !== null;
+        $probe = _stattic_zero_worker_probe($spaceId, $typedpress);
         $status['oldest_pending_age_seconds'] = $probe['oldest_pending_age_seconds'];
         if (!$probe['due']) return $status;
         $wpLoad = realpath(dirname($privateRoot, 2) . '/wp-load.php');
@@ -96,7 +97,7 @@ function _stattic_zero_worker_run(string $privateRoot, string $spaceId, string $
         $status['processed'] = $output['processed'];
         $status['failures'] = $output['failures'];
         $status['status'] = $status['failures'] > 0 ? 'failed' : 'ran';
-        $status['oldest_pending_age_seconds'] = _stattic_zero_worker_probe($spaceId)['oldest_pending_age_seconds'];
+        $status['oldest_pending_age_seconds'] = _stattic_zero_worker_probe($spaceId, $typedpress)['oldest_pending_age_seconds'];
         return $status;
     } catch (Throwable $error) {
         $status['status'] = 'failed';

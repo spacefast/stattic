@@ -1,0 +1,14 @@
+{
+	"name": "@zero-admin/theme",
+	"version": "1.0.0",
+	"description": "Theme provider for WordPress Admin",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@zero-admin/private-apis": "workspace:*",
+		"@wordpress/theme": "next"
+	}
+}

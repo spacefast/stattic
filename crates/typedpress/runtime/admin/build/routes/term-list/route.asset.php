@@ -1,0 +1,1 @@
+<?php return array('name' => 'term-list', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@typedpress-admin/core-data-next', '@typedpress-admin/views', '@wordpress/route'), 'version' => '413cfbb47eb6144c4e6e');

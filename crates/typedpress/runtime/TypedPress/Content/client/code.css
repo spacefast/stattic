@@ -1,0 +1,74 @@
+/* Code blocks (TypedPress\Content\Code): Atom One Light and Atom One Dark from highlight.php's
+ * bundled styles (MIT, Daniel Gamage), switched by the visitor's colour scheme or the page's
+ * `data-theme`; titles, marked lines and tab groups. No script: tabs switch with radio inputs. */
+.typedpress-code-block { margin: 1.5em 0; }
+.typedpress-code { margin: 0; padding: 0.75em 0; overflow-x: auto; border-radius: 6px; font-size: 0.875em; line-height: 1.6; }
+.typedpress-code code { display: block; background: none; padding: 0; }
+/* Each line is a block, and the newline after it (kept so copied code has its line breaks) would be
+   a second, empty line inside <pre>: lines float in normal flow and the newline takes no room. */
+.typedpress-code code { white-space: normal; }
+.typedpress-code-line { display: block; padding: 0 1em; min-height: 1.6em; white-space: pre; }
+.typedpress-code-title { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8125em; padding: 0.4em 1em; border-radius: 6px 6px 0 0; }
+.typedpress-code-title + .typedpress-code { border-top-left-radius: 0; border-top-right-radius: 0; }
+.typedpress-code-group { margin: 1.5em 0; display: flex; flex-wrap: wrap; }
+.typedpress-code-group > .typedpress-code-tab-input { position: absolute; opacity: 0; pointer-events: none; }
+.typedpress-code-group > .typedpress-code-tab { order: 0; cursor: pointer; padding: 0.4em 1em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8125em; border-bottom: 2px solid transparent; }
+.typedpress-code-group > .typedpress-code-panel { order: 1; width: 100%; margin: 0; display: none; }
+.typedpress-code-group > .typedpress-code-tab-input:focus-visible + .typedpress-code-tab { outline: 2px solid currentColor; outline-offset: -2px; }
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(1):checked ~ .typedpress-code-panel:nth-of-type(1),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(2):checked ~ .typedpress-code-panel:nth-of-type(2),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(3):checked ~ .typedpress-code-panel:nth-of-type(3),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(4):checked ~ .typedpress-code-panel:nth-of-type(4),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(5):checked ~ .typedpress-code-panel:nth-of-type(5),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(6):checked ~ .typedpress-code-panel:nth-of-type(6),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(7):checked ~ .typedpress-code-panel:nth-of-type(7),
+.typedpress-code-group > .typedpress-code-tab-input:nth-of-type(8):checked ~ .typedpress-code-panel:nth-of-type(8) { display: block; }
+.typedpress-code-group > .typedpress-code-tab-input:checked + .typedpress-code-tab { border-bottom-color: currentColor; font-weight: 600; }
+.typedpress-code-group .typedpress-code-title { display: none; }
+
+/* Light by default; dark by the visitor's scheme, unless the page says `data-theme="light"` on
+ * <html>. A site with a theme switch sets `data-theme="dark"` or `"light"` there to choose. */
+.typedpress-code-title { background: #eaeaeb; color: #383a42; }
+.typedpress-code-marked { background: rgba(56, 58, 66, 0.08); box-shadow: inset 3px 0 0 #4078f2; }
+.typedpress-code {  color: #383a42;  background: #fafafa; }
+.typedpress-code .hljs-comment, .typedpress-code .hljs-quote { color: #a0a1a7; font-style: italic; }
+.typedpress-code .hljs-doctag, .typedpress-code .hljs-keyword, .typedpress-code .hljs-formula { color: #a626a4; }
+.typedpress-code .hljs-section, .typedpress-code .hljs-name, .typedpress-code .hljs-selector-tag, .typedpress-code .hljs-deletion, .typedpress-code .hljs-subst { color: #e45649; }
+.typedpress-code .hljs-literal { color: #0184bb; }
+.typedpress-code .hljs-string, .typedpress-code .hljs-regexp, .typedpress-code .hljs-addition, .typedpress-code .hljs-attribute, .typedpress-code .hljs-meta-string { color: #50a14f; }
+.typedpress-code .hljs-built_in, .typedpress-code .hljs-class .hljs-title { color: #c18401; }
+.typedpress-code .hljs-attr, .typedpress-code .hljs-variable, .typedpress-code .hljs-template-variable, .typedpress-code .hljs-type, .typedpress-code .hljs-selector-class, .typedpress-code .hljs-selector-attr, .typedpress-code .hljs-selector-pseudo, .typedpress-code .hljs-number { color: #986801; }
+.typedpress-code .hljs-symbol, .typedpress-code .hljs-bullet, .typedpress-code .hljs-link, .typedpress-code .hljs-meta, .typedpress-code .hljs-selector-id, .typedpress-code .hljs-title { color: #4078f2; }
+.typedpress-code .hljs-emphasis { font-style: italic; }
+.typedpress-code .hljs-strong { font-weight: bold; }
+.typedpress-code .hljs-link { text-decoration: underline; }
+@media (prefers-color-scheme: dark) {
+:root:not([data-theme="light"]) .typedpress-code-title { background: #21252b; color: #abb2bf; }
+:root:not([data-theme="light"]) .typedpress-code-marked { background: rgba(171, 178, 191, 0.1); box-shadow: inset 3px 0 0 #61aeee; }
+:root:not([data-theme="light"]) .typedpress-code {  color: #abb2bf;  background: #282c34; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-comment, :root:not([data-theme="light"]) .typedpress-code .hljs-quote { color: #5c6370; font-style: italic; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-doctag, :root:not([data-theme="light"]) .typedpress-code .hljs-keyword, :root:not([data-theme="light"]) .typedpress-code .hljs-formula { color: #c678dd; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-section, :root:not([data-theme="light"]) .typedpress-code .hljs-name, :root:not([data-theme="light"]) .typedpress-code .hljs-selector-tag, :root:not([data-theme="light"]) .typedpress-code .hljs-deletion, :root:not([data-theme="light"]) .typedpress-code .hljs-subst { color: #e06c75; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-literal { color: #56b6c2; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-string, :root:not([data-theme="light"]) .typedpress-code .hljs-regexp, :root:not([data-theme="light"]) .typedpress-code .hljs-addition, :root:not([data-theme="light"]) .typedpress-code .hljs-attribute, :root:not([data-theme="light"]) .typedpress-code .hljs-meta-string { color: #98c379; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-built_in, :root:not([data-theme="light"]) .typedpress-code .hljs-class .hljs-title { color: #e6c07b; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-attr, :root:not([data-theme="light"]) .typedpress-code .hljs-variable, :root:not([data-theme="light"]) .typedpress-code .hljs-template-variable, :root:not([data-theme="light"]) .typedpress-code .hljs-type, :root:not([data-theme="light"]) .typedpress-code .hljs-selector-class, :root:not([data-theme="light"]) .typedpress-code .hljs-selector-attr, :root:not([data-theme="light"]) .typedpress-code .hljs-selector-pseudo, :root:not([data-theme="light"]) .typedpress-code .hljs-number { color: #d19a66; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-symbol, :root:not([data-theme="light"]) .typedpress-code .hljs-bullet, :root:not([data-theme="light"]) .typedpress-code .hljs-link, :root:not([data-theme="light"]) .typedpress-code .hljs-meta, :root:not([data-theme="light"]) .typedpress-code .hljs-selector-id, :root:not([data-theme="light"]) .typedpress-code .hljs-title { color: #61aeee; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-emphasis { font-style: italic; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-strong { font-weight: bold; }
+:root:not([data-theme="light"]) .typedpress-code .hljs-link { text-decoration: underline; }
+}
+:root[data-theme="dark"] .typedpress-code-title { background: #21252b; color: #abb2bf; }
+:root[data-theme="dark"] .typedpress-code-marked { background: rgba(171, 178, 191, 0.1); box-shadow: inset 3px 0 0 #61aeee; }
+:root[data-theme="dark"] .typedpress-code {  color: #abb2bf;  background: #282c34; }
+:root[data-theme="dark"] .typedpress-code .hljs-comment, :root[data-theme="dark"] .typedpress-code .hljs-quote { color: #5c6370; font-style: italic; }
+:root[data-theme="dark"] .typedpress-code .hljs-doctag, :root[data-theme="dark"] .typedpress-code .hljs-keyword, :root[data-theme="dark"] .typedpress-code .hljs-formula { color: #c678dd; }
+:root[data-theme="dark"] .typedpress-code .hljs-section, :root[data-theme="dark"] .typedpress-code .hljs-name, :root[data-theme="dark"] .typedpress-code .hljs-selector-tag, :root[data-theme="dark"] .typedpress-code .hljs-deletion, :root[data-theme="dark"] .typedpress-code .hljs-subst { color: #e06c75; }
+:root[data-theme="dark"] .typedpress-code .hljs-literal { color: #56b6c2; }
+:root[data-theme="dark"] .typedpress-code .hljs-string, :root[data-theme="dark"] .typedpress-code .hljs-regexp, :root[data-theme="dark"] .typedpress-code .hljs-addition, :root[data-theme="dark"] .typedpress-code .hljs-attribute, :root[data-theme="dark"] .typedpress-code .hljs-meta-string { color: #98c379; }
+:root[data-theme="dark"] .typedpress-code .hljs-built_in, :root[data-theme="dark"] .typedpress-code .hljs-class .hljs-title { color: #e6c07b; }
+:root[data-theme="dark"] .typedpress-code .hljs-attr, :root[data-theme="dark"] .typedpress-code .hljs-variable, :root[data-theme="dark"] .typedpress-code .hljs-template-variable, :root[data-theme="dark"] .typedpress-code .hljs-type, :root[data-theme="dark"] .typedpress-code .hljs-selector-class, :root[data-theme="dark"] .typedpress-code .hljs-selector-attr, :root[data-theme="dark"] .typedpress-code .hljs-selector-pseudo, :root[data-theme="dark"] .typedpress-code .hljs-number { color: #d19a66; }
+:root[data-theme="dark"] .typedpress-code .hljs-symbol, :root[data-theme="dark"] .typedpress-code .hljs-bullet, :root[data-theme="dark"] .typedpress-code .hljs-link, :root[data-theme="dark"] .typedpress-code .hljs-meta, :root[data-theme="dark"] .typedpress-code .hljs-selector-id, :root[data-theme="dark"] .typedpress-code .hljs-title { color: #61aeee; }
+:root[data-theme="dark"] .typedpress-code .hljs-emphasis { font-style: italic; }
+:root[data-theme="dark"] .typedpress-code .hljs-strong { font-weight: bold; }
+:root[data-theme="dark"] .typedpress-code .hljs-link { text-decoration: underline; }

@@ -1,0 +1,299 @@
+@use "@wordpress/base-styles/variables";
+@use "@wordpress/base-styles/colors";
+@use "@wordpress/base-styles/mixins";
+
+.first-admin-global-styles-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.first-admin-global-styles-preview__wrapper {
+	max-width: 100%;
+	display: block;
+	width: 100%;
+}
+
+.first-admin-typography-preview {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 100px;
+	margin-bottom: 20px;
+	background: #f0f0f0;
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.first-admin-font-size__item {
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	overflow: hidden;
+	line-break: anywhere;
+}
+
+.first-admin-font-size__item-value {
+	color: #757575;
+}
+
+.first-admin-global-styles-screen {
+	margin: 12px 16px 16px;
+}
+
+.first-admin-global-styles-screen-typography__indicator {
+	height: 24px;
+	width: 24px;
+	font-size: 14px;
+	display: flex !important;
+	align-items: center;
+	justify-content: center;
+	border-radius: 2px;
+}
+
+.first-admin-block-types-search {
+	margin-bottom: 10px;
+	padding: 0 20px;
+}
+
+.first-admin-global-styles-screen-typography__font-variants-count {
+	color: var( --wpds-color-fg-content-neutral-weak );
+}
+
+.first-admin-global-styles-font-families__manage-fonts {
+	justify-content: center;
+}
+
+.first-admin-global-styles-screen .color-block-support-panel {
+	padding-left: 0;
+	padding-right: 0;
+	padding-top: 0;
+	border-top: none;
+	row-gap: calc( 4px * 3 );
+}
+
+.first-admin-global-styles-header__description {
+	padding: 0 16px;
+}
+
+.first-admin-block-types-search {
+	margin-bottom: 8px;
+	padding: 0 16px;
+}
+
+.first-admin-global-styles-header {
+	// Need to override the too specific bottom margin for complementary areas.
+	margin-bottom: 0 !important;
+}
+
+.first-admin-global-styles-subtitle {
+	// Need to override the too specific styles for complementary areas.
+	margin-bottom: 0 !important;
+	text-transform: uppercase;
+	font-weight: 500 !important;
+	font-size: 11px !important;
+}
+
+.first-admin-global-styles-section-title {
+	color: var( --wpds-color-fg-content-neutral );
+	font-weight: 600;
+	line-height: 1.2;
+	padding: 16px 16px 0;
+	margin: 0;
+}
+
+.first-admin-global-styles-icon-with-current-color {
+	fill: currentColor;
+}
+
+.first-admin-global-styles__color-indicator-wrapper {
+	// Match the height of the rest of the icons (24px).
+	height: variables.$grid-unit * 3;
+	flex-shrink: 0;
+}
+
+.first-admin-global-styles__shadows-panel__options-container,
+.first-admin-global-styles__typography-panel__options-container {
+	height: variables.$grid-unit * 3;
+}
+
+.first-admin-global-styles__block-preview-panel {
+	position: relative;
+	width: 100%;
+	border: #ddd 1px solid;
+	border-radius: 2px;
+	overflow: hidden;
+}
+
+.first-admin-global-styles__shadow-preview-panel {
+	height: 144px;
+	border: #ddd 1px solid;
+	border-radius: 2px;
+	overflow: auto;
+	background-image: repeating-linear-gradient(
+			45deg,
+			#f5f5f5 25%,
+			#0000 0,
+			#0000 75%,
+			#f5f5f5 0,
+			#f5f5f5
+		),
+		repeating-linear-gradient(
+			45deg,
+			#f5f5f5 25%,
+			#0000 0,
+			#0000 75%,
+			#f5f5f5 0,
+			#f5f5f5
+		);
+	background-position:
+		0 0,
+		8px 8px;
+	background-size: 16px 16px;
+
+	.first-admin-global-styles__shadow-preview-block {
+		border: #ddd 1px solid;
+		border-radius: 2px;
+		background-color: #fff;
+		width: 60%;
+		height: 60px;
+	}
+}
+
+.first-admin-global-styles__shadow-editor__dropdown-content {
+	width: 280px;
+}
+
+.first-admin-global-styles__shadow-editor-panel {
+	// because tooltip of the range control is too close to the edge and creates overflow
+	margin-bottom: 4px;
+}
+
+.first-admin-global-styles__shadow-editor__dropdown {
+	width: 100%;
+	position: relative;
+}
+
+.first-admin-global-styles__shadow-editor__dropdown-toggle {
+	width: 100%;
+	height: auto;
+	padding-top: 8px;
+	padding-bottom: 8px;
+	text-align: left;
+	border-radius: inherit;
+
+	&.is-open {
+		background: var( --wpds-color-bg-interactive-brand-strong );
+		color: var( --wpds-color-fg-interactive-brand-strong );
+	}
+}
+
+.first-admin-global-styles__shadow-editor__remove-button {
+	position: absolute;
+	right: 8px;
+	top: 8px;
+	opacity: 0;
+
+	&.first-admin-global-styles__shadow-editor__remove-button {
+		border: none;
+	}
+
+	.first-admin-global-styles__shadow-editor__dropdown-toggle:hover + &,
+	&:focus,
+	&:hover {
+		opacity: 1;
+	}
+
+	@media ( hover: none ) {
+		// Show reset button on devices that do not support hover.
+		opacity: 1;
+	}
+}
+
+.first-admin-global-styles-screen-css {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	margin: 16px;
+
+	.components-v-stack {
+		flex: 1 1 auto;
+
+		.block-editor-global-styles-advanced-panel__custom-css-input {
+			flex: 1 1 auto;
+			display: flex;
+			flex-direction: column;
+
+			.components-base-control__field {
+				flex: 1 1 auto;
+				display: flex;
+				flex-direction: column;
+
+				.components-textarea-control__input {
+					flex: 1 1 auto;
+					// CSS input is always LTR regardless of language.
+
+					/*rtl:ignore*/
+					direction: ltr;
+				}
+			}
+		}
+	}
+}
+
+.first-admin-global-styles-screen-css-help-link {
+	display: inline-block;
+	margin-top: 8px;
+}
+
+.first-admin-global-styles-screen-variations {
+	margin-top: 16px;
+	border-top: 1px solid #ddd;
+
+	> * {
+		margin: 24px 16px;
+	}
+}
+
+.first-admin-global-styles-sidebar__navigator-provider {
+	height: 100%;
+}
+
+.first-admin-global-styles-sidebar__navigator-screen {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.first-admin-global-styles-sidebar__navigator-screen .single-column {
+	grid-column: span 1;
+}
+
+.first-admin-global-styles-screen-root.first-admin-global-styles-screen-root,
+.first-admin-global-styles-screen-style-variations.first-admin-global-styles-screen-style-variations {
+	background: unset;
+	color: inherit;
+}
+
+.first-admin-global-styles-sidebar__panel .block-editor-block-icon svg {
+	fill: currentColor;
+}
+
+.first-admin-global-styles-screen-root__active-style-tile {
+	// Todo: revisit use of Card component and/or remove override
+	// The &#{&} is a workaround for the specificity of the Card component.
+	&#{&},
+	&#{&} .first-admin-global-styles-screen-root__active-style-tile-preview {
+		border-radius: 2px;
+	}
+}
+
+.first-admin-global-styles-color-palette-panel,
+.first-admin-global-styles-gradient-palette-panel {
+	padding: variables.$grid-unit-20;
+}
+
+.components-navigator-screen {
+	padding: variables.$grid-unit-15;
+}

@@ -1,0 +1,59 @@
+<?php
+/**
+ * TypedPress Admin load Libraries.
+ *
+ * This file loads all the libraries and registration needed for TypedPress Admin.
+ * Loaded for the admin page and for REST requests alike.
+ *
+ * @package TypedPress_Admin
+ */
+
+define( 'TP_ADMIN_PLUGIN_DIR', plugin_dir_path( __DIR__ ) );
+define( 'TP_ADMIN_PLUGIN_URL', plugin_dir_url( __DIR__ ) );
+
+// Registration APIs.
+require_once __DIR__ . '/api/dashboard-context.php';
+require_once __DIR__ . '/api/dashboard-widgets.php';
+require_once __DIR__ . '/api/dashboard-layout.php';
+require_once __DIR__ . '/api/field-collections.php';
+require_once __DIR__ . '/api/view-config.php';
+require_once __DIR__ . '/view-configs.php';
+require_once __DIR__ . '/api/menu-items.php';
+require_once __DIR__ . '/api/init-modules.php';
+require_once __DIR__ . '/api/routes.php';
+
+// REST API overrides and endpoints.
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-attachments-controller.php';
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-field-collections-controller.php';
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-view-config-controller.php';
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-editor-controller.php';
+require_once __DIR__ . '/rest-api/core-rest-api-overrides.php';
+
+require_once __DIR__ . '/rest-api/class-wp-rest-themes-controller.php';
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-plugins-controller.php';
+require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-resolved-template-controller.php';
+require_once __DIR__ . '/rest-api/plugins-rest-api-overrides.php';
+
+// Core Entities overrides.
+require_once __DIR__ . '/post.php';
+require_once __DIR__ . '/taxonomies.php';
+require_once __DIR__ . '/taxonomy-hierarchy.php';
+require_once __DIR__ . '/site-preview.php';
+
+// i18n support in TypedPress Admin.
+require_once __DIR__ . '/i18n.php';
+
+// Classic wp-admin pages framed in TypedPress Admin (/classic/<slug>), and developer mode.
+require_once __DIR__ . '/classic-route.php';
+
+// Default TypedPress Admin menu registration.
+require_once __DIR__ . '/typedpress-admin-menu.php';
+require_once __DIR__ . '/menu.php';
+
+// Screens declared once for both admins.
+require_once __DIR__ . '/screens.php';
+
+// Build output: registers the modules, routes and fields. Absent until the build is committed.
+if ( is_file( __DIR__ . '/../build/index.php' ) ) {
+	require_once __DIR__ . '/../build/index.php';
+}

@@ -1,0 +1,1 @@
+<?php return array('name' => 'dashboard-redirect', 'dependencies' => array(), 'moduleDependencies' => array('@wordpress/route'), 'version' => '76db64e2a2f1be60d28e');

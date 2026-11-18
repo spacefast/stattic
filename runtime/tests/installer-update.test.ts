@@ -252,18 +252,23 @@ async function runInstaller(
       | "post_publication_check"
       | "tree_rollback"
       | "file_rollback";
+    /** Run as `--chroot-site` against this chroot, with the site's persistent data. */
+    chrootSite?: { chrootRoot: string };
   },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const chrootSite = options?.chrootSite;
   const child = Bun.spawn({
     cmd: [
       "php",
       "-d",
-      "auto_prepend_file=",
+      `auto_prepend_file=${chrootSite ? path.resolve(import.meta.dirname, "atomic-prepend.php") : ""}`,
       "-d",
       `opcache.restrict_api=${options?.opcacheRestriction ?? ""}`,
       fixture.installerPath,
       options?.zipUrl ?? fixture.zipUrl,
+      ...(chrootSite ? ["--chroot-site"] : []),
     ],
+    cwd: chrootSite ? (options?.publicRoot ?? fixture.publicRoot) : undefined,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "pipe",
@@ -283,6 +288,7 @@ async function runInstaller(
         options?.pause?.phase ?? options?.failurePhase ?? "",
       SPACEFAST_RUNTIME_INSTALLER_TEST_PAUSE_FILE: path.join(fixture.root, "prepared"),
       SPACEFAST_RUNTIME_INSTALLER_TEST_RESUME_STDIN: options?.pause ? "1" : "",
+      SPACEFAST_TEST_CHROOT_ROOT: chrootSite?.chrootRoot ?? "",
     },
   });
   const stdout = (async () => {
@@ -1530,6 +1536,7 @@ function runWithPersistentData(
   chrootRoot: string,
   args: string[],
   env: Record<string, string> = {},
+  stdin?: string,
 ) {
   const run = Bun.spawnSync({
     cmd: [
@@ -1540,100 +1547,180 @@ function runWithPersistentData(
     ],
     cwd: fixture.publicRoot,
     env: { ...process.env, SPACEFAST_TEST_CHROOT_ROOT: chrootRoot, ...env },
+    stdin: new TextEncoder().encode(stdin ?? ""),
     stdout: "pipe",
     stderr: "pipe",
   });
   return { exitCode: run.exitCode, stdout: run.stdout.toString(), stderr: run.stderr.toString() };
 }
 
-test("retiring the own release leaves a chroot-served site with no engine copy, and only then", async () => {
-  const fixture = await startUpdateFixture({ revision: "own-release", visitorEngine: true });
+test("a chroot-site install leaves the site the chroot's loader and no engine copy, and only then", async () => {
+  const fixture = await startUpdateFixture({ visitorEngine: true });
+  // A first own install gives the chroot its engine, and the site a release
+  // a chroot-site install must remove.
   expect((await runInstaller(fixture)).exitCode).toBe(0);
   const installRoot = installRootOf(fixture.publicRoot);
   const release = activeReleaseRoot(fixture.publicRoot);
-  const chrootRevision = "c".repeat(40);
-  const chrootRoot = standUpChroot(fixture, chrootRevision);
-  const retire = (commandId = crypto.randomUUID()) =>
-    runWithPersistentData(fixture, chrootRoot, [fixture.installerPath, "--retire-own-release"], {
-      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(fixture.publicRoot),
-      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: commandId,
-      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
-      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
-    });
-  const visit = () =>
-    runWithPersistentData(fixture, chrootRoot, [path.join(fixture.publicRoot, "index.php")], {
+  const chrootRoot = standUpChroot(fixture, fixture.revision);
+  const chrootSite = (target: UpdateFixture, commandId = crypto.randomUUID()) =>
+    runWithPersistentData(
+      target,
+      chrootRoot,
+      [target.installerPath, target.zipUrl, "--chroot-site"],
+      {
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(target.publicRoot),
+        SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: commandId,
+        SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_MD5: target.md5,
+        SPACEFAST_RUNTIME_ENGINE_REVISION: target.revision,
+        SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: "",
+      },
+    );
+  const visit = (target: UpdateFixture) =>
+    runWithPersistentData(target, chrootRoot, [path.join(target.publicRoot, "index.php")], {
       REQUEST_METHOD: "GET",
       REQUEST_URI: "/",
     });
-  const persistentData = path.join(fixture.publicRoot, ".atomic-persistent-data.json");
+  const selectChannel = (target: UpdateFixture) =>
+    writeFileSync(
+      path.join(target.publicRoot, ".atomic-persistent-data.json"),
+      `${JSON.stringify({ SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" })}\n`,
+    );
+  const proofOf = (target: UpdateFixture) => {
+    const proof = runWithPersistentData(
+      target,
+      chrootRoot,
+      [target.installerPath, "--proof"],
+      { SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance" },
+      JSON.stringify({ runtime_instance_id: "installer-test-instance" }),
+    );
+    expect(proof.exitCode, proof.stderr).toBe(0);
+    const parsed: unknown = JSON.parse(proof.stdout);
+    return parsed;
+  };
+  const releaseTarget = path.relative(installRoot, release).split(path.sep).join("/");
+  const nonce = publicationNonce(fixture.publicRoot);
 
-  // Refused while the loader would still fall back to the release: the site
-  // selects no channel, then its chroot lacks the revision's binary.
-  const unselected = retire();
+  // Refused before anything changes while the loader would not serve the
+  // chroot: the site selects no channel, then its chroot lacks the binary.
+  const unselected = chrootSite(fixture);
   expect(unselected.exitCode).toBe(1);
-  expect(unselected.stderr).toContain("runtime_engine_retire_chroot_unavailable:unselected");
-  writeFileSync(
-    persistentData,
-    `${JSON.stringify({ SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" })}\n`,
-  );
-  const binaryMissing = retire();
+  expect(unselected.stderr).toContain("runtime_engine_chroot_site_unavailable:unselected");
+  expect(proofOf(fixture)).toMatchObject({ chroot: { revision: null, reason: "unselected" } });
+  selectChannel(fixture);
+  const binaryMissing = chrootSite(fixture);
   expect(binaryMissing.exitCode).toBe(1);
   expect(binaryMissing.stderr).toContain(
-    "runtime_engine_retire_chroot_unavailable:chroot_binary_missing",
+    "runtime_engine_chroot_site_unavailable:chroot_binary_missing",
   );
-  expect(readActiveReleaseTarget(installRoot)).toBe(
-    path.relative(installRoot, release).split(path.sep).join("/"),
+  mkdirSync(path.dirname(chrootBinary(chrootRoot, fixture.revision)), { recursive: true });
+  copyFileSync(
+    path.join(release, "bin/stattic-runtime"),
+    chrootBinary(chrootRoot, fixture.revision),
   );
-  expect(existsSync(release)).toBe(true);
-
-  mkdirSync(path.dirname(chrootBinary(chrootRoot, chrootRevision)), { recursive: true });
-  copyFileSync(path.join(release, "bin/stattic-runtime"), chrootBinary(chrootRoot, chrootRevision));
-  chmodSync(chrootBinary(chrootRoot, chrootRevision), 0o755);
-  const commandId = crypto.randomUUID();
-  const retired = retire(commandId);
-  expect(retired.exitCode, retired.stderr).toBe(0);
-  expect(JSON.parse(retired.stdout)).toEqual({
-    status: "retired",
-    chroot_revision: chrootRevision,
-    removed: [path.basename(release)],
+  chmodSync(chrootBinary(chrootRoot, fixture.revision), 0o755);
+  expect(proofOf(fixture)).toMatchObject({
+    chroot: { revision: fixture.revision, reason: "chroot" },
   });
+  // So is a zip of another revision than the chroot serves: its loader bytes
+  // would not be the ones the chroot's revision proves.
+  const other = await startUpdateFixture({ visitorEngine: true, revision: "d".repeat(40) });
+  selectChannel(other);
+  const mismatch = chrootSite(other);
+  expect(mismatch.exitCode).toBe(1);
+  expect(mismatch.stderr).toContain("runtime_engine_chroot_site_revision_mismatch");
+  expect(existsSync(path.join(installRootOf(other.publicRoot), "releases"))).toBe(false);
+  expect(readActiveReleaseTarget(installRoot)).toBe(releaseTarget);
+  expect(publicationNonce(fixture.publicRoot)).toBe(nonce);
+
+  // A channel that moves while the files are laid keeps the release: the
+  // site's files are not the serving revision's.
+  const moved = path.join(chrootRoot, "scripts", `sf-engine-${"e".repeat(40)}`);
+  cpSync(path.join(chrootRoot, "scripts", `sf-engine-${fixture.revision}`), moved, {
+    recursive: true,
+  });
+  mkdirSync(path.dirname(chrootBinary(chrootRoot, "e".repeat(40))), { recursive: true });
+  copyFileSync(
+    chrootBinary(chrootRoot, fixture.revision),
+    chrootBinary(chrootRoot, "e".repeat(40)),
+  );
+  chmodSync(chrootBinary(chrootRoot, "e".repeat(40)), 0o755);
+  const latest = path.join(chrootRoot, "scripts", "sf-engine-production-latest");
+  const movedMidInstall = await runInstaller(fixture, {
+    chrootSite: { chrootRoot },
+    pause: {
+      phase: "pause_after_commit",
+      run: async () => {
+        rmSync(latest);
+        symlinkSync(path.basename(moved), latest);
+      },
+    },
+  });
+  expect(movedMidInstall.exitCode).toBe(1);
+  expect(movedMidInstall.stderr).toContain("runtime_engine_chroot_site_revision_mismatch");
+  expect(existsSync(path.join(installRoot, "active-release"))).toBe(true);
+  rmSync(latest);
+  symlinkSync(`sf-engine-${fixture.revision}`, latest);
+
+  // A site with a release keeps none, and the chroot serves it.
+  const commandId = crypto.randomUUID();
+  const laid = chrootSite(fixture, commandId);
+  expect(laid.exitCode, laid.stderr).toBe(0);
+  expect(JSON.parse(laid.stdout)).toMatchObject({
+    status: "installed",
+    engine_revision: fixture.revision,
+    layout: "chroot",
+  });
+  expect(JSON.parse(laid.stdout).removed).toContain(path.basename(release));
   expect(existsSync(path.join(installRoot, "active-release"))).toBe(false);
   expect(readdirSync(path.join(installRoot, "releases"))).toEqual([]);
   expect(readdirSync(path.join(installRoot, "release-authorities"))).toEqual([]);
-  // The loader copies and the site's data stay; the chroot serves.
   expect(existsSync(path.join(fixture.publicRoot, "index.php"))).toBe(true);
   expect(existsSync(path.join(installRoot, "storage"))).toBe(true);
-  const served = visit();
+  const served = visit(fixture);
   expect(served.exitCode, served.stderr).toBe(0);
-  expect(JSON.parse(served.stdout)).toEqual({ context: chrootRevision, module: chrootRevision });
-  // The proof names the retiring command and no release.
-  const proof = Bun.spawnSync({
-    cmd: ["php", "-d", "auto_prepend_file=", fixture.installerPath, "--proof"],
-    cwd: fixture.publicRoot,
-    stdin: new TextEncoder().encode(
-      JSON.stringify({ runtime_instance_id: "installer-test-instance" }),
-    ),
-    env: { ...process.env, SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance" },
+  expect(JSON.parse(served.stdout)).toEqual({
+    context: fixture.revision,
+    module: fixture.revision,
   });
-  expect(proof.exitCode, proof.stderr.toString()).toBe(0);
-  expect(JSON.parse(proof.stdout.toString())).toMatchObject({
+  // The proof names the command and no release.
+  expect(proofOf(fixture)).toMatchObject({
     publication: { command_id: commandId },
     engine_revision: null,
     in_progress: false,
   });
 
+  // A new site, with no files of its own yet, gets the same: the loader and
+  // public files, and no release.
+  const fresh = await startUpdateFixture({ visitorEngine: true });
+  selectChannel(fresh);
+  const freshLaid = chrootSite(fresh);
+  expect(freshLaid.exitCode, freshLaid.stderr).toBe(0);
+  expect(readdirSync(path.join(installRootOf(fresh.publicRoot), "releases"))).toEqual([]);
+  expect(existsSync(path.join(installRootOf(fresh.publicRoot), "active-release"))).toBe(false);
+  const freshServed = visit(fresh);
+  expect(freshServed.exitCode, freshServed.stderr).toBe(0);
+  expect(JSON.parse(freshServed.stdout)).toEqual({
+    context: fixture.revision,
+    module: fixture.revision,
+  });
+
+  // Laid down again, it still keeps no release.
+  const again = chrootSite(fixture);
+  expect(again.exitCode, again.stderr).toBe(0);
+  expect(readdirSync(path.join(installRoot, "releases"))).toEqual([]);
+
   // With no release there is nothing to fall back to.
   rmSync(path.join(chrootRoot, "scripts", "sf-engine-production-latest"));
-  expect(visit().exitCode).toBe(1);
+  expect(visit(fixture).exitCode).toBe(1);
   symlinkSync(
-    `sf-engine-${chrootRevision}`,
+    `sf-engine-${fixture.revision}`,
     path.join(chrootRoot, "scripts", "sf-engine-production-latest"),
   );
 
-  // Retiring again finds nothing; an install afterwards lays a release down.
-  const again = retire();
-  expect(again.exitCode, again.stderr).toBe(0);
-  expect(JSON.parse(again.stdout)).toMatchObject({ status: "absent", removed: [] });
+  // An own install afterwards (a canary's) lays a release down again.
+  rmSync(path.join(fixture.publicRoot, ".atomic-persistent-data.json"));
   const reinstall = await runInstaller(fixture);
   expect(reinstall.exitCode, reinstall.stderr).toBe(0);
   expect(readVisitor(fixture.publicRoot)).toEqual({

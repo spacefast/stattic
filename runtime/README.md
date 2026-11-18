@@ -155,10 +155,16 @@ channel link to its revision directory and requires the body from that path, nev
 link, because FPM runs `opcache.validate_timestamps=Off` and only a path per revision keeps the
 compiled body in step with the disk. A move of `latest` therefore needs no work on the site; PHP
 picks it up when its realpath cache entry for the link expires. The
-control plane's scheduled and SSH commands run no loader; they resolve the site's own release and
-ask its `engine/shared/engine-selection.php`, which restates the same rule. The site's install
-root keeps its storage and its publication lock either way, and a missing or incomplete chroot
-falls back to the site's release. Health and the engine-update receipt report `engine_source`.
+control plane's scheduled and SSH commands run no loader. On a site with a release of its own they
+ask that release's `engine/shared/engine-selection.php`, which restates the same rule; on a site
+with none, their bootstrap (`runtimeEnginePhpBootstrap` in
+`apps/control-plane/src/runtime/engine-files.ts`) checks the chroot selection itself, the way the
+thin loader does, and exits on any failed check. The site's install root keeps its storage and its
+publication lock either way, and a missing or incomplete chroot falls back to the site's release
+when there is one. Canary and development sites keep one, and so does a restored site until a read
+proves it serves the chroot. Every other site has none: the installer's `--chroot-site` mode lays
+down just the loader copies and public files of the revision the site's chroot serves and removes
+any release, so such a site has nothing to fall back to. Health and the engine-update receipt report `engine_source`.
 Health also reports `engine_source_reason` (`chroot`, `no_persistent_data`, `unselected`,
 `chroot_missing`, `chroot_engine_unsupported`, `chroot_containment_missing` or
 `chroot_binary_missing`), the `chroot_revision` the selected channel resolved to, and the

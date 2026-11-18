@@ -2825,6 +2825,9 @@ function print_engine_publication_proof(): never
         'publication' => $proof['publication'] ?? null,
         'engine_revision' => $proof['revision'] ?? null,
         'in_progress' => is_file($installRoot . '/install-transaction.json'),
+        // The chroot revision a `--chroot-site` install must lay down, or why
+        // the site's chroot would not serve it.
+        'chroot' => installer_selected_chroot(),
     ], JSON_THROW_ON_ERROR) . "\n";
     exit;
 }
@@ -2993,44 +2996,50 @@ function installer_selected_chroot(): array
 }
 
 /**
- * Remove the site's own engine release from a site the chroot serves: the
- * release directories, the active-release pointer and the release authorities.
- * Everything the chroot path still reads stays: storage, config, the loader
- * copies, the public trees and the loader marker. Without a release the thin
- * loader and the control plane's commands have no fallback, so this refuses
- * unless the selected chroot passes every check the loader makes, and checks
- * again under the exclusive publication lock. The publication is reserved like
- * an install's, so `--proof` shows which command retired it.
+ * Refuse a chroot-site install unless the site selects a chroot channel that
+ * passes every check the thin loader makes and serves `$revision`: the site
+ * files laid down are then that revision's, byte for byte, and nothing is
+ * left for the loader to fall back to.
  */
-function retire_own_release(): never
+function require_chroot_site(string $revision): void
 {
-    [, $publicRoot] = installer_roots();
-    $installRoot = prepare_install_root($publicRoot);
-    $installerLock = acquire_installer_lock($installRoot);
-    assert_engine_publication_instance($publicRoot, installer_config_value('SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID'));
-    foreach (['install-transaction.json', 'rollback-failure.json'] as $blocked) {
-        if (file_exists($installRoot . '/' . $blocked) || is_link($installRoot . '/' . $blocked)) {
-            fail('runtime_engine_retire_transaction_pending');
-        }
+    $chroot = installer_selected_chroot();
+    if ($chroot['reason'] !== 'chroot') {
+        fail('runtime_engine_chroot_site_unavailable:' . $chroot['reason']);
     }
-    $pointer = active_release_pointer_state($installRoot);
-    if (in_array($pointer['state'], ['unsupported', 'unknown'], true)) {
-        fail('runtime_engine_active_pointer_invalid');
+    if ($chroot['revision'] !== $revision) {
+        fail('runtime_engine_chroot_site_revision_mismatch');
+    }
+}
+
+/**
+ * Remove every release from a site the chroot serves: the active-release
+ * pointer first, then the release directories and their authorities.
+ * Everything the chroot path reads stays: storage, config, the loader copies,
+ * the public trees and the loader marker. Runs under the installer lock,
+ * after a committed install, and checks the chroot again under the exclusive
+ * publication lock, because without a release the thin loader and the control
+ * plane's commands have no fallback, and keeps the release unless the chroot
+ * still serves the installed revision. The proof keeps the install's
+ * publication and names no release.
+ *
+ * @return list<string> the release directories removed
+ */
+function remove_own_releases(string $installRoot, array $publication, string $revision): array
+{
+    $publicationLock = acquire_publication_lock($installRoot);
+    $chroot = installer_selected_chroot();
+    if ($chroot['reason'] !== 'chroot') {
+        fail('runtime_engine_chroot_site_unavailable:' . $chroot['reason']);
+    }
+    // The channel moved during the install: the site files laid down are not
+    // the serving revision's, so the release stays until a retry lays them.
+    if ($chroot['revision'] !== $revision) {
+        fail('runtime_engine_chroot_site_revision_mismatch');
     }
     $releasesRoot = $installRoot . '/releases';
     if (is_link($releasesRoot) || (file_exists($releasesRoot) && !is_dir($releasesRoot))) {
         fail('runtime_engine_releases_invalid');
-    }
-    $chroot = installer_selected_chroot();
-    if ($chroot['reason'] !== 'chroot') {
-        fail('runtime_engine_retire_chroot_unavailable:' . $chroot['reason']);
-    }
-    $publication = reserve_engine_publication($installRoot, hash('sha256', 'retire-own-release:' . $chroot['revision']));
-    $publicationLock = acquire_publication_lock($installRoot);
-    // The chroot can move under any check, so read it again under the lock.
-    $chroot = installer_selected_chroot();
-    if ($chroot['reason'] !== 'chroot') {
-        fail('runtime_engine_retire_chroot_unavailable:' . $chroot['reason']);
     }
     $releases = array_values(array_filter(
         // Every layout's releases: installs name them release-*, older
@@ -3038,25 +3047,25 @@ function retire_own_release(): never
         glob($releasesRoot . '/*') ?: [],
         static fn (string $release): bool => is_dir($release) && !is_link($release),
     ));
-    $hadPointer = $pointer['state'] !== 'absent';
+    $hadPointer = active_release_pointer_state($installRoot)['state'] !== 'absent';
     // The pointer goes first: from here on no reader can name a release.
     if (($hadPointer && !unlink_if_present($installRoot . '/active-release')) || !sync_directory($installRoot)) {
-        fail('runtime_engine_retire_pointer_failed');
+        fail('runtime_engine_chroot_site_pointer_failed');
     }
     $proof = json_encode([
         'format' => 'spacefast.runtime.active-release-proof.v1',
         'publication' => $publication,
         'release' => null,
         'revision' => null,
-        'retired' => ['chroot_revision' => $chroot['revision']],
+        'chroot_revision' => $chroot['revision'],
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     if (!is_string($proof) || !publish_regular_file($installRoot . '/active-release-proof.json', $proof . "\n", 0600)) {
-        fail('runtime_engine_retire_proof_failed');
+        fail('runtime_engine_chroot_site_proof_failed');
     }
     flock($publicationLock, LOCK_UN);
     fclose($publicationLock);
     // Nothing names these any more: a failed removal leaves disk debt, not a
-    // fallback, and the next run removes what is left.
+    // fallback, and the next install removes what is left.
     $removed = [];
     $remaining = [];
     foreach ($releases as $release) {
@@ -3068,21 +3077,17 @@ function retire_own_release(): never
         $removed[] = basename($release);
         clear_regular_state_file($installRoot . '/release-authorities/' . basename($release) . '.json');
     }
-    flock($installerLock, LOCK_UN);
     if ($remaining !== []) {
-        fwrite(STDERR, 'runtime_engine_retire_incomplete:' . implode(',', $remaining) . "\n");
-        exit(1);
+        fail('runtime_engine_chroot_site_incomplete:' . implode(',', $remaining));
     }
-    echo json_encode([
-        'status' => $hadPointer || $removed !== [] ? 'retired' : 'absent',
-        'chroot_revision' => $chroot['revision'],
-        'removed' => $removed,
-    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-    exit(0);
+    return $removed;
 }
 
 if (($argv[1] ?? null) === '--proof') print_engine_publication_proof();
-if (($argv[1] ?? null) === '--retire-own-release') retire_own_release();
+// `--chroot-site` after the zip source: lay down the loader copies and public
+// files of the revision the site's chroot serves, and keep no release of the
+// engine on the site.
+$chrootSite = ($argv[2] ?? null) === '--chroot-site';
 
 [$privateRoot, $publicRoot] = installer_roots();
 $installRoot = prepare_install_root($publicRoot);
@@ -3149,9 +3154,18 @@ if ($expectedRevision === '') {
     fail('runtime_engine_revision_expected_missing');
 }
 $expectedNativeSha256 = strtolower(installer_config_value('SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256'));
+if ($chrootSite) {
+    // Before the publication is reserved: a refusal changes nothing.
+    require_chroot_site($expectedRevision);
+}
 $publication = reserve_engine_publication(
     $installRoot,
-    hash('sha256', json_encode([strtolower($expectedMd5), $expectedRevision, $expectedNativeSha256], JSON_THROW_ON_ERROR)),
+    hash('sha256', json_encode(
+        $chrootSite
+            ? [strtolower($expectedMd5), $expectedRevision, $expectedNativeSha256, 'chroot-site']
+            : [strtolower($expectedMd5), $expectedRevision, $expectedNativeSha256],
+        JSON_THROW_ON_ERROR,
+    )),
 );
 
 
@@ -3203,8 +3217,10 @@ $installedPayloadIdentity = is_string($installedReleaseRoot)
 $installedAuthority = is_string($installedReleaseRoot)
     ? release_authority($installRoot, $installedReleaseRoot)
     : null;
+// A chroot site keeps no release to call current: it is laid down again.
 if (
-    $installedPublicPayloadMatches
+    !$chrootSite
+    && $installedPublicPayloadMatches
     && !$rollbackJournalPresent
     && !$installTransactionPresent
     && $expectedNativeSha256 !== ''
@@ -3524,5 +3540,10 @@ prune_old_releases($releasesRoot, array_values(array_filter([
     realpath($releaseRoot) ?: null,
     $previousReleaseRoot,
 ], 'is_string')));
+
+if ($chrootSite) {
+    $receipt['layout'] = 'chroot';
+    $receipt['removed'] = remove_own_releases($installRoot, $publication, $actualRevision);
+}
 
 echo json_encode(['status' => 'installed'] + $receipt, JSON_PRETTY_PRINT) . "\n";

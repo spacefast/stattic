@@ -6,6 +6,9 @@ import path from "node:path";
 import type { Runtime } from "./harness.ts";
 import type { MysqlContainer } from "./mysql-container.ts";
 
+export const WORDPRESS_IMAGE =
+  "wordpress@sha256:63eda59d220083d9ed1fd9685ffdd5e0405959fd2fec73a734b631487561e12f";
+
 export async function installWordpress(
   rt: Runtime,
   work: string,
@@ -62,8 +65,6 @@ export async function installWordpress(
     throw new Error(`${url}: ${failure}`);
   }
 
-  const wordpressImage =
-    "wordpress@sha256:63eda59d220083d9ed1fd9685ffdd5e0405959fd2fec73a734b631487561e12f";
   const cliImage =
     "wordpress@sha256:01998c8b665a74fe4154f94df8dd14afab558c83fed7be3235c13e7f06378bbe";
   // Official image bytes make setup reproducible without a prepopulated cache.
@@ -74,7 +75,7 @@ export async function installWordpress(
       "--rm",
       "--entrypoint",
       "tar",
-      wordpressImage,
+      WORDPRESS_IMAGE,
       "-C",
       "/usr/src/wordpress",
       "-czf",

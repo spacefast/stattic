@@ -54,6 +54,7 @@ import type {
 import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { writeActiveReleasePointer } from "./active-release.ts";
+import { linuxPhpCommand, stopLinuxPhp } from "./linux-php.ts";
 import { runtimeBinaryPath } from "./runtime-native-binary.ts";
 import { ensureZeroDashboardPlugin } from "./zero-dashboard-plugin.ts";
 
@@ -599,19 +600,22 @@ export type PhpServer = {
  */
 export async function startPhpServer(input: {
   binary?: string | undefined;
+  linux?: boolean;
   args: readonly string[];
   router: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
 }): Promise<PhpServer> {
+  const phpArgs = ["-d", "opcache.enable=0", ...input.args, "-S", "127.0.0.1:0", input.router];
+  const linux = input.linux ? linuxPhpCommand(input.cwd, input.env, phpArgs) : undefined;
   const server = spawn(
-    input.binary ?? PHP_BINARY,
+    linux?.binary ?? input.binary ?? PHP_BINARY,
     // `php -S` is the cli-server SAPI, which opcache.enable_cli does not
     // govern: OPcache stays on with timestamp revalidation every few seconds,
     // so a fixture that rewrites a PHP file in place keeps executing the
     // compiled copy. Fixtures serve the bytes on disk; a caller that is
     // testing OPcache itself overrides this in its own args.
-    ["-d", "opcache.enable=0", ...input.args, "-S", "127.0.0.1:0", input.router],
+    linux?.args ?? phpArgs,
     {
       cwd: input.cwd,
       stdio: ["ignore", "ignore", "pipe"],
@@ -619,9 +623,10 @@ export async function startPhpServer(input: {
       // group so stop() can reap the whole server instead of leaking listeners
       // after killing only the parent process.
       detached: process.platform !== "win32",
-      env: input.env,
+      env: linux ? { ...process.env, ...input.env } : input.env,
     },
   );
+  const closed = new Promise<void>((resolve) => server.once("close", () => resolve()));
   const listening = Promise.withResolvers<string>();
   let diagnostics = "";
   // Drain for the fixture's whole lifetime: PHP logs every request to stderr.
@@ -636,7 +641,7 @@ export async function startPhpServer(input: {
   server.once("exit", (code, signal) => {
     listening.reject(new Error(`php_exited:${code ?? signal}`));
   });
-  const stop = () => {
+  const killServer = () => {
     if (process.platform !== "win32" && server.pid !== undefined) {
       try {
         process.kill(-server.pid, "SIGKILL");
@@ -647,10 +652,15 @@ export async function startPhpServer(input: {
     }
     server.kill("SIGKILL");
   };
+  const stop = () => {
+    killServer();
+    if (linux) stopLinuxPhp(linux.name);
+  };
 
-  const readiness = AbortSignal.timeout(10_000);
+  // Docker may download the pinned image before PHP can announce its port.
+  const startup = AbortSignal.timeout(linux ? 310_000 : 10_000);
   const abortStartup = () => listening.reject(new Error("php_server_start_timeout"));
-  readiness.addEventListener("abort", abortStartup, { once: true });
+  startup.addEventListener("abort", abortStartup, { once: true });
   let baseUrl: string;
   let processId: number;
   try {
@@ -658,7 +668,23 @@ export async function startPhpServer(input: {
     if (server.exitCode !== null || server.signalCode !== null) {
       throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
     }
-    const response = await fetch(`${baseUrl}/__spacefast/health.php`, { signal: readiness });
+    // Image download time must not extend the HTTP health-check budget.
+    const readiness = linux ? AbortSignal.timeout(10_000) : startup;
+    let response: Response;
+    for (;;) {
+      try {
+        // Docker's host-port forwarding may follow PHP's listening signal.
+        // oxlint-disable-next-line no-await-in-loop -- bounded fixture readiness poll
+        response = await fetch(`${baseUrl}/__spacefast/health.php`, { signal: readiness });
+        break;
+      } catch (cause) {
+        if (!linux || readiness.aborted || server.exitCode !== null || server.signalCode !== null) {
+          throw cause;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- bounded fixture readiness poll
+        await Bun.sleep(25);
+      }
+    }
     if (server.exitCode !== null || server.signalCode !== null) {
       throw new Error(`php_exited:${server.exitCode ?? server.signalCode}`);
     }
@@ -666,16 +692,28 @@ export async function startPhpServer(input: {
     if (server.pid === undefined) throw new Error("php_server_pid_missing");
     processId = server.pid;
   } catch (cause) {
-    stop();
-    throw new Error(`PHP fixture startup failed.\n${diagnostics}`, { cause });
+    // A failed startup may still be creating its container. Reap the creator
+    // before asking Docker to remove its name. Normal stop follows readiness.
+    killServer();
+    await closed;
+    if (linux) stopLinuxPhp(linux.name);
+    const prerequisites = linux
+      ? "Released Linux runtimes require Docker with linux/amd64 support and host networking. Start Docker/OrbStack and retry.\n"
+      : "";
+    throw new Error(`PHP fixture startup failed.\n${prerequisites}${diagnostics}`, { cause });
   } finally {
-    readiness.removeEventListener("abort", abortStartup);
+    startup.removeEventListener("abort", abortStartup);
   }
   return { baseUrl, processId, diagnostics: () => diagnostics, stop };
 }
 
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
   const releaseDirectory = options.releaseDirectory ?? process.env.SPACEFAST_TEST_RELEASE_DIRECTORY;
+  // Released artifacts contain Linux x86-64 executables. Keep the verified
+  // release intact and move PHP with it, rather than replacing its finalizer.
+  const linux = Boolean(
+    releaseDirectory && (process.platform !== "linux" || process.arch !== "x64"),
+  );
   // realpathSync: macOS tmpdirs live behind the /var -> /private/var symlink.
   // The engine compares textually-normalized candidate paths against
   // realpath'd roots (shared/storage.php private-path asserts) and
@@ -719,24 +757,25 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       }
     : {};
 
+  const fixtureEnv = {
+    ...DEFAULT_ENV,
+    SPACEFAST_RUNTIME_BIN:
+      options.env?.SPACEFAST_RUNTIME_BIN ??
+      (releaseDirectory
+        ? path.join(root, ".stattic/releases/test/bin/stattic-runtime")
+        : runtimeBinaryPath()),
+    ...edgeCaptureEnv,
+    ...options.env,
+    SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",
+  };
   const bootServer = () =>
     startPhpServer({
       binary: options.phpBinary,
+      linux,
       args: phpArgs,
       router: RUNTIME_TEST_ROUTER,
       cwd: root,
-      env: {
-        ...process.env,
-        ...DEFAULT_ENV,
-        SPACEFAST_RUNTIME_BIN:
-          options.env?.SPACEFAST_RUNTIME_BIN ??
-          (releaseDirectory
-            ? path.join(releaseDirectory, "bin/stattic-runtime")
-            : runtimeBinaryPath()),
-        ...edgeCaptureEnv,
-        ...options.env,
-        SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",
-      },
+      env: linux ? fixtureEnv : { ...process.env, ...fixtureEnv },
     });
   let server: PhpServer;
   try {

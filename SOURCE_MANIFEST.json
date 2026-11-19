@@ -1,7 +1,7 @@
 {
-  "revision": "37039b688ea7a0d0d5c6003cebe9930367fc5b6f",
+  "revision": "bcf1f2513afb4d63094052c78829e05d0695252e",
   "sourceHash": "1535cdaeb3b3232acbbbca9d636935e5617ee8c60289728ccc1f24bbf0937496",
-  "manifestSha256": "60bd16b346de3febae058f60dedd113deb9bf50b2af68b7f824b1a83ee528df3",
+  "manifestSha256": "d94ba0468b2b68e452cd8440e60cd246480ec0c60f9856a87c5087e49cb782a9",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1287bfc14f8ca99bfbb13851da98a773a69bd91a34a7df3512f88e57b206c2e6"
+      "sha256": "f0c5f79e9643e29b47d0f94fdcd187b19320d4b90399cd105decb96085bb0c2c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "b76aed3e5c369277c2f75afeeb7c8948d26097d40094eeeaeabd7605de3ccab9"
+      "sha256": "02313092f22704900279f10c753cdf1b63168b265f722b309183ba2b68542c1a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -30401,11 +30401,11 @@
     },
     {
       "path": "runtime/tests/harness.test.ts",
-      "sha256": "875fdd00dd19a5443d64dcbf7496c8b1c0d71fd9d5f7e6c8cd431a732e4df71d"
+      "sha256": "b461f764ccf543dc6a05d4b034df35dd4af8edc143c2b3931beb497bdb3fed68"
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "094df1e0e560886e39969625bf7cce7741bbedc75370f6d28cf8ceeea0561b9b"
+      "sha256": "66bccf6b97f46e13a1d413bf0559cffec36965927c35e5b47497fcbe949e3782"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -30446,6 +30446,10 @@
     {
       "path": "runtime/tests/legacy-zero.ts",
       "sha256": "5b0cb804800c75aeadbdfd8c02a33928bfb092f8bd48aadd7affa2d95134981a"
+    },
+    {
+      "path": "runtime/tests/linux-php.ts",
+      "sha256": "068e4a600e30f250e2693c4fec76915cc25fa0ba74ea7151fba56a5cf2a5cb2b"
     },
     {
       "path": "runtime/tests/mysql-container.ts",
@@ -30665,7 +30669,7 @@
     },
     {
       "path": "runtime/tests/zero-wordpress.ts",
-      "sha256": "19436578b738ced9344a5d610b45c6705d185f9645f3f120d9c653ca61503048"
+      "sha256": "d3901375c0110327592ccf306f11802c7d510ebf22c9aebc63714b4b55bce50d"
     },
     {
       "path": "runtime/wordpress/managed-theme/style.css",

@@ -394,6 +394,7 @@ test("a published config role reads once for every viewer and writes only for a 
     spaceId: seed.spaceId,
     sessionId: randomBytes(32).toString("hex"),
     generation: space.accessGeneration,
+    sessionVersion: 0,
     audience: host,
     jti: randomUUID(),
     authorityExpiresAt: now + 3600,

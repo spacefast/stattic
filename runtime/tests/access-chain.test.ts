@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
@@ -31,6 +31,11 @@ const usedCodes = new Set<string>();
 // The nonce the provider bound to each code, as Better Auth stores it beside the
 // code. A code with no entry gets a handoff that names no nonce.
 const nonceForCode = new Map<string, string>();
+// The session version the control plane read for a code; unset names none.
+const sessionVersionForCode = new Map<string, number>();
+// Runs after the token endpoint accepts a code and before it mints the
+// handoff: the box's request is still waiting on the response.
+let beforeHandoff: ((code: string) => Promise<void>) | null = null;
 // The authorize endpoint and the issuer live on different origins here, as
 // behind the dev relay or a split auth host.
 const OAUTH_AUTHORIZE_URL = "https://api.spacefast.test/v1/auth/oauth2/authorize";
@@ -72,6 +77,7 @@ process.env.SPACEFAST_RUNTIME_JWT_PRIVATE_KEY = Buffer.from(
 process.env.AUTH_WPCOM_CLIENT_ID = "runtime-access-chain-test";
 process.env.AUTH_WPCOM_CLIENT_SECRET = "runtime-access-chain-test-secret";
 process.env.WP_CLOUD_API_TOKEN = "runtime-access-chain-test-token";
+process.env.WP_CLOUD_CLIENT_NAME = "runtime-access-chain-test";
 
 const [{ mintAuthorityToken }, { runtimeJwks }] = await Promise.all([
   import("../../apps/control-plane/src/access/authorize.ts"),
@@ -162,6 +168,7 @@ beforeAll(async () => {
           { status: 400 },
         );
       usedCodes.add(fields.code);
+      if (beforeHandoff) await beforeHandoff(fields.code);
       // Share sign-in always signs in an account, so this handoff names one.
       const now = Math.floor(Date.now() / 1000);
       return Response.json({
@@ -186,6 +193,7 @@ beforeAll(async () => {
             // The control plane copies the authorize request's nonce here; a
             // code the test never bound gets an empty one, which matches nothing.
             nonce: nonceForCode.get(fields.code) ?? "",
+            sessionVersion: sessionVersionForCode.get(fields.code),
             iat: now,
             nbf: now,
             exp: now + 60,
@@ -201,6 +209,8 @@ beforeAll(async () => {
     env: {
       SPACEFAST_INSECURE_COOKIES: "",
       SPACEFAST_RUNTIME_TEST_ACCESS_SESSION_CLOCK: "1",
+      // A route update must land while a callback waits on the token endpoint.
+      PHP_CLI_SERVER_WORKERS: "4",
       SPACEFAST_ACCESS_EXCHANGE_TEST_CONNECT_ORIGIN: `http://127.0.0.1:${exchangeServer.port}`,
     },
   });
@@ -254,22 +264,28 @@ async function mintCallbackToken({
   host = HOST,
   spaceId = SPACE,
   generation = 1,
+  sessionVersion = 0,
   ttlSeconds,
   authority = MEMBER,
+  principal,
 }: {
   host?: string;
   spaceId?: string;
   generation?: number;
+  sessionVersion?: number;
   ttlSeconds?: number;
   authority?: Parameters<typeof mintAuthorityToken>[0]["sub"];
+  principal?: Parameters<typeof mintAuthorityToken>[0]["principal"];
 } = {}) {
   return (
     await mintAuthorityToken({
       sub: authority,
+      principal,
       authorities: [authority],
       spaceId,
       sessionId: createHash("sha256").update(randomUUID()).digest("hex"),
       generation,
+      sessionVersion,
       audience: host,
       jti: `jti_${randomUUID()}`,
       ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
@@ -816,7 +832,12 @@ test("a handoff is gated on the overlay's access_gen alone, never on the summed 
   const admitted = await redeemHandoff(
     runtime,
     GEN_HOST,
-    await mintCallbackToken({ host: GEN_HOST, spaceId: GEN_SPACE, generation: 2 }),
+    await mintCallbackToken({
+      host: GEN_HOST,
+      spaceId: GEN_SPACE,
+      generation: 2,
+      sessionVersion: 1,
+    }),
     "/docs/",
   );
   expect(admitted.status).toBe(303);
@@ -824,6 +845,290 @@ test("a handoff is gated on the overlay's access_gen alone, never on the summed 
   const served = await get(runtime, GEN_HOST, "/docs/", { headers: { cookie } });
   expect(served.status).toBe(200);
   expect(await served.text()).toBe("<h1>private docs</h1>\n");
+});
+
+test("a handoff issued before everyone was signed out opens no session", async () => {
+  const host = "chain-held.test";
+  const spaceId = "spc_chain_held";
+  const versionId = "ver_chain_held_1";
+  const project = (sessionVersion: number) =>
+    putRoute(runtime, spaceId, "production", {
+      version_id: versionId,
+      config: accessConfig(1, sessionVersion),
+    });
+  await deploy(runtime, {
+    spaceId,
+    versionId,
+    files: { "index.html": "<h1>private</h1>\n", "docs/index.html": "<h1>private docs</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: accessConfig(1, 0),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  const mint = (sessionVersion: number) =>
+    mintCallbackToken({ host, spaceId, sessionVersion, principal: "account:usr_held" });
+  const sessionCookie = (response: Response) =>
+    response.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("__Host-spacefast_session="))
+      ?.split(";")[0];
+  const docs = (cookie: string) => get(runtime, host, "/docs/", { headers: { cookie } });
+  const legacy = (token: string, extra = "") =>
+    get(
+      runtime,
+      host,
+      `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F${extra}`,
+    );
+
+  // Issued while the box holds version 0 and held across a sign-out of everyone.
+  const held = await Promise.all([mint(0), mint(0), mint(0), mint(0)]);
+  await project(1);
+  // Each address answers a stale handoff as it answers any failed one.
+  const [inPath, redeemGet, redeemPost, silent] = [
+    await redeemHandoff(runtime, host, held[0] ?? "", "/docs/"),
+    await legacy(held[1] ?? ""),
+    // A released CLI's same-origin form post.
+    await get(runtime, host, "/__sf/redeem", {
+      method: "POST",
+      headers: { origin: `https://${host}`, "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: held[2] ?? "", return: "/docs/" }).toString(),
+    }),
+    // A renewal nobody clicked for lands back on its page.
+    await legacy(held[3] ?? "", "&silent=1"),
+  ];
+  for (const refused of [inPath, redeemGet, redeemPost]) {
+    expect(refused.status).toBe(404);
+    expect(sessionCookie(refused)).toBeUndefined();
+  }
+  expect(silent.status).toBe(303);
+  expect(silent.headers.get("location")).toBe("/docs/");
+  expect(sessionCookie(silent)).toBeUndefined();
+  // The refusal spent nothing a fresh sign-in needs: one issued now opens.
+  const fresh = await redeemHandoff(runtime, host, await mint(1), "/docs/");
+  expect(fresh.status).toBe(303);
+  expect(fresh.headers.get("location")).toBe("/docs/");
+  expect((await docs(sessionCookie(fresh) ?? "")).status).toBe(200);
+
+  // An older control plane names no version: accepted as before.
+  const now = Math.floor(Date.now() / 1000);
+  const unversioned = signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {
+    sub: MEMBER,
+    principal: "account:usr_held",
+    purpose: "handoff",
+    v: 1,
+    authorities: [MEMBER],
+    iss: "spacefast-api",
+    aud: spaceId,
+    host,
+    spaceId,
+    generation: 1,
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    emailVerified: false,
+    iat: now,
+    nbf: now,
+    exp: now + 60,
+    jti: randomUUID(),
+  });
+  const older = await redeemHandoff(runtime, host, unversioned, "/docs/");
+  expect(older.status).toBe(303);
+  expect(older.headers.get("location")).toBe("/docs/");
+  expect((await docs(sessionCookie(older) ?? "")).status).toBe(200);
+
+  // Issued after a sign-out whose projection has not reached the box yet: it
+  // opens a session now, and that session ends when the projection lands.
+  const ahead = await redeemHandoff(runtime, host, await mint(2), "/docs/");
+  expect(ahead.status).toBe(303);
+  const aheadCookie = sessionCookie(ahead) ?? "";
+  expect((await docs(aheadCookie)).status).toBe(200);
+  await project(2);
+  expect((await docs(aheadCookie)).status).toBe(403);
+});
+
+describe("a Share sign-in that crosses a sign-out of everyone", () => {
+  const versionId = "ver_oauth_chain_signed_out";
+  // The Share Space, with an identity lane so a signed-out page probes once.
+  const shareConfig = (sessionVersion: number) => {
+    const config = accessConfig(1, sessionVersion);
+    const owner = config.authorization.grants[0];
+    if (!owner) throw new Error("owner fixture missing");
+    config.authorization.grants.push({
+      ...owner,
+      id: "grt_consent_view",
+      audience: { kind: "external", issuer: "spacefast-share", subject: "consent.view" },
+    });
+    return {
+      ...config,
+      authorization: {
+        ...config.authorization,
+        accessPage: {
+          ...config.authorization.accessPage,
+          accountUrl: OAUTH_AUTHORIZE_URL,
+          issuer: OAUTH_ISSUER,
+        },
+      },
+    };
+  };
+  const project = (sessionVersion: number) =>
+    putRoute(runtime, OAUTH_SPACE, "production", {
+      version_id: versionId,
+      config: shareConfig(sessionVersion),
+    });
+  let deployed = false;
+  const reset = async (sessionVersion: number) => {
+    if (!deployed) {
+      // Its own version: the first OAuth test may already have committed OAUTH_VERSION.
+      await deploy(runtime, {
+        spaceId: OAUTH_SPACE,
+        versionId,
+        files: { "index.html": "private OAuth home", "docs/index.html": "private OAuth docs" },
+        activate: {
+          route_name: "production",
+          production_hostnames: [OAUTH_HOST, "oauth-alias.test"],
+          version_hostnames: [],
+          config: shareConfig(sessionVersion),
+        },
+      });
+      deployed = true;
+    } else await project(sessionVersion);
+  };
+
+  // A browser with its own cookies that follows redirects. At the authorize URL
+  // it plays the sign-in server, which always hands back a code; the token
+  // endpoint then mints at `issuerVersion` (a number, or read when it mints).
+  const browse = (issuerVersion: () => number) => {
+    const jar = new Map<string, string>();
+    const authorizations: URL[] = [];
+    const exchangesBefore = exchangeCount;
+    const keep = (response: Response) => {
+      for (const header of response.headers.getSetCookie()) {
+        const pair = header.split(";")[0] ?? "";
+        const name = pair.slice(0, pair.indexOf("="));
+        if (/max-age=0/i.test(header) || pair.endsWith("=")) jar.delete(name);
+        else jar.set(name, pair);
+      }
+    };
+    const request = async (path: string) => {
+      const response = await get(runtime, OAUTH_HOST, path, {
+        headers: { cookie: [...jar.values()].join("; "), "sec-fetch-dest": "document" },
+      });
+      keep(response);
+      return response;
+    };
+    const follow = async (start: string) => {
+      let response = await request(start);
+      for (let hop = 0; hop < 20 && response.status >= 300 && response.status < 400; hop++) {
+        const location = new URL(response.headers.get("location") ?? "", `https://${OAUTH_HOST}`);
+        if (location.origin + location.pathname === OAUTH_AUTHORIZE_URL) {
+          authorizations.push(location);
+          const code = `one-use-code-crossing-${randomUUID()}`;
+          expectedChallenge = location.searchParams.get("code_challenge") ?? "";
+          nonceForCode.set(code, location.searchParams.get("nonce") ?? "");
+          sessionVersionForCode.set(code, issuerVersion());
+          response = await request(
+            `/__spacefast/callback?code=${code}&state=${location.searchParams.get("state")}&iss=${encodeURIComponent(OAUTH_ISSUER)}`,
+          );
+        } else response = await request(location.pathname + location.search);
+      }
+      return response;
+    };
+    return {
+      follow,
+      authorizations,
+      exchanges: () => exchangeCount - exchangesBefore,
+      // Only an account session; a probe leaves its stateless `sfa1_` marker.
+      signedIn: () =>
+        /^__Host-spacefast_session=sfv2_/.test(jar.get("__Host-spacefast_session") ?? ""),
+    };
+  };
+
+  test("a silent probe that gets a stale handoff stops at the gate", async () => {
+    await reset(1);
+    // The issuer is stuck one version behind: every handoff it signs is stale.
+    const browser = browse(() => 0);
+    const page = await browser.follow("/docs/");
+    expect(page.status).toBe(403);
+    expect(await page.text()).toContain(">Continue with Spacefast</a>");
+    // One silent authorization for this lapse, one exchange, then the page.
+    expect(browser.authorizations.map((url) => url.searchParams.get("prompt"))).toEqual(["none"]);
+    expect(browser.exchanges()).toBe(1);
+    expect(browser.signedIn()).toBe(false);
+    // Loading the page again does not probe again.
+    expect((await browser.follow("/docs/")).status).toBe(403);
+    expect(browser.authorizations).toHaveLength(1);
+  });
+
+  test("an explicit sign-in that gets a stale handoff stops at the gate with its retry", async () => {
+    await reset(1);
+    const browser = browse(() => 0);
+    const page = await browser.follow("/__spacefast/sign-in?return=%2Fdocs%2F");
+    expect(page.status).toBe(403);
+    // The existing "try again" state of a failed exchange, with its button.
+    const html = await page.text();
+    expect(html).toContain("Couldn&#039;t reach Spacefast to check that. Try again in a moment.");
+    expect(html).toContain('href="/__spacefast/sign-in?return=%2Fdocs%2F"');
+    expect(browser.authorizations.map((url) => url.searchParams.get("prompt"))).toEqual([null]);
+    expect(browser.exchanges()).toBe(1);
+    expect(browser.signedIn()).toBe(false);
+  });
+
+  test("a stale handoff for another authorization request gets the invalid-exchange answer", async () => {
+    await reset(1);
+    const start = await get(runtime, OAUTH_HOST, "/__spacefast/sign-in?return=%2Fdocs%2F");
+    const authorize = new URL(start.headers.get("location") ?? "");
+    expectedChallenge = authorize.searchParams.get("code_challenge") ?? "";
+    // Signed for some other sign-in's nonce, and below the box's version.
+    nonceForCode.set("one-use-code-other-request-stale", "e".repeat(64));
+    sessionVersionForCode.set("one-use-code-other-request-stale", 0);
+    const callback = await get(
+      runtime,
+      OAUTH_HOST,
+      `/__spacefast/callback?code=one-use-code-other-request-stale&state=${authorize.searchParams.get("state")}&iss=${encodeURIComponent(OAUTH_ISSUER)}`,
+      { headers: { cookie: (start.headers.get("set-cookie") ?? "").split(";")[0] ?? "" } },
+    );
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("location")).toBe("/docs/?sf_access=exchange-unavailable");
+    expect(
+      callback.headers
+        .getSetCookie()
+        .some((value) => value.startsWith("__Host-spacefast_session=")),
+    ).toBe(false);
+  });
+
+  test("a sign-out that reaches the box while the callback waits is honoured", async () => {
+    // The issuer minted at version 1, then everyone was signed out and the box
+    // learned version 2 while the callback waited on the token endpoint.
+    await reset(1);
+    const stale = browse(() => 1);
+    beforeHandoff = () => project(2);
+    try {
+      const page = await stale.follow("/__spacefast/sign-in?return=%2Fdocs%2F");
+      expect(page.status).toBe(403);
+      expect(stale.signedIn()).toBe(false);
+    } finally {
+      beforeHandoff = null;
+    }
+    // Here the issuer read version 3 after the sign-out and the box learned it
+    // during the wait: the session it opens carries 3 and keeps working.
+    await reset(2);
+    const current = browse(() => 2);
+    beforeHandoff = async (code) => {
+      await project(3);
+      sessionVersionForCode.set(code, 3);
+    };
+    try {
+      const page = await current.follow("/__spacefast/sign-in?return=%2Fdocs%2F");
+      expect(page.status).toBe(200);
+      expect(await page.text()).toBe("private OAuth docs");
+      // In one sign-in: a session tagged with the version from before the
+      // wait would be refused on arrival and need a second, silent one.
+      expect(current.authorizations).toHaveLength(1);
+      expect(current.exchanges()).toBe(1);
+    } finally {
+      beforeHandoff = null;
+    }
+  });
 });
 
 test("a handoff minted outside the 60-second freshness window is refused", async () => {

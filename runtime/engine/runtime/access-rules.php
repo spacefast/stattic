@@ -2988,6 +2988,28 @@ function _stattic_session_version(array $serving): int
         : -1;
 }
 
+// The session version the box holds right now. A request that waited on the
+// network (the token exchange) may hold a snapshot from before a sign-out of
+// everyone landed; a session tagged with that older version would be refused
+// on its first use. Reads the Space pointer and overlay again; falls back to
+// the snapshot when either cannot be read.
+function _stattic_access_current_session_version(array $serving): int
+{
+    $snapshot = _stattic_session_version($serving);
+    $privateRoot = _stattic_access_private_root();
+    $spaceId = _stattic_serving_space_id($serving);
+    if ($privateRoot === '' || $spaceId === '') {
+        return $snapshot;
+    }
+    $pointer = _sf_pointer_read('space:' . $spaceId, _stattic_space_root($privateRoot, $spaceId) . '/space.json');
+    $overlay = $pointer['kind'] === 'present'
+        ? _stattic_v4_overlay($privateRoot, $spaceId, $pointer['value'])
+        : null;
+    return is_array($overlay) && is_int($overlay['session_ver'] ?? null) && $overlay['session_ver'] >= 0
+        ? max($snapshot, $overlay['session_ver'])
+        : $snapshot;
+}
+
 function _stattic_serving_space_id(array $serving): string
 {
     return is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
@@ -4451,6 +4473,20 @@ function _stattic_access_consume_handoff_token(
     if ($expectedNonce !== null && (!is_string($claims['nonce'] ?? null) || !hash_equals($expectedNonce, $claims['nonce']))) {
         return null;
     }
+    if (!is_string($claims['jti'] ?? null) || trim($claims['jti']) === '') {
+        return null;
+    }
+    // Issued before this Space last signed everyone out: a session opened now
+    // would carry the new version, so the sign-out could never end it. It is a
+    // failed exchange like any other. A newer version is accepted: its
+    // projection is still on the way, and the session ends when it lands. A
+    // control plane before this check names none. `$serving` may predate this
+    // request's wait on the token endpoint, so the box's version is read again.
+    $sessionVersion = _stattic_access_current_session_version($serving);
+    if (array_key_exists('sessionVersion', $claims)
+        && (!is_int($claims['sessionVersion']) || $claims['sessionVersion'] < $sessionVersion)) {
+        return null;
+    }
     $authorityExpiresAt = $claims['authorityExpiresAt'] ?? null;
     $current = _stattic_current_session_identity($serving, $host);
     $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)
@@ -4479,7 +4515,7 @@ function _stattic_access_consume_handoff_token(
         $serving,
         $verified,
         $host,
-        _stattic_session_version($serving),
+        $sessionVersion,
         is_array($serving['authorization'] ?? null) ? $serving['authorization'] : [],
         $combinedAuthorities,
         $storedRecord,

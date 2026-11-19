@@ -1,7 +1,7 @@
 {
-  "revision": "bcf1f2513afb4d63094052c78829e05d0695252e",
-  "sourceHash": "1535cdaeb3b3232acbbbca9d636935e5617ee8c60289728ccc1f24bbf0937496",
-  "manifestSha256": "d94ba0468b2b68e452cd8440e60cd246480ec0c60f9856a87c5087e49cb782a9",
+  "revision": "5249068f8bd00970ed13fd2f65973f7a6205b80b",
+  "sourceHash": "5c70d4593eb04304dd1143bbff7151dfda5782b82a4be9c49051aa347ce09d4b",
+  "manifestSha256": "0f876ad5dc72e96c2d3be279e492f29392630f5e2aff4e0f3ed2008171de25db",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "f0c5f79e9643e29b47d0f94fdcd187b19320d4b90399cd105decb96085bb0c2c"
+      "sha256": "1efd427a0e7f06f525a31df23c2d33d00c41f7885605bd65a1f6ce0d46439e47"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "02313092f22704900279f10c753cdf1b63168b265f722b309183ba2b68542c1a"
+      "sha256": "4d0ab4065053e2e4daeaa581be8036841ec7281688ef2b1cad252ffa03348dcf"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29985,7 +29985,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "478eefd1d84c2f88f96601e94aac1ca73f5df2da57fda4ed1cd218154f905100"
+      "sha256": "9bfbca77d1f8ac8446a646da70e46ee9ac9296b54cfeb086124773a2ed4ea695"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",

@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:004209c80b8872eaf58c91594cb3ea373e6400afadcb10707684df8bef00258d",
+  "digest": "sha256:971ae287de45651b86190e218f9cb419eb0a5ec61fe19556c2c428c546ee77e9",
   "components": [
     {
       "id": "spacefast-identity",
@@ -171,12 +171,11 @@
     {
       "id": "redirection",
       "kind": "plugin",
-      "version": "5.10.0",
-      "sha256": "sha256:966ac6267cd6a99f2d79ec05db1dee2e0aa0cddb6060b1c32cde2ffde739e333",
+      "version": "latest",
+      "sha256": "sha256:f0842e3c4785cdf19c7fc58ad44632c953ee918accf6e833bde23e3a8e835ee5",
       "source": {
-        "kind": "archive",
-        "url": "https://downloads.wordpress.org/plugin/redirection.5.10.0.zip",
-        "bytes": 494067
+        "kind": "provider-managed",
+        "software": "plugins/redirection/latest"
       },
       "provides": ["wordpress.redirection"],
       "activation": "always"

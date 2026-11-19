@@ -1,7 +1,7 @@
 {
-  "revision": "b010b821d9535ab9565a7b53e55a12325831f698",
-  "sourceHash": "b4f2655a96cf493888d8f390336f7304aa5c555eb40fc07451e051bc9118f764",
-  "manifestSha256": "76ad46ee9352dd3bdbc315af803ca3b41837b2d7ef8621bcffa697039561d497",
+  "revision": "2e7503b29617d70cad377822d86a85dbf42e9c26",
+  "sourceHash": "fb5d80bc8e7f3a96b009f33a671a078217e9a83811c8f21d783470a160ac94bf",
+  "manifestSha256": "a322769d911f68f327eda4938354c2799d766ffb960e2c2f23280f40911cc5f4",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "580d122adbfa9e15346b10c0a27f9c760e0287156a8af216ac9969931fa7ede2"
+      "sha256": "ca804d65cd26e8e3a7c5c3c93151aaeaf4b66eee29cefbe40360557ec0c1711a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "57020a551d6d564d69559046baca66cbbcd768284bfb344b6d0fadf11529e74f"
+      "sha256": "a0cbfc644809b913acbafbbd09835dac55598bd24294bd86d43445b19ca03329"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29397,7 +29397,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "64eed0bf790fa9596fa4d3a31ab3b36c027606b70ea6761b0e5c338770f5a1d9"
+      "sha256": "4a925bacf08416f9635bb8b5ce15b78fc1bd625f2cee25b43233285af60f7292"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -29833,7 +29833,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "3115727db6fdcfad9215b7040ac16254c56c27d86d9776c07e51beb22013ed7f"
+      "sha256": "05718053fc36eb7b8f06bae91a9448921812cad2fd37065d1cfbdc4bcec9521a"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -29905,7 +29905,7 @@
     },
     {
       "path": "runtime/engine/shared/response.php",
-      "sha256": "2464473bfb5f3bebf3377310afe258e259bb92885a2e184f7e7f31291aa10c6c"
+      "sha256": "5c3d2a4d86ce43da0c53b00719f3986f5189827ba77f5cf86b28e893a0125ec5"
     },
     {
       "path": "runtime/engine/shared/runtime-log.php",
@@ -30101,7 +30101,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "741d2dc2c9440c1981b90ff8f1d43e4d77cda24ade7a94e90cbc5ec16370db62"
+      "sha256": "6f8e067c65d3d7fadcceb63eacb8bf5258fdc10d628bbd7fe6195bec13b5e581"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -30581,7 +30581,7 @@
     },
     {
       "path": "runtime/tests/typedpress-publish.test.ts",
-      "sha256": "05ab615b0e9430fd66b3aefc3674e8f909ed8f5c5cd1e7933ed9b70f78b2bc90"
+      "sha256": "ae4661bff524cf2df0acb8776e2eb697a04128d7f831fb861e68f554b58d9483"
     },
     {
       "path": "runtime/tests/unit.php",
@@ -30605,7 +30605,7 @@
     },
     {
       "path": "runtime/tests/wp-api.test.ts",
-      "sha256": "231451c35b6dd29a7796c1884bd278eaeec4085f6f26d69b1e2f7916efa17799"
+      "sha256": "f0c2dcd799a255dbcac02f38a908fb72a28eb2c45d415ded766215631b0cec82"
     },
     {
       "path": "runtime/tests/write-lock.test.ts",

@@ -60,10 +60,39 @@ function _stattic_enforce_document_isolation(): void
     _stattic_send_document_isolation_headers();
 }
 
+// The platform's own access refusals name their stable code in this header
+// (`sf fetch` prints it). It is a diagnostic, never an authorization signal:
+// the send boundary below drops it from an ordinary authored header map (a
+// TypedPress app, WordPress) unless the engine's refusal emitter recorded it,
+// but code a Space runs in this process can still set it, so a client reads
+// it as what the responding Space reported.
+const STATTIC_REFUSAL_HEADER = 'X-Spacefast-Refusal';
+
+/** The engine's refusal code for this response, as its emitter recorded it. */
+function _stattic_refusal_header_code(?string $set = null): ?string
+{
+    static $code = null;
+    if ($set !== null) $code = $set;
+    return $code;
+}
+
+/** Records that the engine is answering with its own refusal `$code`. */
+function _stattic_refusal_header_mark(string $code): void
+{
+    _stattic_refusal_header_code($code);
+}
+
 function _stattic_send_document_isolation_headers(): void
 {
     if (headers_sent()) {
         return;
+    }
+    // An authored header map's copy goes; the one the engine's emitter
+    // recorded is sent.
+    header_remove(STATTIC_REFUSAL_HEADER);
+    $refusal = _stattic_refusal_header_code();
+    if ($refusal !== null) {
+        header(STATTIC_REFUSAL_HEADER . ': ' . $refusal, true);
     }
     $policies = [];
     foreach (headers_list() as $line) {

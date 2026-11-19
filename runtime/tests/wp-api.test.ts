@@ -804,6 +804,24 @@ test("classic WordPress admin receives the same authenticated Space scope", asyn
   }
 });
 
+test("a REST selector that is no path is refused by name, as text and as JSON", async () => {
+  // `/?rest_route=` names a REST path; one that climbs above the root names
+  // none, and the access check refuses it with its own code in one header.
+  for (const accept of ["text/html", "application/json"]) {
+    const refused = await get(
+      runtime,
+      CLOSED_HOST,
+      `/?rest_route=${encodeURIComponent("/../../x")}`,
+      {
+        headers: { accept },
+      },
+    );
+    expect(refused.status, accept).toBe(accept === "application/json" ? 401 : 403);
+    expect(refused.headers.get("x-spacefast-refusal"), accept).toBe("access_path_invalid");
+    expect(refused.headers.get("cache-control"), accept).toBe("private, no-store");
+  }
+});
+
 test("both REST spellings honour a Grant that scopes /wp-json", async () => {
   // The Space's page is public, but its only Public Grant excludes `/wp-json/**`.
   // Both ways of naming the SAME REST resource must be denied identically — the

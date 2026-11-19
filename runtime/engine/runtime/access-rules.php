@@ -5679,12 +5679,16 @@ function _stattic_access_handle_logout(string $requestHost): void
         // a link or form elsewhere) ends nothing. It asks, and the button posts
         // back here with this origin: `same-origin` keeps that Origin real.
         if ($method === 'GET' || $method === 'POST') {
+            // A refusal of the request as it came, whatever the page offers.
+            require_once __DIR__ . '/../shared/errors.php';
+            _stattic_refusal_header_mark('access_origin_invalid');
             _stattic_serve_page('sign-out', [
                 'status' => 403,
                 'headers' => [
                     'Cache-Control' => 'no-store',
                     'Referrer-Policy' => 'same-origin',
                     'Content-Security-Policy' => "frame-ancestors 'none'",
+                    STATTIC_REFUSAL_HEADER => 'access_origin_invalid',
                 ],
                 'message' => 'Sign out of this Space?',
                 'code' => 'access_origin_invalid',
@@ -5764,10 +5768,16 @@ function _stattic_verify_cookie_identity(array $serving, string $requestHost): ?
 
 function _stattic_render_json_or_deny(string $code, string $message): never
 {
+    require_once __DIR__ . '/../shared/errors.php';
+    _stattic_refusal_header_mark($code);
     if (_stattic_request_is_fetch()) {
-        _stattic_render_json_unauthenticated($code);
+        _stattic_problem_response(401, $code, '', [], _stattic_private_content_response_headers([
+            'Cache-Control' => 'private, no-store',
+            STATTIC_REFUSAL_HEADER => $code,
+        ]));
     }
     _stattic_response_send(403, $message . "\n", 'text/plain; charset=utf-8', _stattic_private_content_response_headers([
         'Cache-Control' => 'private, no-store',
+        STATTIC_REFUSAL_HEADER => $code,
     ]));
 }

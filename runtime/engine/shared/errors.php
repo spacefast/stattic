@@ -258,6 +258,13 @@ function _stattic_compose_page_artifact(string $html, string $pageId, array $con
     return $html;
 }
 
+// The platform's own access refusals name their stable code in one header
+// (STATTIC_REFUSAL_HEADER, shared/response.php), whatever the body format, so
+// a client (`sf fetch`) can print why without asking again or reading the
+// body. These pages and _stattic_render_json_or_deny record it; every one is
+// uncacheable. A diagnostic only: Space code can set the same header.
+const STATTIC_REFUSAL_PAGES = ['denied', 'access', 'access-route-not-found', 'invalid-path'];
+
 function _stattic_serve_page(string $pageId, array $context = []): void
 {
     $status = is_int($context['status'] ?? null) ? $context['status'] : 500;
@@ -268,6 +275,10 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     $fragment = is_string($context['fragment'] ?? null) ? $context['fragment'] : '';
     // A page that declared no policy is a fault page: nothing may store it.
     $headers['Cache-Control'] ??= STATTIC_CACHE_CONTROL_NO_STORE;
+    if (in_array($pageId, STATTIC_REFUSAL_PAGES, true)) {
+        _stattic_refusal_header_mark($code);
+        $headers[STATTIC_REFUSAL_HEADER] = $code;
+    }
     if (($context['private'] ?? false) === true) {
         $headers = _stattic_private_content_response_headers($headers);
         _stattic_clear_private_content_response_headers();

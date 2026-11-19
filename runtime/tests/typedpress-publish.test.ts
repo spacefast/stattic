@@ -97,10 +97,22 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         production_hostnames: [host],
         config: publicAccessConfig({ zero_generation: "tp_v1" }, "live_and_all_versions"),
       });
+      // An authored response that names a platform refusal code: the app's own
+      // WordPress code sets the header while the TypedPress page renders.
+      const muPlugins = path.join(rt.root, "wp-content/mu-plugins");
+      mkdirSync(muPlugins, { recursive: true });
+      writeFileSync(
+        path.join(muPlugins, "forged-refusal.php"),
+        "<?php add_action('send_headers', static function (): void { header('X-Spacefast-Refusal: access_denied'); header('X-Tp-Proof: authored'); });\n",
+      );
       const page = await get(rt, host, "/");
       const body = await page.text();
       assert.equal(page.status, 200, body + rt.diagnostics());
       assert.match(body, /TypedPress hosted page/);
+      // An ordinary authored header map's copy is dropped at the send boundary,
+      // while the same app code's other header arrives.
+      assert.equal(page.headers.get("x-tp-proof"), "authored");
+      assert.equal(page.headers.get("x-spacefast-refusal"), null);
       const assetPath = body.match(/\/__tp\/assets\/[^"'<>\s]+\.(?:js|css)/)?.[0];
       assert.ok(assetPath, "The rendered page declares a hosted client asset");
       const asset = await get(rt, host, assetPath);

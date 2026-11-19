@@ -1110,6 +1110,17 @@ test("a Space with no visitor lanes denies uniformly and discloses nothing", asy
   // No lane, no acquisition surface, no hostname echoed back to a crawler.
   expect(body).not.toContain("sf-access-request");
   expect(body).not.toContain(LANELESS_HOST);
+
+  // The refusal names its stable code in one platform header, whatever the
+  // body format, so a client can say why without asking again.
+  expect(denied.headers.get("x-spacefast-refusal")).toBe("access_denied");
+  const deniedJson = await get(runtime, LANELESS_HOST, "/", {
+    headers: { accept: "application/json" },
+  });
+  expect(deniedJson.status).toBe(403);
+  expect(deniedJson.headers.get("content-type")).toStartWith("application/problem+json");
+  expect(deniedJson.headers.get("x-spacefast-refusal")).toBe("access_denied");
+  expect(deniedJson.headers.get("cache-control")).toBe("private, no-store");
 });
 
 test("access callback handoffs require both the Space audience and request host", async () => {
@@ -1138,6 +1149,21 @@ test("access callback handoffs require both the Space audience and request host"
   );
   expect(mismatchedHost.status).toBe(404);
   expect(mismatchedHost.headers.get("set-cookie")).toBeNull();
+  expect(mismatchedHost.headers.get("x-spacefast-refusal")).toBe("access_route_not_found");
+  expect(mismatchedHost.headers.get("cache-control")).toBe("no-store");
+
+  // The older engine's handoff address refuses a cross-origin form by name.
+  const crossOrigin = await get(runtime, PRIVATE_HOST, "/__sf/redeem", {
+    method: "POST",
+    headers: {
+      origin: "https://elsewhere.example",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: "token=x&return=%2F",
+  });
+  expect(crossOrigin.status).toBe(403);
+  expect(crossOrigin.headers.get("x-spacefast-refusal")).toBe("access_origin_invalid");
+  expect(crossOrigin.headers.get("cache-control")).toBe("private, no-store");
 
   const matching = await redeemHandoff(
     runtime,
@@ -2332,6 +2358,23 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   expect(docsHtml).not.toContain("data-spacefast-auto-image=");
   expect(docsHtml).not.toContain("/v1/screenshots/page");
   expect(admitted.headers.get("x-spacefast-share-image")).toBeNull();
+});
+
+test("the engine names each of its own refusals in one header, whatever the body", async () => {
+  for (const accept of ["text/html", "application/json"]) {
+    // A path that is no path: invalid_path.
+    const invalid = await get(runtime, PRIVATE_HOST, "/%2fdocs", { headers: { accept } });
+    expect(invalid.status, accept).toBe(403);
+    expect(invalid.headers.get("x-spacefast-refusal"), accept).toBe("invalid_path");
+    expect(invalid.headers.get("cache-control"), accept).toBe("no-store");
+    // A sign-out that did not come from this Space's own page: access_origin_invalid.
+    const signOut = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
+      headers: { accept, "sec-fetch-site": "cross-site" },
+    });
+    expect(signOut.status, accept).toBe(403);
+    expect(signOut.headers.get("x-spacefast-refusal"), accept).toBe("access_origin_invalid");
+    expect(signOut.headers.get("cache-control"), accept).toBe("no-store");
+  }
 });
 
 test("ambiguous path identities fail closed instead of being sanitized", async () => {

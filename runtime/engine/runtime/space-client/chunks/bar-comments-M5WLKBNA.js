@@ -1,1 +1,0 @@
-import"./chunk-7SZRL6FY.js";function n(s){let t=null,r=()=>t??=import("./auto-GVPJHAGM.js").then(({mount:e})=>e(s,{orb:!1}));return{async set(e){if(!e&&!t)return;let o=await r();o&&(e?o.store.actions.setExpanded(!0):(o.store.actions.stopCommenting(),o.store.actions.setExpanded(!1)))},destroy(){t?.then(e=>e?.destroy()),t=null}}}export{n as createBarComments};

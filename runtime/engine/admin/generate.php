@@ -895,7 +895,7 @@ function _stattic_runtime_tombstone_variant(?string $reason, ?string $category):
         'csam' => 'tombstone-csam',
         'version_deleted' => 'tombstone-version-deleted',
         'copyright', 'dmca' => 'tombstone-dmca',
-        'tenant_suspended', 'account_suspended', 'site_suspended' => 'tombstone-suspended',
+        'tenant_suspended', 'account_suspended', 'site_suspended', 'usage_limit' => 'tombstone-suspended',
         default => 'tombstone-generic',
     };
     return [

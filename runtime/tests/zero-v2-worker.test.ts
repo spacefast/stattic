@@ -1,4 +1,5 @@
-// Real WordPress/MariaDB acceptance of the managed CLI worker. No browser or loopback cron.
+// Real WordPress/MariaDB acceptance of the managed CLI worker: stock `wp cron event run --due-now`
+// under the Space's binding. No browser or loopback cron.
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -38,7 +39,7 @@ const hookSchema = z.object({
 });
 
 test(
-  "managed worker delivers scoped outbox and scheduled jobs, excludes concurrent runners and skips idle boots",
+  "managed worker runs due WP-Cron and Action Scheduler work per Space, excludes concurrent runners and skips idle boots",
   async () => {
     const work = mkdtempSync(path.join(os.tmpdir(), "sf-zero-worker-"));
     const db = await startMysqlContainer({
@@ -86,10 +87,14 @@ test(
     const workers: Array<ReturnType<typeof Bun.spawn>> = [];
     try {
       const wp = await installWordpress(rt, work, db, "worker-a.test");
+      const coreVersion = readFileSync(
+        path.join(rt.root, "__wp__/wp-includes/version.php"),
+        "utf8",
+      );
       const marker = path.join(work, "worker-boots.txt");
       writeFileSync(
         path.join(rt.root, "wp-content/mu-plugins/worker-proof.php"),
-        `<?php if (defined('WP_CLI') && WP_CLI && isset($GLOBALS['SPACEFAST_ZERO_V2_ENVIRONMENT'])) file_put_contents(${JSON.stringify(marker)}, $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']."\\n", FILE_APPEND); add_action('worker_core_proof', static function () { update_option('worker_core_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); }); add_action('worker_as_proof', static function () { update_option('worker_as_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); });`,
+        `<?php if (defined('WP_CLI') && WP_CLI && isset($GLOBALS['SPACEFAST_CONTENT_SPACE_ID']) && in_array('cron', $GLOBALS['argv'] ?? [], true)) file_put_contents(${JSON.stringify(marker)}, $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']."\\n", FILE_APPEND); add_action('worker_core_proof', static function () { update_option('worker_core_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); }); add_action('worker_as_proof', static function () { update_option('worker_as_proof', $GLOBALS['SPACEFAST_CONTENT_SPACE_ID']); }); add_action('worker_fatal_proof', static function () { throw new RuntimeException('Expected tick failure: zażółć'); });`,
       );
       // The Space's real mail path ends in wp_mail() inside the mail endpoint; capture it there.
       const mailCapture = path.join(work, "mail-capture.jsonl");
@@ -152,12 +157,21 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         assert.equal(queued.status, 200, await queued.clone().text());
       }
       assert.deepEqual(deliveries, []);
-      // Recreate the committed-but-not-dispatched ticket to prove recovery from that crash boundary.
+      // Recreate the committed-but-not-dispatched ticket: Zero's own maintenance action recovers it.
       db.exec(
         `INSERT INTO ${prefix(a)}zero__outbox (id, job, input, \`key\`, runAt, createdAt) SELECT id, job, input, \`key\`, runAt, createdAt FROM ${prefix(a)}zero__jobs WHERE job='zero.webhook'`,
       );
       const bootstrap = (space: string) =>
         `require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/storage.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/zero-v2.php"))};_stattic_zero_v2_select(${JSON.stringify(rt.storageRoot)},${JSON.stringify(space)},"ver_worker_live",["zero_generation"=>"v2"]);`;
+      // A bound request never spawns core's site-wide cron or takes its lock.
+      assert.equal(
+        wp(
+          `--exec=${bootstrap(a)}`,
+          "eval",
+          "echo has_action('init', 'wp_cron') === false ? 'off' : 'on';",
+        ),
+        "off",
+      );
       for (const space of [a, b]) {
         assert.ok(
           Number(
@@ -175,10 +189,19 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       wp(
         `--exec=${bootstrap(a)}`,
         "eval",
-        "wp_schedule_single_event(time()-1,'worker_core_proof'); as_schedule_single_action(time()-1,'worker_as_proof'); wp_clear_scheduled_hook('zero_identity_maintenance'); wp_schedule_event(time()-1,'hourly','zero_identity_maintenance');",
+        "wp_schedule_single_event(time()-1,'worker_core_proof'); as_schedule_single_action(time()-1,'worker_as_proof'); as_schedule_single_action(time()-1,'zero_jobs_maintain',[],'zero'); wp_clear_scheduled_hook('zero_identity_maintenance'); wp_schedule_event(time()-1,'hourly','zero_identity_maintenance');",
       );
       const bBefore = db.exec(`SELECT * FROM ${prefix(b)}zero__jobs ORDER BY id`);
+      // Ticks are five minutes apart on a box, so AS's every-minute queue runner is always due by
+      // the next one; reproduce that gap instead of sleeping between back-to-back test ticks.
+      const elapse = (space: string) =>
+        wp(
+          `--exec=${bootstrap(space)}`,
+          "eval",
+          "foreach (_get_cron_array() as $at => $hooks) if (isset($hooks['action_scheduler_run_queue'])) foreach ($hooks['action_scheduler_run_queue'] as $event) { wp_unschedule_event($at, 'action_scheduler_run_queue', $event['args']); wp_schedule_event(time() - 1, $event['schedule'], 'action_scheduler_run_queue', $event['args']); }",
+        );
       const worker = (space?: string, extra: string[] = [], expectedExitCode = 0) => {
+        for (const scope of space ? [space] : [a, b]) elapse(scope);
         const proc = Bun.spawn({
           cmd: [
             "php",
@@ -275,9 +298,13 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         db.exec(`SELECT COUNT(*) FROM ${prefix(b)}zero_records WHERE label='scheduled'`),
         "0",
       );
-      // Advance only A's persisted schedule to the due boundary; no wall-clock sleeps.
+      // Advance only A's persisted schedule, job row and its AS action, to the due boundary;
+      // no wall-clock sleeps.
       db.exec(
         `UPDATE ${prefix(a)}zero__jobs SET runAt='2000-01-01T00:00:00.000Z' WHERE job='stamp'`,
+      );
+      db.exec(
+        `UPDATE ${prefix(a)}actionscheduler_actions SET scheduled_date_gmt='2000-01-01 00:00:00', scheduled_date_local='2000-01-01 00:00:00' WHERE hook='zero_job' AND status='pending' AND args LIKE CONCAT('%', (SELECT id FROM ${prefix(a)}zero__jobs WHERE job='stamp'), '%')`,
       );
       const due = await worker(a).result();
       assert.equal(due[0]?.status, "ran");
@@ -299,7 +326,7 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       assert.equal(stateResponse.status, 200, await stateResponse.clone().text());
       const state = runtimeStateResponseSchema.parse(await stateResponse.json());
       assert.deepEqual(state.spaces?.find((row) => row.space_id === a)?.zero_worker, idle);
-      // Bound recovery and receipt retention as well as delivery; unfinished pages retry later.
+      // Zero's maintenance action recovers a job whose runner died and sweeps expired receipts.
       db.exec(
         `UPDATE ${prefix(b)}zero__jobs SET state='running', lockedAt='2000-01-01T00:00:00.000Z' WHERE job='stamp'`,
       );
@@ -313,26 +340,16 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         "eval",
         "as_schedule_single_action(time()-1,'zero_jobs_maintain',[],'zero');",
       );
-      const [maintenance] = await worker(b, ["--limit=1"]).result();
+      const [maintenance] = await worker(b).result();
       assert.equal(maintenance?.status, "ran");
-      assert.equal(maintenance?.processed, 1);
-      assert.equal(
-        db.exec(`SELECT state FROM ${prefix(b)}zero__jobs WHERE job='stamp'`),
-        "pending",
-      );
       assert.equal(
         db.exec(`SELECT COUNT(*) FROM ${prefix(b)}zero__receipts WHERE scope='worker-test'`),
-        "2",
+        "0",
       );
-      assert.equal(
-        db.exec(
-          `SELECT COUNT(*) FROM ${prefix(b)}actionscheduler_actions WHERE hook='zero_jobs_maintain' AND status='pending'`,
-        ),
-        "2",
-      );
-      const [recovered] = await worker(b, ["--limit=1"]).result();
-      assert.equal(recovered?.status, "ran");
-      assert.equal(recovered?.processed, 1);
+      // The requeued job runs from its new AS action on this tick or the next one.
+      if (db.exec(`SELECT state FROM ${prefix(b)}zero__jobs WHERE job='stamp'`) !== "done") {
+        assert.equal((await worker(b).result())[0]?.status, "ran");
+      }
       assert.equal(
         db.exec(`SELECT scope FROM ${prefix(b)}zero_records WHERE label='scheduled'`),
         "b",
@@ -346,10 +363,11 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         body: "{}",
       });
       assert.equal(failQueue.status, 200, await failQueue.clone().text());
-      const [failure] = await worker(a, [], 1).result();
-      assert.equal(failure?.status, "failed");
+      // A failing app job fails in its own record and retries; the tick itself succeeded.
+      const [failure] = await worker(a).result();
+      assert.equal(failure?.status, "ran");
       assert.ok(failure && "failures" in failure);
-      assert.equal(failure.failures, 1);
+      assert.equal(failure.failures, 0);
       assert.equal(
         db.exec(`SELECT CONCAT(state,':',attempts) FROM ${prefix(a)}zero__jobs WHERE job='crash'`),
         "failed:1",
@@ -360,44 +378,26 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         ),
         "1",
       );
-      // A full direct-job page still gives AS and core maintenance their turn.
-      for (const index of [0, 1, 2]) {
-        db.exec(
-          `INSERT INTO ${prefix(a)}zero__jobs (id,job,input,state,runAt,createdAt) VALUES ('fair-${index}','stamp','{"label":"fair-${index}"}','pending','2000-01-01T00:00:00.000Z','2000-01-01T00:00:00.000Z')`,
-        );
-      }
-      db.exec(
-        `INSERT INTO ${prefix(a)}zero__receipts (scope, \`key\`, userId, inputHash, state, createdAt) VALUES ('fairness','old',0,REPEAT('0',64),'done','2000-01-01T00:00:00.000Z')`,
-      );
-      db.exec(`DELETE FROM ${prefix(a)}options WHERE option_name='worker_core_proof'`);
+      // A fatal cron hook fails the tick itself: nonzero exit, a readable error, later ticks recover.
       wp(
         `--exec=${bootstrap(a)}`,
         "eval",
-        "wp_schedule_single_event(time()-10,'worker_core_proof'); as_schedule_single_action(time()-10,'zero_jobs_maintain',[],'zero');",
+        "wp_schedule_single_event(time()-1,'worker_fatal_proof');",
       );
-      const [fair] = await worker(a, ["--limit=4"]).result();
-      assert.equal(fair?.status, "ran");
-      assert.equal(fair?.processed, 4);
-      assert.equal(
-        db.exec(`SELECT COUNT(*) FROM ${prefix(a)}zero_records WHERE label LIKE 'fair-%'`),
-        "2",
+      const [fatal] = await worker(a, [], 1).result();
+      assert.equal(fatal?.status, "failed");
+      assert.ok(fatal && "error" in fatal);
+      // The cause leads the detail. PHP prints the uncaught exception, or with display_errors off
+      // only core's fatal-handler message; which one depends on the PHP build's ini.
+      assert.match(
+        fatal.error ?? "",
+        /^Zero worker command failed\. (?:.*Expected tick failure|Error: There has been a critical error)/,
       );
-      assert.equal(
-        db.exec(
-          `SELECT COUNT(*) FROM ${prefix(a)}zero__jobs WHERE id LIKE 'fair-%' AND state='pending'`,
-        ),
-        "1",
+      const statusFile = JSON.parse(
+        readFileSync(path.join(rt.storageRoot, "spaces", a, "zero-v2-worker-status.json"), "utf8"),
       );
-      assert.equal(
-        db.exec(`SELECT COUNT(*) FROM ${prefix(a)}zero__receipts WHERE scope='fairness'`),
-        "0",
-      );
-      assert.equal(
-        db.exec(
-          `SELECT option_value FROM ${prefix(a)}options WHERE option_name='worker_core_proof'`,
-        ),
-        a,
-      );
+      assert.equal(runtimeZeroWorkerStatusSchema.parse(statusFile).status, "failed");
+      assert.notEqual((await worker(a).result())[0]?.status, "failed");
       // mail.send leaves through the Space's mail path: the broker's sender-domain check, then the
       // mail endpoint's daily recipient allowance and wp_mail(). No second transport exists.
       await putRoute(rt, a, "production", {
@@ -437,7 +437,7 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         db.exec(
           `SELECT CONCAT(state,':',COALESCE(lastError,'')) FROM ${prefix(a)}zero__jobs WHERE job='zero.mail' AND id='${id}'`,
         );
-      assert.equal((await worker(a, [], 1).result())[0]?.status, "failed");
+      assert.equal((await worker(a).result())[0]?.status, "ran");
       assert.equal(mailJob(sent), "done:");
       assert.match(mailJob(foreign), /^failed:.*email_sender_unverified/);
       // One recipient is spent today; two more exceed the allowance of two, so nothing is sent.
@@ -446,7 +446,7 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         to: "second@example.test",
         cc: "third@example.test",
       });
-      assert.equal((await worker(a, [], 1).result())[0]?.status, "failed");
+      assert.equal((await worker(a).result())[0]?.status, "ran");
       assert.match(mailJob(overAllowance), /^failed:.*did not accept/);
       // Without `from`, the default sender is noreply@ the route's sending domain, not the host the
       // request came in on, so a message queued on the alias still passes the broker's domain check.
@@ -498,6 +498,11 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         JSON.parse(readFileSync(path.join(rt.storageRoot, "spaces", a, "email-usage.json"), "utf8"))
           .recipients,
         2,
+      );
+      // Stock core events ran under the binding all along; none of them updated the box's WordPress.
+      assert.equal(
+        readFileSync(path.join(rt.root, "__wp__/wp-includes/version.php"), "utf8"),
+        coreVersion,
       );
       // Generation authority closes the worker before any legacy WordPress boot, even with due work.
       await putRoute(rt, b, "production", {

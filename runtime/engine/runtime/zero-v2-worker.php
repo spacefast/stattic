@@ -39,19 +39,19 @@ function _stattic_zero_worker_probe(string $spaceId, bool $typedpress = false): 
         }
         return $result->fetch_all(MYSQLI_ASSOC);
     };
-    $now = gmdate('Y-m-d\TH:i:s') . '.000Z';
+    // Due means work `wp cron event run --due-now` would do: a due Action Scheduler
+    // action (jobs, mail, maintenance) or a due core event other than AS's own runner.
+    // Queue rows only age the status; their AS action is what runs them.
     $oldest = [];
     $due = false;
     $outbox = $read($typedpress ? 'tp__outbox' : 'zero__outbox', 'MIN(`createdAt`) AS oldest');
-    if (isset($outbox[0]['oldest'])) { $due = true; $oldest[] = strtotime($outbox[0]['oldest']); }
-    $jobs = $read($typedpress ? 'tp__jobs' : 'zero__jobs', 'MIN(`createdAt`) AS oldest, MIN(`runAt`) AS next', "WHERE `state` IN ('pending','failed')");
+    if (isset($outbox[0]['oldest'])) $oldest[] = strtotime($outbox[0]['oldest']);
+    $jobs = $read($typedpress ? 'tp__jobs' : 'zero__jobs', 'MIN(`createdAt`) AS oldest', "WHERE `state` IN ('pending','failed')");
     if (isset($jobs[0]['oldest'])) $oldest[] = strtotime($jobs[0]['oldest']);
-    $due = $due || (isset($jobs[0]['next']) && $jobs[0]['next'] <= $now);
     $actions = $read('actionscheduler_actions', 'MIN(`scheduled_date_gmt`) AS next', "WHERE `status` = 'pending'");
     if (isset($actions[0]['next'])) {
         $at = strtotime($actions[0]['next'] . ' UTC');
-        $due = $due || $at <= time();
-        if ($at <= time()) $oldest[] = $at;
+        if ($at <= time()) { $due = true; $oldest[] = $at; }
     }
     $cron = $read('options', '`option_value`', "WHERE `option_name` = 'cron'");
     $events = isset($cron[0]['option_value']) ? @unserialize($cron[0]['option_value'], ['allowed_classes' => false]) : [];
@@ -61,7 +61,25 @@ function _stattic_zero_worker_probe(string $spaceId, bool $typedpress = false): 
     return ['due' => $due, 'oldest_pending_age_seconds' => $oldest === [] ? 0 : max(0, time() - min($oldest))];
 }
 
-function _stattic_zero_worker_run(string $privateRoot, string $spaceId, string $environment, int $limit = 25, int $budgetMs = 45000): array
+/**
+ * The cause of a failed tick: WP-CLI prints it first on stderr, ahead of the
+ * stack trace, while stdout lists events that already ran. Notices are noise.
+ * Printable ASCII only, so a cut multibyte character never breaks the status.
+ */
+function _stattic_zero_worker_error_detail(string $stderr, string $stdout): string
+{
+    $lines = array_values(array_filter(array_map('trim', explode("\n", $stderr)), static fn (string $line): bool => $line !== ''
+        && preg_match('/^(PHP )?(Deprecated|Notice|Warning|Strict Standards):/', $line) !== 1 && !str_starts_with($line, '#') && !str_starts_with($line, 'Stack trace:')));
+    $detail = $lines === [] ? trim(substr(trim($stdout), -300)) : implode("\n", array_slice($lines, 0, 3));
+    return trim(substr((string) preg_replace('/[^\x20-\x7e\n]+/', '?', $detail), 0, 500));
+}
+
+/**
+ * One tick for one Space: bind its live version, then let stock WP-Cron run
+ * what is due. Action Scheduler's queue runner bounds itself; app job failures
+ * stay in its log, and only a failed tick (boot, fatal, timeout) fails the run.
+ */
+function _stattic_zero_worker_run(string $privateRoot, string $spaceId, string $environment, int $budgetMs = 45000): array
 {
     $started = microtime(true);
     $spaceRoot = $privateRoot . '/spaces/' . $spaceId;
@@ -79,24 +97,27 @@ function _stattic_zero_worker_run(string $privateRoot, string $spaceId, string $
         if (!$probe['due']) return $status;
         $wpLoad = realpath(dirname($privateRoot, 2) . '/wp-load.php');
         if (!is_string($wpLoad)) throw new RuntimeException('WordPress is unavailable for Zero work.');
-        $bootstrap = _stattic_zero_v2_wp_bootstrap($privateRoot, $spaceId, $target['version_id']);
         // Recheck authority in the child immediately before selecting the immutable runtime.
         $bootstrap = 'require_once ' . var_export(__FILE__, true) . ';'
             . 'if ((_stattic_zero_worker_target(' . var_export($privateRoot, true) . ',' . var_export($spaceId, true) . ',' . var_export($environment, true) . ')["version_id"] ?? null) !== ' . var_export($target['version_id'], true) . ') throw new RuntimeException("Zero worker live version changed.");'
-            . '$GLOBALS["SPACEFAST_ZERO_V2_ENVIRONMENT"]=' . var_export($environment, true) . ';' . $bootstrap;
+            . _stattic_zero_v2_wp_bootstrap($privateRoot, $spaceId, $target['version_id']);
         $remaining = min(50000, $budgetMs) - (int) ((microtime(true) - $started) * 1000);
         if ($remaining <= 0) throw new RuntimeException('Zero worker time budget exhausted.');
         $status['wordpress_booted'] = true;
         $result = _stattic_runtime_run_subprocess(['wp', '--path=' . dirname($wpLoad), '--exec=' . $bootstrap,
-            'eval-file', __DIR__ . '/zero-v2-worker-wp.php', (string) max(1, min(100, $limit))], null, null, dirname($wpLoad), $remaining, 262144, 65536);
-        $output = json_decode(trim($result['stdout']), true);
-        if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0 || !is_array($output)
-            || !is_int($output['processed'] ?? null) || !is_int($output['failures'] ?? null)) {
-            throw new RuntimeException($result['timedOut'] ? 'Zero worker time budget exhausted.' : 'Zero worker command failed.');
+            'cron', 'event', 'run', '--due-now'], null, null, dirname($wpLoad), $remaining, 262144, 65536);
+        // Newer WP-CLI skips, exiting 0, while core's doing_cron lock is fresh.
+        if ($result['spawned'] && !$result['timedOut'] && $result['exitCode'] === 0
+            && str_contains($result['stdout'] . $result['stderr'], 'A cron event run is already in progress')) {
+            return $status;
         }
-        $status['processed'] = $output['processed'];
-        $status['failures'] = $output['failures'];
-        $status['status'] = $status['failures'] > 0 ? 'failed' : 'ran';
+        if (!$result['spawned'] || $result['timedOut'] || $result['exitCode'] !== 0
+            || preg_match('/Executed a total of (\d+) cron events?\./', $result['stdout'], $match) !== 1) {
+            $detail = _stattic_zero_worker_error_detail($result['stderr'], $result['stdout']);
+            throw new RuntimeException(($result['timedOut'] ? 'Zero worker time budget exhausted.' : 'Zero worker command failed.') . ($detail === '' ? '' : ' ' . $detail));
+        }
+        $status['processed'] = (int) $match[1];
+        $status['status'] = 'ran';
         $status['oldest_pending_age_seconds'] = _stattic_zero_worker_probe($spaceId, $typedpress)['oldest_pending_age_seconds'];
         return $status;
     } catch (Throwable $error) {

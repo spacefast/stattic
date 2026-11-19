@@ -156,7 +156,6 @@
     "engine/shared/zero-db-scope.php",
     "engine/entrypoints/zero-worker.php",
     "engine/runtime/zero-v2-worker.php",
-    "engine/runtime/zero-v2-worker-wp.php",
     "engine/runtime/zero-v2-realtime.php",
     "engine/runtime/zero-v2-realtime-publisher.php",
     "engine/runtime/zero-realtime.js",

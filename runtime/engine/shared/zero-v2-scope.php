@@ -92,8 +92,15 @@ function _stattic_zero_v2_bind_wordpress(): void
     add_filter('pre_site_option_active_sitewide_plugins', static fn (): array => []);
     add_filter('action_scheduler_allow_async_request_runner', '__return_false');
     // Core can spawn only a site-wide wp-cron request, which carries no Space
-    // binding. Scoped workers must enter through an explicit host/version.
-    add_filter('pre_spawn_cron', '__return_false');
+    // binding, and its lock would make the next worker tick skip. Scoped work
+    // runs only from the box worker's explicit host/version binding.
+    remove_action('init', 'wp_cron');
+    // The box's WordPress belongs to the platform: a Space-bound cron tick must
+    // never update core, plugins or themes, or mail the Space about it.
+    add_filter('automatic_updater_disabled', '__return_true');
+    add_filter('auto_update_core', '__return_false');
+    add_filter('auto_update_plugin', '__return_false');
+    add_filter('auto_update_theme', '__return_false');
     add_filter('site_url', 'spacefast_content_request_url', 1);
     add_filter('home_url', 'spacefast_content_public_url', 1);
     add_filter('rest_url', 'spacefast_content_request_url', 1);

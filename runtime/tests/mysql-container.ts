@@ -27,6 +27,12 @@ export type MysqlContainer = {
    * without parsing a table.
    */
   exec(sql: string): string;
+  /**
+   * Run SQL in its own client session without waiting for it, for a test that
+   * needs another connection to hold or wait on a lock. Resolves when the
+   * session ends, failed or not.
+   */
+  session(sql: string): Promise<{ exitCode: number; stdout: string; stderr: string }>;
 };
 
 // Every container this process started, so teardown still works when a start
@@ -97,6 +103,22 @@ export async function startMysqlContainer(input: {
       { cause: error },
     );
   }
+  const clientCommand = (sql: string) => [
+    "docker",
+    "exec",
+    name,
+    client,
+    "-uroot",
+    `-p${input.rootPassword}`,
+    // Non-ASCII fixture rows travel through this client, so the wire
+    // charset is named rather than inherited from the image default.
+    "--default-character-set=utf8mb4",
+    "-N",
+    "-B",
+    input.database,
+    "-e",
+    sql,
+  ];
   return {
     name,
     url: `mysql://root:${input.rootPassword}@127.0.0.1:${port}/${input.database}`,
@@ -106,30 +128,20 @@ export async function startMysqlContainer(input: {
       Bun.spawnSync({ cmd: ["docker", "rm", "-f", name] });
     },
     exec(sql: string) {
-      const result = Bun.spawnSync({
-        cmd: [
-          "docker",
-          "exec",
-          name,
-          client,
-          "-uroot",
-          `-p${input.rootPassword}`,
-          // Non-ASCII fixture rows travel through this client, so the wire
-          // charset is named rather than inherited from the image default.
-          "--default-character-set=utf8mb4",
-          "-N",
-          "-B",
-          input.database,
-          "-e",
-          sql,
-        ],
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const result = Bun.spawnSync({ cmd: clientCommand(sql), stdout: "pipe", stderr: "pipe" });
       if (result.exitCode !== 0) {
         throw new Error(`mysql statement failed: ${sql}\n${result.stderr.toString()}`);
       }
       return result.stdout.toString().trim();
+    },
+    async session(sql: string) {
+      const child = Bun.spawn({ cmd: clientCommand(sql), stdout: "pipe", stderr: "pipe" });
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      return { exitCode, stdout: stdout.trim(), stderr };
     },
   };
 }

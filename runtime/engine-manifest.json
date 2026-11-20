@@ -20,6 +20,8 @@
     "engine/admin/upload-policy.php",
     "engine/admin/upload.php",
     "engine/admin/zero-db.php",
+    "engine/admin/space-db.php",
+    "engine/admin/space-db-secrets.json",
     "engine/admin/storage.php",
     "engine/entrypoints/blob.php",
     "engine/entrypoints/cron.php",

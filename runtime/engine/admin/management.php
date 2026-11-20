@@ -23,6 +23,7 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/jobs.php';
 require_once __DIR__ . '/retention.php';
 require_once __DIR__ . '/zero-db.php';
+require_once __DIR__ . '/space-db.php';
 require_once __DIR__ . '/storage.php';
 require_once __DIR__ . '/build-source.php';
 require_once __DIR__ . '/static-zip.php';

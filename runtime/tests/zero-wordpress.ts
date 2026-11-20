@@ -14,6 +14,9 @@ export async function installWordpress(
   work: string,
   db: MysqlContainer,
   host: string,
+  // The Zero suites need their plugins; a suite of plain WordPress skips the
+  // downloads.
+  options: { plugins?: boolean } = {},
 ) {
   const cache = path.join(work, "cache");
   mkdirSync(cache, { recursive: true });
@@ -137,6 +140,7 @@ if (!defined('ABSPATH')) define('ABSPATH',__DIR__.'/'); require_once ABSPATH.'wp
     "--skip-email",
   );
   wp("rewrite", "structure", "/%postname%/");
+  if (options.plugins === false) return wp;
   for (const [slug, version, digest] of [
     [
       "secure-custom-fields",

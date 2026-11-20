@@ -224,6 +224,13 @@ function _stattic_runtime_admin_management_routes(): array
         ['POST', '#^/engine/update$#', 'update_engine', [], 'none', false, '_stattic_engine_update_route'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/dump$#', 'zero_db_dump', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_dump'],
         ['GET', '#^/spaces/([^/]+)/versions/([^/]+)/zero/db/export$#', 'zero_db_export', ['space_id' => 1, 'version_id' => 2], 'none', false, '_stattic_zero_db_export'],
+        // Space data (admin/space-db.php). Writes take no lock: each call is one
+        // MySQL transaction and touches nothing in the space's storage tree.
+        ['GET', '#^/spaces/([^/]+)/db/tables$#', 'space_db_tables', ['space_id' => 1], 'none', false, '_stattic_space_db_tables_route'],
+        ['POST', '#^/spaces/([^/]+)/db/rows/query$#', 'space_db_rows_query', ['space_id' => 1], 'none', false, '_stattic_space_db_rows_query_route'],
+        ['POST', '#^/spaces/([^/]+)/db/rows/insert$#', 'space_db_rows_insert', ['space_id' => 1], 'none', false, '_stattic_space_db_rows_insert_route'],
+        ['POST', '#^/spaces/([^/]+)/db/rows/update$#', 'space_db_rows_update', ['space_id' => 1], 'none', false, '_stattic_space_db_rows_update_route'],
+        ['POST', '#^/spaces/([^/]+)/db/rows/delete$#', 'space_db_rows_delete', ['space_id' => 1], 'none', false, '_stattic_space_db_rows_delete_route'],
         ['GET', '#^/spaces/([^/]+)/storage$#', 'storage_list', ['space_id' => 1], 'none', false, '_stattic_storage_list'],
         ['POST', '#^/spaces/([^/]+)/storage$#', 'storage_upload', ['space_id' => 1], 'space', true, '_stattic_storage_object_create'],
         ['POST', '#^/spaces/([^/]+)/storage/private$#', 'storage_upload_private', ['space_id' => 1], 'space', true, '_stattic_storage_object_create'],

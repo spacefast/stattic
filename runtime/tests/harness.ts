@@ -54,7 +54,12 @@ import type {
 import { FINALIZER_PROTOCOL } from "../../packages/routing/src/protocol.generated.ts";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 import { writeActiveReleasePointer } from "./active-release.ts";
-import { linuxPhpCommand, stopLinuxPhp } from "./linux-php.ts";
+import {
+  dockerClientEnv,
+  linuxPhpCommand,
+  recordLinuxPhpClientEnv,
+  stopLinuxPhp,
+} from "./linux-php.ts";
 import { runtimeBinaryPath } from "./runtime-native-binary.ts";
 import { ensureZeroDashboardPlugin } from "./zero-dashboard-plugin.ts";
 
@@ -354,6 +359,12 @@ export type RuntimeOptions = {
   /** An unpacked published engine, including its own native binary and loaders. */
   releaseDirectory?: string;
   env?: Record<string, string>;
+  /**
+   * Give PHP only the fixture's variables, PATH and a HOME inside the fixture
+   * root, as a published engine always gets. For the candidate engine this is
+   * opt-in.
+   */
+  isolatedEnv?: boolean;
   atomicData?: Record<string, string>;
   /** Native visitor scheme supplied by the fixture's provider prepend, over loopback HTTP. */
   visitorScheme?: "http" | "https";
@@ -605,9 +616,19 @@ export async function startPhpServer(input: {
   router: string;
   cwd: string;
   env: NodeJS.ProcessEnv;
+  /**
+   * `env` replaces this process's environment for PHP. With the Docker
+   * transport, the `docker` client gets only `dockerClientEnv()` plus `env`,
+   * and cleanup reuses that same client environment.
+   */
+  isolatedEnv?: boolean | undefined;
 }): Promise<PhpServer> {
   const phpArgs = ["-d", "opcache.enable=0", ...input.args, "-S", "127.0.0.1:0", input.router];
   const linux = input.linux ? linuxPhpCommand(input.cwd, input.env, phpArgs) : undefined;
+  const env = linux
+    ? { ...(input.isolatedEnv ? dockerClientEnv() : process.env), ...input.env }
+    : input.env;
+  if (linux) recordLinuxPhpClientEnv(linux.name, env);
   const server = spawn(
     linux?.binary ?? input.binary ?? PHP_BINARY,
     // `php -S` is the cli-server SAPI, which opcache.enable_cli does not
@@ -623,7 +644,7 @@ export async function startPhpServer(input: {
       // group so stop() can reap the whole server instead of leaking listeners
       // after killing only the parent process.
       detached: process.platform !== "win32",
-      env: linux ? { ...process.env, ...input.env } : input.env,
+      env,
     },
   );
   const closed = new Promise<void>((resolve) => server.once("close", () => resolve()));
@@ -707,6 +728,22 @@ export async function startPhpServer(input: {
   return { baseUrl, processId, diagnostics: () => diagnostics, stop };
 }
 
+/**
+ * A published engine's PHP process (and a candidate engine's, when asked)
+ * gets only the fixture's variables, PATH, and a HOME inside the fixture
+ * root, never the runner's environment: a release is code this checkout did
+ * not build, and the runner's HOME,
+ * credentials and proxy settings are not its business. The HOME lives in the
+ * root so the Docker transport, which mounts only the root, sees it too.
+ * Variables an engine reads to stay local (`SPACEFAST_EVENTS_URL` and the
+ * update-check flags, for example) come from the caller's `env`.
+ */
+function isolatedEngineEnv(root: string, fixtureEnv: Record<string, string>) {
+  const home = path.join(root, ".home");
+  mkdirSync(home, { recursive: true });
+  return { PATH: process.env.PATH ?? "", ...fixtureEnv, HOME: home };
+}
+
 export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtime> {
   const releaseDirectory = options.releaseDirectory ?? process.env.SPACEFAST_TEST_RELEASE_DIRECTORY;
   // Released artifacts contain Linux x86-64 executables. Keep the verified
@@ -768,6 +805,7 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
     ...options.env,
     SPACEFAST_TEST_VISITOR_SCHEME: options.visitorScheme ?? "http",
   };
+  const isolated = Boolean(releaseDirectory) || options.isolatedEnv === true;
   const bootServer = () =>
     startPhpServer({
       binary: options.phpBinary,
@@ -775,7 +813,12 @@ export async function startRuntime(options: RuntimeOptions = {}): Promise<Runtim
       args: phpArgs,
       router: RUNTIME_TEST_ROUTER,
       cwd: root,
-      env: linux ? fixtureEnv : { ...process.env, ...fixtureEnv },
+      env: isolated
+        ? isolatedEngineEnv(root, fixtureEnv)
+        : linux
+          ? fixtureEnv
+          : { ...process.env, ...fixtureEnv },
+      isolatedEnv: isolated,
     });
   let server: PhpServer;
   try {

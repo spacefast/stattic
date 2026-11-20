@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { Window, type ShadowRoot } from "happy-dom";
+import { z } from "zod";
 
 import {
   remixButtonScript,
@@ -36,6 +37,7 @@ import {
   deploy,
   errorCode,
   get,
+  runtimeHttpPath,
   prependHostRoutes,
   redeemHandoff,
   problemDocument,
@@ -126,8 +128,21 @@ type FakeWindow = {
 // orb lands.
 function runSdk(
   source: string,
-  options: { host?: string; pathname?: string; storedPlacement?: string; background?: string } = {},
+  options: {
+    host?: string;
+    pathname?: string;
+    storedPlacement?: string;
+    background?: string;
+    cookie?: string;
+    cookieThrows?: boolean;
+    /**
+     * A second SDK tag on the same page, run after the first with this
+     * `document.cookie` (another tab signed in meanwhile).
+     */
+    secondTagCookie?: string;
+  } = {},
 ) {
+  let cookie = options.cookie;
   const head: FakeElement[] = [];
   const body: FakeElement[] = [];
   const events: string[] = [];
@@ -143,6 +158,11 @@ function runSdk(
     CustomEvent,
   };
   const fakeDocument = {
+    get cookie(): string {
+      // A sandboxed frame throws on reading document.cookie.
+      if (cookie === undefined && options.cookieThrows) throw new Error("SecurityError");
+      return cookie ?? "";
+    },
     body: {
       appendChild: (node: FakeElement) => {
         body.push(node);
@@ -178,7 +198,7 @@ function runSdk(
       },
     },
   };
-  Function(
+  const run = Function(
     "window",
     "document",
     "location",
@@ -187,22 +207,34 @@ function runSdk(
     "innerHeight",
     "getComputedStyle",
     source,
-  )(
-    fakeWindow,
-    fakeDocument,
-    { host, origin: `https://${host}`, pathname: options.pathname ?? "/" },
-    { getItem: () => options.storedPlacement ?? null },
-    1_000,
-    900,
-    // The body's painted background; html and anything else paint none.
-    (element: typeof fakeDocument.body) => ({
-      backgroundColor:
-        element === fakeDocument.body && options.background
-          ? options.background
-          : "rgba(0, 0, 0, 0)",
-    }),
   );
+  const runOnce = () =>
+    run(
+      fakeWindow,
+      fakeDocument,
+      { host, origin: `https://${host}`, pathname: options.pathname ?? "/" },
+      { getItem: () => options.storedPlacement ?? null },
+      1_000,
+      900,
+      // The body's painted background; html and anything else paint none.
+      (element: typeof fakeDocument.body) => ({
+        backgroundColor:
+          element === fakeDocument.body && options.background
+            ? options.background
+            : "rgba(0, 0, 0, 0)",
+      }),
+    );
+  runOnce();
+  if (options.secondTagCookie !== undefined) {
+    cookie = options.secondTagCookie;
+    runOnce();
+  }
   return { head, body, events, window: fakeWindow };
+}
+
+/** `runSdk` with a `document.cookie`, for the bar's sign-in marker guard. */
+function runSdkWithCookie(source: string, options: { host: string; cookie: string }) {
+  return runSdk(source, { host: options.host, cookie: options.cookie });
 }
 
 function sessionRecords(runtime: Runtime, spaceId: string): string[] {
@@ -2586,11 +2618,21 @@ test("sdk.js loads the Space bar only where the bar is projected and the Space i
       version_hostnames: [],
     },
   });
+  // What the page loads; with or without the sign-in marker it must be the
+  // same everywhere but a public Space whose engine offers the bar there.
   const sdk = async () => {
     const response = await get(runtime, "bar.site.test", "/__spacefast/sdk.js");
     expect(response.status).toBe(200);
-    const { head } = runSdk(await response.text(), { host: "bar.site.test" });
-    return head.map((node) => ({ src: node.src, type: node.type, dataset: { ...node.dataset } }));
+    const source = await response.text();
+    const load = (cookie: string) =>
+      runSdk(source, { host: "bar.site.test", cookie }).head.map((node) => ({
+        src: node.src,
+        type: node.type,
+        dataset: { ...node.dataset },
+      }));
+    const plain = load("");
+    expect(load("spacefast_returning_dev=1")).toEqual(plain);
+    return plain;
   };
 
   await activate("private", false);
@@ -2633,6 +2675,455 @@ test("sdk.js loads the Space bar only where the bar is projected and the Space i
   expect(open).toContain("https://cast.example.test/sdk/v1/collab.js");
   expect(open).not.toContain("/__spacefast/client.js");
 });
+
+const sessionResponseSchema = z.object({ data: z.object({ bar: z.boolean().optional() }) });
+
+// A public Space whose engine offers the bar there (`public_spaces`): sdk.js
+// is still one cached answer for everyone; only a browser holding the
+// returning-account marker loads client.js, and the session it asks decides.
+test("on a public Space the bar loads only behind the sign-in marker, and only a member gets it", async () => {
+  const runtime = await startRuntime({
+    atomicData: { SPACEFAST_CAST_API_URL: "https://cast.example.test" },
+  });
+  runtimes.push(runtime);
+  const host = "open-bar.site.test";
+  const keyPair = generateKeyPairSync("ed25519");
+  const issuer = visitorIssuer(keyPair.publicKey);
+  const publicJwk = keyPair.publicKey.export({ format: "jwk" });
+  const publicGrant = {
+    id: "grt_open_bar_public",
+    generation: 1,
+    name: "Public",
+    audience: { kind: "public" },
+    resources: { include: ["/**"], exclude: [] },
+    capabilities: ["page.view", "comments.read", "comments.write"],
+    constraints: {},
+    target: { kind: "live" },
+    source: { kind: "managed", reference: "test:open-bar-public" },
+  };
+  // The current projection shape: one team Grant, matched by any member's
+  // `member:<membership>` authority through the projection's teamId.
+  const memberGrant = {
+    id: "grt_open_bar_member",
+    generation: 1,
+    audience: { kind: "team", teamId: "team_open_bar" },
+    resources: { include: ["/**"], exclude: [] },
+    capabilities: ["page.view", "comments.read", "comments.write"],
+    constraints: {},
+    target: { kind: "live" },
+    source: { kind: "system", reference: "test:open-bar-member" },
+  };
+  const personGrant = {
+    ...memberGrant,
+    id: "grt_open_bar_person",
+    audience: { kind: "person", personId: "per_open_bar" },
+    source: { kind: "system", reference: "test:open-bar-person" },
+  };
+  const domainGrant = {
+    ...memberGrant,
+    id: "grt_open_bar_domain",
+    audience: { kind: "external", issuer: "spacefast-email-domain", subject: "bakecrew.test" },
+    source: { kind: "system", reference: "test:open-bar-domain" },
+  };
+  // A domain Grant that starts tomorrow: it admits nobody yet, so the consent
+  // projected from it doesn't belong either.
+  const scheduledGrant = {
+    ...memberGrant,
+    id: "grt_open_bar_scheduled",
+    audience: { kind: "external", issuer: "spacefast-email-domain", subject: "later.test" },
+    constraints: { notBefore: new Date(Date.now() + 86_400_000).toISOString() },
+    source: { kind: "system", reference: "test:open-bar-scheduled" },
+  };
+  const linkGrant = {
+    ...memberGrant,
+    id: "grt_open_bar_link",
+    audience: { kind: "link", linkId: "lnk_open_bar" },
+    source: { kind: "system", reference: "test:open-bar-link" },
+  };
+  // What the Space's own sign-in produces: one consent authority per account,
+  // projected by the control plane from each Grant the account reaches
+  // (share-oauth-authority.ts withShareConsentGrants). A member's consent is
+  // projected from the member Grant (and the public one); a stranger's only
+  // from the public one.
+  const consentGrant = (consent: string, from: { id: string }) => ({
+    ...from,
+    id: `grt_${createHash("sha256").update(`${consent}\0${from.id}`).digest("hex")}`,
+    audience: { kind: "external", issuer: "spacefast-share", subject: consent },
+    source: { kind: "system", reference: `share-consent:${consent}:${from.id}` },
+  });
+  const consentAuthority = (consent: string) =>
+    `external:${createHash("sha256").update(`spacefast-share\0${consent}`).digest("hex")}`;
+  const consentGrants = [
+    consentGrant("cns_member", memberGrant),
+    consentGrant("cns_member", publicGrant),
+    consentGrant("cns_stranger", publicGrant),
+    // Signed in today through the public Grant, with a scheduled Grant for
+    // the same consent.
+    consentGrant("cns_scheduled", publicGrant),
+    consentGrant("cns_scheduled", scheduledGrant),
+  ];
+  const bar = {
+    frame_url: "https://access.example.test/bar/spc_open_bar",
+    dashboard_url: "https://my.example.test/spaces/spc_open_bar",
+  };
+  const activate = async (publicSpaces: boolean) => {
+    const config = publicAccessConfig({ mode: "website", site_title: "Open bar" });
+    config.visitor_issuer = "spacefast-api";
+    config.visitor_jwks = {
+      keys: [
+        {
+          kty: "OKP",
+          crv: "Ed25519",
+          kid: issuer.kid,
+          alg: "EdDSA",
+          use: "sig",
+          x: publicJwk.x ?? "",
+        },
+      ],
+    };
+    config.session_version = 0;
+    config.authorization = {
+      generation: 1,
+      sessionVersion: 0,
+      fence: "none",
+      acquireUrl: "https://api.spacefast.com/acquire/open-bar",
+      spaceClaimed: true,
+      teamId: "team_open_bar",
+      membershipEpoch: 1,
+      grants: [
+        publicGrant,
+        memberGrant,
+        personGrant,
+        domainGrant,
+        scheduledGrant,
+        linkGrant,
+        ...consentGrants,
+      ],
+      // Comments on, so the overlay is what a visitor without the bar keeps.
+      accessPage: {
+        displayName: "Open bar",
+        accountUrl: "https://api.spacefast.com/acquire/open-bar/account",
+        connections: [],
+        exchange: {
+          passwordUrl: "https://api.spacefast.com/acquire/open-bar/password",
+          tokenUrl: "https://api.spacefast.com/acquire/open-bar/token",
+          emailUrl: "https://api.spacefast.com/acquire/open-bar/email",
+          requestUrl: "https://api.spacefast.com/acquire/open-bar/request",
+          logoutUrl: "https://api.spacefast.com/runtime/collaboration-sessions/revoke",
+          commentsTicketUrl: "https://api.spacefast.com/runtime/comments/open-bar/ticket",
+          credential: "runtime-comments-credential-0000000000000000000000000000",
+        },
+      },
+    };
+    config.sdk = {
+      revision: `sdk-open-bar-${publicSpaces}`,
+      config: {
+        cast_api_base: "https://cast.example.test",
+        cast_ws_url: "wss://cast.example.test/socket/websocket",
+        cast_resource_key: "resource_open_bar",
+        comments: LOCAL_COMMENTS,
+        // A tracker, so the page's start of it can be seen.
+        tracker: {
+          src: RUNTIME_TRACKER_SCRIPT_PATH,
+          endpoint: "https://beacon.example.test",
+          key: "pk_open_bar",
+          consent: "count",
+        },
+        bar: publicSpaces ? { ...bar, public_spaces: true } : bar,
+      },
+    };
+    return config;
+  };
+  await deploy(runtime, {
+    spaceId: "spc_open_bar",
+    versionId: "ver_open_bar_1",
+    files: { "index.html": "<h1>Open</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: await activate(true),
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  // The session decides: a member gets `bar: true`; a signed-in stranger,
+  // admitted by the public Grant alone, gets `bar: false`.
+  const sessionFor = async (authority: string) => {
+    const now = Math.floor(Date.now() / 1000);
+    const token = signEd25519Jwt(keyPair.privateKey, issuer.kid, {
+      sub: authority,
+      purpose: "handoff",
+      grants: [authority],
+      authorities: [authority],
+      principal: "account:usr_open_bar",
+      iss: "spacefast-api",
+      aud: "spc_open_bar",
+      host,
+      sv: 0,
+      generation: 1,
+      spaceId: "spc_open_bar",
+      sid: createHash("sha256").update(randomUUID()).digest("hex"),
+      iat: now,
+      nbf: now,
+      exp: now + 300,
+      jti: randomUUID(),
+    });
+    const callback = await redeemHandoff(runtime, host, token);
+    expect(callback.status).toBe(303);
+    // The next visit's cookies are exactly what the handoff set: the session
+    // for requests, and what the page's script can read for document.cookie.
+    const setCookies = callback.headers.getSetCookie();
+    const pair = (line: string) => line.split(";")[0] ?? "";
+    const cookie = setCookies.map(pair).join("; ");
+    const documentCookie = setCookies
+      .filter((line) => !/;\s*httponly/i.test(line))
+      .map(pair)
+      .join("; ");
+    const response = await get(runtime, host, "/__spacefast/access/session", {
+      headers: { cookie },
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    return { body: sessionResponseSchema.parse(await response.json()), cookie, documentCookie };
+  };
+  const sdkFor = async (cookie?: string) => {
+    const response = await get(runtime, host, "/__spacefast/sdk.js", {
+      headers: cookie ? { cookie } : {},
+    });
+    expect(response.status).toBe(200);
+    return { body: await response.text(), cacheControl: response.headers.get("cache-control") };
+  };
+  // What the page adds to <head>, with and without the marker in document.cookie.
+  const loads = (source: string, cookie: string) => {
+    const { head } = runSdkWithCookie(source, { host, cookie });
+    return head.map((node) => node.src || node.href);
+  };
+
+  // A member arriving from Manage on Spacefast: the handoff signs them in and
+  // leaves the returning-account marker, which is all the next page load sees.
+  const member = await sessionFor("member:mem_open_bar");
+  const marker = member.documentCookie;
+  expect(marker).toContain("spacefast_returning_dev=1");
+
+  // One answer for everyone: the same bytes and the public cache policy with
+  // the marker, without it, and with a session; nothing in it names a visitor.
+  const anonymous = await sdkFor();
+  for (const cookie of [member.documentCookie, member.cookie]) {
+    expect(await sdkFor(cookie)).toEqual(anonymous);
+  }
+  expect(anonymous.cacheControl).toContain("public");
+  // A sandboxed frame, whose cookies throw on read, is a page without one.
+  expect(
+    runSdk(anonymous.body, { host, cookieThrows: true }).head.map((node) => node.src || node.href),
+  ).toEqual(loads(anonymous.body, ""));
+  // Without the marker the page loads today's overlay and no bar code.
+  const withoutMarker = loads(anonymous.body, "");
+  expect(withoutMarker).toContain("https://cast.example.test/sdk/v1/collab.js");
+  expect(withoutMarker).not.toContain("/__spacefast/client.js");
+  // With it, client.js (told the Space is public) instead of the overlay,
+  // which client.js loads itself for anyone the session gives no bar.
+  const withMarker = runSdkWithCookie(anonymous.body, { host, cookie: marker }).head;
+  expect(withMarker.map((node) => node.src)).toEqual(["/__spacefast/client.js"]);
+  expect(withMarker[0]?.dataset).toMatchObject({
+    sfBarPublic: "1",
+    sfCollab: "https://cast.example.test/sdk/v1/collab.js",
+  });
+  // client.js fails to load (a network error, a blocked request): the page
+  // gets what it would have without the marker, the overlay, once.
+  const failing = runSdkWithCookie(anonymous.body, { host, cookie: marker });
+  const clientTag = failing.head[0];
+  expect(clientTag?.onerror).toBeDefined();
+  clientTag?.onerror?.();
+  clientTag?.onerror?.();
+  expect(failing.head.map((node) => node.src || node.href)).toEqual([
+    "/__spacefast/client.js",
+    ...withoutMarker,
+  ]);
+  // Two SDK tags on one page: the first ran before the marker existed and
+  // inserted the tracker and overlay; another tab then signed in, the second
+  // took the marker branch, and its client.js failed. The page keeps one
+  // tracker and one overlay.
+  const twoTags = runSdk(anonymous.body, { host, cookie: "", secondTagCookie: marker });
+  const secondClient = twoTags.head.find((node) => node.src === "/__spacefast/client.js");
+  expect(secondClient?.onerror).toBeDefined();
+  secondClient?.onerror?.();
+  expect(twoTags.head.map((node) => node.src || node.href)).toEqual([
+    ...withoutMarker,
+    "/__spacefast/client.js",
+  ]);
+
+  expect(member.body.data.bar).toBe(true);
+  const stranger = await sessionFor("external:grant.grt_open_bar_public");
+  expect(stranger.body.data.bar).toBe(false);
+
+  // A page that imports /__spacefast/client.js itself, before or after
+  // sdk.js runs, still gets the platform: client.js boots once either way.
+  // A marker-bearing stranger gets no bar, so the tracker tag and the
+  // standalone Comments are what the page must end up with.
+  for (const order of ["page import first", "sdk.js first"] as const) {
+    const booted = await bootClientInPage(anonymous.body, {
+      host,
+      documentCookie: stranger.documentCookie,
+      order,
+      session: (path, fetchImpl) =>
+        fetchImpl(`${runtime.baseUrl}${runtimeHttpPath(path)}`, {
+          redirect: "manual",
+          headers: { Connection: "close", Host: host, cookie: stranger.cookie },
+        }),
+    });
+    // The tracker started once, then the standalone Comments; one session
+    // read, and a later focus reads nothing more.
+    expect(booted.added, order).toEqual([
+      `https://${host}${RUNTIME_TRACKER_SCRIPT_PATH}`,
+      "https://cast.example.test/sdk/v1/collab.js",
+    ]);
+    expect(booted.sessionReads, order).toBe(1);
+    expect(booted.readsAfterFocus, order).toBe(1);
+  }
+  // Signed in through the Space's own sign-in: the consent of a member
+  // belongs; the consent of a stranger, projected only from the public Grant,
+  // does not.
+  expect((await sessionFor(consentAuthority("cns_member"))).body.data.bar).toBe(true);
+  expect((await sessionFor(consentAuthority("cns_stranger"))).body.data.bar).toBe(false);
+  // A public-only sign-in whose consent a scheduled Grant also names gets no
+  // bar before that Grant starts, and neither does the domain it names.
+  expect((await sessionFor(consentAuthority("cns_scheduled"))).body.data.bar).toBe(false);
+  const laterAuthority = `external:${createHash("sha256").update("spacefast-email-domain\0later.test").digest("hex")}`;
+  expect((await sessionFor(laterAuthority)).body.data.bar).toBe(false);
+  // Let in by email domain: belongs, as on a private Space.
+  const domainAuthority = `external:${createHash("sha256").update("spacefast-email-domain\0bakecrew.test").digest("hex")}`;
+  expect((await sessionFor(domainAuthority)).body.data.bar).toBe(true);
+  // Someone invited by email (shared in) belongs too, as on a private Space.
+  expect((await sessionFor("person:per_open_bar")).body.data.bar).toBe(true);
+  // A share link admits a visitor, not a member.
+  expect((await sessionFor("link:lnk_open_bar")).body.data.bar).toBe(false);
+  const anonymousSession = await get(runtime, host, "/__spacefast/access/session");
+  expect(await anonymousSession.json()).toEqual({ data: { state: "anonymous" } });
+
+  // An engine the control plane did not tell (an older control plane, or a
+  // box without the capability): today's public Space, with no guard at all.
+  await putRoute(runtime, "spc_open_bar", "production", {
+    version_id: "ver_open_bar_1",
+    config: await activate(false),
+    production_hostnames: [host],
+    noindex_production_hostnames: [],
+    version_hostnames: [],
+  });
+  const off = await sdkFor();
+  // A signed-out visitor on the public host, and a browser with the marker,
+  // get today's overlay from that engine, and no bar.
+  for (const cookie of ["", marker]) {
+    const loaded = loads(off.body, cookie);
+    expect(loaded).toContain("https://cast.example.test/sdk/v1/collab.js");
+    expect(loaded).not.toContain("/__spacefast/client.js");
+  }
+});
+
+/**
+ * Runs sdk.js and the real client.js source in one happy-dom page, in the
+ * given order, with the page's session read from the runtime. Returns the
+ * script tags client.js added (beyond sdk.js's own module tag) and how many
+ * session reads it made.
+ */
+async function bootClientInPage(
+  sdkBody: string,
+  options: {
+    host: string;
+    documentCookie: string;
+    order: "page import first" | "sdk.js first";
+    session: (path: string, fetchImpl: typeof fetch) => Promise<Response>;
+  },
+) {
+  const realFetch = globalThis.fetch;
+  // The page doesn't fetch script tags itself: the test evaluates client.js
+  // as the module that tag names. A fetch here would fail and fire the tag's
+  // load-failure fallback, which is not the case under test.
+  const view = new Window({
+    url: `https://${options.host}/`,
+    settings: { disableJavaScriptFileLoading: true, handleDisabledFileLoadingAsSuccess: true },
+  });
+  for (const pair of options.documentCookie.split("; ").filter(Boolean)) {
+    view.document.cookie = pair;
+  }
+  let sessionReads = 0;
+  const globals = {
+    window: view,
+    document: view.document,
+    location: view.location,
+    CustomEvent: view.CustomEvent,
+    // Listeners the module adds go to this page's window, which goes away
+    // with it, as a browser's would.
+    addEventListener: view.addEventListener.bind(view),
+    removeEventListener: view.removeEventListener.bind(view),
+    // The page's own fetch: a session read goes to the runtime, through the
+    // real fetch captured before the swap.
+    fetch: async (input: string | URL) => {
+      const url = new URL(String(input), `https://${options.host}/`);
+      if (url.pathname === "/__spacefast/access/session") sessionReads += 1;
+      return options.session(url.pathname, realFetch);
+    },
+  };
+  const saved = Object.keys(globals).map(
+    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+  );
+  for (const [key, value] of Object.entries(globals)) {
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  const scripts = () =>
+    [...view.document.querySelectorAll("script")].map((script) => script.src).filter(Boolean);
+  try {
+    // A fresh module instance per page: a browser evaluates a module once
+    // per document.
+    const importClient = () =>
+      import(`../../packages/space-client/src/index.ts?page=${randomUUID()}`);
+    if (options.order === "page import first") {
+      await importClient();
+      view.eval(sdkBody);
+    } else {
+      view.eval(sdkBody);
+      await importClient();
+    }
+    // sdk.js's own tag is first; whatever the boot adds follows it (the
+    // tracker can be in already, when the boot ran inside sdk.js).
+    const clientTag = `https://${options.host}/__spacefast/client.js`;
+    expect(scripts()[0]).toBe(clientTag);
+    // The boot starts the tracker, reads the session, then adds Comments:
+    // wait for the Comments tag. The timer only reports a boot that never came.
+    await new Promise<void>((resolve, reject) => {
+      const booted = () =>
+        sessionReads > 0 && scripts().some((src) => src.endsWith("/sdk/v1/collab.js"));
+      const observer = new view.MutationObserver(() => {
+        if (!booted()) return;
+        observer.disconnect();
+        clearTimeout(failure);
+        resolve();
+      });
+      const failure = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`client.js did not boot (${options.order})`));
+      }, 5_000);
+      observer.observe(view.document.head, { childList: true });
+      if (booted()) {
+        observer.disconnect();
+        clearTimeout(failure);
+        resolve();
+      }
+    });
+    const added = scripts().slice(1);
+    const reads = sessionReads;
+    // The window regains focus: a session client listening for it would read
+    // again here, synchronously starting its fetch.
+    view.dispatchEvent(new view.Event("focus"));
+    await view.happyDOM.waitUntilComplete();
+    return { sessionReads: reads, readsAfterFocus: sessionReads, added };
+  } finally {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+    await view.happyDOM.abort();
+  }
+}
 
 test("only named routes are public under the private platform namespaces", async () => {
   const runtime = await startRuntime();

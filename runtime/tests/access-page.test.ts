@@ -1016,6 +1016,114 @@ test("the password lane verifies centrally and enters through one single-use han
   expect(call?.headers["spacefast-visitor-ip"]).toBeDefined();
   expect(call?.form.get("host")).toBe(LANES_HOST);
   expect(call?.form.get("landingPath")).toBe("/docs/");
+
+  // An account handoff writes the returning-account marker only where this
+  // host's page would try the bar (the SDK's own decision). With no bar
+  // projected (the switch off), or with injection off, it leaves none, as
+  // before the bar was on public Spaces.
+  const signedInWithoutBar = await landHandoff(
+    runtime,
+    LANES_HOST,
+    accountHandoff(LANES_HOST, LANES_SPACE, "password:pwd_page_test"),
+    "/docs/",
+  );
+  expect(sessionPayload(sessionCookie(signedInWithoutBar)).principal).toBe(
+    "account:usr_returning_editor",
+  );
+  expect(returningAccountSetCookie(signedInWithoutBar)).toBe("");
+  const lanesConfig = accessConfig({
+    spaceId: LANES_SPACE,
+    grants: lanesGrants(),
+    accessPage: lanesAccessPage(),
+  });
+  // The same route with the Space bar projected to it, with injection off
+  // and then on.
+  const withBar = (injection: boolean) =>
+    putRoute(runtime, LANES_SPACE, "production", {
+      version_id: LANES_VERSION,
+      config: {
+        ...lanesConfig,
+        sdk: {
+          revision: `sdk-lanes-bar-${injection}`,
+          injection,
+          config: {
+            bar: {
+              frame_url: "https://access.access-page.test/bar/spc_access_page_lanes",
+              dashboard_url: "https://my.access-page.test/spaces/spc_access_page_lanes",
+            },
+          },
+        },
+      },
+    });
+  await withBar(false);
+  const injectionOff = await landHandoff(
+    runtime,
+    LANES_HOST,
+    accountHandoff(LANES_HOST, LANES_SPACE, "password:pwd_page_test"),
+    "/docs/",
+  );
+  expect(sessionPayload(sessionCookie(injectionOff)).principal).toBe(
+    "account:usr_returning_editor",
+  );
+  expect(returningAccountSetCookie(injectionOff)).toBe("");
+  await withBar(true);
+  // A password entered by a browser an account already signed in keeps that
+  // account, but proves none itself, so it issues no returning-account marker.
+  const signedIn = await landHandoff(
+    runtime,
+    LANES_HOST,
+    accountHandoff(LANES_HOST, LANES_SPACE, "password:pwd_page_test"),
+    "/docs/",
+  );
+  expect(returningAccountSetCookie(signedIn)).toStartWith(`${RETURNING_MARKER}=1`);
+  const accountCookie = sessionCookie(signedIn);
+  const again = await get(runtime, LANES_HOST, "/__spacefast/access/password", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+      cookie: accountCookie,
+    },
+    body: new URLSearchParams({ password: PASSWORD, return: "/docs/" }),
+  });
+  expect(again.status).toBe(303);
+  const reentry = new URL(again.headers.get("location") ?? "", `https://${LANES_HOST}`);
+  const attached = await get(runtime, LANES_HOST, `${reentry.pathname}${reentry.search}`, {
+    headers: { cookie: accountCookie },
+  });
+  expect(attached.status).toBe(303);
+  expect(sessionPayload(sessionCookie(attached)).principal).toBe("account:usr_returning_editor");
+  expect(returningAccountSetCookie(attached)).toBe("");
+  // The same attach through an old control plane's `/__sf/redeem` keeps main's
+  // rule: the saved session's principal decides, so the account it kept gets
+  // its marker.
+  const legacyAgain = await get(runtime, LANES_HOST, "/__spacefast/access/password", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+      cookie: accountCookie,
+    },
+    body: new URLSearchParams({ password: PASSWORD, return: "/docs/" }),
+  });
+  expect(legacyAgain.status).toBe(303);
+  const legacyEntry = new URL(legacyAgain.headers.get("location") ?? "", `https://${LANES_HOST}`);
+  const legacyToken = decodeURIComponent(legacyEntry.pathname.split("/").at(-1) ?? "");
+  const legacyAttached = await get(
+    runtime,
+    LANES_HOST,
+    `/__sf/redeem?${new URLSearchParams({ sf_token: legacyToken, return: "/docs/" })}`,
+    { headers: { cookie: accountCookie } },
+  );
+  expect(legacyAttached.status).toBe(303);
+  expect(sessionPayload(sessionCookie(legacyAttached)).principal).toBe(
+    "account:usr_returning_editor",
+  );
+  expect(returningAccountSetCookie(legacyAttached)).toStartWith(`${RETURNING_MARKER}=1`);
+  await putRoute(runtime, LANES_SPACE, "production", {
+    version_id: LANES_VERSION,
+    config: lanesConfig,
+  });
 });
 
 test("a wrong password bounces back to the page with an allowlisted state", async () => {
@@ -1779,9 +1887,6 @@ test("a public Grant retains a signed-in account identity without team membershi
     headers: { cookie },
   });
   expect(await anotherHost.json()).toEqual({ data: { state: "anonymous" } });
-
-  // A redeem is not the Space's own sign-in, so it leaves no renewal marker.
-  expect(returningAccountSetCookie(redeem)).toBe("");
 });
 
 test("a returning account's silent start spends its marker and goes nowhere without the Space's sign-in", async () => {

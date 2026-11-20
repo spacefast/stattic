@@ -361,8 +361,8 @@ function _stattic_spacefast_sdk_bootstrap(
     // bar will boot. client.js does: it boots the bar for a Spacefast account
     // and loads this same overlay for anyone else (a share-link or password
     // holder, a guest on a public path), so they keep Comments.
-    $bar = $previewToken === null && $review === null && $on('space-bar')
-        ? _stattic_spacefast_bar_config($serving, $requestHost)
+    $bar = $previewToken === null && $review === null
+        ? _stattic_spacefast_bar_tried($serving, $requestHost)
         : null;
     if ($bar !== null && $commentsAvailable) {
         $bar['collab'] = [
@@ -373,7 +373,15 @@ function _stattic_spacefast_sdk_bootstrap(
             'config' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query,
         ];
     }
-    if ($bar !== null) {
+    // On a Space anyone may open, the bar is for a browser that signed in
+    // here with an account, which carries the returning-account marker; every
+    // other visitor keeps today's tracker and overlay. The choice is made in
+    // the page from that one cookie, so this response stays one cached answer
+    // for everyone. client.js then asks the session (private, no-store) and
+    // draws the bar only if it says `bar`; otherwise it loads the overlay it
+    // was handed, so nobody gets both or neither.
+    $barOnlyWithMarker = $bar !== null && ($bar['public'] ?? false) === true;
+    if ($bar !== null && !$barOnlyWithMarker) {
         $commentsAvailable = false;
     }
     // Nothing to join costs the page zero collaboration bytes: no stylesheet,
@@ -441,9 +449,17 @@ function _stattic_spacefast_sdk_bootstrap(
             : '') .
         $tagLoader .
         ($bar === null
-            ? _stattic_spacefast_tracker_loader($serving, $previewToken)
-            : _stattic_spacefast_bar_loader($bar, _stattic_spacefast_tracker_for_page($serving, $previewToken))) .
-        $collab;
+            ? _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
+            : ($barOnlyWithMarker
+                ? _stattic_spacefast_bar_marker_guard(
+                    _stattic_spacefast_bar_loader(
+                        $bar,
+                        _stattic_spacefast_tracker_for_page($serving, $previewToken),
+                        _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
+                    ),
+                    _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
+                )
+                : _stattic_spacefast_bar_loader($bar, _stattic_spacefast_tracker_for_page($serving, $previewToken)) . $collab));
     $reviewModule = '';
     if ($review !== null && $collabBase !== null && $on('review')) {
         $review['spaceId'] = $spaceId;
@@ -484,6 +500,47 @@ function _stattic_spacefast_sdk_bootstrap(
  */
 function _stattic_spacefast_bar_config(array $serving, string $requestHost): ?array
 {
+    $bar = _stattic_spacefast_bar_projection($serving);
+    if ($bar === null) {
+        return null;
+    }
+    $public = _stattic_access_anonymous_admits($serving, _stattic_canonicalize_host($requestHost), '/');
+    // A Space anyone may open keeps its overlay for anyone, unless the
+    // control plane said this engine may offer the bar there too
+    // (`runtime.space-bar-public.v1`): then only a browser that signed in
+    // here with an account loads client.js, and the session it asks decides.
+    if ($public && ($bar['public'] ?? false) !== true) {
+        return null;
+    }
+    return [...$bar, 'public' => $public];
+}
+
+/**
+ * The bar this host's page tries, or null: injection has the bar on for the
+ * served version, and `_stattic_spacefast_bar_config` gives one for this host
+ * (projected, with a platform URL, and on a public host only where the
+ * control plane said `public_spaces`). The one decision behind the SDK's bar
+ * and the returning-account marker a handoff writes.
+ */
+function _stattic_spacefast_bar_tried(array $serving, string $requestHost): ?array
+{
+    return _stattic_injection_on($serving, 'space-bar')
+        ? _stattic_spacefast_bar_config($serving, $requestHost)
+        : null;
+}
+
+/** Whether the control plane projected a usable bar to this Space at all. */
+function _stattic_spacefast_bar_projected(array $serving): bool
+{
+    return _stattic_spacefast_bar_projection($serving) !== null;
+}
+
+/**
+ * The projected bar's URLs, checked, plus whether it may show on a Space
+ * anyone may open; null when there is none or a URL is not a platform URL.
+ */
+function _stattic_spacefast_bar_projection(array $serving): ?array
+{
     $bar = _stattic_spacefast_sdk_config($serving)['bar'] ?? null;
     if (!is_array($bar)) {
         return null;
@@ -500,10 +557,11 @@ function _stattic_spacefast_bar_config(array $serving, string $requestHost): ?ar
             return null;
         }
     }
-    if (_stattic_access_anonymous_admits($serving, _stattic_canonicalize_host($requestHost), '/')) {
-        return null;
-    }
-    return ['frame' => $frame, 'dashboard' => $dashboard];
+    return [
+        'frame' => $frame,
+        'dashboard' => $dashboard,
+        'public' => ($bar['public_spaces'] ?? false) === true,
+    ];
 }
 
 /**
@@ -513,9 +571,11 @@ function _stattic_spacefast_bar_config(array $serving, string $requestHost): ?ar
  * this host's `/__spacefast/t.js`, the Beacon copy, so the page always runs
  * the tracker Beacon's wire format expects. With Comments on, it is also told
  * the overlay's theme, module and manifest, which it loads for a visitor the
- * bar does not boot for.
+ * bar does not boot for. The tag carries the configuration; the loader then
+ * dispatches `spacefast:boot`, which an already evaluated client.js waits
+ * for, so the platform starts even on a page that imported client.js first.
  */
-function _stattic_spacefast_bar_loader(array $bar, ?array $tracker): string
+function _stattic_spacefast_bar_loader(array $bar, ?array $tracker, string $onFailure = ''): string
 {
     $data = static fn (string $key, string $value): string =>
         'm.dataset.' . $key . '=' . json_encode($value, JSON_UNESCAPED_SLASHES) . ';';
@@ -524,6 +584,8 @@ function _stattic_spacefast_bar_loader(array $bar, ?array $tracker): string
         'm.src=' . json_encode(STATTIC_SPACE_CLIENT_PATH, JSON_UNESCAPED_SLASHES) . ';' .
         $data('sfBarFrame', $bar['frame']) .
         $data('sfBarDashboard', $bar['dashboard']) .
+        // A Space anyone may open: the bar shows only if the session says so.
+        (($bar['public'] ?? false) === true ? $data('sfBarPublic', '1') : '') .
         ($tracker === null ? '' : (
             $data('sfTracker', $tracker['src']) .
             $data('sfTrackerSite', $tracker['key']) .
@@ -535,7 +597,40 @@ function _stattic_spacefast_bar_loader(array $bar, ?array $tracker): string
             $data('sfCollabConfig', $bar['collab']['config']) .
             ($bar['collab']['module'] === null ? '' : $data('sfCollab', $bar['collab']['module']))
         )) .
-        'document.head.appendChild(m);}';
+        // On a public Space the marker branch left out today's tracker and
+        // overlay for client.js to start. If client.js can't load, start them
+        // as the page without the marker would, once, and the tracker only if
+        // no other SDK tag on the page inserted it already.
+        ($onFailure === '' ? '' :
+            'm.onerror=function(){if(root.barFallback)return;root.barFallback=true;' .
+            // The tracker goes in once per page: let the fallback insert it
+            // only if no tag on this page inserted it already.
+            'if(!root.trackerInserted)root.trackerLoader=false;(function(){' . $onFailure . '})();};') .
+        'document.head.appendChild(m);' .
+        // A page that imported client.js itself already evaluated it, and a
+        // module runs once per document, so the tag alone would start
+        // nothing. That module is listening for this event. Not there yet,
+        // the module boots itself when it evaluates and finds this tag.
+        'window.dispatchEvent(new CustomEvent("spacefast:boot"));}';
+}
+
+/**
+ * The bar loader on a Space anyone may open: run it only in a browser that
+ * holds the returning-account marker, which this engine sets when an account
+ * signs in here and clears at sign-out; run `$otherwise` (today's tracker and
+ * overlay) everywhere else. The marker names no one and grants nothing: it
+ * only decides whether client.js asks the session, which decides the bar.
+ * Each branch is a function body, so the overlay's early `return` stays in
+ * its own branch.
+ */
+function _stattic_spacefast_bar_marker_guard(string $barLoader, string $otherwise): string
+{
+    require_once __DIR__ . '/access-rules.php';
+    $marker = json_encode(_stattic_returning_account_cookie_name() . '=', JSON_UNESCAPED_SLASHES);
+    // A sandboxed frame throws on reading document.cookie: that reads as no
+    // marker, so the page keeps today's overlay.
+    return 'var signedIn=false;try{signedIn=(";"+document.cookie.replace(/\s+/g,"")).indexOf(";"+' . $marker . ')>=0;}catch(e){}' .
+        'if(signedIn){' . $barLoader . '}else{(function(){' . $otherwise . '})();}';
 }
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
@@ -602,7 +697,10 @@ function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken
     if ($tracker === null) {
         return '';
     }
-    return 'if(!root.trackerLoader){root.trackerLoader=true;' .
+    // `trackerInserted` records that this tag really went in, which a bar
+    // loader's failure fallback reads; `trackerLoader` also covers a bar
+    // loader that handed the tracker to client.js.
+    return 'if(!root.trackerLoader){root.trackerLoader=true;root.trackerInserted=true;' .
         'var a=document.createElement("script");a.async=true;' .
         'a.src=' . json_encode($tracker['src'], JSON_UNESCAPED_SLASHES) . ';' .
         'a.dataset.site=' . json_encode($tracker['key'], JSON_UNESCAPED_SLASHES) . ';' .

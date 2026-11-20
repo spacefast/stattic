@@ -113,9 +113,9 @@ const STATTIC_ACCESS_BROWSER_STATE_SECONDS = 600;
 // script-readable because the overlay reads it, so a script on this host's
 // pages can tell, for as long as it lasts and after the session itself has
 // lapsed, that an account signed in from this browser; it never says which.
-// Only an account sign-in at the callback writes it; logout and every silent
-// start spend it, so a renewal that comes back without an account never runs
-// again, and a forged marker buys one round trip that ends where it began. The
+// Only an account sign-in (the callback or a handoff) writes it; logout and
+// every silent start spend it, so a renewal that comes back without an account
+// never runs again, and a forged marker buys one round trip that ends where it began. The
 // collab manifest names it (`returningAccountCookie`), and naming it is what
 // tells the overlay this Space renews at all.
 const STATTIC_RETURNING_ACCOUNT_COOKIE = '__Host-spacefast_returning';
@@ -200,6 +200,41 @@ function _stattic_access_principal_from_claims(array $claims): ?string
 function _stattic_access_principal_is_account(string $principal): bool
 {
     return str_starts_with($principal, 'account:');
+}
+
+/**
+ * The Space bar is for an account that belongs to the Space: one whose
+ * session holds a live authority the compiled Grant index lists as belonging
+ * (_stattic_grant_index_belonging). A projection compiled before that list
+ * existed lists none, so it gives no bar until the next route sync.
+ */
+function _stattic_access_session_shows_bar(array $serving, ?array $identity, string $principal): bool
+{
+    if (!_stattic_access_principal_is_account($principal) || !is_array($identity)) {
+        return false;
+    }
+    $index = $serving['authorization']['grantIndex'] ?? null;
+    $belonging = is_array($index) ? ($index['belonging'] ?? null) : null;
+    if (!is_array($belonging) || $belonging === []) {
+        return false;
+    }
+    $entries = is_array($identity['authorityEntries'] ?? null) ? $identity['authorityEntries'] : [];
+    foreach ($entries as $entry) {
+        $reference = is_array($entry) && is_string($entry['reference'] ?? null) ? $entry['reference'] : '';
+        if ($reference === '') {
+            continue;
+        }
+        // A team member holds `member:<membership>`, matched by the Space's
+        // team Grant (`team:<teamId>`) the same way admission matches it.
+        $teamReference = _stattic_member_authority_team_reference($index, $reference);
+        if (
+            ($belonging[$reference] ?? false) === true
+            || ($teamReference !== null && ($belonging[$teamReference] ?? false) === true)
+        ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** Valid only inside an already verified handoff or host-bound session. */
@@ -1481,6 +1516,10 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
     $authorities = [];
     $generationSources = [];
     $lanes = ['password' => [], 'identity' => []];
+    // Which authority references mean the account belongs to the Space, for
+    // the Space bar (_stattic_access_session_shows_bar). Read at compile time
+    // because the raw Grants and their sources are not kept.
+    $belonging = _stattic_grant_index_belonging($grants);
     $hasFrameLinks = false;
     // Per target kind: does a public grant admit ANY path, anonymously, with no
     // constraint at all? That is the only shape where skipping the access code
@@ -1646,7 +1685,52 @@ function _stattic_compile_authorization_grant_index(array $projection): ?array
         'hasFrameLinks' => $hasFrameLinks,
         'unconditionalTargets' => $unconditionalTargets,
         'teamReference' => $teamReference,
+        'belonging' => $belonging,
     ];
+}
+
+/**
+ * The authority references that admit an account as someone who belongs to
+ * the Space: a Grant to its team or parent team, an invitation, an email
+ * domain or a company sign-in. Not the public Grant, a share link, a password,
+ * a machine token or a claim preview. A consent from the Space's own sign-in
+ * (`share-consent:<consent>:<Grant>`) counts only when projected from a Grant
+ * that is not public. A Grant with a start time (`notBefore`) never counts:
+ * this list is compiled once per route sync, so it can't tell when that Grant
+ * starts to admit anyone.
+ *
+ * @return array<string, true>
+ */
+function _stattic_grant_index_belonging(array $grants): array
+{
+    $publicGrantIds = [];
+    foreach ($grants as $grant) {
+        if (is_array($grant) && ($grant['audience']['kind'] ?? null) === 'public') {
+            $publicGrantIds[(string) ($grant['id'] ?? '')] = true;
+        }
+    }
+    $belonging = [];
+    foreach ($grants as $grant) {
+        if (!is_array($grant) || !is_array($grant['audience'] ?? null)) {
+            continue;
+        }
+        $kind = $grant['audience']['kind'] ?? null;
+        if (!in_array($kind, ['team', 'person', 'external'], true)
+            || ($grant['audience']['issuer'] ?? null) === 'claim-preview'
+            || isset($grant['constraints']['notBefore'])) {
+            continue;
+        }
+        $source = is_string($grant['source']['reference'] ?? null) ? $grant['source']['reference'] : '';
+        if (preg_match('/\Ashare-consent:[^:]+:(.+)\z/', $source, $match) === 1
+            && isset($publicGrantIds[$match[1]])) {
+            continue;
+        }
+        $reference = _stattic_grant_audience_reference($grant['audience']);
+        if (is_string($reference)) {
+            $belonging[$reference] = true;
+        }
+    }
+    return $belonging;
 }
 
 // The envelope every projection carries, compiled or raw.
@@ -4440,14 +4524,19 @@ function _stattic_merge_authority_lru(
 
 // Verify (host-bound, ≤60s old), attach or replace the browser's authorities, then
 // verify AGAIN to consume the single-use jti before writing the record.
+// $handoffPrincipal receives the principal the handoff itself names, never one
+// the session inherited from the browser, so only a sign-in that proved an
+// account counts as one.
 function _stattic_access_consume_handoff_token(
     array $serving,
     string $host,
     string $token,
     ?array &$storedRecord = null,
     bool $replaceSession = false,
-    ?string $expectedNonce = null
+    ?string $expectedNonce = null,
+    ?string &$handoffPrincipal = null
 ): ?string {
+    $handoffPrincipal = null;
     $verifyOptions = _stattic_visitor_verify_options($serving, $host, null, [
         'requireJti' => false,
         'iatMaxAge' => 60,
@@ -4533,6 +4622,9 @@ function _stattic_access_consume_handoff_token(
     if ($currentSid !== null && $currentSid !== (string) ($storedRecord['sid'] ?? '')) {
         _stattic_access_session_record_delete(_stattic_access_private_root(), $currentSid);
     }
+    $handoffPrincipal = _stattic_access_principal_from_claims(
+        is_array($verified['claims'] ?? null) ? $verified['claims'] : []
+    );
     return $credential;
 }
 
@@ -5032,11 +5124,30 @@ function _stattic_access_handle_in(array $serving, string $requestPath, string $
     }
     $host = _stattic_canonicalize_host($requestHost);
     $storedRecord = null;
-    $credential = _stattic_access_consume_handoff_token($serving, $host, $token, $storedRecord);
+    $handoffPrincipal = null;
+    $credential = _stattic_access_consume_handoff_token(
+        $serving,
+        $host,
+        $token,
+        $storedRecord,
+        handoffPrincipal: $handoffPrincipal
+    );
     if ($credential === null) {
         _stattic_render_access_route_not_found();
     }
     _stattic_access_set_session_cookie($credential);
+    // The returning-account marker only decides whether the page asks about a
+    // bar, so it is written only where this host's page would try one
+    // (`_stattic_spacefast_bar_tried`, the SDK's own decision): no marker with
+    // the bar switched off, injection off, or on a public host whose
+    // projection doesn't offer the bar there.
+    require_once __DIR__ . '/spacefast-sdk.php';
+    if (
+        _stattic_access_principal_is_account($handoffPrincipal ?? '')
+        && _stattic_spacefast_bar_tried($serving, $host) !== null
+    ) {
+        _stattic_access_remember_returning_account();
+    }
     _stattic_access_redirect(
         $requestedReturn ?? '/',
         303,
@@ -5090,6 +5201,9 @@ function _stattic_access_handle_legacy_redeem(array $serving, string $requestHos
         _stattic_render_access_route_not_found();
     }
     _stattic_access_set_session_cookie($credential);
+    // As it always has: the saved record's principal decides, so a handoff
+    // that attaches to a browser already signed in to an account keeps its
+    // marker. The canonical route decides from the handoff's own claims.
     if (_stattic_access_principal_is_account((string) ($storedRecord['principal'] ?? ''))) {
         _stattic_access_remember_returning_account();
     }
@@ -5688,6 +5802,14 @@ function _stattic_access_handle_session(array $serving, string $requestHost): ne
             'principal' => $principal,
             'displayName' => $profile['name'] ?? null,
         ];
+        // Whether this session gets the Space bar, decided here from what the
+        // session holds and never by page script. Said only where the control
+        // plane projected a bar (its capability and `share.sign_in` on).
+        require_once __DIR__ . '/../shared/bootstrap-config.php';
+        require_once __DIR__ . '/spacefast-sdk.php';
+        if (_stattic_spacefast_bar_projected($serving)) {
+            $session['bar'] = _stattic_access_session_shows_bar($serving, $identity, $principal);
+        }
     }
     _stattic_json_response(
         200,

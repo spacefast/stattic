@@ -36,6 +36,9 @@ const sessionVersionForCode = new Map<string, number>();
 // Runs after the token endpoint accepts a code and before it mints the
 // handoff: the box's request is still waiting on the response.
 let beforeHandoff: ((code: string) => Promise<void>) | null = null;
+// The token exchange an opaque header credential is traded at.
+const TOKEN_EXCHANGE_PATH = "/acquire/opaque/token";
+let tokenHandoff: (() => Promise<string>) | null = null;
 // The authorize endpoint and the issuer live on different origins here, as
 // behind the dev relay or a split auth host.
 const OAUTH_AUTHORIZE_URL = "https://api.spacefast.test/v1/auth/oauth2/authorize";
@@ -137,6 +140,11 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
+      const exchangePath = new URL(request.url).pathname;
+      if (exchangePath === TOKEN_EXCHANGE_PATH) {
+        if (!tokenHandoff) return Response.json({ code: "unknown_credential" }, { status: 403 });
+        return Response.json({ fields: { token: await tokenHandoff(), return: "/" } });
+      }
       // The standard token request: form-encoded, at the issuer's token
       // endpoint, with nothing in it but OAuth's own parameters.
       expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
@@ -944,6 +952,86 @@ test("a handoff issued before everyone was signed out opens no session", async (
   expect((await docs(aheadCookie)).status).toBe(200);
   await project(2);
   expect((await docs(aheadCookie)).status).toBe(403);
+});
+
+test("a header handoff issued before everyone was signed out admits nothing", async () => {
+  const host = "chain-header.test";
+  const spaceId = "spc_chain_header";
+  const versionId = "ver_chain_header_1";
+  await deploy(runtime, {
+    spaceId,
+    versionId,
+    files: { "index.html": "<h1>private</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: accessConfig(1, 0),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  const signOutEveryone = (sessionVersion: number) =>
+    putRoute(runtime, spaceId, "production", {
+      version_id: versionId,
+      config: accessConfig(1, sessionVersion),
+    });
+  const present = (token: string) =>
+    get(runtime, host, "/", { headers: { "x-sf-authorization": `Bearer ${token}` } });
+  // An integration presents an opaque credential; the box trades it at the
+  // token exchange for a one-request handoff, as it does for a machine key.
+  const presentOpaque = (token: Promise<string>, during?: () => Promise<void>) => {
+    tokenHandoff = async () => {
+      const minted = await token;
+      await during?.();
+      return minted;
+    };
+    return get(runtime, host, "/", {
+      headers: { "x-sf-authorization": "Bearer sfm_header_opaque_credential_0001" },
+    }).finally(() => {
+      tokenHandoff = null;
+    });
+  };
+  const mint = (sessionVersion: number) => mintCallbackToken({ host, spaceId, sessionVersion });
+  expect((await presentOpaque(mint(0))).status).toBe(200);
+
+  // Minted at version 0; everyone is signed out while the box waits on the
+  // exchange, and the handoff from before comes back: it admits nothing.
+  const stale = await presentOpaque(mint(0), () => signOutEveryone(1));
+  expect(stale.status).toBe(403);
+  expect(stale.headers.get("set-cookie") ?? "").not.toContain("sfv2_");
+
+  // A handoff below the version the box already holds is refused before its
+  // jti is spent: the box does not consume it, so the refusal is the floor's.
+  const held = await mint(0);
+  expect((await present(held)).status).toBe(403);
+  await signOutEveryone(0);
+  expect((await present(held)).status).toBe(200);
+  // Admitted once, then spent.
+  expect((await present(held)).status).toBe(403);
+  await signOutEveryone(1);
+
+  // A current handoff still admits.
+  expect((await presentOpaque(mint(1))).status).toBe(200);
+
+  // An older control plane names no version: admitted as before.
+  const now = Math.floor(Date.now() / 1000);
+  const unversioned = signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {
+    sub: MEMBER,
+    purpose: "handoff",
+    v: 1,
+    authorities: [MEMBER],
+    iss: "spacefast-api",
+    aud: spaceId,
+    host,
+    spaceId,
+    generation: 1,
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    emailVerified: false,
+    iat: now,
+    nbf: now,
+    exp: now + 60,
+    jti: randomUUID(),
+  });
+  expect((await present(unversioned)).status).toBe(200);
 });
 
 describe("a Share sign-in that crosses a sign-out of everyone", () => {

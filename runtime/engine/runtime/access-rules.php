@@ -5212,6 +5212,14 @@ function _stattic_access_verify_platform_identity_token(
     if ($purpose !== STATTIC_HANDOFF_PURPOSE) {
         return false;
     }
+    // Issued before this Space last signed everyone out: refused, as by the
+    // session consumer, before the jti is spent. A control plane before this
+    // check names no version.
+    if (array_key_exists('sessionVersion', $claims)
+        && (!is_int($claims['sessionVersion'])
+            || $claims['sessionVersion'] < _stattic_access_current_session_version($serving))) {
+        return false;
+    }
     // A server-to-server credential exchange mints one short-lived handoff for
     // this request. Consume its jti here so copying that internal result cannot
     // turn it into a reusable platform bearer.

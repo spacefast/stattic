@@ -4577,7 +4577,12 @@ function _stattic_access_consume_handoff_token(
         return null;
     }
     $authorityExpiresAt = $claims['authorityExpiresAt'] ?? null;
-    $current = _stattic_current_session_identity($serving, $host);
+    // The browser's session is read under `$serving`'s version. When a sign-out
+    // of everyone landed since, that session is over: nothing it held, neither
+    // who it was nor what it could open, crosses into the new one.
+    $current = $sessionVersion === _stattic_session_version($serving)
+        ? _stattic_current_session_identity($serving, $host)
+        : null;
     $currentSid = is_array($current) && is_string($current['sessionId'] ?? null)
         ? $current['sessionId']
         : null;

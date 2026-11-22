@@ -36,6 +36,10 @@ const sessionVersionForCode = new Map<string, number>();
 // Runs after the token endpoint accepts a code and before it mints the
 // handoff: the box's request is still waiting on the response.
 let beforeHandoff: ((code: string) => Promise<void>) | null = null;
+// The control plane's answer to a share link the box exchanges at LINK_PATH:
+// the handoff it mints, after whatever else happens while the box waits.
+let linkHandoff: (() => Promise<string>) | null = null;
+const LINK_PATH = "/acquire/opaque/link";
 // The token exchange an opaque header credential is traded at.
 const TOKEN_EXCHANGE_PATH = "/acquire/opaque/token";
 let tokenHandoff: (() => Promise<string>) | null = null;
@@ -141,6 +145,13 @@ beforeAll(async () => {
     port: 0,
     async fetch(request) {
       const exchangePath = new URL(request.url).pathname;
+      if (exchangePath === LINK_PATH) {
+        if (!linkHandoff) return Response.json({ code: "not_found" }, { status: 404 });
+        return Response.json(
+          { fields: { token: await linkHandoff(), return: "/docs/" } },
+          { headers: { "content-type": "application/vnd.spacefast.access-handoff+json" } },
+        );
+      }
       if (exchangePath === TOKEN_EXCHANGE_PATH) {
         if (!tokenHandoff) return Response.json({ code: "unknown_credential" }, { status: 403 });
         return Response.json({ fields: { token: await tokenHandoff(), return: "/" } });
@@ -952,6 +963,109 @@ test("a handoff issued before everyone was signed out opens no session", async (
   expect((await docs(aheadCookie)).status).toBe(200);
   await project(2);
   expect((await docs(aheadCookie)).status).toBe(403);
+});
+
+test("a link attached while everyone is signed out carries nothing from the session it joins", async () => {
+  const host = "chain-attach.test";
+  const spaceId = "spc_chain_attach";
+  const versionId = "ver_chain_attach_1";
+  // The owner opens every page; the link opens only /docs/.
+  const config = (sessionVersion: number) => {
+    const base = accessConfig(1, sessionVersion);
+    const { exchange } = base.authorization.accessPage;
+    return {
+      ...base,
+      authorization: {
+        ...base.authorization,
+        accessPage: {
+          ...base.authorization.accessPage,
+          exchange: { ...exchange, linkUrl: `https://access.spacefast.test${LINK_PATH}` },
+        },
+        grants: [
+          ...base.authorization.grants,
+          {
+            ...base.authorization.grants[0],
+            id: "grt_chain_attach_link",
+            audience: { kind: "link", linkId: "lnk_chain_attach" },
+            resources: { include: ["/docs/**"], exclude: [] },
+          },
+        ],
+      },
+    };
+  };
+  await deploy(runtime, {
+    spaceId,
+    versionId,
+    files: { "index.html": "<h1>private</h1>\n", "docs/index.html": "<h1>private docs</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: config(0),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  const sessionCookie = (response: Response) =>
+    response.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("__Host-spacefast_session="))
+      ?.split(";")[0] ?? "";
+  const page = (cookie: string, pagePath: string) =>
+    get(runtime, host, pagePath, { headers: { cookie } });
+  const claims = (cookie: string) => {
+    const body = cookie.slice(cookie.indexOf("=") + 1 + "sfv2_".length);
+    return z
+      .object({
+        principal: z.string(),
+        sessionVersion: z.number(),
+        identity: z.unknown().optional(),
+      })
+      .parse(JSON.parse(Buffer.from(body.slice(0, body.lastIndexOf(".")), "base64url").toString()));
+  };
+
+  const signedIn = await redeemHandoff(
+    runtime,
+    host,
+    await mintCallbackToken({ host, spaceId, sessionVersion: 0, principal: "account:usr_attach" }),
+    "/",
+  );
+  const owner = sessionCookie(signedIn);
+  expect((await page(owner, "/")).status).toBe(200);
+
+  // The owner opens a share link. While the box waits on the exchange, everyone
+  // is signed out, and the control plane mints the link's handoff at the new
+  // version: the handoff is current, the browser's session is not.
+  linkHandoff = async () => {
+    await putRoute(runtime, spaceId, "production", { version_id: versionId, config: config(1) });
+    return mintCallbackToken({
+      host,
+      spaceId,
+      sessionVersion: 1,
+      authority: "link:lnk_chain_attach",
+    });
+  };
+  let attached: Response;
+  try {
+    attached = await get(
+      runtime,
+      host,
+      "/__spacefast/in/sfl_chain-attach_0123456789?return=%2Fdocs%2F",
+      {
+        headers: { cookie: owner },
+      },
+    );
+  } finally {
+    linkHandoff = null;
+  }
+  expect(attached.status).toBe(303);
+  expect(attached.headers.get("location")).toBe("/docs/");
+  const linked = sessionCookie(attached);
+  // Only what the link proved: its page opens, the owner's pages do not, and
+  // the session is nobody in particular.
+  expect((await page(linked, "/docs/")).status).toBe(200);
+  expect((await page(linked, "/")).status).toBe(403);
+  expect(claims(linked)).toMatchObject({ principal: "anonymous", sessionVersion: 1 });
+  expect(claims(linked).identity).toBeUndefined();
+  expect((await page(owner, "/")).status).toBe(403);
 });
 
 test("a header handoff issued before everyone was signed out admits nothing", async () => {

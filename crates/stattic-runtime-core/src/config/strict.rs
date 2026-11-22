@@ -212,6 +212,20 @@ pub fn public_json_schema() -> Value {
             "crons": crons::json_schema(),
             "system": system::json_schema(),
             "sell": super::current::sell_json_schema(),
+            // Validated by the control plane at finalize; described here so
+            // editors offer it. Only the team sees `name`; this is what a
+            // stranger with the link sees.
+            "public": closed(json!({
+                "title": { "type": "string", "minLength": 1, "maxLength": CONFIG_META_TITLE_MAX_CHARS },
+                "description": {
+                    "type": "string",
+                    "maxLength": CONFIG_META_DESCRIPTION_MAX_CHARS
+                },
+                "icon": { "type": "string", "maxLength": CONFIG_META_IMAGE_MAX_CHARS },
+                "accent": { "type": "string", "maxLength": 64 },
+                "ogImage": { "type": "string", "maxLength": CONFIG_META_IMAGE_MAX_CHARS },
+                "hideOnPrivateLinks": { "type": "boolean" }
+            })),
             "access": {
                 "anyOf": [
                     {
@@ -357,6 +371,21 @@ pub fn compile(input: Input) -> Output {
             None,
         );
     }
+    // `public` is checked against the same rules finalize freezes it with, so
+    // a bad field is an issue at its own path rather than a failed publish.
+    let mut public_diagnostics = Vec::new();
+    let mut checked = root.clone();
+    super::current::validate_public_identity(&mut checked, &mut public_diagnostics);
+    for diagnostic in public_diagnostics {
+        push_issue(
+            &mut issues,
+            &locations,
+            &diagnostic.code,
+            &format!("$.{}", diagnostic.path.unwrap_or_else(|| "public".into())),
+            &diagnostic.message,
+            None,
+        );
+    }
     validate_traffic_rules(root, &locations, &mut issues);
     validate_routing(root, &document.object_keys, &locations, &mut issues);
     validate_templates(root, &input.template_sources, &locations, &mut issues);
@@ -440,6 +469,7 @@ fn validate_keys(
         "system",
         "sell",
         "analytics",
+        "public",
     ];
     let renamed = [
         ("index", "serve.index"),
@@ -1700,6 +1730,10 @@ fn project(root: &Map<String, Value>) -> Value {
     if let Some(analytics) = root.get("analytics") {
         out.insert("analytics".into(), analytics.clone());
     }
+    // The Space's public identity, for finalize to validate and freeze.
+    if let Some(public) = root.get("public") {
+        out.insert("public".into(), public.clone());
+    }
     Value::Object(out)
 }
 fn effective(config: &Value, index: Value) -> Value {
@@ -2032,6 +2066,36 @@ mod tests {
                 .config
                 .and_then(|config| config.get("analytics").cloned()),
             Some(analytics)
+        );
+    }
+
+    /// `public` is control-plane-only too: finalize validates and freezes it.
+    #[test]
+    fn carries_public_identity_through_verbatim_for_the_control_plane() {
+        let public = json!({ "title": "Acme Briefing", "ogImage": "/og.png" });
+        let output = compile_source(&format!(r#"{{ "version": 1, "public": {public} }}"#));
+        assert!(output.issues.is_empty(), "{:?}", output.issues);
+        assert!(output.success);
+        assert_eq!(
+            output
+                .config
+                .and_then(|config| config.get("public").cloned()),
+            Some(public)
+        );
+    }
+
+    /// A `public` field finalize would refuse is an issue at its own path.
+    #[test]
+    fn reports_an_invalid_public_identity_field_at_its_path() {
+        let output = compile_source(r#"{ "version": 1, "public": { "icon": "http://x/i.png" } }"#);
+        assert!(!output.success);
+        assert!(
+            output
+                .issues
+                .iter()
+                .any(|issue| issue.code == "config_invalid" && issue.path == "$.public.icon"),
+            "{:?}",
+            output.issues
         );
     }
 

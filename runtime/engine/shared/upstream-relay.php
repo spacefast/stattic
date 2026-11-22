@@ -41,9 +41,10 @@ const STATTIC_RELAY_DENIED_REQUEST_PREFIXES = ['spacefast-access-'];
 // Spacefast's own credentials. The runtime reads them to authenticate a request,
 // and nothing it hands to authored code or an upstream may carry them: not Zero,
 // not tenant PHP, not a Functions worker, not a proxy origin. X-SF-Authorization
-// exists so these never ride Authorization, which belongs to the customer's
-// application and passes untouched.
-const STATTIC_PLATFORM_CREDENTIAL_REQUEST_HEADERS = ['x-sf-authorization'];
+// (and its unprefixed spelling SF-Authorization) exists so these never ride
+// Authorization, which belongs to the customer's application and passes
+// untouched.
+const STATTIC_PLATFORM_CREDENTIAL_REQUEST_HEADERS = ['x-sf-authorization', 'sf-authorization'];
 
 // Every cookie the runtime sets on a Space host: the visitor session, system
 // view and frame proofs, browser state, and the content editor session. A

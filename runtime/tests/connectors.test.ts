@@ -15,10 +15,10 @@ import { z } from "zod";
 import {
   RUNTIME_ACCESS_SESSION_PATH,
   RUNTIME_COLLAB_MANIFEST_PATH,
-  RUNTIME_SPACE_CLIENT_CHUNKS_PREFIX,
   RUNTIME_SPACE_CLIENT_PATH,
   RUNTIME_SPACE_CLIENT_TYPES_PATH,
 } from "../../packages/common/src/utils/runtime-paths.ts";
+import { buildCdnModules } from "../../packages/space-client/scripts/browser.mjs";
 import {
   deploy,
   get,
@@ -167,7 +167,12 @@ let rt: Runtime;
 let memberCookie = "";
 
 beforeAll(async () => {
-  rt = await startRuntime({ atomicData: { SPACEFAST_API_BASE_URL: controlPlane.url.toString() } });
+  rt = await startRuntime({
+    atomicData: {
+      SPACEFAST_API_BASE_URL: controlPlane.url.toString(),
+      SPACEFAST_CAST_API_URL: "https://cast.example.test",
+    },
+  });
   await deploy(rt, {
     spaceId: SPACE_ID,
     versionId: VERSION_ID,
@@ -241,13 +246,15 @@ test("the version's types are served as long as its data would be", async () => 
   expect((await call(RUNTIME_SPACE_CLIENT_TYPES_PATH, { method: "POST" })).status).toBe(405);
 });
 
-test("the public Space client serves executable Access, connector and collaboration modules", async () => {
+test("the public Space client re-exports Cast's client, and that module is executable", async () => {
   // Public for anyone, member or not: it holds no Space's data.
   const client = await get(rt, HOST, RUNTIME_SPACE_CLIENT_PATH);
   expect(client.status).toBe(200);
   expect(client.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
   expect(client.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
   const body = await client.text();
+  // A tiny same-origin module: everything Cast's client exports, by `export *`.
+  expect(body).toBe('export*from"https://cast.example.test/sdk/v1/client.js";\n');
   const etag = client.headers.get("etag") ?? "";
   expect(etag).toMatch(/^"[a-f0-9]{64}"$/);
   const revalidated = await get(rt, HOST, RUNTIME_SPACE_CLIENT_PATH, {
@@ -261,30 +268,24 @@ test("the public Space client serves executable Access, connector and collaborat
   const post = await get(rt, HOST, RUNTIME_SPACE_CLIENT_PATH, { method: "POST" });
   expect(post.status).toBe(405);
   expect(post.headers.get("allow")).toBe("GET, HEAD");
-  const nested = await get(rt, HOST, `${RUNTIME_SPACE_CLIENT_CHUNKS_PREFIX}nested/client.js`);
-  expect(nested.status).toBe(404);
-  expect(await nested.json()).toMatchObject({ code: "not_found" });
+  // The engine ships no chunks any more: the old path is just private.
+  expect((await get(rt, HOST, "/__spacefast/chunks/client-ABCDEFGH.js")).status).toBe(403);
 
-  // Import the actual modules the runtime returned, including the chunks used
-  // by collaboration. Relative module imports resolve as they do on the page.
+  // Import the shim the way a page does, with Cast's URL answered by the
+  // modules Cast serves, built here the way Cast's build makes them
+  // (packages/collab-sdk/scripts/build.mjs), never read from a local build.
   const root = mkdtempSync(path.join(os.tmpdir(), "spacefast-client-http-"));
   try {
-    writeFileSync(path.join(root, "client.mjs"), body);
-    mkdirSync(path.join(root, "chunks"));
-    const chunkNames = readdirSync(
-      path.join(import.meta.dir, "../engine/runtime/space-client/chunks"),
+    await buildCdnModules({ outdir: root });
+    writeFileSync(
+      path.join(root, "shim.mjs"),
+      body.replace("https://cast.example.test/sdk/v1/client.js", "./client.js"),
     );
-    expect(chunkNames.length).toBeGreaterThan(0);
-    await Promise.all(
-      chunkNames.map(async (filename) => {
-        const chunk = await get(rt, HOST, `${RUNTIME_SPACE_CLIENT_CHUNKS_PREFIX}${filename}`);
-        expect(chunk.status).toBe(200);
-        expect(chunk.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
-        expect(chunk.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
-        writeFileSync(path.join(root, "chunks", filename), await chunk.text());
-      }),
-    );
-    const module = await import(pathToFileURL(path.join(root, "client.mjs")).href);
+    const module = await import(pathToFileURL(path.join(root, "shim.mjs")).href);
+    // Every export Cast's client has reaches a page through the shim.
+    const cast = await import(pathToFileURL(path.join(root, "client.js")).href);
+    expect(Object.keys(module).toSorted()).toEqual(Object.keys(cast).toSorted());
+    expect(Object.keys(module)).toContain("createSpaceClient");
     const manifest = await get(rt, HOST, RUNTIME_COLLAB_MANIFEST_PATH);
     expect(manifest.status).toBe(200);
     const requested: string[] = [];

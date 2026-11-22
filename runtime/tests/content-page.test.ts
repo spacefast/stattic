@@ -65,7 +65,7 @@ function wp_footer() { echo '<footer>WordPress footer</footer>'; }
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/storage.php"))};
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/runtime/content-page.php"))};
 $snapshotBytes = ${JSON.stringify(seed)};
-$context = ['private_root' => ${JSON.stringify(privateRoot)}, 'space_id' => 'spc_document', 'version_id' => 'ver_document', 'serving' => ['immutable' => isset($_GET['immutable']), 'sdk' => isset($_GET['disabled']) ? null : ['config' => []], 'inject' => ['bodyEnd' => [${JSON.stringify(baked)}]]]];
+$context = ['private_root' => ${JSON.stringify(privateRoot)}, 'space_id' => 'spc_document', 'version_id' => 'ver_document', 'serving' => ['immutable' => isset($_GET['immutable']), 'sdk' => isset($_GET['disabled']) ? null : ['config' => ['tracker' => ['src' => '/__spacefast/t.js', 'endpoint' => 'https://beacon.test', 'key' => 'pk']]], 'inject' => ['bodyEnd' => [${JSON.stringify(baked)}]]]];
 $context['version_dir'] = '/version'; $context['root'] = [];
 $route = ['id' => '${pageId}', 'bindingId' => '${bindingId}', 'path' => '/', 'render' => 'document', 'params' => []];
 file_put_contents(_stattic_version_root($context['private_root'], 'spc_document', 'ver_document') . '/metadata.json', json_encode(['catalog' => ['format' => STATTIC_RUNTIME_VERSION_CATALOG_FORMAT, 'spaceId' => 'spc_document', 'versionId' => 'ver_document', 'paths' => ['_spacefast/pages/documents/${pageId}.json' => ['source' => ['sha256' => hash('sha256', $snapshotBytes), 'size' => strlen($snapshotBytes), 'contentType' => 'application/json']]], 'variants' => []]]));

@@ -190,7 +190,10 @@ function _stattic_zero_v2_realtime_post(string $url, string $token, string $body
 function _stattic_zero_v2_realtime_script(string $versionRoot, string $method): never
 {
     if (!in_array($method, ['GET', 'HEAD'], true)) _stattic_method_not_allowed('GET, HEAD');
+    // A TypedPress (`tp_v1`) build publishes no notices yet, so it gets no
+    // transport either, whatever room settings an older control plane wrote.
     $config = is_file($versionRoot . '/.zero-compiled/realtime.json')
+        && _stattic_typedpress_manifest($versionRoot . '/.zero-compiled') === null
         ? json_decode((string) file_get_contents($versionRoot . '/.zero-compiled/realtime.json'), true)
         : null;
     $public = is_array($config) && is_string($config['cast_resource_key'] ?? null) && is_string($config['cast_ws_url'] ?? null)

@@ -75,20 +75,27 @@ test_args+=(--timeout 30000)
 # The version-delete tombstone suite drives the API against PHP the same way.
 # The two Zero v2 WordPress acceptances each install WordPress on MariaDB and
 # run for about 20s and 70s; in a general shard they set the suite's floor.
-long_files=(tests/typedpress-publish.test.ts tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts)
+# The TypedPress Space role acceptance does the same. Like access-chain.test.ts
+# and wp-api.test.ts, it sets the control plane's signing key in process.env
+# before importing runtime/auth.ts, which caches the first key it reads: two
+# such files in one process sign with one key and verify against another, so
+# none of them may share a process with each other or with the general shard.
+long_files=(tests/typedpress-publish.test.ts tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts tests/typedpress-space-role.test.ts tests/access-chain.test.ts tests/wp-api.test.ts)
 reports=()
 # Each process writes a JUnit report, the proof that the suite really ran.
 junit_dir="$(mktemp -d)"
 trap 'rm -rf "$junit_dir"' EXIT
 junit_reports=()
 running=0
+last_pid=
 status=0
 launch() {
   local name="$1"
   shift
   if [[ "$running" -ge "$workers" ]]; then
     if [[ "$workers" = 1 ]]; then
-      wait || status=1
+      # A bare `wait` returns 0 whatever the child did; wait on the child.
+      wait "$last_pid" || status=1
     else
       wait -n || status=1
     fi
@@ -103,6 +110,7 @@ launch() {
     reports+=("$coverage/lcov.info")
   fi
   bun "${args[@]}" &
+  last_pid=$!
   running=$((running + 1))
 }
 ignore_args=()
@@ -121,7 +129,7 @@ else
 fi
 for ((; running > 0; running--)); do
   if [[ "$workers" = 1 ]]; then
-    wait || status=1
+    wait "$last_pid" || status=1
   else
     wait -n || status=1
   fi

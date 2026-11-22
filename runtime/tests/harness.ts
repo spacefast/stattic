@@ -106,6 +106,9 @@ export const DASHBOARD_ORIGIN = "https://my.spacefast.com";
 export const RUNTIME_ATOMIC_DATA = {
   SPACEFAST_API_BASE_URL: "https://api.spacefast.com",
   SPACEFAST_BROWSER_API_URL: "https://api.spacefast.com",
+  // Every box is told where Cast is (boxEngineConfig); `/__spacefast/client.js`
+  // re-exports the page client from there.
+  SPACEFAST_CAST_API_URL: "https://cast.spacefast.com",
   // The one origin allowed to READ a blob-gate response with fetch(). Pushed as
   // provider persistent data like every other runtime config value.
   SPACEFAST_DASHBOARD_ORIGIN: DASHBOARD_ORIGIN,
@@ -231,6 +234,10 @@ export function managementToken(action: string, scope: Record<string, unknown> =
     runtime_instance_id: tokenRuntimeInstanceId,
     operation_id: `op_${action}`,
     action,
+    // The control plane stamps every management token: it runs the box
+    // heartbeat sweep (shared/box-sync.php). A scope can drop it to act as one
+    // that does not.
+    box_sync: 1,
     jti: `jti_${randomUUID()}`,
     ...scope,
   });

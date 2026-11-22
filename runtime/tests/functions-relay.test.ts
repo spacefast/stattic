@@ -1115,7 +1115,17 @@ test("a worker's HTML carries the SDK tag; a multipart form reaches it whole, an
         route_name: "production",
         config: {
           ...publicAccessConfig({ mode: "website", site_title: "multipart" }),
-          sdk: { revision: "sdk-1", config: {} },
+          // Analytics on, so its pages carry the SDK tag.
+          sdk: {
+            revision: "sdk-1",
+            config: {
+              tracker: {
+                src: "/__spacefast/t.js",
+                endpoint: "https://beacon.example.test",
+                key: "pk",
+              },
+            },
+          },
         },
         production_hostnames: ["fx-multipart.test"],
         noindex_production_hostnames: [],
@@ -1247,7 +1257,12 @@ test("a worker's HTML carries the SDK tag; a multipart form reaches it whole, an
       },
     });
     expect(await (await visit("/api/page")).text()).toBe(withoutTag);
-    await route({ revision: "sdk-1", config: {} });
+    await route({
+      revision: "sdk-1",
+      config: {
+        tracker: { src: "/__spacefast/t.js", endpoint: "https://beacon.example.test", key: "pk" },
+      },
+    });
 
     // Exactly max_input_vars fields and max_file_uploads files: at a limit is
     // not over it. An empty file input counts only once the limit is reached

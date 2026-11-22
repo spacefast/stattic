@@ -51,6 +51,11 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "meta",
     "name",
     "placement",
+    // Control-plane-only public identity (title, description, icon, accent,
+    // preview image). Passed through verbatim like `system`: the control
+    // plane validates it in TypeScript and freezes it on the version; the
+    // serving engine never reads it.
+    "public",
     "redirects",
     "rewrites",
     "runtime",
@@ -379,6 +384,7 @@ fn validate_config_shape(
     validate_placement_config(object, diagnostics);
     validate_superpowers_config(object, diagnostics);
     validate_space_theme(object, diagnostics);
+    validate_public_identity(object, diagnostics);
     if let Some(inject) = object.get_mut("inject").and_then(Value::as_object_mut) {
         inject
             .retain(|key, _| matches!(key.as_str(), "head" | "bodyStart" | "bodyEnd" | "noscript"));
@@ -1121,6 +1127,104 @@ fn validate_space_theme(object: &mut Map<String, Value>, diagnostics: &mut Vec<P
     );
 }
 
+/// The Space's public identity (`public`), for the control plane to freeze at
+/// finalize. Mirrors `spacePublicIdentitySchema` in
+/// packages/common/src/contracts/space-config.ts. A field that would fail
+/// there is a `config_invalid` diagnostic at its own path (as `theme.logo`
+/// is), and is dropped, so the control plane never meets a value it would
+/// refuse. Unknown fields are dropped.
+pub(super) fn validate_public_identity(
+    object: &mut Map<String, Value>,
+    diagnostics: &mut Vec<PrepareDiagnostic>,
+) {
+    let Some(value) = object.get_mut("public") else {
+        return;
+    };
+    let Some(public) = value.as_object_mut() else {
+        push_shape_error(diagnostics, "public", "an object");
+        object.remove("public");
+        return;
+    };
+    public.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "title" | "description" | "icon" | "accent" | "ogImage" | "hideOnPrivateLinks"
+        )
+    });
+    let mut text = |key: &str, limit: usize, allow_empty: bool, expected: &str| {
+        let Some(value) = public.get(key) else {
+            return;
+        };
+        let trimmed = value.as_str().map(str::trim);
+        match trimmed {
+            Some(trimmed) if js_len(trimmed) <= limit && (allow_empty || !trimmed.is_empty()) => {
+                let trimmed = trimmed.to_string();
+                public.insert(key.into(), Value::String(trimmed));
+            }
+            _ => {
+                push_shape_error(diagnostics, &format!("public.{key}"), expected);
+                public.remove(key);
+            }
+        }
+    };
+    text(
+        "title",
+        CONFIG_META_TITLE_MAX_CHARS,
+        false,
+        "a non-empty string",
+    );
+    text(
+        "description",
+        CONFIG_META_DESCRIPTION_MAX_CHARS,
+        true,
+        "a string",
+    );
+    for (key, limit) in [
+        ("icon", CONFIG_PAGES_LOGO_MAX_CHARS),
+        ("ogImage", CONFIG_META_IMAGE_MAX_CHARS),
+    ] {
+        let Some(value) = public.get(key) else {
+            continue;
+        };
+        match value.as_str().map(str::trim) {
+            Some(trimmed) if js_len(trimmed) <= limit && pages_logo_pattern().is_match(trimmed) => {
+                let trimmed = trimmed.to_string();
+                public.insert(key.into(), Value::String(trimmed));
+            }
+            _ => {
+                push_shape_error(
+                    diagnostics,
+                    &format!("public.{key}"),
+                    "an https URL or root-relative path",
+                );
+                public.remove(key);
+            }
+        }
+    }
+    if let Some(value) = public.get("accent") {
+        match value.as_str().map(str::trim) {
+            Some(trimmed)
+                if js_len(trimmed) <= CONFIG_PAGES_COLOR_MAX_CHARS
+                    && pages_color_pattern().is_match(trimmed) =>
+            {
+                let trimmed = trimmed.to_string();
+                public.insert("accent".into(), Value::String(trimmed));
+            }
+            _ => {
+                push_shape_error(diagnostics, "public.accent", "a safe CSS color");
+                public.remove("accent");
+            }
+        }
+    }
+    if public
+        .get("hideOnPrivateLinks")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        push_shape_error(diagnostics, "public.hideOnPrivateLinks", "a boolean");
+        public.remove("hideOnPrivateLinks");
+    }
+}
+
 fn validate_trimmed_page_theme_string(
     theme: &mut Map<String, Value>,
     key: &str,
@@ -1853,7 +1957,41 @@ mod tests {
         );
     }
 
-    /// The `system` manifest and `analytics` are control-plane-only: the crate
+    /// A `public` field the control plane would refuse is a config diagnostic at
+    /// its own path, as `theme.logo` is, never a throw during finalize.
+    #[test]
+    fn reports_an_invalid_public_identity_field_at_its_path() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{ "public": { "title": " Acme ", "icon": "http://x/i.png", "accent": "url(x)", "hideOnPrivateLinks": "yes" } }"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+        assert_eq!(config, None);
+        let paths: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "config_invalid")
+            .filter_map(|diagnostic| diagnostic.path.clone())
+            .collect();
+        assert_eq!(
+            paths,
+            ["public.icon", "public.accent", "public.hideOnPrivateLinks"]
+        );
+        // A valid block comes through trimmed, its unknown fields dropped.
+        let mut clean = Vec::new();
+        let config = parse_config(
+            r#"{ "public": { "title": " Acme ", "icon": "/i.png", "extra": 1 } }"#,
+            "sf.jsonc",
+            &mut clean,
+        );
+        assert!(clean.is_empty(), "{clean:?}");
+        assert_eq!(
+            config.and_then(|value| value.pointer("/public").cloned()),
+            Some(json!({ "title": "Acme", "icon": "/i.png" }))
+        );
+    }
+
+    /// The `system` manifest, `analytics` and `public` are control-plane-only: the crate
     /// recognizes the keys so they are not stripped as unknown, then passes them
     /// through verbatim for the control plane to parse and validate. This lane
     /// must not strip them, not warn `config_invalid`, and not mutate them.
@@ -1881,8 +2019,15 @@ mod tests {
         let analytics = json!({
             "profile": { "subject": { "name": "Acme", "form": "site" }, "goals": [] }
         });
+        let public = json!({
+            "title": "Acme Briefing",
+            "description": "Roadmap notes for partners.",
+            "hideOnPrivateLinks": true
+        });
         let config = parse_config(
-            &format!(r#"{{ "name": "acme", "system": {system}, "analytics": {analytics} }}"#),
+            &format!(
+                r#"{{ "name": "acme", "system": {system}, "analytics": {analytics}, "public": {public} }}"#
+            ),
             "sf.jsonc",
             &mut diagnostics,
         );
@@ -1895,8 +2040,14 @@ mod tests {
             Some(system)
         );
         assert_eq!(
-            config.and_then(|value| value.pointer("/analytics").cloned()),
+            config
+                .as_ref()
+                .and_then(|value| value.pointer("/analytics").cloned()),
             Some(analytics)
+        );
+        assert_eq!(
+            config.and_then(|value| value.pointer("/public").cloned()),
+            Some(public)
         );
     }
 

@@ -191,6 +191,12 @@ function _stattic_comments_handle_exchange(
     // mints a ticket Cast will not accept.
     $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH
         || $requestPath === STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH;
+    // A TypedPress (`tp_v1`) build publishes no change notices, so it has no
+    // room to join: its pages poll (zero-v2-realtime.php serves them no
+    // transport). Zero 0.8's per-version rooms and v2's shared room stay.
+    if ($isZeroRealtimeTicket && ($serving['zero_generation'] ?? null) === 'tp_v1') {
+        _stattic_render_json_unauthenticated('zero_realtime_unavailable');
+    }
     $exchange = _stattic_access_page_exchange($serving);
     $exchangeKey = match (true) {
         $isZeroRealtimeTicket => 'zeroRealtimeTicketUrl',
@@ -215,6 +221,9 @@ function _stattic_comments_handle_exchange(
                 'authorityGeneration' => $entry['generation'],
                 'sessionVersion' => $sessionVersion,
                 'emailVerifiedUntil' => $entry['emailVerifiedUntil'] ?? null,
+                // A Space-origin session's cap travels with its authority, so
+                // the ticket is decided on the same terms as the page.
+                ...(is_array($entry['capabilities'] ?? null) ? ['capabilities' => $entry['capabilities']] : []),
             ];
         }
     }
@@ -319,177 +328,164 @@ function _stattic_spacefast_sdk_bootstrap(
     // access code (D34), so this route requires access-rules.php itself rather
     // than fataling on a public Space.
     require_once __DIR__ . '/access-rules.php';
+    $config = _stattic_spacefast_sdk_page_config($privateRoot, $serving, $requestHost, $previewToken);
+    $embeddedTagBody = $config['tagBody'];
+    unset($config['tagBody']);
+    // Nothing to do at all (only the context for modules that aren't there):
+    // the same answer as injection off. A tag draft or a visual review reload
+    // is something to do: an older page carries its own tag and relies on it.
+    if ($embeddedTagBody === '' && array_diff(array_keys($config), ['runtime']) === []) {
+        return STATTIC_SPACEFAST_SDK_OFF;
+    }
+    // The one static script (packages/space-client/src/sdk), then this host's
+    // config for it. The bytes are the same for every visitor of the host.
+    $static = @file_get_contents(__DIR__ . '/space-client/sdk.js');
+    if (!is_string($static)) {
+        return STATTIC_SPACEFAST_SDK_OFF;
+    }
+    // The tag release runs as the boot's `tags` callback: after the draft
+    // check (a draft replaces it) and once per page.
+    return $static . "\n" .
+        'window.Spacefast.boot(' . json_encode($config, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP) .
+        ($embeddedTagBody !== '' ? ",function(){\n" . $embeddedTagBody . "\n}" : '') . ');';
+}
+
+/**
+ * What `sdk.js` does on this host's pages, as the JSON it boots from. Each
+ * part is written only while the injection plan has its item on for the
+ * served version (shared/injection-plan.php); nothing on is an empty config,
+ * and a page then loads nothing. `tagBody` is the production tag release,
+ * appended after the config rather than inside it.
+ *
+ * @return array<string, mixed>
+ */
+function _stattic_spacefast_sdk_page_config(
+    string $privateRoot,
+    array $serving,
+    string $requestHost,
+    ?string $previewToken
+): array {
+    $on = static fn (string $item): bool => _stattic_injection_on($serving, $item);
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $review = _stattic_system_view_review();
-    // Only what this response has to PAINT: whether this surface speaks at
-    // all. Everything else a client needs is one fetch away at the manifest,
-    // which is cacheable on its own terms.
     $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
     $collabBase = _stattic_spacefast_sdk_base_url($sdkConfig);
     $pageHost = _stattic_normalize_hostname($requestHost);
-    $commentsAvailable = _stattic_spacefast_collab_available($serving, $overlay);
-    // Each module below is written only when the plan has its item on for the
-    // served version (shared/injection-plan.php). With none of them on, the
-    // response is a comment: still 200 and still JavaScript, so a page that
-    // baked the tag before injection went off loads nothing and breaks nothing.
-    $on = static fn (string $item): bool => _stattic_injection_on($serving, $item);
-    // Preview tag artifacts stay capability-selected at the control plane (the
-    // preview token names a session, not a release); the production release is
-    // one module of this same response. It is compiled as one body that also
-    // carries Spacefast's own buttons (Remix, the chip, the bar), so it goes
-    // out while any of those items is on and never when all are off; which
-    // tags are inside is the control plane's to choose from the same plan.
-    $embeddedTagBody = $previewToken === null
+    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null;
+    // The token this response was selected by, carried onto the URLs it
+    // writes so they resolve against the same draft serving state.
+    $query = $previewToken === null ? '' : '?preview=' . rawurlencode($previewToken);
+    $config = [];
+
+    // Preview tag artifacts stay capability-selected at the control plane; the
+    // production release is one body of this same response, sent while any
+    // item it carries is on.
+    $config['tagBody'] = $previewToken === null
         && ($on('tags-dynamic') || $on('remix') || $on('referral-chip') || $on('space-bar'))
         ? _stattic_spacefast_sdk_tag_body($privateRoot, $serving)
         : '';
-    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : null;
-    // The token this response was selected by, carried onto the two URLs it
-    // writes so they resolve against the same draft serving state. It selects a
-    // tag release, never a surface (`_stattic_spacefast_preview_surface` owns
-    // that); its only other effect here is that the two new URLs, like this one,
-    // stay short-lived and revalidated instead of pinning immutably.
-    $query = $previewToken === null ? '' : '?preview=' . rawurlencode($previewToken);
-    $ui = _stattic_spacefast_collab_ui($serving);
-    // The Space bar replaces the collab overlay where the control plane
-    // projected it (only to engines with `runtime.space-bar.v1`) and the Space
-    // is private. A public Space keeps today's overlay: the bar is for people
-    // signed in to a Space they were let into, and the chunk checks who is
-    // signed in before it draws anything.
-    //
-    // This response is shared by every visitor, so it cannot know whether the
-    // bar will boot. client.js does: it boots the bar for a Spacefast account
-    // and loads this same overlay for anyone else (a share-link or password
-    // holder, a guest on a public path), so they keep Comments.
+
+    // Old outputs carry their own SDK tag: a tag-preview query or a visual
+    // review reloads sdk.js for that draft instead.
+    $reload = [];
+    if ($previewToken === null && $on('tag-preview')) {
+        $reload['preview'] = STATTIC_TAG_PREVIEW_QUERY_NAME;
+    }
+    // A visual review only ever opens an immutable version host.
+    if ($review === null && !empty($serving['immutable']) && $on('review')) {
+        $reload['review'] = true;
+    }
+    if ($reload !== []) {
+        $config['reload'] = $reload;
+    }
+
+    $scripts = [];
+    // Space Users' browser helper, `window.Spacefast.users`, defined by sdk.js.
+    if ($on('users-api') && ($serving['users']['enabled'] ?? false) === true) {
+        $config['users'] = true;
+    }
+    if ($on('zero-realtime') && ($serving['zero_generation'] ?? null) === 'v2') {
+        $scripts[] = ['src' => STATTIC_ZERO_V2_REALTIME_PATH];
+    }
+    $apiBase = _stattic_spacefast_sdk_api_base_url();
+    if ($previewToken !== null && $apiBase !== null && $spaceId !== null && $on('tag-preview')) {
+        $scripts[] = ['src' => $apiBase . '/v1/spaces/' . rawurlencode($spaceId) . '/tags/sdk.js'
+            . '?host=' . rawurlencode($pageHost) . '&preview=' . rawurlencode($previewToken)];
+    }
+    if ($review !== null && $collabBase !== null && $on('review')) {
+        // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
+        $review['spaceId'] = $spaceId;
+        $scripts[] = [
+            'src' => rtrim($collabBase, '/') . '/sdk/v1/review.js',
+            'module' => true,
+            'json' => ['id' => 'sf-visual-review', 'text' => (string) json_encode($review, JSON_UNESCAPED_SLASHES)],
+        ];
+    }
+    if ($scripts !== []) {
+        $config['scripts'] = $scripts;
+    }
+
+    $tracker = _stattic_spacefast_tracker_for_page($serving, $previewToken);
+    if ($tracker !== null) {
+        $config['tracker'] = [
+            'src' => $tracker['src'],
+            'site' => $tracker['key'],
+            'endpoint' => $tracker['endpoint'],
+            ...($tracker['wait'] ? ['wait' => true] : []),
+        ];
+    }
+
+    // Nothing to join costs the page zero collaboration bytes. `custom` gets
+    // the Space's look and nothing else: the page brought its own UI.
+    if (_stattic_spacefast_collab_available($serving, $overlay)) {
+        $ui = _stattic_spacefast_collab_ui($serving);
+        $config['collab'] = [
+            'theme' => STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query,
+            'config' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query,
+            ...($ui === 'default' && $collabBase !== null
+                ? ['module' => rtrim($collabBase, '/') . '/sdk/v1/collab.js']
+                : []),
+        ];
+    }
+
     $bar = $previewToken === null && $review === null
         ? _stattic_spacefast_bar_tried($serving, $requestHost)
         : null;
-    if ($bar !== null && $commentsAvailable) {
-        $bar['collab'] = [
-            'theme' => STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query,
-            'module' => $ui === 'default' && $collabBase !== null
-                ? rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js'
-                : null,
-            'config' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query,
+    if ($bar !== null && $collabBase !== null) {
+        require_once __DIR__ . '/share-oauth.php';
+        $config['bar'] = [
+            'frame' => $bar['frame'],
+            'dashboard' => $bar['dashboard'],
+            'module' => rtrim($collabBase, '/') . '/sdk/v1/bar.js',
+            // A Space anyone may open: only a browser with the returning-account
+            // marker asks the session, so a visitor without one costs nothing,
+            // and anyone it does not draw the frame for gets the mark: Sign in
+            // on this Space, and the Space on Spacefast.
+            ...(($bar['public'] ?? false) === true
+                ? [
+                    'public' => ['marker' => _stattic_returning_account_cookie_name() . '='],
+                    'mark' => [
+                        'links' => [],
+                        ...(_stattic_share_oauth_url($serving) !== null
+                            ? ['signIn' => STATTIC_SHARE_OAUTH_START_PATH]
+                            : []),
+                    ],
+                ]
+                : []),
         ];
     }
-    // On a Space anyone may open, the bar is for a browser that signed in
-    // here with an account, which carries the returning-account marker; every
-    // other visitor keeps today's tracker and overlay. The choice is made in
-    // the page from that one cookie, so this response stays one cached answer
-    // for everyone. client.js then asks the session (private, no-store) and
-    // draws the bar only if it says `bar`; otherwise it loads the overlay it
-    // was handed, so nobody gets both or neither.
-    $barOnlyWithMarker = $bar !== null && ($bar['public'] ?? false) === true;
-    if ($bar !== null && !$barOnlyWithMarker) {
-        $commentsAvailable = false;
+
+    if (count($config) > 1 || $config['tagBody'] !== '') {
+        require_once __DIR__ . '/../shared/brand.php';
+        $config['runtime'] = [
+            'live' => $previewToken === null
+                && !isset($_GET['review'])
+                && $review === null
+                && !_stattic_spacefast_preview_surface($serving),
+            'brand' => _stattic_brand()['name'],
+        ];
     }
-    // Nothing to join costs the page zero collaboration bytes: no stylesheet,
-    // no placeholder orb, no module loader, not even a disabled copy. `custom`
-    // gets the Space's look and nothing else — the page brought its own UI and
-    // the runtime stays out of it.
-    $collab = !$commentsAvailable ? '' : (
-        'if(root.collabLoader)return;root.collabLoader=true;' .
-        'var l=document.createElement("link");l.rel="stylesheet";l.href=' .
-        json_encode(STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query, JSON_UNESCAPED_SLASHES) . ';' .
-        'document.head.appendChild(l);' .
-        ($ui !== 'default' ? '' : (
-            _stattic_spacefast_sdk_placeholder_orb() .
-            'var o=document.createElement("script");' .
-            'o.async=true;o.type="module";' .
-            'o.src=' . json_encode(rtrim((string) $collabBase, '/') . '/sdk/v1/collab.js', JSON_UNESCAPED_SLASHES) . ';' .
-            'o.setAttribute("data-sf-config",' .
-            json_encode(STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query, JSON_UNESCAPED_SLASHES) . ');' .
-            // The placeholder orb stands in for an arriving overlay. When the
-            // module never arrives, remove it: a disc that pulses forever is a
-            // worse lie than no orb.
-            'o.onerror=function(){var e=new Error("Spacefast Comments module failed to load");console.error(e);var b=document.getElementById("sf-collab-boot-orb");if(b)b.remove();window.dispatchEvent(new CustomEvent("spacefast:collab-error",{detail:{stage:"module",message:e.message}}));};' .
-            'document.head.appendChild(o);'
-        ))
-    );
-    // A public, cached bootstrap uses the frame name only as a reload signal.
-    // The unique URL rechecks the HttpOnly proof before returning review code.
-    // The name contains no credential and cannot authorize a review.
-    $reviewReload = ($review !== null || !$on('review')) ? '' : (
-        'if(/^spacefast-review:[0-9a-f-]{36}$/.test(window.name)&&window.parent!==window){' .
-        'if(!root.reviewLoader){root.reviewLoader=true;var r=document.createElement("script");r.src=' . json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?review="+encodeURIComponent(window.name.slice(17));document.head.appendChild(r);}return;}'
-    );
-    // A preview session loads the draft tag release from the control plane
-    // instead of the published body. PHP knows every part of that URL, so the
-    // page gets it finished rather than assembling one.
-    $apiBase = _stattic_spacefast_sdk_api_base_url();
-    $tagLoader = ($previewToken === null || $apiBase === null || $spaceId === null || !$on('tag-preview')) ? '' : (
-        'if(!root.tagLoader){var t=document.createElement("script");t.async=true;t.src=' .
-        json_encode(
-            $apiBase . '/v1/spaces/' . rawurlencode($spaceId) . '/tags/sdk.js'
-                . '?host=' . rawurlencode($pageHost) . '&preview=' . rawurlencode($previewToken),
-            JSON_UNESCAPED_SLASHES
-        ) . ';' .
-        't.dataset.spacefastSdk="v1";root.tagLoader=t;document.head.appendChild(t);}'
-    );
-    // `window.Spacefast` is a private latch, not an API: it holds the
-    // "already loading" flags so a page carrying two SDK tags boots once. The
-    // engine relies on this: it adds its tag to every dynamic response without
-    // looking for one the page already has (shared/html-insert.php). Every
-    // side effect below is latched or idempotent; a new one must be too. The
-    // tracker goes before Comments, whose latch returns early, and whether or
-    // not Comments is on.
-    require_once __DIR__ . '/../shared/brand.php';
-    $runtimeContext = json_encode([
-        'live' => $previewToken === null
-            && !isset($_GET['review'])
-            && $review === null
-            && !_stattic_spacefast_preview_surface($serving),
-        'brand' => _stattic_brand()['name'],
-    ], JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
-    $modules = ($on('users-api') && ($serving['users']['enabled'] ?? false) === true ? _stattic_space_users_browser_script() : '') .
-        // Zero v2 live updates: the Cast transport registers with every Zero client on the page.
-        ($on('zero-realtime') && ($serving['zero_generation'] ?? null) === 'v2'
-            ? 'if(!root.zeroRealtime){root.zeroRealtime=true;var z=document.createElement("script");z.src=' . json_encode(STATTIC_ZERO_V2_REALTIME_PATH) . ';document.head.appendChild(z);}'
-            : '') .
-        $tagLoader .
-        ($bar === null
-            ? _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
-            : ($barOnlyWithMarker
-                ? _stattic_spacefast_bar_marker_guard(
-                    _stattic_spacefast_bar_loader(
-                        $bar,
-                        _stattic_spacefast_tracker_for_page($serving, $previewToken),
-                        _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
-                    ),
-                    _stattic_spacefast_tracker_loader($serving, $previewToken) . $collab
-                )
-                : _stattic_spacefast_bar_loader($bar, _stattic_spacefast_tracker_for_page($serving, $previewToken)) . $collab));
-    $reviewModule = '';
-    if ($review !== null && $collabBase !== null && $on('review')) {
-        $review['spaceId'] = $spaceId;
-        // No proof is exposed to publisher JavaScript. Only the verified bridge identity travels.
-        $reviewJson = json_encode($review, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG);
-        $reviewUrl = json_encode(rtrim($collabBase, '/') . '/sdk/v1/review.js', JSON_UNESCAPED_SLASHES);
-        $reviewModule = ';(function(){var root=window.Spacefast=window.Spacefast||{};if(root.reviewModule)return;root.reviewModule=true;var c=document.createElement("script");c.type="application/json";c.id="sf-visual-review";c.textContent=' . json_encode($reviewJson) . ';document.head.appendChild(c);var s=document.createElement("script");s.type="module";s.src=' . $reviewUrl . ';document.head.appendChild(s);})();';
-    }
-    // Old outputs can carry their own async SDK tag. Select a draft before
-    // either copy boots, even when the unqualified SDK came from an edge cache.
-    $previewRedirect = ($previewToken !== null || !$on('tag-preview')) ? '' : (
-        'var p=(new URLSearchParams(window.location&&window.location.search||"").get(' .
-        json_encode(STATTIC_TAG_PREVIEW_QUERY_NAME) . ')||"").trim();' .
-        'if(p){if(!root.tagPreviewLoader){root.tagPreviewLoader=true;var s=document.createElement("script");s.src=' .
-        json_encode(STATTIC_SPACEFAST_SDK_PATH) . '+"?preview="+encodeURIComponent(p);document.head.appendChild(s);}return;}'
-    );
-    if ($previewRedirect . $reviewReload . $modules . $reviewModule . $embeddedTagBody === '') {
-        return STATTIC_SPACEFAST_SDK_OFF;
-    }
-    $loader = '(function(){' .
-        'var root=window.Spacefast=window.Spacefast||{};' .
-        $reviewReload .
-        'root.runtime=' . $runtimeContext . ';' .
-        $modules .
-        '})();' . $reviewModule;
-    return '(function(){var root=window.Spacefast=window.Spacefast||{};' .
-        $previewRedirect . $loader .
-        ($embeddedTagBody !== '' ?
-            'if(!root.tagBodyStarted){root.tagBodyStarted=true;' . "\n" . $embeddedTagBody . "\n}" : '') .
-        '})();';
+    return $config;
 }
 
 /**
@@ -564,74 +560,7 @@ function _stattic_spacefast_bar_projection(array $serving): ?array
     ];
 }
 
-/**
- * The one platform tag: `client.js`, told where the bar's frame lives and, on
- * a live view, which tracker to start. client.js loads the bar chunk only for
- * a signed-in account, and adds the tracker itself: its bytes still come from
- * this host's `/__spacefast/t.js`, the Beacon copy, so the page always runs
- * the tracker Beacon's wire format expects. With Comments on, it is also told
- * the overlay's theme, module and manifest, which it loads for a visitor the
- * bar does not boot for. The tag carries the configuration; the loader then
- * dispatches `spacefast:boot`, which an already evaluated client.js waits
- * for, so the platform starts even on a page that imported client.js first.
- */
-function _stattic_spacefast_bar_loader(array $bar, ?array $tracker, string $onFailure = ''): string
-{
-    $data = static fn (string $key, string $value): string =>
-        'm.dataset.' . $key . '=' . json_encode($value, JSON_UNESCAPED_SLASHES) . ';';
-    return 'if(!root.barLoader){root.barLoader=true;root.trackerLoader=true;' .
-        'var m=document.createElement("script");m.type="module";' .
-        'm.src=' . json_encode(STATTIC_SPACE_CLIENT_PATH, JSON_UNESCAPED_SLASHES) . ';' .
-        $data('sfBarFrame', $bar['frame']) .
-        $data('sfBarDashboard', $bar['dashboard']) .
-        // A Space anyone may open: the bar shows only if the session says so.
-        (($bar['public'] ?? false) === true ? $data('sfBarPublic', '1') : '') .
-        ($tracker === null ? '' : (
-            $data('sfTracker', $tracker['src']) .
-            $data('sfTrackerSite', $tracker['key']) .
-            $data('sfTrackerEndpoint', $tracker['endpoint']) .
-            ($tracker['wait'] ? $data('sfTrackerConsent', 'wait') : '')
-        )) .
-        (!is_array($bar['collab'] ?? null) ? '' : (
-            $data('sfCollabTheme', $bar['collab']['theme']) .
-            $data('sfCollabConfig', $bar['collab']['config']) .
-            ($bar['collab']['module'] === null ? '' : $data('sfCollab', $bar['collab']['module']))
-        )) .
-        // On a public Space the marker branch left out today's tracker and
-        // overlay for client.js to start. If client.js can't load, start them
-        // as the page without the marker would, once, and the tracker only if
-        // no other SDK tag on the page inserted it already.
-        ($onFailure === '' ? '' :
-            'm.onerror=function(){if(root.barFallback)return;root.barFallback=true;' .
-            // The tracker goes in once per page: let the fallback insert it
-            // only if no tag on this page inserted it already.
-            'if(!root.trackerInserted)root.trackerLoader=false;(function(){' . $onFailure . '})();};') .
-        'document.head.appendChild(m);' .
-        // A page that imported client.js itself already evaluated it, and a
-        // module runs once per document, so the tag alone would start
-        // nothing. That module is listening for this event. Not there yet,
-        // the module boots itself when it evaluates and finds this tag.
-        'window.dispatchEvent(new CustomEvent("spacefast:boot"));}';
-}
 
-/**
- * The bar loader on a Space anyone may open: run it only in a browser that
- * holds the returning-account marker, which this engine sets when an account
- * signs in here and clears at sign-out; run `$otherwise` (today's tracker and
- * overlay) everywhere else. The marker names no one and grants nothing: it
- * only decides whether client.js asks the session, which decides the bar.
- * Each branch is a function body, so the overlay's early `return` stays in
- * its own branch.
- */
-function _stattic_spacefast_bar_marker_guard(string $barLoader, string $otherwise): string
-{
-    require_once __DIR__ . '/access-rules.php';
-    $marker = json_encode(_stattic_returning_account_cookie_name() . '=', JSON_UNESCAPED_SLASHES);
-    // A sandboxed frame throws on reading document.cookie: that reads as no
-    // marker, so the page keeps today's overlay.
-    return 'var signedIn=false;try{signedIn=(";"+document.cookie.replace(/\s+/g,"")).indexOf(";"+' . $marker . ')>=0;}catch(e){}' .
-        'if(signedIn){' . $barLoader . '}else{(function(){' . $otherwise . '})();}';
-}
 
 // Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
 // through this copy as it does from Beacon. It is how long the edge keeps a
@@ -682,32 +611,6 @@ function _stattic_spacefast_tracker_config(array $serving): ?array
     ];
 }
 
-/**
- * The tag that loads t.js, written by sdk.js. Only a visitor's view of the
- * live surface counts: a visual review, a preview token's draft and an
- * immutable version host write nothing. `data-endpoint` is set because the
- * tracker otherwise reports to the origin it was loaded from, which is this
- * host and not Beacon. `data-injected` makes it give way to a t.js tag the
- * author placed by hand, whose settings are the page's own. `data-consent`
- * is written only for a Space that waits for a grant.
- */
-function _stattic_spacefast_tracker_loader(array $serving, ?string $previewToken): string
-{
-    $tracker = _stattic_spacefast_tracker_for_page($serving, $previewToken);
-    if ($tracker === null) {
-        return '';
-    }
-    // `trackerInserted` records that this tag really went in, which a bar
-    // loader's failure fallback reads; `trackerLoader` also covers a bar
-    // loader that handed the tracker to client.js.
-    return 'if(!root.trackerLoader){root.trackerLoader=true;root.trackerInserted=true;' .
-        'var a=document.createElement("script");a.async=true;' .
-        'a.src=' . json_encode($tracker['src'], JSON_UNESCAPED_SLASHES) . ';' .
-        'a.dataset.site=' . json_encode($tracker['key'], JSON_UNESCAPED_SLASHES) . ';' .
-        'a.dataset.endpoint=' . json_encode($tracker['endpoint'], JSON_UNESCAPED_SLASHES) . ';' .
-        ($tracker['wait'] ? 'a.dataset.consent="wait";' : '') .
-        'a.dataset.injected="";document.head.appendChild(a);}';
-}
 
 // The tracker this page view counts with, or null: only a visitor's view of
 // the live surface counts.
@@ -918,37 +821,6 @@ function _stattic_spacefast_tracker_upstream(string $endpoint, ?bool &$noCache =
  * `restoreOrbPlacement` + `orbDockStyle`; a rejected stored value falls back to
  * the default bottom-right dock.
  */
-function _stattic_spacefast_sdk_placeholder_orb(): string
-{
-    // Kept in one place with the SDK's copy: runtime/tests/spacefast-sdk.test.ts
-    // pins this path against `ICON_PATHS.comment`.
-    $glyph = 'M6 4h12a2 2 0 012 2v7a2 2 0 01-2 2h-7l-4 4v-4H6a2 2 0 01-2-2V6a2 2 0 012-2z';
-    return 'try{' .
-        'var pr=JSON.parse(localStorage.getItem("spacefast:collab:orb-corner"))||{};' .
-        'var pe=/^(left|right|top|bottom)$/.test(pr.edge)?pr.edge:"right";' .
-        'var pa=pr.along>=0&&pr.along<=1?pr.along:1;' .
-        'var pi=pr.inset>=0&&isFinite(pr.inset)?pr.inset:16;' .
-        'var pv=pe=="left"||pe=="right";' .
-        'var ps=pv?innerHeight:innerWidth;' .
-        'var pc=Math.min(Math.max(pa*ps-22,16),Math.max(16,ps-60));' .
-        // A dark site is one whose body (or html) paints a dark background; a
-        // page that paints none is the browser's light canvas.
-        'var pd=false;try{var pg=function(el){var m=el&&getComputedStyle(el).backgroundColor.match(/[\d.]+/g);' .
-        'return m&&m.length>2&&!(m.length>3&&+m[3]<.1)?(.2126*m[0]+.7152*m[1]+.0722*m[2])/255:null};' .
-        'var pl=pg(document.body);if(pl===null)pl=pg(document.documentElement);pd=pl!==null&&pl<.5}catch(e){}' .
-        'var b=document.createElement("div");b.id="sf-collab-boot-orb";' .
-        'b.style.cssText="position:fixed;z-index:2147483000;width:44px;height:44px;border-radius:999px;' .
-        'pointer-events:none;display:grid;place-items:center;background:"+(pd?"#f4f4f6":"#1d1d22")+";' .
-        'box-shadow:0 2px 8px rgba(0,0,0,.12);"+' .
-        'pe+":"+pi+"px;"+(pv?"top:":"left:")+pc+"px";' .
-        'b.innerHTML=\'<style>@keyframes sf-boot-pulse{0%,100%{opacity:1}50%{opacity:.35}}</style>\'+' .
-        '\'<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="\'+' .
-        '(pd?"#16161b":"#ffffff")' .
-        '+\'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ' .
-        'style="animation:sf-boot-pulse 1.6s ease-in-out infinite"><path d="' . $glyph . '"/></svg>\';' .
-        '(document.body||document.documentElement).appendChild(b);' .
-        '}catch(e){}';
-}
 
 // The API base comes from configuration, and from nowhere else.
 //
@@ -1340,38 +1212,3 @@ function _stattic_send_spacefast_sdk_cors_headers(): void
     header('Timing-Allow-Origin: *', false);
 }
 
-/** Tiny same-origin integration for pages without a bundler. */
-function _stattic_space_users_browser_script(): string
-{
-    return <<<'JS'
-root.users={
-  getCurrentUser:async function(){
-    var r=await fetch('/__zero/auth/user',{credentials:'same-origin',cache:'no-store',redirect:'error'});
-    if(!r.ok)throw new Error('Account verification failed ('+r.status+').');
-    var a=(await r.json()).data;
-    if(a===null)return null;
-    if(!a||a.provider!=='space-users'||!a.isAuthenticated||!/^usr_[a-f0-9]{64}$/.test(a.userId)||typeof a.displayName!=='string')throw new Error('Invalid account response.');
-    return {id:a.userId,displayName:a.displayName};
-  },
-  signInWithGoogle:function(options){return this.signIn('google',options);},
-  signInWithGravatar:function(options){return this.signIn('gravatar',options);},
-  signInWithSpacefast:function(options){return this.signIn('spacefast',options);},
-  signIn:function(provider,options){
-    if(!['google','gravatar','spacefast'].includes(provider))throw new Error('Choose a supported sign-in method.');
-    var back=new URL(options&&options.returnTo||location.href,location.href);
-    if(back.origin!==location.origin)throw new Error('Return to a page on this app.');
-    var url=new URL('/__zero/auth/start',location.origin);
-    url.searchParams.set('provider',provider);url.searchParams.set('returnTo',back.href);location.assign(url.href);
-  },
-  signOut:async function(){
-    var r=await fetch('/__zero/auth/sign-out',{method:'POST',credentials:'same-origin',redirect:'error'});
-    if(!r.ok)throw new Error('Sign-out failed. Try again.');
-  },
-  fetch:function(input,options){
-    var url=new URL(input,location.href);
-    if(url.origin!==location.origin)throw new Error('Authenticated requests must use this app origin.');
-    return fetch(url,Object.assign({},options,{credentials:'same-origin',redirect:'error'}));
-  }
-};
-JS;
-}

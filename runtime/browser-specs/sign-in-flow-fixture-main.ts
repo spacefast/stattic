@@ -115,6 +115,7 @@ export async function main(): Promise<void> {
     { setRuntimeConnectAddressDependenciesForTests },
     { verifyCollaborationBearer },
     { parseCommentRoomKey },
+    { buildCdnModules },
     harness,
   ] = await Promise.all([
     import("../../apps/control-plane/src/app.ts"),
@@ -138,6 +139,7 @@ export async function main(): Promise<void> {
     import("../../apps/control-plane/src/runtime/runtime-connect-address.ts"),
     import("../../apps/control-plane/src/comments/mint.ts"),
     import("../../apps/control-plane/src/comments/rooms.ts"),
+    import("../../packages/space-client/scripts/browser.mjs"),
     import("../tests/harness.ts"),
   ]);
 
@@ -174,6 +176,7 @@ export async function main(): Promise<void> {
   const runtimes: Runtime[] = [];
   let listener: ReturnType<typeof Bun.serve> | undefined;
   let tlsDirectory: string | undefined;
+  let castSdkDirectory: string | undefined;
   let stopProxy: (() => void) | undefined;
   let controlPlane: ReturnType<typeof Bun.serve> | undefined;
   let control: ReturnType<typeof Bun.serve> | undefined;
@@ -205,6 +208,12 @@ export async function main(): Promise<void> {
         "TLS key",
         () => {
           if (tlsDirectory) rmSync(tlsDirectory, { recursive: true, force: true });
+        },
+      ],
+      [
+        "Cast SDK assets",
+        () => {
+          if (castSdkDirectory) rmSync(castSdkDirectory, { recursive: true, force: true });
         },
       ],
       ["control plane", () => controlPlane?.stop(true)],
@@ -326,6 +335,11 @@ export async function main(): Promise<void> {
       { preconnect: realFetch.preconnect },
     );
 
+    // Build the Cast CDN modules (`sdk/v1/bar.js`, `sdk/v1/client.js`, and their
+    // shared chunks) into a run-owned temp directory, matching Cast's own build.
+    castSdkDirectory = mkdtempSync(path.join(tmpdir(), "sign-in-flow-cast-sdk-"));
+    await buildCdnModules({ outdir: castSdkDirectory });
+
     // The TLS listener every browser and engine request for a production name
     // arrives at. Its port is known now, so the engines' proxy can name it.
     tlsDirectory = mkdtempSync(path.join(tmpdir(), "sign-in-flow-tls-"));
@@ -386,6 +400,27 @@ export async function main(): Promise<void> {
               "content-type": types.get(path.extname(file)) ?? "application/octet-stream",
             },
           });
+        }
+        if (
+          host === "cast.spacefast.com" &&
+          url.pathname.startsWith("/sdk/v1/") &&
+          castSdkDirectory
+        ) {
+          const file = url.pathname.slice("/sdk/v1/".length);
+          if (file && !file.includes("/") && !file.includes("..")) {
+            const candidate = path.join(castSdkDirectory, file);
+            if (existsSync(candidate) && statSync(candidate).isFile()) {
+              return new Response(Bun.file(candidate), {
+                headers: {
+                  "content-type":
+                    types.get(path.extname(candidate)) ?? "application/javascript; charset=utf-8",
+                  "access-control-allow-origin": "*",
+                  "cross-origin-resource-policy": "cross-origin",
+                },
+              });
+            }
+          }
+          return new Response("not found", { status: 404 });
         }
         if (runtimeFor(host)) {
           return globalThis.fetch(`https://${host}${url.pathname}${url.search}`, {

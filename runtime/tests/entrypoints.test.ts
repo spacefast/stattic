@@ -185,10 +185,12 @@ function _stattic_content_access_target(string $root, string $host): array {
 }
 `,
     );
-    copyFileSync(
-      path.resolve(import.meta.dir, "../engine/shared/content-admin.php"),
-      path.join(sharedRoot, "content-admin.php"),
-    );
+    for (const file of ["space-roles.generated.php", "space-roles.php", "content-admin.php"]) {
+      copyFileSync(
+        path.resolve(import.meta.dir, "../engine/shared", file),
+        path.join(sharedRoot, file),
+      );
+    }
     writeFileSync(
       path.join(sharedRoot, "wordpress-rest.php"),
       `<?php require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/wordpress-rest.php"))};`,

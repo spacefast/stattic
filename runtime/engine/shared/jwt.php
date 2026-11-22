@@ -628,11 +628,14 @@ function _stattic_visitor_verify(string $token, array $options): ?array
             return null;
         }
     }
+    // `spaceIdClaim => false`: a token bound to the Space only through `aud`
+    // (checked above), like the Terms acceptance. Every other lane also needs
+    // the explicit claim.
     $spaceId = is_string($options['spaceId'] ?? null) ? $options['spaceId'] : '';
     if (
         $spaceId === ''
-        || !is_string($claims['spaceId'] ?? null)
-        || !hash_equals($spaceId, $claims['spaceId'])
+        || (($options['spaceIdClaim'] ?? true) !== false
+            && (!is_string($claims['spaceId'] ?? null) || !hash_equals($spaceId, $claims['spaceId'])))
     ) {
         return null;
     }

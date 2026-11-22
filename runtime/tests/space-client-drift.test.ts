@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { buildSpaceClient } from "../../scripts/build-space-client.mjs";
 
-test("the served Space client and lazy modules are freshly built from the public package", async () => {
+test("the served sdk.js is freshly built from the public package, and is the only file", async () => {
   const result = await buildSpaceClient(false);
   const outputs = result.outputFiles;
   if (!outputs?.length) throw new Error("The Space client bundle was not generated.");

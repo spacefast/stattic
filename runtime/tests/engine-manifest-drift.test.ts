@@ -65,8 +65,6 @@ const BUILD_ARTIFACTS = new Set([
 // file by installer.php from the payload it extracts. Pin the shipped set here
 // so a new tree is a reviewed diff, with the script that produces each.
 const EXPECTED_TREES = {
-  // scripts/build-space-client.mjs emits content-hashed lazy browser modules.
-  "engine/runtime/space-client/chunks": "__spacefast/chunks",
   // runtime/identity/build.ts verifies and extracts the pinned Identity distribution.
   "wordpress/spacefast-identity": "wp-content/mu-plugins/spacefast-identity",
   // legacy/zero-0.8/dashboard/scripts/build.ts (the vendored Zero dashboard plugin)
@@ -80,7 +78,6 @@ const GENERATED_ROOTS = [
   ".turbo",
   "bin",
   "engine/vendor",
-  "engine/runtime/space-client/chunks",
   "wordpress/spacefast-identity",
   "wordpress/zero-dashboard",
 ];

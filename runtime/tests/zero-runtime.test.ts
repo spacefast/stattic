@@ -249,7 +249,17 @@ echo json_encode([
       route_name: "production",
       config: {
         ...publicAccessConfig({ mode: "website", site_title: "Zero Runtime" }),
-        sdk: { revision: "sdk-1", config: {} },
+        // Analytics on, so its pages carry the SDK tag.
+        sdk: {
+          revision: "sdk-1",
+          config: {
+            tracker: {
+              src: "/__spacefast/t.js",
+              endpoint: "https://beacon.example.test",
+              key: "pk",
+            },
+          },
+        },
       },
       production_hostnames: [HOST],
       noindex_production_hostnames: [],
@@ -994,6 +1004,54 @@ test("Zero identity uses the canonical access session (guest fallback, then memb
     expect(bearerMutation.status).toBe(200);
     const replayedBearerMutation = await get(idRuntime, host, "/__zero/run", bearerRequest);
     expect(replayedBearerMutation.status).toBe(403);
+
+    // A handoff that names a nonce finishes one browser's Sign in with
+    // Spacefast request and belongs to that callback alone. In the header lane
+    // and at `/__spacefast/in/` it is refused before its jti is spent: the
+    // same jti still redeems once afterwards.
+    const callbackClaims = {
+      sub: "member:mem_zero",
+      purpose: "handoff",
+      authorities: ["member:mem_zero"],
+      iss: "spacefast-api",
+      aud: "spc_zero_identity",
+      host,
+      spaceId: "spc_zero_identity",
+      generation: 1,
+      sid: "4".repeat(64),
+      iat: now,
+      nbf: now,
+      exp: now + 60,
+      jti: "jti_zero_callback_nonce",
+    };
+    const callbackToken = signEd25519Jwt(key.privateKey, issuer.kid, {
+      ...callbackClaims,
+      nonce: "callback-nonce-0123456789",
+    });
+    const nonceRequest = (bearer: string) => ({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-sf-authorization": `Bearer ${bearer}`,
+      },
+      body: JSON.stringify({ id: "mutation-nonce", op: "mutation.run", name: "updateProfile" }),
+    });
+    expect((await get(idRuntime, host, "/__zero/run", nonceRequest(callbackToken))).status).toBe(
+      403,
+    );
+    const nonceRedeem = await get(
+      idRuntime,
+      host,
+      `/__spacefast/in/${encodeURIComponent(callbackToken)}?return=/api/whoami`,
+    );
+    expect(nonceRedeem.headers.getSetCookie().join("\n")).not.toContain("=sfv2_");
+    const sameJti = await get(
+      idRuntime,
+      host,
+      "/__zero/run",
+      nonceRequest(signEd25519Jwt(key.privateKey, issuer.kid, callbackClaims)),
+    );
+    expect(sameJti.status).toBe(200);
 
     // The agent token is a different signed purpose: reusable until expiry,
     // not a handoff whose jti is consumed by its first request. Its issue time

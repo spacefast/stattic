@@ -1,11 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import path from "node:path";
 import { gzipSync } from "node:zlib";
 
 import { EGRESS_UNTRUSTED_MESSAGE } from "../../packages/common/src/contracts/egress.ts";
 import {
+  api,
   deploy,
   errorCode,
   finalizeRaw,
@@ -14,6 +17,7 @@ import {
   prependHostRoutes,
   redeemHandoff,
   readBlob,
+  RUNTIME_HTTP_API_BASE,
   type Runtime,
   sha256,
   signEd25519Jwt,
@@ -418,7 +422,20 @@ beforeAll(async () => {
     },
     activate: {
       route_name: "production",
-      config: { ...accessProjection(), sdk: { revision: "sdk-1", config: {} } },
+      // Analytics on, so its pages carry the SDK tag (a page with nothing on gets none).
+      config: {
+        ...accessProjection(),
+        sdk: {
+          revision: "sdk-1",
+          config: {
+            tracker: {
+              src: "/__spacefast/t.js",
+              endpoint: "https://beacon.example.test",
+              key: "pk",
+            },
+          },
+        },
+      },
       production_hostnames: [PUBLIC_HOST],
       version_hostnames: [],
       proxy_host_routes: [
@@ -585,6 +602,42 @@ describe("proxy shared-cache policy against a real PHP upstream path", () => {
     expect(identity.sub).toBeNull();
     expect(identity.grants).toBeNull();
     expect(admitted.headers.get("cache-control")).toBe(PROTECTED);
+  });
+
+  // The stale-box cutoff is enforced where every lane admits, so a proxied
+  // private path fails closed like a page; a public one keeps serving.
+  test("a box out of touch fails private proxied paths closed, on both proxy lanes", async () => {
+    const heartbeat = await api(rt, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", {
+      box_sync_lease: 10_800,
+    });
+    expect(heartbeat.status).toBe(200);
+    const staleAt = Math.floor(Date.now() / 1000) - 3660;
+    writeFileSync(
+      path.join(rt.storageRoot, "runtime/box-sync.json"),
+      `${JSON.stringify({ synced_at: staleAt, enforce_until: staleAt + 10_800 })}\n`,
+    );
+    try {
+      for (const host of [ACCESS_HOST, ACCESS_HOST_ROUTE]) {
+        const stale = await get(rt, host, "/access/token", {
+          headers: { cookie: accessCookie, origin: `https://${host}` },
+        });
+        expect(stale.status, host).toBe(503);
+        expect(stale.headers.get("retry-after"), host).toBe("60");
+        expect(stale.headers.get("x-spacefast-unavailable"), host).toBe("box_sync_stale");
+      }
+      const publicProxy = await get(rt, PUBLIC_HOST_ROUTE, "/upstream/public");
+      expect(publicProxy.status).toBe(200);
+    } finally {
+      // A fresh heartbeat brings the box back.
+      const fresh = await api(rt, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", {
+        box_sync_lease: 10_800,
+      });
+      expect(fresh.status).toBe(200);
+    }
+    const back = await get(rt, ACCESS_HOST, "/access/token", {
+      headers: { cookie: accessCookie, origin: `https://${ACCESS_HOST}` },
+    });
+    expect(back.status).toBe(200);
   });
 
   test("an unclaimed Space's proxy routes reach the trusted list only", async () => {

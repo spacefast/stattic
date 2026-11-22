@@ -232,9 +232,43 @@ function runSdk(
   return { head, body, events, window: fakeWindow };
 }
 
-/** `runSdk` with a `document.cookie`, for the bar's sign-in marker guard. */
-function runSdkWithCookie(source: string, options: { host: string; cookie: string }) {
-  return runSdk(source, { host: options.host, cookie: options.cookie });
+/**
+ * The config sdk.js boots from: the one JSON object the runtime appends to the
+ * static script (`window.Spacefast.boot(<config>)`). Null when the response is
+ * the "injection off" comment.
+ */
+const bootConfigSchema = z
+  .object({
+    reload: z.object({ preview: z.string().optional(), review: z.boolean().optional() }).optional(),
+    users: z.boolean().optional(),
+    tracker: z
+      .object({ src: z.string(), site: z.string(), endpoint: z.string() })
+      .loose()
+      .optional(),
+    collab: z
+      .object({ theme: z.string(), config: z.string(), module: z.string().optional() })
+      .optional(),
+    bar: z
+      .object({
+        frame: z.string(),
+        dashboard: z.string(),
+        module: z.string(),
+        public: z.object({ marker: z.string() }).optional(),
+        mark: z
+          .object({
+            links: z.array(z.object({ label: z.string(), href: z.string() })),
+            signIn: z.string().optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    scripts: z.array(z.object({ src: z.string() }).loose()).optional(),
+    runtime: z.object({ live: z.boolean(), brand: z.string() }).optional(),
+  })
+  .strict();
+function bootConfig(body: string) {
+  const call = body.match(/\nwindow\.Spacefast\.boot\((\{.*?\})(?:,function\(\)\{|\);)/s);
+  return call ? bootConfigSchema.parse(JSON.parse(call[1] ?? "{}")) : null;
 }
 
 function sessionRecords(runtime: Runtime, spaceId: string): string[] {
@@ -333,18 +367,14 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   });
   expect(response.status).toBe(200);
   const body = await response.text();
-  expect(body).toContain("window.Spacefast=window.Spacefast||{}");
-  // Comments are not available for this surface, so the response carries no
-  // Comments bytes at all: no theme stylesheet, no placeholder orb, no module
-  // loader. The permissions toggle is a byte budget, not a disabled flag.
-  expect(body).not.toContain("collab.css");
-  expect(body).not.toContain("collab.json");
-  expect(body).not.toContain("sf-collab-boot-orb");
-  expect(body).not.toContain("collab.js");
+  // Comments are not available for this surface, so the config names no
+  // Comments at all, and nothing about Cast's room or its ticket.
+  const booted = bootConfig(body);
+  expect(booted?.collab).toBeUndefined();
+  expect(booted?.users).toBe(true);
   expect(body).not.toContain("resource_key");
   expect(body).not.toContain("cast_ws_url");
   expect(body).not.toContain("comments/ticket");
-  expect(body).not.toContain("postMessage");
   const appended: Array<{
     async: boolean;
     dataset: Record<string, string>;
@@ -455,9 +485,8 @@ test("same-host Spacefast SDK route boots tags without exposing a Comments surfa
   // Comments lane could be consulted from the live site by anyone who appended
   // a query parameter. The manifest is where that verdict is now published.
   const previewSdk = await preview.text();
-  expect(previewSdk).toContain("preview=preview-token");
   // A draft is not a visit: a preview token loads no tracker.
-  expect(previewSdk).not.toContain(RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(bootConfig(previewSdk)?.tracker).toBeUndefined();
   const whitespaceWindow = { location: { search: "?spacefast_tag_preview=%20" } };
   Function("window", "document", body)(whitespaceWindow, fakeDocument);
   expect(Object.hasOwn(whitespaceWindow, "__embeddedTagRuns")).toBe(true);
@@ -1201,12 +1230,10 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   const bakedRemote = await get(runtime, "baked-local.site.test", "/__spacefast/sdk.js");
   expect(bakedRemote.status).toBe(200);
   const bakedBody = await bakedRemote.text();
-  // No Cast origin the visitor could reach means no Comments: nothing embedded,
-  // no placeholder orb, no module loader.
-  expect(bakedBody).not.toContain("collab.js");
-  expect(bakedBody).not.toContain("sf-collab-boot-orb");
+  // No Cast origin the visitor could reach means no Comments: nothing in the
+  // config, so no placeholder orb and no module loader.
+  expect(bootConfig(bakedBody)?.collab).toBeUndefined();
   expect(bakedBody).not.toContain("resource_baked_local");
-  expect(bakedBody).not.toContain("collab.css");
   expect(runSdk(bakedBody, { host: "baked-local.site.test" }).head).toEqual([]);
   // ...and the manifest reaches the SAME verdict. It has to: a `ui: "custom"`
   // client boots from this document alone and never sees the bootstrap, so a
@@ -2618,62 +2645,41 @@ test("sdk.js loads the Space bar only where the bar is projected and the Space i
       version_hostnames: [],
     },
   });
-  // What the page loads; with or without the sign-in marker it must be the
-  // same everywhere but a public Space whose engine offers the bar there.
+  // What this host's sdk.js boots from: one config, the same for everyone.
   const sdk = async () => {
     const response = await get(runtime, "bar.site.test", "/__spacefast/sdk.js");
     expect(response.status).toBe(200);
-    const source = await response.text();
-    const load = (cookie: string) =>
-      runSdk(source, { host: "bar.site.test", cookie }).head.map((node) => ({
-        src: node.src,
-        type: node.type,
-        dataset: { ...node.dataset },
-      }));
-    const plain = load("");
-    expect(load("spacefast_returning_dev=1")).toEqual(plain);
-    return plain;
+    return bootConfig(await response.text());
   };
 
   await activate("private", false);
   expect((await get(runtime, "bar.site.test", "/")).status).not.toBe(200);
-  // Private, no bar projected (an old engine's projection): today's tags,
-  // t.js and the collab overlay.
-  const today = (await sdk()).map((node) => node.src);
-  expect(today[0]).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
-  expect(today).toContain("https://cast.example.test/sdk/v1/collab.js");
+  // Private, no bar projected (an old engine's projection): the tracker and
+  // the Comments overlay, and no bar.
+  const today = await sdk();
+  expect(today?.tracker?.src).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
+  expect(today?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
+  expect(today?.bar).toBeUndefined();
 
-  // Private, bar projected: one tag, client.js, told where the frame is and
-  // which tracker to start. No collab overlay of its own, no separate t.js
-  // tag. sdk.js is one cached answer for every visitor, so it cannot know
-  // whether the bar boots: client.js boots it for an account and loads the
-  // overlay it is handed here for anyone else, so a share-link or password
-  // holder keeps Comments (packages/space-client/src/bar.test.ts).
+  // Private, bar projected: the bar's frame and its CDN module, beside the
+  // tracker and Comments. sdk.js decides in the page, from one session read,
+  // whether this visitor gets the frame or the standalone Comments, so a
+  // share-link or password holder keeps Comments.
   await activate("private", true);
-  expect(await sdk()).toEqual([
-    {
-      src: "/__spacefast/client.js",
-      type: "module",
-      dataset: {
-        sfBarFrame: bar.frame_url,
-        sfBarDashboard: bar.dashboard_url,
-        sfTracker: RUNTIME_TRACKER_SCRIPT_PATH,
-        sfTrackerSite: "pk_bar",
-        sfTrackerEndpoint: "https://beacon.example.test",
-        sfCollabTheme: "/__spacefast/collab.css",
-        sfCollabConfig: "/__spacefast/collab.json",
-        sfCollab: "https://cast.example.test/sdk/v1/collab.js",
-      },
-    },
-  ]);
+  const withBar = await sdk();
+  expect(withBar?.bar).toEqual({
+    frame: bar.frame_url,
+    dashboard: bar.dashboard_url,
+    module: "https://cast.example.test/sdk/v1/bar.js",
+  });
+  expect(withBar?.tracker?.site).toBe("pk_bar");
+  expect(withBar?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
 
-  // Public, bar projected: the bar never shows on a public Space, which keeps
-  // today's tags.
+  // Public, bar projected but not offered on public hosts: no bar there.
   await activate("public", true);
-  const open = (await sdk()).map((node) => node.src);
-  expect(open[0]).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
-  expect(open).toContain("https://cast.example.test/sdk/v1/collab.js");
-  expect(open).not.toContain("/__spacefast/client.js");
+  const open = await sdk();
+  expect(open?.bar).toBeUndefined();
+  expect(open?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
 });
 
 const sessionResponseSchema = z.object({ data: z.object({ bar: z.boolean().optional() }) });
@@ -2893,12 +2899,6 @@ test("on a public Space the bar loads only behind the sign-in marker, and only a
     expect(response.status).toBe(200);
     return { body: await response.text(), cacheControl: response.headers.get("cache-control") };
   };
-  // What the page adds to <head>, with and without the marker in document.cookie.
-  const loads = (source: string, cookie: string) => {
-    const { head } = runSdkWithCookie(source, { host, cookie });
-    return head.map((node) => node.src || node.href);
-  };
-
   // A member arriving from Manage on Spacefast: the handoff signs them in and
   // leaves the returning-account marker, which is all the next page load sees.
   const member = await sessionFor("member:mem_open_bar");
@@ -2912,74 +2912,47 @@ test("on a public Space the bar loads only behind the sign-in marker, and only a
     expect(await sdkFor(cookie)).toEqual(anonymous);
   }
   expect(anonymous.cacheControl).toContain("public");
-  // A sandboxed frame, whose cookies throw on read, is a page without one.
-  expect(
-    runSdk(anonymous.body, { host, cookieThrows: true }).head.map((node) => node.src || node.href),
-  ).toEqual(loads(anonymous.body, ""));
-  // Without the marker the page loads today's overlay and no bar code.
-  const withoutMarker = loads(anonymous.body, "");
-  expect(withoutMarker).toContain("https://cast.example.test/sdk/v1/collab.js");
-  expect(withoutMarker).not.toContain("/__spacefast/client.js");
-  // With it, client.js (told the Space is public) instead of the overlay,
-  // which client.js loads itself for anyone the session gives no bar.
-  const withMarker = runSdkWithCookie(anonymous.body, { host, cookie: marker }).head;
-  expect(withMarker.map((node) => node.src)).toEqual(["/__spacefast/client.js"]);
-  expect(withMarker[0]?.dataset).toMatchObject({
-    sfBarPublic: "1",
-    sfCollab: "https://cast.example.test/sdk/v1/collab.js",
-  });
-  // client.js fails to load (a network error, a blocked request): the page
-  // gets what it would have without the marker, the overlay, once.
-  const failing = runSdkWithCookie(anonymous.body, { host, cookie: marker });
-  const clientTag = failing.head[0];
-  expect(clientTag?.onerror).toBeDefined();
-  clientTag?.onerror?.();
-  clientTag?.onerror?.();
-  expect(failing.head.map((node) => node.src || node.href)).toEqual([
-    "/__spacefast/client.js",
-    ...withoutMarker,
-  ]);
-  // Two SDK tags on one page: the first ran before the marker existed and
-  // inserted the tracker and overlay; another tab then signed in, the second
-  // took the marker branch, and its client.js failed. The page keeps one
-  // tracker and one overlay.
-  const twoTags = runSdk(anonymous.body, { host, cookie: "", secondTagCookie: marker });
-  const secondClient = twoTags.head.find((node) => node.src === "/__spacefast/client.js");
-  expect(secondClient?.onerror).toBeDefined();
-  secondClient?.onerror?.();
-  expect(twoTags.head.map((node) => node.src || node.href)).toEqual([
-    ...withoutMarker,
-    "/__spacefast/client.js",
-  ]);
+  // The bar is offered here only behind the marker.
+  expect(bootConfig(anonymous.body)?.bar?.public).toEqual({ marker: "spacefast_returning_dev=" });
+  // Anyone the frame is not for gets the mark. This Space signs in through
+  // the older account lane, not Sign in with Spacefast, so the mark offers no
+  // Sign in of its own; it still leads to the Space on Spacefast.
+  expect(bootConfig(anonymous.body)?.bar?.mark).toEqual({ links: [] });
+
+  // The page, run: without the marker it never asks the session and loads
+  // the standalone Comments; with it, a member's session gets the bar module.
+  const page = (documentCookie: string, sessionCookie: string) =>
+    bootSdkInPage(anonymous.body, {
+      host,
+      documentCookie,
+      session: (path, fetchImpl) =>
+        fetchImpl(`${runtime.baseUrl}${runtimeHttpPath(path)}`, {
+          redirect: "manual",
+          headers: { Connection: "close", Host: host, cookie: sessionCookie },
+        }),
+    });
+  // No marker: no session read, and the mark (Comments load on its click),
+  // nothing from the CDN on load.
+  const withoutMarker = await page("", "");
+  expect(withoutMarker.sessionReads).toBe(0);
+  expect(withoutMarker.barState).toBe("anonymous_mark");
+  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v1/collab.js");
+  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v1/bar.js");
+  const memberPage = await page(member.documentCookie, member.cookie);
+  expect(memberPage.sessionReads).toBe(1);
+  expect(memberPage.added).toContain("https://cast.example.test/sdk/v1/bar.js");
+  expect(memberPage.added).not.toContain("https://cast.example.test/sdk/v1/collab.js");
+  expect(memberPage.barState).toBe("frame_booting");
 
   expect(member.body.data.bar).toBe(true);
   const stranger = await sessionFor("external:grant.grt_open_bar_public");
   expect(stranger.body.data.bar).toBe(false);
 
-  // A page that imports /__spacefast/client.js itself, before or after
-  // sdk.js runs, still gets the platform: client.js boots once either way.
-  // A marker-bearing stranger gets no bar, so the tracker tag and the
-  // standalone Comments are what the page must end up with.
-  for (const order of ["page import first", "sdk.js first"] as const) {
-    const booted = await bootClientInPage(anonymous.body, {
-      host,
-      documentCookie: stranger.documentCookie,
-      order,
-      session: (path, fetchImpl) =>
-        fetchImpl(`${runtime.baseUrl}${runtimeHttpPath(path)}`, {
-          redirect: "manual",
-          headers: { Connection: "close", Host: host, cookie: stranger.cookie },
-        }),
-    });
-    // The tracker started once, then the standalone Comments; one session
-    // read, and a later focus reads nothing more.
-    expect(booted.added, order).toEqual([
-      `https://${host}${RUNTIME_TRACKER_SCRIPT_PATH}`,
-      "https://cast.example.test/sdk/v1/collab.js",
-    ]);
-    expect(booted.sessionReads, order).toBe(1);
-    expect(booted.readsAfterFocus, order).toBe(1);
-  }
+  // A marker-bearing stranger: one session read, no frame, the mark.
+  const strangerPage = await page(stranger.documentCookie, stranger.cookie);
+  expect(strangerPage.sessionReads).toBe(1);
+  expect(strangerPage.added).toEqual([`https://${host}${RUNTIME_TRACKER_SCRIPT_PATH}`]);
+  expect(strangerPage.barState).toBe("anonymous_mark");
   // Signed in through the Space's own sign-in: the consent of a member
   // belongs; the consent of a stranger, projected only from the public Grant,
   // does not.
@@ -3010,117 +2983,69 @@ test("on a public Space the bar loads only behind the sign-in marker, and only a
     version_hostnames: [],
   });
   const off = await sdkFor();
-  // A signed-out visitor on the public host, and a browser with the marker,
-  // get today's overlay from that engine, and no bar.
-  for (const cookie of ["", marker]) {
-    const loaded = loads(off.body, cookie);
-    expect(loaded).toContain("https://cast.example.test/sdk/v1/collab.js");
-    expect(loaded).not.toContain("/__spacefast/client.js");
-  }
+  // That engine offers no bar on the public host, marker or not.
+  expect(bootConfig(off.body)?.bar).toBeUndefined();
+  expect(bootConfig(off.body)?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
 });
 
 /**
- * Runs sdk.js and the real client.js source in one happy-dom page, in the
- * given order, with the page's session read from the runtime. Returns the
- * script tags client.js added (beyond sdk.js's own module tag) and how many
- * session reads it made.
+ * Runs the served sdk.js in one happy-dom page, with the page's session read
+ * from the runtime. Returns the script URLs it added, how many session reads
+ * it made, and the bar machine's state (null with no bar on the page).
  */
-async function bootClientInPage(
+async function bootSdkInPage(
   sdkBody: string,
   options: {
     host: string;
     documentCookie: string;
-    order: "page import first" | "sdk.js first";
     session: (path: string, fetchImpl: typeof fetch) => Promise<Response>;
   },
 ) {
   const realFetch = globalThis.fetch;
-  // The page doesn't fetch script tags itself: the test evaluates client.js
-  // as the module that tag names. A fetch here would fail and fire the tag's
-  // load-failure fallback, which is not the case under test.
   const view = new Window({
     url: `https://${options.host}/`,
-    settings: { disableJavaScriptFileLoading: true, handleDisabledFileLoadingAsSuccess: true },
+    settings: {
+      enableJavaScriptEvaluation: true,
+      suppressInsecureJavaScriptEnvironmentWarning: true,
+      disableJavaScriptFileLoading: true,
+      handleDisabledFileLoadingAsSuccess: true,
+    },
   });
   for (const pair of options.documentCookie.split("; ").filter(Boolean)) {
     view.document.cookie = pair;
   }
   let sessionReads = 0;
-  const globals = {
-    window: view,
-    document: view.document,
-    location: view.location,
-    CustomEvent: view.CustomEvent,
-    // Listeners the module adds go to this page's window, which goes away
-    // with it, as a browser's would.
-    addEventListener: view.addEventListener.bind(view),
-    removeEventListener: view.removeEventListener.bind(view),
-    // The page's own fetch: a session read goes to the runtime, through the
-    // real fetch captured before the swap.
-    fetch: async (input: string | URL) => {
+  Object.defineProperty(view, "fetch", {
+    configurable: true,
+    value: async (input: string | URL) => {
       const url = new URL(String(input), `https://${options.host}/`);
-      if (url.pathname === "/__spacefast/access/session") sessionReads += 1;
+      if (url.pathname === "/__spacefast/session") sessionReads += 1;
       return options.session(url.pathname, realFetch);
     },
-  };
-  const saved = Object.keys(globals).map(
-    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
-  );
-  for (const [key, value] of Object.entries(globals)) {
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
+  });
   const scripts = () =>
     [...view.document.querySelectorAll("script")].map((script) => script.src).filter(Boolean);
   try {
-    // A fresh module instance per page: a browser evaluates a module once
-    // per document.
-    const importClient = () =>
-      import(`../../packages/space-client/src/index.ts?page=${randomUUID()}`);
-    if (options.order === "page import first") {
-      await importClient();
-      view.eval(sdkBody);
-    } else {
-      view.eval(sdkBody);
-      await importClient();
+    const script = view.document.createElement("script");
+    script.textContent = sdkBody;
+    view.document.head.appendChild(script);
+    // The boot reads the session (when it asks), then adds what it decided.
+    // Settled once it loaded a CDN module or drew the mark (which loads none).
+    const settled = () =>
+      scripts().some((src) => /\/sdk\/v1\/(?:collab|bar)\.js$/.test(src)) ||
+      view.document.querySelector("spacefast-bar[data-sf-bar]") !== null;
+    const deadline = Date.now() + 5_000;
+    while (!settled() && Date.now() < deadline) {
+      await new Promise((resolve) => view.setTimeout(resolve, 10));
     }
-    // sdk.js's own tag is first; whatever the boot adds follows it (the
-    // tracker can be in already, when the boot ran inside sdk.js).
-    const clientTag = `https://${options.host}/__spacefast/client.js`;
-    expect(scripts()[0]).toBe(clientTag);
-    // The boot starts the tracker, reads the session, then adds Comments:
-    // wait for the Comments tag. The timer only reports a boot that never came.
-    await new Promise<void>((resolve, reject) => {
-      const booted = () =>
-        sessionReads > 0 && scripts().some((src) => src.endsWith("/sdk/v1/collab.js"));
-      const observer = new view.MutationObserver(() => {
-        if (!booted()) return;
-        observer.disconnect();
-        clearTimeout(failure);
-        resolve();
-      });
-      const failure = setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(`client.js did not boot (${options.order})`));
-      }, 5_000);
-      observer.observe(view.document.head, { childList: true });
-      if (booted()) {
-        observer.disconnect();
-        clearTimeout(failure);
-        resolve();
-      }
-    });
-    const added = scripts().slice(1);
-    const reads = sessionReads;
-    // The window regains focus: a session client listening for it would read
-    // again here, synchronously starting its fetch.
-    view.dispatchEvent(new view.Event("focus"));
-    await view.happyDOM.waitUntilComplete();
-    return { sessionReads: reads, readsAfterFocus: sessionReads, added };
+    if (!settled()) throw new Error("sdk.js did not boot");
+    const bar = view.document.querySelector("spacefast-bar");
+    return {
+      added: scripts(),
+      sessionReads,
+      barState: bar instanceof view.HTMLElement ? (bar.dataset["sfBar"] ?? null) : null,
+    };
   } finally {
-    for (const [key, descriptor] of saved) {
-      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
-      else Reflect.deleteProperty(globalThis, key);
-    }
     await view.happyDOM.abort();
   }
 }
@@ -3182,7 +3107,12 @@ test("a routing rule cannot rewrite the reserved SDK route onto tenant bytes", a
   expect(sdk.status).toBe(200);
   const body = await sdk.text();
   expect(body).not.toContain(TENANT_MARKER);
-  expect(body).toContain("window.Spacefast=window.Spacefast||{}");
+  // The runtime's own answer: the platform script, booted with nothing but
+  // the tag-draft reload a baked tag may still need.
+  expect(bootConfig(body)).toEqual({
+    reload: { preview: "spacefast_tag_preview" },
+    runtime: { live: true, brand: "Spacefast" },
+  });
 
   // The same publish's ordinary rules are untouched: the fix reserves the
   // platform's own routes, it does not stop a Space routing itself.
@@ -3251,14 +3181,13 @@ test("sdk.js and t.js carry each module only while the plan has it on, per versi
   );
   const live = await sdk(host);
   expect(live).toContain(TAG_BODY);
-  expect(live).toContain("trackerLoader");
-  expect(live).not.toContain("spacefast-review:");
-  expect(live).not.toContain("spacefast_tag_preview");
-  expect(await sdk(host, "?preview=tok_plan")).not.toContain("/tags/sdk.js?host=");
+  expect(bootConfig(live)?.tracker?.site).toBe("pk_plan");
+  expect(bootConfig(live)?.reload).toBeUndefined();
+  expect(bootConfig(await sdk(host, "?preview=tok_plan"))?.scripts).toBeUndefined();
   // The tracker is live-only: a version host loads the tag body but no tracker.
   const version = await sdk(versionHost);
   expect(version).toContain(TAG_BODY);
-  expect(version).not.toContain("trackerLoader");
+  expect(bootConfig(version)?.tracker).toBeUndefined();
 
   // The served version's own entry wins over the default, on every host.
   await putRoute(
@@ -3287,9 +3216,89 @@ test("sdk.js and t.js carry each module only while the plan has it on, per versi
   await putRoute(runtime, "spc_plan", "production", routeBody(undefined));
   const legacy = await sdk(host);
   expect(legacy).toContain(TAG_BODY);
-  expect(legacy).toContain("trackerLoader");
-  expect(legacy).toContain("spacefast-review:");
-  expect(legacy).toContain("spacefast_tag_preview");
+  expect(bootConfig(legacy)?.tracker?.site).toBe("pk_plan");
+  // The live host offers only the tag-draft reload; a visual review only
+  // ever opens a version host, which offers both.
+  expect(bootConfig(legacy)?.reload).toEqual({ preview: "spacefast_tag_preview" });
+  expect(bootConfig(await sdk(versionHost))?.reload).toEqual({
+    preview: "spacefast_tag_preview",
+    review: true,
+  });
+});
+
+// A public live Space with nothing on: no Comments, no bar, no Remix, no
+// analytics, no tags. Its pages carry no Spacefast script at all.
+test("a default public live Space gets 0 bytes of Spacefast JavaScript", async () => {
+  const runtime = await startRuntime();
+  runtimes.push(runtime);
+  const host = "zero-bytes.site.test";
+  const versionHost = "zero-bytes--v1.site.test";
+  const config = publicAccessConfig(
+    { mode: "website", site_title: "Zero" },
+    "live_and_all_versions",
+  );
+  config.sdk = { revision: "sdk-zero", config: {} };
+  await deploy(runtime, {
+    spaceId: "spc_zero_bytes",
+    versionId: "ver_zero_bytes_1",
+    // A page the compiler could not decorate, so only the engine could add a tag.
+    files: { "index.html": "<html><head><title>Zero</title></head><h1>Zero</h1></html>\n" },
+    serving: {
+      config: {
+        inject: {
+          bodyEnd: ['<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>'],
+        },
+      },
+    },
+    activate: {
+      route_name: "production",
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [{ hostname: versionHost, version_id: "ver_zero_bytes_1" }],
+    },
+  });
+  const page = await (await get(runtime, host, "/")).text();
+  expect(page).toContain("<h1>Zero</h1>");
+  expect(page).not.toContain("<script");
+  // A page that still carries its own baked tag keeps its tag-draft reload,
+  // and nothing more.
+  const sdk = await get(runtime, host, "/__spacefast/sdk.js");
+  expect(bootConfig(await sdk.text())).toEqual({
+    reload: { preview: "spacefast_tag_preview" },
+    runtime: { live: true, brand: "Spacefast" },
+  });
+  // A visual review only ever opens a version host, and is known only in the
+  // browser: that page gets the tag, so the review layer can still load.
+  const versionPage = await (await get(runtime, versionHost, "/")).text();
+  expect(versionPage).toContain('src="/__spacefast/sdk.js"');
+  expect(
+    bootConfig(await (await get(runtime, versionHost, "/__spacefast/sdk.js")).text())?.reload,
+  ).toEqual({ preview: "spacefast_tag_preview", review: true });
+
+  // Turn analytics on and the same page gets the one tag.
+  config.sdk = {
+    revision: "sdk-zero-tracker",
+    config: {
+      tracker: {
+        src: RUNTIME_TRACKER_SCRIPT_PATH,
+        endpoint: "https://beacon.example.test",
+        key: "pk_zero",
+      },
+    },
+  };
+  await putRoute(runtime, "spc_zero_bytes", "production", {
+    version_id: "ver_zero_bytes_1",
+    config,
+    production_hostnames: [host],
+    noindex_production_hostnames: [],
+    version_hostnames: [{ hostname: versionHost, version_id: "ver_zero_bytes_1" }],
+  });
+  const tracked = await (await get(runtime, host, "/")).text();
+  expect(tracked).toContain('src="/__spacefast/sdk.js"');
+  expect(
+    bootConfig(await (await get(runtime, host, "/__spacefast/sdk.js")).text())?.tracker?.site,
+  ).toBe("pk_zero");
 });
 
 test("Comments boots only while the plan has it on", async () => {

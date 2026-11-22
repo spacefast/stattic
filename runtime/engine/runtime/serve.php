@@ -248,6 +248,19 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $serving = _stattic_v4_legacy_serving($spaceId, $versionId, $hostEntry, $overlay);
     $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
 
+    // A redirect host (`www.acme.com` -> `acme.com`) sends its visitor on
+    // before any navigation lane starts here: a sign-in begun on the redirect
+    // host would bind its cookies and callback to the host the visitor is
+    // about to leave. The callback itself never redirects; its code is bound
+    // to the host it was issued for.
+    if (in_array(_stattic_control_path_entry_handler($requestPath), STATTIC_REDIRECT_FIRST_HANDLERS, true)) {
+        $redirectFirst = _stattic_v4_match_host_route($hostRoutes, $requestPath, $requestMethod);
+        $redirectAction = is_array($redirectFirst) ? _stattic_matched_host_route_action($redirectFirst) : null;
+        if (is_array($redirectAction) && ($redirectAction['action'] ?? null) === 'redirect'
+            && (string) ($redirectFirst['location'] ?? '') === '/') {
+            _stattic_send_route_redirect($redirectAction, (string) ($redirectFirst['_remainder'] ?? '/'), true);
+        }
+    }
     // Must stay before route response headers are emitted: these exchange
     // responses own their headers.
     _stattic_dispatch_control_path($serving, $requestPath, $requestHost, $privateRoot);
@@ -532,6 +545,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
             $accessPath,
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
+        _stattic_access_enforce_preview_terms($serving, $requestHost);
     }
     if (!($storageRequest && !$storageContentEntry)
         && _stattic_released_cli_reads_version('admitted', $originalRequestPath)) {
@@ -1686,6 +1700,9 @@ function _stattic_v4_render_forbidden(string $pageId, string $code, string $mess
     exit;
 }
 
+// Navigation lanes a whole-host redirect answers first (see the call above).
+const STATTIC_REDIRECT_FIRST_HANDLERS = ['access_account_start', 'access_unlock', 'access_door', 'access_link_trampoline'];
+
 // The entry-stage rows of the control-path table, walked in table order. Only
 // paths the front door admitted reach here.
 function _stattic_dispatch_control_path(array $serving, string $requestPath, string $requestHost, string $privateRoot): void
@@ -1713,6 +1730,8 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         'access_session' => _stattic_access_handle_session($serving, $requestHost),
         'access_logout' => _stattic_access_handle_logout($requestHost),
         'access_password' => _stattic_access_handle_password($serving, $requestHost, $privateRoot),
+        'access_unlock' => _stattic_access_handle_unlock($serving, $requestHost, $privateRoot),
+        'access_link_trampoline' => _stattic_access_handle_link_trampoline(),
         'access_email' => _stattic_access_handle_email_verification($serving, $requestHost, $privateRoot),
         'access_request' => _stattic_access_handle_request_invite($serving, $requestHost, $privateRoot),
         'comments_exchange' => _stattic_comments_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),

@@ -887,6 +887,8 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'zero_generation' => $overlay['zero_generation'] ?? 'none',
         'zero_generation_set_at' => $overlay['zero_generation_set_at'] ?? null,
         'live_hostname' => $overlay['live_hostname'] ?? null,
+        // When the Space last went from public to private (unix seconds), or null.
+        'private_since' => is_int($overlay['private_since'] ?? null) ? $overlay['private_since'] : null,
         'projection_generation' => is_int($overlay['access_gen'] ?? null) ? $overlay['access_gen'] : null,
         'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
         'email' => is_array($overlay['email'] ?? null) ? $overlay['email'] : null,

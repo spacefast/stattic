@@ -204,8 +204,21 @@ if (!defined('DISALLOW_FILE_MODS')) {
 require_once $engineRoot . '/shared/zero-v2.php';
 $zeroUsers = ($request['operation'] ?? null) === 'rest.request' && is_string($request['path'] ?? null)
     && preg_match('#\A/wp-abilities/v1/abilities/zero/wp-users-(?:account-list|account-get|sessions-list|sessions-revoke|suspend|deletion-complete)/run(?:\?|\z)#', $request['path']) === 1;
-$zeroOverlay = $zeroUsers ? _stattic_zero_v2_space_overlay($privateRoot, $spaceId) : [];
+$zeroOverlay = _stattic_zero_v2_space_overlay($privateRoot, $spaceId);
+$typedPress = in_array(_stattic_zero_generation($zeroOverlay), ['v2', 'tp_v1'], true);
 $zeroUsers = $zeroUsers && _stattic_zero_generation($zeroOverlay) === 'v2';
+// On a TypedPress Space, a named WordPress ability runs inside the selected
+// app (with the Spacefast plugin), so the control plane can call the app's
+// abilities and `spacefast/runtime-report`. Every other REST path keeps the
+// site's content kernel, as before: the dashboard's managed-content editor
+// and released clients still use it. The Space Users lane above keeps its own
+// account rules.
+$tpAbility = null;
+if ($typedPress && !$zeroUsers && ($request['operation'] ?? null) === 'rest.request') {
+    require_once $engineRoot . '/wordpress/typedpress.php';
+    $tpAbility = spacefast_tp_bridge_ability($request['path'] ?? null);
+    if ($tpAbility !== null) $GLOBALS['SPACEFAST_TP_BRIDGE_ABILITY'] = $tpAbility;
+}
 if ($zeroUsers) {
     // Wherever the accounts are: while this Space still has any on the site
     // tables, its owner manages them there, on the content kernel's path, as
@@ -217,22 +230,34 @@ if ($zeroUsers) {
     }
     $zeroUsers = !$siteAccounts;
 }
-if ($zeroUsers) {
-    $zeroCurrent = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
-    $zeroVersion = is_array($zeroCurrent) ? ($zeroCurrent['version_id'] ?? null) : null;
+if ($zeroUsers || $tpAbility !== null) {
+    // An ability runs the live route's version: the last initialized build
+    // (zero-v2-current.json) may be a preview finalized after the live one,
+    // or the build a route rollback just left. The Users lane keeps reading
+    // the last initialized build, as on main.
+    if ($tpAbility !== null) {
+        $zeroVersion = $zeroOverlay['versions']['production'] ?? null;
+        if (is_string($zeroVersion) && _stattic_id_valid($zeroVersion)
+            && _stattic_zero_generation_refusal(_stattic_version_root($privateRoot, $spaceId, $zeroVersion), $zeroOverlay) !== null) {
+            $zeroVersion = null;
+        }
+    } else {
+        $zeroCurrent = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
+        $zeroVersion = is_array($zeroCurrent) ? ($zeroCurrent['version_id'] ?? null) : null;
+    }
     if (!is_string($zeroVersion) || !_stattic_id_valid($zeroVersion)
         || !_stattic_zero_v2_select($privateRoot, $spaceId, $zeroVersion, $zeroOverlay)) {
         _stattic_problem_response(503, 'content_zero_version_unavailable', 'The Space content service is not ready.');
     }
-    $GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] = true;
+    if ($zeroUsers) $GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] = true;
 }
 require $wpLoad;
-if ($zeroUsers) {
+if ($zeroUsers || $tpAbility !== null) {
     // The content kernel's REST serializer and its error type; a v2 binding loads no kernel.
     require_once $engineRoot . '/wordpress/content-error.php';
     require_once $engineRoot . '/wordpress/content-admin-api.php';
 }
-$handle = $zeroUsers ? 'spacefast_content_rest_dispatch' : 'spacefast_content_handle_request';
+$handle = $zeroUsers || $tpAbility !== null ? 'spacefast_content_rest_dispatch' : 'spacefast_content_handle_request';
 if (!function_exists($handle)) {
     _stattic_problem_response(503, 'content_kernel_unavailable', 'The Space content kernel is not ready.');
 }

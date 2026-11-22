@@ -438,7 +438,16 @@ return static function (array $loader): void {
                 // whether the request may proceed, and null is a normal answer:
                 // WordPress then serves REST unauthenticated, which on a public
                 // Space is exactly what it would do on its own.
-                $principal = !$restCookieAllowed && !$platformCredentialPresented
+                // A native WordPress request (admin-ajax.php, wp-admin) that
+                // changes something acts as the person only from this exact
+                // origin, the rule the REST door applies: a same-site page on
+                // another origin can send the Space's Lax cookie, never its
+                // Origin. Its own nonce checks still run.
+                $nativeUnsafeForeign = !$isRestRequest
+                    && !in_array(strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')), ['GET', 'HEAD', 'OPTIONS'], true)
+                    && function_exists('_stattic_access_same_origin_post')
+                    && !_stattic_access_same_origin_post($host);
+                $principal = (!$restCookieAllowed && !$platformCredentialPresented) || $nativeUnsafeForeign
                     ? null : _stattic_access_wordpress_principal(
                         $accessTarget['serving'],
                         $host,
@@ -447,6 +456,21 @@ return static function (array $loader): void {
                 if ($principal !== null) {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
                     $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];
+                }
+                if (in_array($accessTarget['serving']['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) {
+                    // The Space role the session holds, for the Spacefast
+                    // TypedPress plugin to lend on this request; the same
+                    // resolver the page lane runs (shared/typedpress.php).
+                    if ($principal !== null && !$nativeUnsafeForeign) {
+                        require_once $releaseRoot . '/engine/shared/typedpress.php';
+                        _stattic_typedpress_resolve_visitor($accessTarget['serving'], $host, $restAccessPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')));
+                    }
+                    // A response that needed a Grant or runs as a platform
+                    // principal leaves PHP private and out of the edge cache,
+                    // whatever the app's own handler sets.
+                    if (($principal !== null || !$accessTarget['open']) && function_exists('_stattic_authenticated_response')) {
+                        _stattic_authenticated_response(true);
+                    }
                 }
                 _stattic_content_admin_enter_wordpress(
                     $privateRoot,

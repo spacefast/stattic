@@ -193,6 +193,15 @@ const STATTIC_ACCESS_IN_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/in/';
 // still reach a new engine during a deploy, so this stays a thin alias of the
 // handoff half of `/__spacefast/in/`. See compat/old-engine.ts S12.
 const STATTIC_ACCESS_LEGACY_REDEEM_PATH = '/__sf/redeem';
+// The six canonical Space-host paths: `/__spacefast/sign-in`, `/callback`,
+// `/unlock`, `/session`, `/sdk.js`, and the `/__` share-link trampoline (the
+// token rides the fragment, `/__#sfl_…`, so no server, CDN log or Referer sees
+// it). Every older spelling below stays a thin alias of one of them: links,
+// CLIs and pages already in the wild keep working. The TS mirrors live in
+// packages/common/src/utils/runtime-paths.ts.
+const STATTIC_ACCESS_UNLOCK_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/unlock';
+const STATTIC_SPACE_SESSION_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/session';
+const STATTIC_ACCESS_LINK_TRAMPOLINE_PATH = '/__';
 const STATTIC_ACCESS_LOGOUT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/logout';
 const STATTIC_ACCESS_SESSION_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/session';
 const STATTIC_ACCESS_PASSWORD_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/access/password';
@@ -252,10 +261,10 @@ const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 // operation names are therefore never tool names on this route.
 const STATTIC_CONNECTORS_PATH_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/connectors/';
 const STATTIC_CONNECTORS_VISITOR_OPERATIONS = ['connect', 'callback', 'disconnect'];
-// The public browser client and its lazy collaboration modules contain no
-// Space data. Generated declarations belong to the published version.
+// The public browser client: a same-origin re-export of Cast's
+// `sdk/v1/client.js`, holding no Space data. Generated declarations belong to
+// the published version.
 const STATTIC_SPACE_CLIENT_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.js';
-const STATTIC_SPACE_CLIENT_CHUNKS_PREFIX = STATTIC_RUNTIME_NAMESPACE_PATH . '/chunks/';
 const STATTIC_SPACE_CLIENT_TYPES_URL_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/client.d.ts';
 
 // Runtime-owned files keep their existing physical layout inside a version.
@@ -1708,9 +1717,18 @@ function _stattic_runtime_bearer_token_from_request(): ?string
 
 // Authorization belongs to the customer's application and must reach Functions
 // unchanged, so Spacefast credentials use their own header.
+// `SF-Authorization` is the same header without the `X-` (RFC 6648); a client
+// may send either, and the `X-` spelling wins when both arrive. Both are
+// dropped from everything handed to authored code (upstream-relay.php).
 function _stattic_platform_bearer_token_from_request(): ?string
 {
-    return _stattic_bearer_token_from_header((string) ($_SERVER['HTTP_X_SF_AUTHORIZATION'] ?? ''));
+    foreach (['HTTP_X_SF_AUTHORIZATION', 'HTTP_SF_AUTHORIZATION'] as $key) {
+        $value = (string) ($_SERVER[$key] ?? '');
+        if (trim($value) !== '') {
+            return _stattic_bearer_token_from_header($value);
+        }
+    }
+    return null;
 }
 
 function _stattic_access_entry_token(string $requestPath): ?string
@@ -1961,7 +1979,7 @@ function _stattic_runtime_cors_headers(): void
 
     header('Access-Control-Allow-Origin: ' . $origin, false);
     header('Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS', false);
-    header('Access-Control-Allow-Headers: Authorization, X-SF-Authorization, Content-Type, Content-Length', false);
+    header('Access-Control-Allow-Headers: Authorization, X-SF-Authorization, SF-Authorization, Content-Type, Content-Length', false);
     header('Access-Control-Expose-Headers: ETag', false);
     header('Access-Control-Max-Age: 600', false);
     header('Vary: Origin', false);

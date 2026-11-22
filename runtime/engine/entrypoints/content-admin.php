@@ -27,6 +27,9 @@ if (
 }
 $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $launch['principal'];
 $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $launch['wordpress_role'];
+// The platform's editor session mints its own WordPress session for the row
+// it signs in; a TypedPress binding keeps the stock session store for it.
+$GLOBALS['SPACEFAST_CONTENT_ADMIN_LAUNCH'] = true;
 $publicRoot = dirname(_stattic_runtime_install_root($engineRoot));
 $wpLoad = $publicRoot . '/wp-load.php';
 if (!is_file($wpLoad)) {

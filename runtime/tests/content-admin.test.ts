@@ -319,33 +319,35 @@ echo json_encode([
   });
 });
 
-// A generated↔source parity guard: the grant→WordPress-role mapping has two
-// authors because the two lanes learn the capabilities at different moments
-// (see _stattic_wordpress_role_for_capabilities). Neither is generated from the
-// other, so this runs both over the same inputs and fails when they diverge.
-test("the runtime's grant→WordPress-role mapping matches the control plane's", async () => {
-  const { wordpressRoleForGrantCapabilities } =
-    await import("../../packages/common/src/contracts/principal-assertion.ts");
-  // Every capability alone, nothing at all, and the combinations where the
-  // precedence between them is the whole answer.
-  const cases = [
-    [],
-    ["page.view"],
-    ["comments.read"],
-    ["comments.write"],
-    ["content.publish"],
-    ["access.manage"],
-    ["page.view", "content.publish"],
-    ["page.view", "content.publish", "access.manage"],
-    ["comments.write", "content.publish"],
-    ["comments.write", "page.view"],
-  ] as const;
+// A parity guard: the grant→WordPress-role mapping has two callers because the
+// two lanes learn the capabilities at different moments (see
+// _stattic_wordpress_role_for_capabilities). Both read the one role table, the
+// PHP side through its generated copy, so this runs both over the same inputs
+// and fails when they diverge.
+test("the runtime's Space and WordPress roles match the control plane's for every capability set", async () => {
+  const [
+    { wordpressRoleForGrantCapabilities },
+    { accessRoleForCapabilities },
+    { GRANT_CAPABILITIES },
+  ] = await Promise.all([
+    import("../../packages/common/src/contracts/principal-assertion.ts"),
+    import("../../packages/common/src/contracts/access-core.ts"),
+    import("../../packages/common/src/contracts/grants-core.ts"),
+  ]);
+  // Every subset of the capabilities: the precedence between them is the
+  // whole answer, and there are only 2^5 of them.
+  const cases = Array.from({ length: 2 ** GRANT_CAPABILITIES.length }, (_, mask) =>
+    GRANT_CAPABILITIES.filter((_, bit) => (mask & (1 << bit)) !== 0),
+  );
 
   const script = String.raw`
 require $argv[1];
 $cases = json_decode($argv[2], true);
 echo json_encode(array_map(
-  static fn (array $capabilities): ?string => _stattic_wordpress_role_for_capabilities($capabilities),
+  static fn (array $capabilities): array => [
+    _stattic_space_role_for_capabilities($capabilities),
+    _stattic_wordpress_role_for_capabilities($capabilities),
+  ],
   $cases
 ));
 `;
@@ -360,7 +362,9 @@ echo json_encode(array_map(
     new Response(process.stderr).text(),
   ]);
   expect(exitCode, stderr).toBe(0);
-  expect(JSON.parse(stdout)).toEqual(cases.map((c) => wordpressRoleForGrantCapabilities(c)));
+  expect(JSON.parse(stdout)).toEqual(
+    cases.map((c) => [accessRoleForCapabilities(c), wordpressRoleForGrantCapabilities(c)]),
+  );
 });
 
 // The query spelling of REST (`/?rest_route=`) addresses the same resource as

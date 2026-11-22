@@ -225,12 +225,25 @@ function _stattic_replace_page_runtime_slot(string $html, string $name, string $
     return is_string($rendered) ? $rendered : $html;
 }
 
+/** Whether the projection says this Space's public details stay hidden here. */
+function _stattic_page_hides_space_brand(array $context): bool
+{
+    $serving = is_array($context['serving'] ?? null) ? $context['serving'] : [];
+    $preview = $serving['authorization']['accessPage']['publicPreview'] ?? null;
+    return is_array($preview) && ($preview['hideDetails'] ?? false) === true;
+}
+
 function _stattic_compose_page_artifact(string $html, string $pageId, array $context): string
 {
     $hasFragment = array_key_exists('fragment', $context) && is_string($context['fragment']);
     $fragment = $hasFragment ? $context['fragment'] : '';
     if ($pageId === 'denied' && $hasFragment) {
         return _stattic_replace_page_runtime_slot($html, 'denial', $fragment);
+    }
+    // A private Space whose public identity hides its details on private
+    // links: its gate names neither the Space nor its logo, only the address.
+    if (($pageId === 'access' || $pageId === 'denied') && _stattic_page_hides_space_brand($context)) {
+        $html = _stattic_replace_page_runtime_slot($html, 'space-brand', '');
     }
     if ($pageId === 'access' && $hasFragment) {
         // Custom templates place the blocks; the runtime owns their contents so

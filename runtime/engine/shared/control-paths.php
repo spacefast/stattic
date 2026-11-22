@@ -20,7 +20,17 @@ const SPACEFAST_CONTROL_PATHS = [
     // The Space's own server code answers here, after the access check; no
     // published file can, because uploads refuse every `__spacefast` segment.
     ['path' => STATTIC_SHARE_OAUTH_APP_CALLBACK_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => true, 'stage' => null, 'handler' => null],
+    // Canonical: the unlock card (GET) and its password form (POST), served on
+    // the Space's own hostname before any publisher HTML or JS runs.
+    ['path' => STATTIC_ACCESS_UNLOCK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_unlock'],
+    // Canonical: who is signed in here (GET), and signing out of this Space (DELETE).
+    ['path' => STATTIC_SPACE_SESSION_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_session'],
+    // Canonical: the share-link trampoline. `/__` alone; `/__/<token>` below
+    // is the older path form.
+    ['path' => STATTIC_ACCESS_LINK_TRAMPOLINE_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_link_trampoline'],
     ['path' => STATTIC_ACCESS_CLIENT_SCRIPT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_client_script'],
+    // Aliases of the canonical paths above, for pages, links and CLIs already
+    // in the wild.
     ['path' => STATTIC_ACCESS_ACCOUNT_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
     ['path' => STATTIC_ACCESS_SESSION_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_session'],
     ['path' => STATTIC_ACCESS_LOGOUT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_logout'],
@@ -55,7 +65,6 @@ const SPACEFAST_CONTROL_PATHS = [
     // AFTER the Space access check, so a page's data is exactly as private as
     // the page. Must precede the '/__spacefast' catch-all below.
     ['path' => STATTIC_SPACE_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'space_client'],
-    ['path' => STATTIC_SPACE_CLIENT_CHUNKS_PREFIX, 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'space_client'],
     ['path' => STATTIC_SPACE_CLIENT_TYPES_URL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
     ['path' => STATTIC_CONNECTORS_PATH_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_connectors_route', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
     ...STATTIC_LEGACY_ZERO_CONNECTOR_PATHS,

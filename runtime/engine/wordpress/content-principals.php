@@ -115,7 +115,9 @@ function spacefast_content_principal_user_authority(int $userId): ?array
 }
 
 /**
- * Find the WordPress user already established for an authority, or 0 for none.
+ * Find the WordPress user already established for an authority: its id, 0 for
+ * none, or -1 when a row holds this principal's link or login but another
+ * authority (or none), which no caller may adopt.
  * Read-only: the link option is the durable pointer, and a login-keyed lookup
  * recovers an insert that committed before its option did. Lets a caller decide
  * how to treat an existing row before ensure_user would find-or-create it.
@@ -134,11 +136,26 @@ function spacefast_content_principal_find_user(string $principalId, string $issu
         && hash_equals($subject, (string) ($link['subject'] ?? ''))
         ? (int) ($link['user_id'] ?? 0)
         : 0;
-    $user = $linkedUserId > 0 ? get_user_by('id', $linkedUserId) : false;
+    $linked = $linkedUserId > 0 ? get_user_by('id', $linkedUserId) : false;
+    $user = is_object($linked) ? $linked : get_user_by('login', 'spacefast_' . substr(hash('sha256', $principalId), 0, 32));
     if (!is_object($user)) {
-        $user = get_user_by('login', 'spacefast_' . substr(hash('sha256', $principalId), 0, 32));
+        return 0;
     }
-    return is_object($user) ? (int) ($user->ID ?? 0) : 0;
+    // A row is this principal's only when it says so. The link option names
+    // the issuer and subject (the platform writes it, also for an explicitly
+    // linked native account); a row found by the login alone must carry them
+    // in its own meta. A row stamped with another authority, or an app-local
+    // account that took the projection's login, is never adopted.
+    $userId = (int) ($user->ID ?? 0);
+    $authority = spacefast_content_principal_user_authority($userId);
+    $owned = $authority !== null
+        ? hash_equals($issuer, $authority['issuer']) && hash_equals($subject, $authority['subject'])
+        : is_object($linked);
+    if (!$owned) {
+        error_log('spacefast content principal row mismatch user=' . $userId);
+        return -1;
+    }
+    return $userId;
 }
 
 /**
@@ -185,8 +202,16 @@ function spacefast_content_principal_ensure_user_unlocked(array $identity, bool 
         (string) $identity['issuer'],
         (string) $identity['subject']
     );
+    // A row that holds this principal's login but not its authority stays
+    // what it is: nobody is projected rather than taking it over.
+    if ($existingId < 0) {
+        return 0;
+    }
     $user = $existingId > 0 ? get_user_by('id', $existingId) : false;
     if (!is_object($user)) {
+        // Marks the platform's own insert: the projection login is reserved
+        // for it (wordpress/typedpress.php).
+        $GLOBALS['SPACEFAST_TP_INSERTING_PRINCIPAL'] = true;
         $created = wp_insert_user([
             'user_login' => $login,
             'user_pass' => bin2hex(random_bytes(32)),
@@ -195,6 +220,7 @@ function spacefast_content_principal_ensure_user_unlocked(array $identity, bool 
             // Durable identity stores no authorization role.
             'role' => '',
         ]);
+        unset($GLOBALS['SPACEFAST_TP_INSERTING_PRINCIPAL']);
         if (function_exists('is_wp_error') && is_wp_error($created)) {
             $code = method_exists($created, 'get_error_code')
                 ? preg_replace('/[^A-Za-z0-9_.-]/', '', (string) $created->get_error_code())
@@ -303,16 +329,24 @@ function spacefast_content_principal_capabilities(
     return spacefast_content_principal_scope_capabilities($allCapabilities);
 }
 
+/**
+ * The one list of installation-wide capabilities no Space role conveys. Every
+ * Space shares one WordPress installation, and these gate work across it: their
+ * WordPress consumers (export.php, import.php, site-health.php, the
+ * personal-data tools, plugin and theme management) read and write with direct
+ * SQL that never passes through the Space scoping filters. Applied on every
+ * path that projects a Space role (this file) and to every TypedPress user
+ * (typedpress.php).
+ */
+const SPACEFAST_WORDPRESS_INSTALLATION_CAPABILITIES = ['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites', 'export', 'import', 'view_site_health_checks', 'export_others_personal_data', 'erase_others_personal_data', 'manage_privacy_options'];
+
 function spacefast_content_principal_scope_capabilities(array $capabilities): array
 {
     if (spacefast_content_space_id() === '') {
         return $capabilities;
     }
-    // A Space role conveys authority over this Space only. These capabilities
-    // gate installation-wide work, and their WordPress consumers (export.php,
-    // import.php, site-health.php, the personal-data tools) read and write with
-    // direct SQL that never passes through the Space scoping filters.
-    foreach (['manage_options', 'promote_users', 'create_users', 'delete_users', 'remove_users', 'activate_plugins', 'install_plugins', 'update_plugins', 'delete_plugins', 'edit_plugins', 'install_themes', 'update_themes', 'delete_themes', 'switch_themes', 'edit_themes', 'update_core', 'manage_network', 'manage_network_options', 'manage_network_plugins', 'manage_network_themes', 'manage_sites', 'create_sites', 'delete_sites', 'export', 'import', 'view_site_health_checks', 'export_others_personal_data', 'erase_others_personal_data', 'manage_privacy_options'] as $capability) {
+    // A Space role conveys authority over this Space only.
+    foreach (SPACEFAST_WORDPRESS_INSTALLATION_CAPABILITIES as $capability) {
         $capabilities[$capability] = false;
     }
     return $capabilities;

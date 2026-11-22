@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,10 +86,14 @@ process.env.AUTH_WPCOM_CLIENT_SECRET = "runtime-access-chain-test-secret";
 process.env.WP_CLOUD_API_TOKEN = "runtime-access-chain-test-token";
 process.env.WP_CLOUD_CLIENT_NAME = "runtime-access-chain-test";
 
-const [{ mintAuthorityToken }, { runtimeJwks }] = await Promise.all([
-  import("../../apps/control-plane/src/access/authorize.ts"),
-  import("../../apps/control-plane/src/runtime/auth.ts"),
-]);
+const [{ mintAuthorityToken }, { runtimeJwks }, unclaimedTerms, { signToken }, accessCore] =
+  await Promise.all([
+    import("../../apps/control-plane/src/access/authorize.ts"),
+    import("../../apps/control-plane/src/runtime/auth.ts"),
+    import("../../apps/control-plane/src/access/unclaimed-terms.ts"),
+    import("../../apps/control-plane/src/auth/token-signer.ts"),
+    import("../../packages/common/src/contracts/access-core.ts"),
+  ]);
 
 /**
  * The raw route config management compiles into the overlay's grant index. The
@@ -1161,6 +1165,95 @@ test("a link attached while everyone is signed out carries nothing from the sess
   expect((await page(owner, "/")).status).toBe(403);
 });
 
+test("a real-authority sign-in is capped at view and comment and ends by its session id", async () => {
+  const host = "chain-real.test";
+  const spaceId = "spc_chain_real";
+  const versionId = "ver_chain_real_1";
+  // The member holds a manager Grant on the whole Space; a second account
+  // holds the same, to show one ended session touches no other.
+  const config = (generation: number, endedSessions?: string[]) => {
+    const base = accessConfig(generation, 0);
+    const owner = base.authorization.grants[0];
+    if (!owner) throw new Error("owner fixture missing");
+    owner.capabilities = [
+      "page.view",
+      "comments.read",
+      "comments.write",
+      "content.publish",
+      "access.manage",
+    ];
+    return {
+      ...base,
+      authorization:
+        endedSessions === undefined ? base.authorization : { ...base.authorization, endedSessions },
+    };
+  };
+  await deploy(runtime, {
+    spaceId,
+    versionId,
+    files: { "index.html": "<h1>private</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: config(1),
+      production_hostnames: [host],
+      version_hostnames: [],
+    },
+  });
+  const capped = async (consent: string) => {
+    const sessionId = createHash("sha256").update(randomUUID()).digest("hex");
+    const consentAuthority =
+      `external:${createHash("sha256").update(`spacefast-share\0${consent}`).digest("hex")}` as const;
+    const token = (
+      await mintAuthorityToken({
+        sub: consentAuthority,
+        principal: `account:usr_${consent}`,
+        authorities: [consentAuthority],
+        spaceOrigin: {
+          authorities: [MEMBER],
+          capabilities: ["page.view", "comments.read", "comments.write"],
+        },
+        spaceId,
+        sessionId,
+        generation: 1,
+        sessionVersion: 0,
+        audience: host,
+        jti: `jti_${randomUUID()}`,
+      })
+    ).token;
+    const response = await redeemHandoff(runtime, host, token, "/");
+    expect(response.status).toBe(303);
+    const cookie =
+      response.headers
+        .getSetCookie()
+        .find((value) => value.startsWith("__Host-spacefast_session="))
+        ?.split(";")[0] ?? "";
+    expect(cookie).toContain("sfv2_");
+    return { sessionId, cookie };
+  };
+  const first = await capped("cns_first");
+  const second = await capped("cns_second");
+  const page = (cookie: string) => get(runtime, host, "/", { headers: { cookie } });
+  expect((await page(first.cookie)).status).toBe(200);
+  // A manager Grant behind a capped authority is not a manager on the
+  // Space's origin: the exposure fence, which needs access.manage, refuses it.
+  const fenced = config(1);
+  await putRoute(runtime, spaceId, "production", {
+    version_id: versionId,
+    config: { ...fenced, authorization: { ...fenced.authorization, fence: "exposure" } },
+  });
+  expect((await page(first.cookie)).status).toBe(403);
+  await putRoute(runtime, spaceId, "production", { version_id: versionId, config: config(1) });
+  expect((await page(first.cookie)).status).toBe(200);
+  // Ending the first sign-in by id ends it on the next request, with no
+  // Grant edit and no sign-out of everyone; the other session stays.
+  await putRoute(runtime, spaceId, "production", {
+    version_id: versionId,
+    config: config(1, [first.sessionId]),
+  });
+  expect((await page(first.cookie)).status).toBe(403);
+  expect((await page(second.cookie)).status).toBe(200);
+});
+
 test("a header handoff issued before everyone was signed out admits nothing", async () => {
   const host = "chain-header.test";
   const spaceId = "spc_chain_header";
@@ -1511,4 +1604,479 @@ test("a never-live Space admits its owner to a version host once its Space confi
   expect(served.status).toBe(200);
   expect(served.headers.get("cache-control")).toBe(PROTECTED);
   expect(await served.text()).toBe("<h1>private docs</h1>\n");
+});
+
+// A Space that lets accounts in and has a password: one card on its own host,
+// Continue with Spacefast on top. A returning account goes straight to
+// sign-in; a first visit tries one silent check and falls back to the card.
+test("the hybrid unlock card: returning accounts skip it, a first visit checks silently once", async () => {
+  const HYBRID_HOST = "hybrid-unlock.test";
+  const HYBRID_SPACE = "spc_hybrid_unlock";
+  const config = accessConfig(1, 0);
+  const owner = config.authorization.grants[0];
+  if (!owner) throw new Error("owner fixture missing");
+  // A password Grant beside the owner's: the projection shape is the same,
+  // only the audience differs.
+  const grants = [
+    owner,
+    {
+      ...owner,
+      id: "grt_hybrid_password",
+      audience: { kind: "password", credentialId: "pwd_hybrid" },
+    },
+  ];
+  await deploy(runtime, {
+    spaceId: HYBRID_SPACE,
+    versionId: "ver_hybrid_unlock",
+    files: { "index.html": "<h1>hybrid</h1>\n" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [HYBRID_HOST],
+      version_hostnames: [],
+      config: {
+        ...config,
+        authorization: {
+          ...config.authorization,
+          grants,
+          accessPage: {
+            ...config.authorization.accessPage,
+            displayName: "Hybrid Notes",
+            accountUrl: OAUTH_AUTHORIZE_URL,
+            issuer: OAUTH_ISSUER,
+          },
+        },
+      },
+    },
+  });
+  const navigate = { "sec-fetch-dest": "document" };
+  // First visit: one silent check, the card marked as tried.
+  const first = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2F", {
+    headers: navigate,
+  });
+  expect(first.status).toBe(302);
+  const silent = new URL(first.headers.get("location") ?? "");
+  expect(silent.origin + silent.pathname).toBe(OAUTH_AUTHORIZE_URL);
+  expect(silent.searchParams.get("prompt")).toBe("none");
+  // It comes back marked, in the URL: a browser that keeps no cookies gets
+  // the card on its return instead of another silent check.
+  expect(silent.searchParams.get("return")).toBe("/__spacefast/unlock?return=%2F&silent=tried");
+  const cookieless = await get(
+    runtime,
+    HYBRID_HOST,
+    "/__spacefast/unlock?return=%2F&silent=tried",
+    {
+      headers: navigate,
+    },
+  );
+  expect(cookieless.status).toBe(401);
+  expect(await cookieless.text()).toContain('name="password"');
+  const tried = first.headers
+    .getSetCookie()
+    .map((header) => header.split(";")[0] ?? "")
+    .join("; ");
+  expect(tried).toContain(`__Host-spacefast_unlock_tried_${HYBRID_SPACE}=1`);
+  // The fallback (or a refresh) renders the card instead of looping.
+  const card = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2F", {
+    headers: { ...navigate, cookie: tried },
+  });
+  expect(card.status).toBe(401);
+  const html = await card.text();
+  const spacefast = html.indexOf(">Continue with Spacefast</a>");
+  const password = html.indexOf('name="password"');
+  expect(spacefast).toBeGreaterThan(-1);
+  expect(password).toBeGreaterThan(spacefast);
+  expect(html).toContain("or enter password");
+  expect(html).toContain("<h1>Hybrid Notes</h1>");
+  // A browser an account signed in to before: straight to sign-in, no card.
+  const returning = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2Fdocs%2F", {
+    headers: { ...navigate, cookie: "__Host-spacefast_returning=1" },
+  });
+  expect(returning.status).toBe(302);
+  expect(returning.headers.get("location")).toBe("/__spacefast/sign-in?return=%2Fdocs%2F");
+  expect(returning.headers.get("referrer-policy")).toBe("no-referrer");
+  // Asking for the password itself draws the card, returning account or not.
+  const byPassword = await get(
+    runtime,
+    HYBRID_HOST,
+    "/__spacefast/unlock?return=%2Fdocs%2F&method=password",
+    { headers: { ...navigate, cookie: "__Host-spacefast_returning=1" } },
+  );
+  expect(byPassword.status).toBe(401);
+  const byPasswordHtml = await byPassword.text();
+  expect(byPasswordHtml).toContain('name="password"');
+  expect(byPasswordHtml).toContain('name="return" value="/docs/"');
+  // A script's fetch is never bounced off the host.
+  const fetched = await get(runtime, HYBRID_HOST, "/__spacefast/unlock", {
+    headers: { "sec-fetch-dest": "empty" },
+  });
+  expect(fetched.status).toBe(401);
+});
+
+// The box's sync watermark: a private page fails closed once the control
+// plane has not reached the box for over an hour; a public one keeps serving.
+test("a box out of touch for over an hour fails private pages closed and keeps public ones", async () => {
+  const PUBLIC_STALE_HOST = "public-stale.test";
+  const base = accessConfig(1, 0);
+  const anyone = base.authorization.grants[0];
+  if (!anyone) throw new Error("grant fixture missing");
+  const publicConfig = {
+    ...base,
+    authorization: {
+      ...base.authorization,
+      grants: [{ ...anyone, id: "grt_public_stale", audience: { kind: "public" } }],
+    },
+  };
+  await deploy(runtime, {
+    spaceId: "spc_public_stale",
+    versionId: "ver_public_stale",
+    files: { "index.html": "<h1>open</h1>\n" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [PUBLIC_STALE_HOST],
+      version_hostnames: [],
+      config: publicConfig,
+    },
+  });
+  const syncPath = path.join(runtime.storageRoot, "runtime/box-sync.json");
+  const lease = { box_sync_lease: 10_800 };
+  const beat = (scope: { box_sync_lease: number; iat?: number; exp?: number } = lease) =>
+    api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", scope);
+  const callback = await redeemHandoff(runtime, HOST, await mintCallbackToken(), "/");
+  const admitted = { cookie: (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "" };
+  const privateStatus = async () => (await get(runtime, HOST, "/", { headers: admitted })).status;
+  const staleAt = Math.floor(Date.now() / 1000) - 3660;
+  const writeWatermark = (value: Record<string, number>) =>
+    writeFileSync(syncPath, `${JSON.stringify(value)}\n`);
+
+  // An ordinary management write never arms the cutoff: only a heartbeat
+  // does, so a box nothing heartbeats can never trip on it.
+  rmSync(syncPath, { force: true });
+  await putRoute(runtime, "spc_public_stale", "production", {
+    version_id: "ver_public_stale",
+    config: publicConfig,
+    production_hostnames: [PUBLIC_STALE_HOST],
+    version_hostnames: [],
+  });
+  expect(existsSync(syncPath)).toBe(false);
+
+  const heartbeat = await beat();
+  expect(heartbeat.status).toBe(200);
+  const recorded = z
+    .object({
+      ok: z.literal(true),
+      synced_at: z.number(),
+      enforce_until: z.number(),
+      stale_after_seconds: z.literal(3600),
+    })
+    .parse(await heartbeat.json());
+  expect(Math.abs(recorded.synced_at - Date.now() / 1000)).toBeLessThan(120);
+  expect(recorded.enforce_until - recorded.synced_at).toBe(10_800);
+  expect(await privateStatus()).toBe(200);
+
+  // An hour and a minute without contact, inside the lease.
+  writeWatermark({ synced_at: staleAt, enforce_until: staleAt + 10_800 });
+  const stalePrivate = await get(runtime, HOST, "/", { headers: admitted });
+  expect(stalePrivate.status).toBe(503);
+  expect(stalePrivate.headers.get("retry-after")).toBe("60");
+  expect(stalePrivate.headers.get("x-spacefast-unavailable")).toBe("box_sync_stale");
+  expect(stalePrivate.headers.get("cache-control")).toBe("no-store");
+  const stalePublic = await get(runtime, PUBLIC_STALE_HOST, "/");
+  expect(stalePublic.status).toBe(200);
+  expect(await stalePublic.text()).toContain("open");
+
+  // A heartbeat signed long ago and delivered late is refused by its own
+  // timestamps, and neither moves the watermark back nor counts as contact.
+  const replayed = await beat({ ...lease, iat: staleAt - 10, exp: staleAt + 290 });
+  expect(replayed.status).toBe(401);
+  expect(await privateStatus()).toBe(503);
+  // A write stamped by a control plane that runs the sweep leaves it alone.
+  await putRoute(runtime, "spc_public_stale", "production", {
+    version_id: "ver_public_stale",
+    config: publicConfig,
+    production_hostnames: [PUBLIC_STALE_HOST],
+    version_hostnames: [],
+  });
+  expect(await privateStatus()).toBe(503);
+  expect((await beat()).status).toBe(200);
+  expect(await privateStatus()).toBe(200);
+
+  // Past its lease, a box nobody heartbeats serves again.
+  writeWatermark({ synced_at: staleAt - 10_800, enforce_until: staleAt - 60 });
+  expect(await privateStatus()).toBe(200);
+
+  // A write from a control plane without the sweep (a rollback) disarms the
+  // box at once, inside the lease.
+  writeWatermark({ synced_at: staleAt, enforce_until: staleAt + 10_800 });
+  expect(await privateStatus()).toBe(503);
+  const unstamped = await api(
+    runtime,
+    "PUT",
+    `${RUNTIME_HTTP_API_BASE}/spaces/spc_public_stale/routes/production`,
+    "update_route",
+    { space_id: "spc_public_stale", route_name: "production", box_sync: undefined },
+    {
+      version_id: "ver_public_stale",
+      config: publicConfig,
+      production_hostnames: [PUBLIC_STALE_HOST],
+      version_hostnames: [],
+    },
+  );
+  expect(unstamped.status).toBe(200);
+  expect(existsSync(syncPath)).toBe(false);
+  expect(await privateStatus()).toBe(200);
+});
+
+/** When the engine recorded this Space going private, from its live overlay. */
+function privateSince(spaceId: string): number | null {
+  const probe = Bun.spawnSync([
+    "php",
+    "-r",
+    `$p = json_decode(file_get_contents($argv[1] . '/space.json'), true);
+     $o = include $argv[1] . '/' . $p['overlay'];
+     echo json_encode($o['private_since'] ?? null);`,
+    spaceRoot(runtime, spaceId),
+  ]);
+  if (probe.exitCode !== 0) throw new Error(probe.stderr.toString());
+  return z.number().nullable().parse(JSON.parse(probe.stdout.toString()));
+}
+
+// A Space that goes from public to private: a browser arriving at the gate
+// afterwards is told to drop what it kept from the public pages. One that
+// stays private, or arrives with a session, is not.
+test("going private clears a returning browser's public copies, once the gate answers", async () => {
+  const host = "went-private.test";
+  const spaceId = "spc_went_private";
+  const publicConfig = {
+    ...accessConfig(1, 0),
+    public_exposure: {
+      v: 1,
+      public: true,
+      authorizationDigest: "0".repeat(64),
+      contentTypes: null,
+      externalProxy: false,
+      unmodeled: "",
+    },
+  };
+  const owner = publicConfig.authorization.grants[0];
+  if (!owner) throw new Error("grant fixture missing");
+  publicConfig.authorization = {
+    ...publicConfig.authorization,
+    grants: [{ ...owner, id: "grt_went_public", audience: { kind: "public" } }],
+  };
+  await deploy(runtime, {
+    spaceId,
+    versionId: "ver_went_private",
+    files: { "index.html": "<h1>was public</h1>\n" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [host],
+      version_hostnames: [],
+      config: publicConfig,
+    },
+  });
+  expect((await get(runtime, host, "/")).status).toBe(200);
+  const route = (config: ReturnType<typeof accessConfig>) =>
+    putRoute(runtime, spaceId, "production", {
+      version_id: "ver_went_private",
+      config,
+      production_hostnames: [host],
+      version_hostnames: [],
+    });
+  await route(accessConfig(2, 0));
+  const gate = await get(runtime, host, "/");
+  expect(gate.status).toBe(403);
+  expect(gate.headers.get("clear-site-data")).toBe('"cache", "storage"');
+  // Another sync while it stays private keeps the same switch time.
+  await route(accessConfig(3, 0));
+  expect((await get(runtime, host, "/")).headers.get("clear-site-data")).not.toBeNull();
+  // A private Space that never was public tells nobody anything.
+  expect((await get(runtime, HOST, "/")).headers.get("clear-site-data")).toBeNull();
+
+  // A platform fence on a public Space is a hold, not an access change: it
+  // never starts the clear, and lifting it doesn't either. The Space going
+  // private afterwards still does.
+  const fencedHost = "went-fenced.test";
+  const fencedSpace = "spc_went_fenced";
+  // What the control plane sends under an exposure fence: its descriptor
+  // says not public (runtime/public-exposure.ts) while the Grants are unchanged.
+  const fencedExposure = { ...publicConfig.public_exposure, public: false };
+  const fenced = {
+    ...publicConfig,
+    public_exposure: fencedExposure,
+    authorization: { ...publicConfig.authorization, fence: "exposure" },
+  };
+  const privateConfig = {
+    ...accessConfig(4, 0),
+    authorization: { ...accessConfig(4, 0).authorization },
+  };
+  await deploy(runtime, {
+    spaceId: fencedSpace,
+    versionId: "ver_went_fenced",
+    files: { "index.html": "<h1>public</h1>\n" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [fencedHost],
+      version_hostnames: [],
+      config: publicConfig,
+    },
+  });
+  const fencedRoute = (config: typeof publicConfig | ReturnType<typeof accessConfig>) =>
+    putRoute(runtime, fencedSpace, "production", {
+      version_id: "ver_went_fenced",
+      config,
+      production_hostnames: [fencedHost],
+      version_hostnames: [],
+    });
+  await fencedRoute(fenced);
+  const held = await get(runtime, fencedHost, "/");
+  expect(held.status).not.toBe(200);
+  expect(held.headers.get("clear-site-data")).toBeNull();
+  await fencedRoute(publicConfig);
+  const lifted = await get(runtime, fencedHost, "/");
+  expect(lifted.status).toBe(200);
+  expect(lifted.headers.get("clear-site-data")).toBeNull();
+  // A public Space with one private path, fenced and then unfenced: its
+  // gate answers on that path afterwards, and says nothing, because a fence
+  // never made the Space "not public".
+  const partlyPrivate = (fence: string) => ({
+    ...publicConfig,
+    public_exposure: fence === "none" ? publicConfig.public_exposure : fencedExposure,
+    authorization: {
+      ...publicConfig.authorization,
+      fence,
+      grants: [
+        ...publicConfig.authorization.grants.map((grant) => ({
+          ...grant,
+          resources: { include: ["/**"], exclude: ["/members/**"] },
+        })),
+        {
+          ...owner,
+          id: "grt_went_fenced_members",
+          resources: { include: ["/members/**"], exclude: [] },
+        },
+      ],
+    },
+  });
+  await fencedRoute(partlyPrivate("none"));
+  await fencedRoute(partlyPrivate("exposure"));
+  expect(privateSince(fencedSpace)).toBeNull();
+  await fencedRoute(partlyPrivate("none"));
+  const membersGate = await get(runtime, fencedHost, "/members/");
+  expect(membersGate.status).toBe(403);
+  expect(membersGate.headers.get("clear-site-data")).toBeNull();
+  // Fenced, then made private: going private is the change, so the week of
+  // clearing is counted from then. A fence never stamps a switch time.
+  await fencedRoute(fenced);
+  expect(privateSince(fencedSpace)).toBeNull();
+  await fencedRoute(privateConfig);
+  expect(privateSince(fencedSpace)).toEqual(expect.any(Number));
+  const wentPrivate = await get(runtime, fencedHost, "/");
+  expect(wentPrivate.status).toBe(403);
+  expect(wentPrivate.headers.get("clear-site-data")).toBe('"cache", "storage"');
+});
+
+// Nothing under Spacefast's own namespace can become a service worker.
+test("a service worker script from a reserved path is refused", async () => {
+  for (const path of ["/__spacefast/sdk.js", "/__spacefast/unlock", "/__"]) {
+    const worker = await get(runtime, HOST, path, { headers: { "service-worker": "script" } });
+    expect(worker.status, path).toBe(403);
+  }
+  // An ordinary request for the same path is answered as before.
+  expect((await get(runtime, HOST, "/__")).status).toBe(200);
+});
+
+// An unclaimed preview: a browser agrees to the current Terms once, on the
+// platform page. When the Terms version changes, it is asked again.
+test("an unclaimed preview asks each browser to agree to the current Terms, and again when they change", async () => {
+  const host = "terms-preview.test";
+  const spaceId = "spc_terms_preview";
+  const termsUrl = "https://api.spacefast.test/v1/spaces/spc_terms_preview/preview-terms";
+  const config = (version: string) => {
+    const base = accessConfig(1, 0);
+    const owner = base.authorization.grants[0];
+    if (!owner) throw new Error("grant fixture missing");
+    return {
+      ...base,
+      authorization: {
+        ...base.authorization,
+        spaceClaimed: false,
+        grants: [{ ...owner, id: "grt_terms_preview", audience: { kind: "public" } }],
+        accessPage: { ...base.authorization.accessPage, previewTerms: { url: termsUrl, version } },
+      },
+    };
+  };
+  await deploy(runtime, {
+    spaceId,
+    versionId: "ver_terms_preview",
+    files: { "index.html": "<h1>preview</h1>\n", "app.css": "h1{}\n" },
+    activate: {
+      route_name: "production",
+      production_hostnames: [host],
+      version_hostnames: [],
+      config: config(accessCore.UNCLAIMED_TERMS_VERSION),
+    },
+  });
+  const navigate = { "sec-fetch-dest": "document" };
+  const first = await get(runtime, host, "/docs?tab=2", { headers: navigate });
+  expect(first.status).toBe(302);
+  expect(first.headers.get("location")).toBe(`${termsUrl}?return=%2Fdocs%3Ftab%3D2&host=${host}`);
+  // A return too long for the Terms page comes back to the root instead.
+  const long = await get(runtime, host, `/docs?q=${"x".repeat(2100)}`, { headers: navigate });
+  expect(long.status).toBe(302);
+  expect(long.headers.get("location")).toBe(`${termsUrl}?return=%2F&host=${host}`);
+  // A subresource is never sent away.
+  expect((await get(runtime, host, "/app.css")).status).toBe(200);
+
+  // The Terms page comes back with the acceptance the control plane's own
+  // Terms page mints, under the current Terms.
+  const { UNCLAIMED_TERMS_VERSION } = accessCore;
+  const back = await get(
+    runtime,
+    host,
+    `/?sf_terms=${await unclaimedTerms.mintTermsAcceptanceToken({ spaceId, host, acceptanceId: `uta_${randomUUID()}` })}`,
+    { headers: navigate },
+  );
+  expect(back.status).toBe(303);
+  expect(back.headers.get("location")).toBe("/");
+  const cookie =
+    back.headers
+      .getSetCookie()
+      .find((line) => line.startsWith(`__Host-spacefast_terms_${spaceId}=`))
+      ?.split(";")[0] ?? "";
+  expect(cookie).not.toBe("");
+  expect((await get(runtime, host, "/", { headers: { ...navigate, cookie } })).status).toBe(200);
+
+  // An acceptance signed by the same key for older Terms remembers nothing.
+  const { token: stale } = await signToken(
+    { purpose: "terms-acceptance", issuer: "spacefast-api", audience: spaceId },
+    { host, termsVersion: "2025-01-01", jti: `uta_${randomUUID()}` },
+    { ttlSeconds: 120 },
+  );
+  expect(UNCLAIMED_TERMS_VERSION).not.toBe("2025-01-01");
+  const refused = await get(runtime, host, `/?sf_terms=${stale}`, { headers: navigate });
+  expect(refused.status).toBe(303);
+  expect(refused.headers.getSetCookie().some((line) => line.includes("spacefast_terms_"))).toBe(
+    false,
+  );
+  // Another Space's acceptance, from the real mint, remembers nothing either.
+  const elsewhere = await unclaimedTerms.mintTermsAcceptanceToken({
+    spaceId: "spc_other_preview",
+    host,
+    acceptanceId: `uta_${randomUUID()}`,
+  });
+  const crossSpace = await get(runtime, host, `/?sf_terms=${elsewhere}`, { headers: navigate });
+  expect(crossSpace.headers.getSetCookie().some((line) => line.includes("spacefast_terms_"))).toBe(
+    false,
+  );
+
+  // The Terms change: the same browser is asked again.
+  await putRoute(runtime, spaceId, "production", {
+    version_id: "ver_terms_preview",
+    config: config("2026-12-01"),
+    production_hostnames: [host],
+    version_hostnames: [],
+  });
+  const again = await get(runtime, host, "/", { headers: { ...navigate, cookie } });
+  expect(again.status).toBe(302);
+  expect(again.headers.get("location")).toBe(`${termsUrl}?return=%2F&host=${host}`);
 });

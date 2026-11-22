@@ -93,7 +93,11 @@ test("upload preflight is answered before compact-route parsing and authorizatio
   expect(response.status).toBe(204);
   expect(response.headers.get("access-control-allow-origin")).toBe("https://my.spacefast.com");
   expect(response.headers.get("access-control-allow-methods")).toContain("PUT");
-  expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+  // Both spellings of the platform credential header are allowed.
+  const allowed = (response.headers.get("access-control-allow-headers") ?? "").split(/,\s*/);
+  expect(allowed).toEqual(
+    expect.arrayContaining(["Authorization", "X-SF-Authorization", "SF-Authorization"]),
+  );
 });
 
 /** Raw `POST /spaces/{s}/versions` so a rejected manifest can be inspected. */

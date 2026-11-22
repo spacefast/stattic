@@ -3,6 +3,9 @@
     "bin/stattic-runtime",
     "engine-manifest.json",
     "engine/wordpress/space-users.php",
+    "engine/wordpress/typedpress.php",
+    "engine/wordpress/typedpress-session-tokens.php",
+    "engine/wordpress/space-role.php",
     "engine/runtime/space-users.php",
     "engine/admin/api.php",
     "engine/admin/auth.php",
@@ -38,7 +41,7 @@
     "engine/runtime/share-oauth.php",
     "engine/runtime/cli-invoke.php",
     "engine/runtime/connectors.php",
-    "engine/runtime/space-client/client.js",
+    "engine/runtime/space-client/sdk.js",
     "engine/runtime/content-page.php",
     "engine/runtime/crons.php",
     "engine/runtime/functions-artifacts.php",
@@ -59,6 +62,7 @@
     "engine/runtime/storage.php",
     "engine/runtime/zero.php",
     "engine/shared/admission.php",
+    "engine/shared/box-sync.php",
     "engine/shared/application-journal.php",
     "engine/shared/content-source-journal.php",
     "engine/shared/artifacts.php",
@@ -121,6 +125,8 @@
     "engine/wordpress/team-knowledge.php",
     "engine/wordpress/team-design-system.php",
     "engine/shared/design-upload.generated.php",
+    "engine/shared/space-roles.generated.php",
+    "engine/shared/space-roles.php",
     "engine/wordpress/content-admin-api.php",
     "engine/wordpress/content-error.php",
     "engine/wordpress/content-context.php",
@@ -165,10 +171,6 @@
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [
-    {
-      "source": "engine/runtime/space-client/chunks",
-      "path": "__spacefast/chunks"
-    },
     {
       "source": "wordpress/spacefast-identity",
       "path": "wp-content/mu-plugins/spacefast-identity"

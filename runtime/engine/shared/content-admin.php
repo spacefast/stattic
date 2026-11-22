@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/space-roles.php';
+
 const SPACEFAST_CONTENT_ADMIN_COOKIE = '__Host-spacefast_content_admin';
 const SPACEFAST_CONTENT_ADMIN_TICKET_TTL = 60;
 const SPACEFAST_CONTENT_ADMIN_SESSION_TTL = 3600;
@@ -198,10 +200,11 @@ function _stattic_content_wordpress_role(mixed $value): ?string
 /**
  * The runtime half of THE grant→WordPress-role mapping. The other half is
  * wordpressRoleForGrantCapabilities in
- * packages/common/src/contracts/principal-assertion.ts, and the two must change
- * together; runtime/tests/content-admin.test.ts runs them side by side.
+ * packages/common/src/contracts/principal-assertion.ts. Both read the one role
+ * table (shared/space-roles.generated.php is generated from it), and
+ * runtime/tests/content-admin.test.ts runs them side by side.
  *
- * Two authors exist because the two lanes learn the capabilities at different
+ * Two callers exist because the two lanes learn the capabilities at different
  * moments. The control plane knows them when it composes a principal assertion
  * for the content API and the editor launch. The WP API door has no control
  * plane in the request at all: the capabilities come from the Grant decision
@@ -209,16 +212,12 @@ function _stattic_content_wordpress_role(mixed $value): ?string
  */
 function _stattic_wordpress_role_for_capabilities(array $capabilities): ?string
 {
-    if (in_array('access.manage', $capabilities, true)) {
-        return 'administrator';
+    $role = _stattic_space_role_for_capabilities($capabilities);
+    $reads = in_array('page.view', $capabilities, true) || in_array('comments.read', $capabilities, true);
+    if (_stattic_space_role_rank($role) <= _stattic_space_role_rank('commenter') && !$reads) {
+        return null;
     }
-    if (in_array('content.publish', $capabilities, true)) {
-        return 'editor';
-    }
-    return in_array('page.view', $capabilities, true)
-        || in_array('comments.read', $capabilities, true)
-        ? 'subscriber'
-        : null;
+    return SPACEFAST_SPACE_ROLE_WORDPRESS_ROLES[$role];
 }
 
 function _stattic_content_admin_mint_ticket(

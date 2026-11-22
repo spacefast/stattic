@@ -254,11 +254,51 @@ function _stattic_html_head_anchor(string $html, bool $final, int $limit, array 
 // token, since sdk.js reads the draft from the page URL.
 function _stattic_spacefast_sdk_tag(array $serving, ?string $previewToken): string
 {
-    if (!_stattic_injection_on($serving, 'sdk-tag')) {
+    if (!_stattic_injection_on($serving, 'sdk-tag') || !_stattic_spacefast_sdk_needed($serving, $previewToken)) {
         return '';
     }
     $src = STATTIC_SPACEFAST_SDK_PATH . ($previewToken === null ? '' : '?preview=' . rawurlencode($previewToken));
     return '<script defer src="' . $src . '" data-spacefast-sdk="v1"></script>';
+}
+
+/**
+ * Whether this page has anything for `sdk.js` to do. A public live Space with
+ * Comments, the bar, Remix, the referral chip, analytics, tags and Space Users
+ * all off gets no tag from the engine at all: 0 bytes of Spacefast JavaScript.
+ * Read from the plan and the projection only, never from the page's visitor,
+ * so every visitor of a page gets the same bytes. A draft (`?preview=`) always
+ * needs it, and so does a page on an immutable version host while visual
+ * review is on: the review frame is only known in the browser (its window
+ * name), and it only ever opens a version host. A live page stays at 0 bytes.
+ */
+function _stattic_spacefast_sdk_needed(array $serving, ?string $previewToken): bool
+{
+    if ($previewToken !== null) {
+        return true;
+    }
+    if (!empty($serving['immutable']) && _stattic_injection_on($serving, 'review')) {
+        return true;
+    }
+    $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
+    $config = is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
+    $hasTagBody = is_string($sdk['body'] ?? null) || is_string($sdk['body_sha256'] ?? null);
+    $comments = is_array($config['comments'] ?? null) ? $config['comments'] : [];
+    $surface = empty($serving['immutable']) ? 'live' : 'preview';
+    foreach ([
+        'tags-dynamic' => $hasTagBody,
+        'remix' => $hasTagBody,
+        'referral-chip' => $hasTagBody,
+        'space-bar' => is_array($config['bar'] ?? null),
+        'tracker' => is_array($config['tracker'] ?? null),
+        'comments' => ($comments[$surface] ?? null) === true,
+        'users-api' => ($serving['users']['enabled'] ?? null) === true,
+        'zero-realtime' => ($serving['zero_generation'] ?? null) === 'v2',
+    ] as $item => $present) {
+        if ($present && _stattic_injection_on($serving, $item)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function _stattic_spacefast_tag_preview_token(string $requestMethod): ?string

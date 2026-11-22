@@ -1149,6 +1149,31 @@ function _stattic_runtime_overlay_public_exposure(array $config): ?array
     return $descriptor;
 }
 
+/**
+ * Whether any unbranched Public Grant opens a page, fences aside: the
+ * compiled public index (which already left out an unclaimed Space's config
+ * Grants), the same rule as the control plane's exposure descriptor
+ * (runtime/public-exposure.ts) without its fence term.
+ */
+function _stattic_runtime_access_rules_public(?array $grantIndex): bool
+{
+    $public = is_array($grantIndex['public'] ?? null) ? $grantIndex['public'] : [];
+    $compiled = [
+        ...(is_array($public['fallback'] ?? null) ? $public['fallback'] : []),
+        ...array_merge([], ...array_values(is_array($public['by_first_segment'] ?? null) ? $public['by_first_segment'] : [])),
+    ];
+    foreach ($compiled as $grant) {
+        if (
+            is_array($grant)
+            && in_array('page.view', is_array($grant['capabilities'] ?? null) ? $grant['capabilities'] : [], true)
+            && ($grant['target']['kind'] ?? null) !== 'branch'
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // `open` = "this Space can be served to everyone, for every host it answers on,
 // without loading access-rules.php at all". Two independent things must hold,
 // because either alone leaks:
@@ -1349,7 +1374,28 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
     // (packages/common runtimePublicExposureDescriptorSchema, v>=1, `public`);
     // absent or malformed means not public, which is the fail-closed answer.
     $open = _stattic_runtime_overlay_open($config, $authorization, $grantIndex, $fence, $versions);
+    // Whether the owner's access rules let anyone read it, whatever fence
+    // holds it now: a platform fence is a hold, not an access change, so
+    // setting or lifting one never starts the clear below. The same rule as
+    // the control plane's exposure descriptor (runtime/public-exposure.ts),
+    // without its fence term.
+    $publicNow = _stattic_runtime_access_rules_public($grantIndex);
+    // When the Space stopped being public: a browser that read it before keeps
+    // its public copies (HTTP cache, storage, a service worker) until told.
+    // For a while after, the gate tells it (`Clear-Site-Data`, access-rules.php).
+    $previousOverlay = _stattic_runtime_current_space_overlay($privateRoot, $spaceId);
+    $privateSince = null;
+    if (!$publicNow) {
+        $wasPublic = is_array($previousOverlay) && ($previousOverlay['public'] ?? null) === true;
+        $privateSince = $wasPublic
+            ? time()
+            : (is_array($previousOverlay) && is_int($previousOverlay['private_since'] ?? null)
+                ? $previousOverlay['private_since']
+                : null);
+    }
     _stattic_runtime_write_space_overlay($privateRoot, $spaceId, [
+        'public' => $publicNow,
+        'private_since' => $privateSince,
         'users' => $config['users'] ?? null,
         'usersProviderConfig' => $config['usersProviderConfig'] ?? null,
         'open' => $open,
@@ -1405,6 +1451,19 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         // plan, not what publish baked.
         'entitlements' => _stattic_runtime_stored_entitlements($privateRoot, $spaceId),
     ], $beforePublish);
+}
+
+/** The overlay space.json names now, or null when there is none to read. */
+function _stattic_runtime_current_space_overlay(string $privateRoot, string $spaceId): ?array
+{
+    $spaceRoot = _stattic_space_root($privateRoot, $spaceId);
+    $current = _stattic_runtime_read_json_strict($spaceRoot . '/space.json');
+    $name = is_array($current) && is_string($current['overlay'] ?? null) ? $current['overlay'] : null;
+    if ($name === null || !is_file($spaceRoot . '/' . $name)) {
+        return null;
+    }
+    $loaded = include $spaceRoot . '/' . $name;
+    return is_array($loaded) ? $loaded : null;
 }
 
 // The §4 swap protocol: write the content-addressed overlay -> include it back

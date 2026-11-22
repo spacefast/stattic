@@ -765,6 +765,23 @@ function _stattic_runtime_state_summary(string $privateRoot): array
     return ['routes_generation' => $generation, 'spaces' => $spaces];
 }
 
+/**
+ * `POST /heartbeat`: the control plane's periodic signed proof that it still
+ * reaches this box. The JWT verification (and the watermark and lease it
+ * records) already ran in the route runner; this only answers with them.
+ */
+function _stattic_runtime_heartbeat_route(string $privateRoot): void
+{
+    require_once __DIR__ . '/../shared/box-sync.php';
+    $recorded = _stattic_box_sync_read($privateRoot);
+    _stattic_json_response(200, [
+        'ok' => true,
+        'synced_at' => $recorded['synced_at'] ?? null,
+        'enforce_until' => $recorded['enforce_until'] ?? null,
+        'stale_after_seconds' => STATTIC_BOX_SYNC_STALE_SECONDS,
+    ]);
+}
+
 function _stattic_runtime_state_route(string $privateRoot): void
 {
     try {

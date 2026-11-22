@@ -155,7 +155,21 @@ test("declared icons select exact version bytes through runtime-safe URLs across
 test("runtime splices static inject placements and the one SDK tag into served HTML", async () => {
   const route = (versionId: string) => ({
     version_id: versionId,
-    config: { ...publicAccessConfig({ mode: "website" }), sdk: { revision: "sdk-1", config: {} } },
+    // Analytics on, so its pages have something for sdk.js to do; a page with
+    // nothing on gets no tag (spacefast-sdk.test.ts, 0 bytes).
+    config: {
+      ...publicAccessConfig({ mode: "website" }),
+      sdk: {
+        revision: "sdk-1",
+        config: {
+          tracker: {
+            src: RUNTIME_TRACKER_SCRIPT_PATH,
+            endpoint: "https://beacon.example.test",
+            key: "pk_html",
+          },
+        },
+      },
+    },
     production_hostnames: [HOST],
     noindex_production_hostnames: [],
     version_hostnames: [],
@@ -358,7 +372,7 @@ test("runtime splices static inject placements and the one SDK tag into served H
   expect(storedShared).toContain('<meta property="og:image" content="/share.png">');
   expect(await (await get(rt, HOST, "/shared")).text()).toBe(String(storedShared));
   // Omitting the opt-out restores SDK injection without changing image metadata.
-  await putRoute(rt, "spc_html_inject", "production", optedOut({ revision: "sdk-1", config: {} }));
+  await putRoute(rt, "spc_html_inject", "production", route("ver_html_inject_1"));
   expect(await (await get(rt, HOST, "/bare")).text()).toContain(`<head>${engineTag}`);
   const shared = await (await get(rt, HOST, "/shared")).text();
   expect(shared).toBe(String(storedShared));
@@ -789,7 +803,8 @@ function get_post_meta($id, $key, $single) { return ${JSON.stringify(SPACE)}; }
     }
     const sdkOn = await read(LIVE, "/__spacefast/sdk.js");
     expect(sdkOn.body).toContain(TAG_BODY);
-    expect(sdkOn.body).toContain("trackerLoader");
+    // The tracker is in the config sdk.js boots from.
+    expect(sdkOn.body).toMatch(/window\.Spacefast\.boot\(\{[^\n]*"tracker":\{/);
     expect((await read(LIVE, RUNTIME_TRACKER_SCRIPT_PATH)).body).toBe(beaconBody);
 
     for (const [source, sdk, fileOff] of [

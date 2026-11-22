@@ -510,9 +510,15 @@ add_action('rest_api_init', static function () {
       );
       const sdk = await get(rt, host, "/__spacefast/sdk.js");
       const sdkBody = await sdk.text();
+      // The transport is one of the scripts sdk.js boots with.
+      const booted = sdkBody.match(
+        /\nwindow\.Spacefast\.boot\((\{.*?\})(?:,function\(\)\{|\);)/s,
+      )?.[1];
       assert.ok(
-        sdkBody.includes(JSON.stringify("/__zero/realtime.js").replaceAll("/", "\\/")),
-        `v2 pages load the transport: ${sdk.status} ${sdkBody.slice(0, 600)}`,
+        (JSON.parse(booted ?? "{}").scripts ?? []).some(
+          (script: { src?: string }) => script.src === "/__zero/realtime.js",
+        ),
+        `v2 pages load the transport: ${sdk.status} ${booted ?? sdkBody.slice(-600)}`,
       );
       await checkEnvironment(host, `${space}/v2`);
       await checkEnvironment("zero-v2-proof--v1.test", `${space}/v1`);

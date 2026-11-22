@@ -55,6 +55,18 @@ $requestHost = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST']
 
 _stattic_dispatch_public_alias_entrypoint($engineRoot, $requestPath, $requestUri);
 
+// No service worker is ever installed from Spacefast's own namespace: a worker
+// script fetched from `/__spacefast/` (sdk.js, say) would get a scope over the
+// unlock card, sign-in and session routes. Browsers mark the fetch with
+// `Service-Worker: script`, and every reserved path refuses it.
+if (
+    strtolower(trim((string) ($_SERVER['HTTP_SERVICE_WORKER'] ?? ''))) === 'script'
+    && (_stattic_is_runtime_private_http_path($requestPath) || _stattic_path_is_reserved($requestPath))
+) {
+    require_once __DIR__ . '/shared/errors.php';
+    _stattic_deny_private_path();
+}
+
 if (_stattic_is_runtime_private_http_path($requestPath) && !_stattic_control_path_admits_visitor($requestPath)) {
     _stattic_deny_private_path();
 }

@@ -163,7 +163,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
   await trimButton.click();
   expect(await passwordInput.inputValue()).toBe(PASSWORD);
   const passwordResponsePromise = popup.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
+    (response) => new URL(response.url()).pathname === "/__spacefast/unlock",
   );
   await popup.getByRole("button", { name: "Continue", exact: true }).click();
   const passwordResponse = await passwordResponsePromise;
@@ -186,7 +186,7 @@ test("custom access page CSP permits its same-origin script and forms", async ()
     VERIFIED_EMAIL_PASSWORD,
   );
   const verifiedPasswordResponsePromise = verifiedEmailPage.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
+    (response) => new URL(response.url()).pathname === "/__spacefast/unlock",
   );
   await verifiedEmailPage.getByRole("button", { name: "Continue", exact: true }).click();
   const verifiedPasswordResponse = await verifiedPasswordResponsePromise;
@@ -300,7 +300,7 @@ test("production transitions render every locally reachable state with independe
     await context.clearCookies();
     await page.goto(fixture.defaultPageUrl);
     const sessionResponsePromise = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/__spacefast/access/password",
+      (response) => new URL(response.url()).pathname === "/__spacefast/unlock",
     );
     await page.locator('input[name="password"]').fill(PASSWORD);
     await page.getByRole("button", { name: "Continue", exact: true }).click();

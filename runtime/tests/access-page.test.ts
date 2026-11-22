@@ -763,7 +763,7 @@ beforeAll(async () => {
       // The built-in access page as finalize compiles it for a themed Space.
       "page-access-compiled": expandPageHtml(DEFAULT_PAGE_TEMPLATES.access, {
         page: "access",
-        theme: { accent: "#ff603d" },
+        theme: { accent: "#ff603d", name: "Acme Studio", logo: "https://acme.example/logo.png" },
       }),
     },
     serving: {
@@ -840,6 +840,353 @@ test("the Access session endpoint reports anonymous visitors before private-page
   );
 });
 
+// The canonical unlock card on the Space's own host: one card, a CSRF value
+// bound to this Space and host, and the same password exchange behind it.
+test("/__spacefast/unlock serves the card, checks its CSRF value, and enters through the handoff", async () => {
+  const card = await get(runtime, LANES_HOST, "/__spacefast/unlock?return=%2Fdocs%2F");
+  expect(card.status).toBe(401);
+  expect(card.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(card.headers.get("cache-control")).toBe("private, no-store");
+  expect(card.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+  const html = await card.text();
+  expect(html).toContain('action="/__spacefast/unlock"');
+  expect(html).toContain('name="return" value="/docs/"');
+  const csrf = html.match(/name="csrf" value="([a-f0-9]{32})"/)?.[1] ?? "";
+  expect(csrf).not.toBe("");
+  const csrfCookie =
+    card.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith(`__Host-spacefast_unlock_${LANES_SPACE}=`)) ?? "";
+  expect(csrfCookie).toContain("HttpOnly");
+  expect(csrfCookie).toContain("Secure");
+  expect(csrfCookie).not.toContain("Domain=");
+  const csrfPair = csrfCookie.split(";")[0] ?? "";
+
+  const post = (fields: Record<string, string>, cookie = csrfPair, host = LANES_HOST) =>
+    get(runtime, host, "/__spacefast/unlock", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: `https://${host}`,
+        cookie,
+      },
+      body: new URLSearchParams(fields),
+    });
+  // No CSRF value, a wrong one, or a cookie from no browser: refused before
+  // the password leaves this host.
+  const before = exchangeRequests.length;
+  expect((await post({ password: PASSWORD, return: "/docs/" })).status).toBe(403);
+  expect((await post({ password: PASSWORD, return: "/docs/", csrf: "0".repeat(32) })).status).toBe(
+    403,
+  );
+  expect((await post({ password: PASSWORD, return: "/docs/", csrf }, "")).status).toBe(403);
+  // The value is bound to this host: the same cookie on a sibling Space's
+  // host verifies nothing there.
+  expect(
+    (await post({ password: PASSWORD, return: "/docs/", csrf }, csrfPair, CHAIN_HOST)).status,
+  ).toBe(403);
+  expect(exchangeRequests.length).toBe(before);
+
+  const wrong = await post({ password: "nope", return: "/docs/", csrf });
+  expect(wrong.status).toBe(303);
+  // A failure lands back on the card, never on the page it guards.
+  expect(wrong.headers.get("location")).toBe(
+    "/__spacefast/unlock?return=%2Fdocs%2F&sf_access=invalid-password",
+  );
+
+  const submitted = await post({ password: PASSWORD, return: "/docs/", csrf });
+  expect(submitted.status).toBe(303);
+  const entry = new URL(submitted.headers.get("location") ?? "", `https://${LANES_HOST}`);
+  expect(entry.pathname.startsWith("/__spacefast/in/")).toBe(true);
+  const entered = await get(runtime, LANES_HOST, `${entry.pathname}${entry.search}`);
+  expect(entered.headers.get("location")).toBe("/docs/");
+  const cookie = sessionCookie(entered);
+  expect((await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } })).status).toBe(200);
+  // Already in: the card is a redirect to the page.
+  const again = await get(runtime, LANES_HOST, "/__spacefast/unlock?return=%2Fdocs%2F", {
+    headers: { cookie },
+  });
+  expect(again.status).toBe(303);
+  expect(again.headers.get("location")).toBe("/docs/");
+});
+
+test("a client-set CF-Connecting-IP never reaches the password exchange", async () => {
+  const card = await get(runtime, LANES_HOST, "/__spacefast/unlock");
+  const csrf = (await card.text()).match(/name="csrf" value="([a-f0-9]{32})"/)?.[1] ?? "";
+  const cookie =
+    card.headers
+      .getSetCookie()
+      .find((value) => value.startsWith(`__Host-spacefast_unlock_${LANES_SPACE}=`))
+      ?.split(";")[0] ?? "";
+  const before = exchangeRequests.length;
+  await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+      cookie,
+      "cf-connecting-ip": "203.0.113.7",
+    },
+    body: new URLSearchParams({ password: "nope", csrf }),
+  });
+  const call = exchangeRequests
+    .slice(before)
+    .find((request) => request.pathname === "/acquire/runtime-page/password");
+  // A client can set CF-Connecting-IP itself, so nothing of it reaches the
+  // control plane: the address the box itself saw is the only one it sends.
+  expect(call).toBeDefined();
+  expect(call?.headers["spacefast-visitor-edge-ip"]).toBeUndefined();
+  expect(call?.headers["spacefast-visitor-ip"]).not.toBe("203.0.113.7");
+});
+
+// `/__#<token>`: the token stays in the fragment. The trampoline is one
+// cacheable page for every link, and the token reaches the box only in a
+// same-origin POST body.
+test("the /__ trampoline is one cacheable page and the link lands through a POST", async () => {
+  const page = await get(runtime, LANES_HOST, "/__");
+  expect(page.status).toBe(200);
+  expect(page.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(page.headers.get("cache-control")).toBe(
+    "public, max-age=0, s-maxage=600, must-revalidate",
+  );
+  expect(page.headers.get("set-cookie")).toBeNull();
+  const csp = page.headers.get("content-security-policy") ?? "";
+  expect(csp).toContain("default-src 'none'");
+  expect(csp).toContain("form-action 'self'");
+  const body = await page.text();
+  expect(body).toContain('action="/__spacefast/unlock"');
+  // A second request for it is byte-identical: nothing about a link is in it.
+  expect(await (await get(runtime, LANES_HOST, "/__")).text()).toBe(body);
+
+  // Run the page the way a browser would, with a limited link: it scrubs the
+  // fragment and waits for a click; an unlimited one submits on its own.
+  const { Window } = await import("happy-dom");
+  const run = (hash: string) => {
+    const window = new Window({ url: `https://${LANES_HOST}/__${hash}` });
+    const submitted: string[] = [];
+    window.HTMLFormElement.prototype.submit = function (this: HTMLFormElement) {
+      submitted.push(String(new window.FormData(this).get("link")));
+    };
+    window.document.write(body.replace(/<script>[\s\S]*<\/script>/, ""));
+    const script = body.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+    // The page's own script, against this window's globals.
+    new Function("location", "history", "document", script)(
+      window.location,
+      window.history,
+      window.document,
+    );
+    return { window, submitted };
+  };
+  const unlimited = run(`#${LINK_TOKEN}`);
+  expect(unlimited.submitted).toEqual([LINK_TOKEN]);
+  expect(unlimited.window.location.hash).toBe("");
+  const limited = run(`#${LINK_TOKEN}!`);
+  expect(limited.submitted).toEqual([]);
+  expect(limited.window.document.getElementById("sf-link-continue")?.hidden).toBe(false);
+  expect(limited.window.location.hash).toBe("");
+  const broken = run("#nothing-here");
+  expect(broken.window.document.getElementById("sf-link-none")?.hidden).toBe(false);
+
+  // The POST the page makes: exchanged centrally, a session, the clean URL.
+  const landed = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ link: LINK_TOKEN }),
+  });
+  expect(landed.status).toBe(303);
+  expect(landed.headers.get("location")).toBe("/docs/");
+  expect(landed.headers.get("referrer-policy")).toBe("no-referrer");
+  const cookie = sessionCookie(landed);
+  expect((await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } })).status).toBe(200);
+  // From another site, nothing is exchanged.
+  const crossSite = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: "https://elsewhere.example",
+    },
+    body: new URLSearchParams({ link: LINK_TOKEN }),
+  });
+  expect(crossSite.status).toBe(403);
+  // A dead link goes to the card and says why.
+  const dead = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ link: `${LINK_PREFIX}not-a-real-link-0123456789` }),
+  });
+  expect(dead.headers.get("location")).toBe(
+    "/__spacefast/unlock?return=%2F&sf_access=link-invalid",
+  );
+});
+
+test("/__spacefast/session reads the session and DELETE signs out of this Space", async () => {
+  const anonymous = await get(runtime, LANES_HOST, "/__spacefast/session", {
+    headers: { cookie: `${RETURNING_MARKER}=1` },
+  });
+  expect(await anonymous.json()).toEqual({ data: { state: "anonymous" } });
+  // Anonymous here: the marker that asked is cleared.
+  expect(returningAccountSetCookie(anonymous)).toContain("Max-Age=0");
+  const options = await get(runtime, LANES_HOST, "/__spacefast/session", { method: "OPTIONS" });
+  expect(options.headers.get("allow")).toBe("GET, HEAD, DELETE, OPTIONS");
+
+  const entered = await landHandoff(
+    runtime,
+    LANES_HOST,
+    accountHandoff(LANES_HOST, LANES_SPACE, "link:lnk_page_share"),
+    "/docs/",
+  );
+  const cookie = sessionCookie(entered);
+  const signedIn = await get(runtime, LANES_HOST, "/__spacefast/session", { headers: { cookie } });
+  expect((await signedIn.json()).data.state).toBe("authenticated");
+  expect(returningAccountSetCookie(signedIn)).toBe("");
+
+  // From another origin: refused, and the session still opens the page.
+  const crossSite = await get(runtime, LANES_HOST, "/__spacefast/session", {
+    method: "DELETE",
+    headers: { cookie, origin: "https://elsewhere.example" },
+  });
+  expect(crossSite.status).toBe(403);
+  expect((await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } })).status).toBe(200);
+
+  const deleted = await get(runtime, LANES_HOST, "/__spacefast/session?return=%2Fdocs%2F", {
+    method: "DELETE",
+    headers: { cookie, origin: `https://${LANES_HOST}`, accept: "application/json" },
+  });
+  expect(deleted.status).toBe(200);
+  expect(await deleted.json()).toEqual({ data: { state: "anonymous", next: "/docs/" } });
+  expect(sessionCookie(deleted)).toBe("__Host-spacefast_session=");
+  // The session's record is gone, so its cookie is refused at its next
+  // revalidation wherever a copy survives.
+  expect(existsSync(sessionRecordPath(LANES_SPACE, cookie))).toBe(false);
+  // The older read path keeps its old answer: no DELETE there.
+  const legacy = await get(runtime, LANES_HOST, RUNTIME_ACCESS_SESSION_PATH, { method: "DELETE" });
+  expect(legacy.status).toBe(405);
+});
+
+// A link to a private page, unfurled in a chat app: a card with only the
+// public face the owner chose, never the page, its private name or its path.
+test("a known link unfurler gets a public-face card for a private page, everyone else the 403", async () => {
+  const slack = { "user-agent": "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)" };
+  type PublicPreview = {
+    title?: string;
+    description?: string;
+    image?: string;
+    hideDetails?: boolean;
+  };
+  const reactivate = (publicPreview: PublicPreview | null) =>
+    putRoute(runtime, LANES_SPACE, "production", {
+      version_id: LANES_VERSION,
+      config: accessConfig({
+        spaceId: LANES_SPACE,
+        grants: lanesGrants(),
+        accessPage:
+          publicPreview === null ? lanesAccessPage() : { ...lanesAccessPage(), publicPreview },
+      }),
+    });
+  try {
+    // No public face set: the hostname, and nothing of the Space's private name.
+    await reactivate(null);
+    const bare = await get(runtime, LANES_HOST, "/docs/secret-plan/", { headers: slack });
+    expect(bare.status).toBe(200);
+    expect(bare.headers.get("cache-control")).toBe("private, no-store");
+    expect(bare.headers.get("set-cookie")).toBeNull();
+    const bareHtml = await bare.text();
+    expect(bareHtml).toContain(`<meta property="og:title" content="${LANES_HOST}">`);
+    expect(bareHtml).not.toContain("Design Handbook");
+    expect(bareHtml).not.toContain("secret-plan");
+    expect(bareHtml).not.toContain("docs of");
+    expect(bareHtml).not.toContain("og:image");
+
+    await reactivate({
+      title: "Acme Briefing",
+      description: "Quarterly notes for the board.",
+      image: "/og.png",
+    });
+    const card = await (
+      await get(runtime, LANES_HOST, "/docs/", {
+        headers: { "user-agent": "Mozilla/5.0 (compatible; Discordbot/2.0)" },
+      })
+    ).text();
+    expect(card).toContain('<meta property="og:title" content="Acme Briefing">');
+    expect(card).toContain('content="Quarterly notes for the board."');
+    expect(card).toContain(`<meta property="og:image" content="https://${LANES_HOST}/og.png">`);
+
+    await reactivate({ title: "Acme Briefing", hideDetails: true });
+    const opaque = await (await get(runtime, LANES_HOST, "/docs/", { headers: slack })).text();
+    expect(opaque).toContain('content="Private Space on Spacefast"');
+    expect(opaque).not.toContain("Acme Briefing");
+
+    // A browser, or an unfurler carrying a session or a credential, keeps
+    // the ordinary answer.
+    expect((await get(runtime, LANES_HOST, "/docs/")).status).toBe(403);
+    expect(
+      (
+        await get(runtime, LANES_HOST, "/docs/", {
+          headers: { ...slack, "x-sf-authorization": "Bearer sfl_not-a-real-link-0123456789" },
+        })
+      ).status,
+    ).toBe(403);
+  } finally {
+    await reactivate(null);
+  }
+});
+
+// On a white-label host the card names the host's platform, never Spacefast.
+test("a white-label host's unfurl card names its own platform", async () => {
+  const branded = await startRuntime({
+    visitorScheme: "https",
+    env: {
+      SPACEFAST_INSECURE_COOKIES: "",
+      SPACEFAST_BRAND_JSON: JSON.stringify({ name: "Partner Cloud" }),
+    },
+  });
+  try {
+    await deploy(branded, {
+      spaceId: LANES_SPACE,
+      versionId: LANES_VERSION,
+      files: { "index.html": "<h1>private</h1>\n" },
+      activate: {
+        route_name: "production",
+        production_hostnames: [LANES_HOST],
+        version_hostnames: [],
+        config: accessConfig({
+          spaceId: LANES_SPACE,
+          grants: lanesGrants(),
+          accessPage: { ...lanesAccessPage(), publicPreview: { hideDetails: true } },
+        }),
+      },
+    });
+    const card = await (
+      await get(branded, LANES_HOST, "/docs/", {
+        headers: { "user-agent": "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)" },
+      })
+    ).text();
+    expect(card).toContain('<meta property="og:title" content="Private Space on Partner Cloud">');
+    expect(card).toContain('<meta property="og:site_name" content="Partner Cloud">');
+    expect(card).not.toContain("Spacefast");
+  } finally {
+    branded.stop();
+  }
+});
+
+test("SF-Authorization admits exactly like X-SF-Authorization", async () => {
+  const linked = await get(runtime, LANES_HOST, "/docs/", {
+    headers: { "sf-authorization": `Bearer ${LINK_TOKEN}` },
+  });
+  expect(linked.status).toBe(200);
+  expect(linked.headers.get("set-cookie")).toBeNull();
+  const refused = await get(runtime, LANES_HOST, "/docs/", {
+    headers: { "sf-authorization": "Bearer sfl_not-a-real-link-0123456789" },
+  });
+  expect(refused.status).toBe(403);
+});
+
 test("the deny surface renders the access page with every configured lane", async () => {
   const response = await get(runtime, LANES_HOST, "/docs/");
   expect(response.status).toBe(403);
@@ -857,7 +1204,9 @@ test("the deny surface renders the access page with every configured lane", asyn
   // projection that still names a connection gets no button for it.
   expect(html).not.toContain("Continue with Okta");
   expect(html).not.toContain("/identity/acn_okta/start");
-  expect(html).toContain('action="/__spacefast/access/password"');
+  // The gate posts to the canonical unlock lane, with this host's CSRF value.
+  expect(html).toContain('action="/__spacefast/unlock"');
+  expect(html).toMatch(/name="csrf" value="[a-f0-9]{32}"/);
   expect(html).toContain('name="password"');
   expect(html).toContain('type="submit">Request access<svg');
   const requestDetails = html.match(
@@ -879,7 +1228,7 @@ test("the deny surface renders the access page with every configured lane", asyn
   expect(door.status).toBe(403);
   expect(door.headers.get("cache-control")).toBe("private, no-store");
   const doorHtml = await door.text();
-  expect(doorHtml).toContain('action="/__spacefast/access/password"');
+  expect(doorHtml).toContain('action="/__spacefast/unlock"');
   expect(doorHtml).toContain('name="return" value="/docs/guide/"');
   expect(doorHtml).toContain(">Continue with Spacefast</a>");
   expect(doorHtml).not.toContain(`docs of ${LANES_SPACE}`);
@@ -1738,7 +2087,7 @@ test("a publisher access template keeps the working lane blocks", async () => {
   expect(rendered.status).toBe(403);
   const html = await rendered.text();
   expect(html).toContain("<h1>Acme gate</h1>");
-  expect(html).toContain('action="/__spacefast/access/password"');
+  expect(html).toContain('action="/__spacefast/unlock"');
   expect(html).not.toContain("<p>fallback</p>");
   expect(html).not.toContain("sf-runtime:access-lanes:start");
 
@@ -1757,6 +2106,46 @@ test("a publisher access template keeps the working lane blocks", async () => {
   expect(compiled).toContain(
     ".sf-access-lanes .sf-button:not(.sf-button-quiet){background:var(--sf-access-primary)",
   );
+  // Its colophon names the Space and shows its logo.
+  expect(compiled).toContain("<strong>Acme Studio</strong>");
+  expect(compiled).toContain('src="https://acme.example/logo.png"');
+});
+
+// Hidden on private links: the gate's colophon drops the Space's name and
+// logo too, as the door and link previews do.
+test("a gate hidden on private links names neither the Space nor its logo", async () => {
+  const route = (hidden: boolean) =>
+    putRoute(runtime, CUSTOM_SPACE, "production", {
+      version_id: CUSTOM_VERSION,
+      config: accessConfig({
+        spaceId: CUSTOM_SPACE,
+        grants: [grant("grt_page_custom_pw", { kind: "password", credentialId: "pwd_custom" })],
+        accessPage: {
+          displayName: hidden ? null : "Acme",
+          accountUrl: null,
+          connections: [],
+          exchange: {
+            passwordUrl: `${exchangeOrigin}/acquire/runtime-page/password`,
+            tokenUrl: `${exchangeOrigin}/acquire/runtime-page/token`,
+            emailUrl: `${exchangeOrigin}/acquire/runtime-page/email`,
+            requestUrl: `${exchangeOrigin}/acquire/runtime-page/request`,
+            logoutUrl: `${exchangeOrigin}/runtime/collaboration-sessions/revoke`,
+            credential: EXCHANGE_CREDENTIAL,
+          },
+          publicPreview: { hideDetails: hidden },
+        },
+      }),
+      production_hostnames: [CUSTOM_HOST],
+    });
+  try {
+    await route(true);
+    const hidden = await (await get(runtime, CUSTOM_HOST, "/compiled/")).text();
+    expect(hidden).toContain('action="/__spacefast/unlock"');
+    expect(hidden).not.toContain("Acme Studio");
+    expect(hidden).not.toContain("acme.example/logo.png");
+  } finally {
+    await route(false);
+  }
 });
 
 // The account lane: the control plane 303s a signed handoff straight at the

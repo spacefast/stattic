@@ -251,18 +251,16 @@ async function barFrame(page: Page): Promise<Frame> {
 const barRequests = () =>
   requests.filter(
     (url) =>
-      url.startsWith(`${fixture.accessOrigin}/bar/`) || /\/__spacefast\/chunks\/bar-/.test(url),
+      url.startsWith(`${fixture.accessOrigin}/bar/`) ||
+      /\/__spacefast\/chunks\/bar-/.test(url) ||
+      /\/sdk\/v1\/bar\.js(?:\?|$)/.test(url),
   );
 
 /** Signs in on the door the Space's sign-in sends a person to, as they would. */
 async function continueOnDoor(page: Page, button: RegExp) {
   await page.waitForURL(
-    (url) => url.origin === fixture.dashboardOrigin && url.pathname === "/sign-in",
+    (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/door/page",
   );
-  // The dashboard's cookie notice sits over the bottom of the door on a first
-  // visit; a person answers it before anything under it.
-  const notice = page.getByRole("button", { name: "Decline non-essential cookies" });
-  if (await notice.isVisible().catch(() => false)) await notice.click();
   const door = page.waitForResponse(
     (response) =>
       response.url() === `${fixture.apiOrigin}/v1/door` && response.request().method() === "POST",
@@ -362,7 +360,8 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
   });
 
   // 1. A signed-out visitor, and an anonymous visitor on a public Space, load
-  //    no bar code and make no bar request.
+  //    no bar frame/module and make no session or bar request; the public Space
+  //    draws only the zero-network anonymous mark.
   await checkpoint("1 signed-out and public visitors load no bar", async () => {
     const page = await context.newPage();
     await page.goto(docsUrl());
@@ -371,16 +370,23 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     expect(new URL((await signIn.getAttribute("href")) ?? "", docsUrl()).pathname).toBe(
       "/__spacefast/sign-in",
     );
+    const beforeOpen = requests.length;
     await page.goto(openUrl());
     await expectUi(page.getByRole("heading", { name: "flow-open home" })).toBeVisible();
     await page.waitForLoadState("networkidle");
     expect(barRequests()).toEqual([]);
-    expect(await page.locator("spacefast-bar").count()).toBe(0);
+    expect(
+      requests.slice(beforeOpen).filter((url) => new URL(url).pathname === "/__spacefast/session"),
+    ).toEqual([]);
+    expect(
+      page.frames().filter((frame) => frame.url().startsWith(`${fixture.accessOrigin}/bar/`)),
+    ).toEqual([]);
+    await expectUi(page.locator('spacefast-bar[data-sf-bar="anonymous_mark"]')).toHaveCount(1);
     await page.close();
   });
 
   // 2. A manager invites Robin. He finds the Space under Shared with You,
-  //    accepts on the door and lands on the page as himself.
+  //    accepts it there, opens it through the door and lands on the page as himself.
   let robinOnDocs = "";
   await checkpoint("2 invite, Shared with You, door, page", async () => {
     await control("/invite", { spaceId: fixture.docs.spaceId, email: fixture.robin.email });
@@ -388,12 +394,10 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     const page = await context.newPage();
     await page.goto(`${fixture.dashboardOrigin}/shared`);
     await expectUi(page.getByRole("heading", { name: "Shared with You" })).toBeVisible();
-    await page
-      .getByRole("listitem")
-      .filter({ hasText: fixture.docs.title })
-      .getByRole("link", { name: "Accept" })
-      .click();
-    await continueOnDoor(page, /^Accept$/);
+    const docsRow = page.getByRole("listitem").filter({ hasText: fixture.docs.title });
+    await docsRow.getByRole("button", { name: "Accept" }).click();
+    await docsRow.getByRole("link", { name: "Open" }).click();
+    await continueOnDoor(page, /^Continue as Robin$/);
     // An invite opens the whole Space, so it lands on its front page.
     await page.waitForURL(docsUrl("/"));
     await expectUi(page.getByRole("heading", { name: "flow-docs home" })).toBeVisible();
@@ -475,12 +479,10 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     });
     const page = await context.newPage();
     await page.goto(`${fixture.dashboardOrigin}/shared`);
-    await page
-      .getByRole("listitem")
-      .filter({ hasText: fixture.notes.title })
-      .getByRole("link", { name: "Accept" })
-      .click();
-    await continueOnDoor(page, /^Accept$/);
+    const notesRow = page.getByRole("listitem").filter({ hasText: fixture.notes.title });
+    await notesRow.getByRole("button", { name: "Accept" }).click();
+    await notesRow.getByRole("link", { name: "Open" }).click();
+    await continueOnDoor(page, /^Continue as Robin$/);
     await page.waitForURL(notesUrl("/"));
     robinOnNotes = await signedInAs(page, fixture.notes.spaceId, fixture.robin);
     const menu = await openAccountMenu(page);
@@ -511,14 +513,12 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     await frame.getByRole("menuitem", { name: "Switch Account" }).click();
     // The door asks which account this Space signs in as.
     await page.waitForURL(
-      (url) => url.origin === fixture.dashboardOrigin && url.pathname === "/sign-in",
+      (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/door/page",
     );
-    await expectUi(
-      page.getByText("Pick the account for this Space.", { exact: false }),
-    ).toBeVisible();
-    await continueOnDoor(page, /Continue as Sam Second/);
+    await expectUi(page.getByRole("heading", { name: "Choose an account" })).toBeVisible();
+    await continueOnDoor(page, /Sam Second/);
     // Sam's first sign-in on this Space: the door asks once.
-    await continueOnDoor(page, /^Allow$/);
+    await continueOnDoor(page, /^Continue as Sam$/);
     await page.waitForURL((url) => url.host === fixture.docs.host);
     const samOnDocs = await signedInAs(page, fixture.docs.spaceId, fixture.sam);
     expect(samOnDocs).not.toBe(robinOnDocs);
@@ -580,7 +580,7 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     // A click on the Space's sign-in, through the door, signs in again. The
     // browser holds two accounts, so the door asks which; Robin picks himself.
     await page.getByRole("link", { name: "Continue with Spacefast", exact: true }).click();
-    await continueOnDoor(page, /Continue as Robin Guest/);
+    await continueOnDoor(page, /Robin Guest/);
     await page.waitForURL((url) => url.host === fixture.notes.host);
     await signedInAs(page, fixture.notes.spaceId, fixture.robin);
     await page.close();
@@ -663,6 +663,7 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
           (origin === fixture.apiOrigin && method === "POST" && pathname === "/v1/door") ||
           (origin === `https://${fixture.docs.host}` &&
             (pathname === "/__spacefast/sign-in" || pathname === "/__spacefast/callback")) ||
+          (origin === fixture.apiOrigin && pathname === "/v1/door/page") ||
           (origin === fixture.dashboardOrigin && pathname === "/sign-in"),
       ),
     ).toEqual([]);

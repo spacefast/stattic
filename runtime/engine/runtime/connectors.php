@@ -159,8 +159,13 @@ function _stattic_connectors_call_args(string $method): array
 }
 
 /**
- * The unified browser client is public infrastructure. Its entry revalidates
- * on reuse; lazy modules have content hashes and can be cached immutably.
+ * `/__spacefast/client.js`: the no-build page client, as a tiny same-origin
+ * module that re-exports the real one from Spacefast's CDN (Cast's
+ * `sdk/v1/client.js`), whatever it exports: `export *` keeps it in step with
+ * `@spacefast/client` with nothing to maintain here. The client has no
+ * default export. The engine ships none of the client's code. Every URL
+ * the client calls is relative to the page, so it acts on this Space.
+ * `/__spacefast/chunks/*` is gone with the code it served.
  */
 function _stattic_space_client_serve(string $requestPath): never
 {
@@ -168,24 +173,19 @@ function _stattic_space_client_serve(string $requestPath): never
     if (!in_array($method, ['GET', 'HEAD'], true)) {
         _stattic_method_not_allowed('GET, HEAD');
     }
-    $entry = $requestPath === STATTIC_SPACE_CLIENT_PATH;
-    $relative = 'client.js';
-    if (!$entry) {
-        $filename = substr($requestPath, strlen(STATTIC_SPACE_CLIENT_CHUNKS_PREFIX));
-        if (preg_match('/\A[A-Za-z0-9_-]+-[A-Z0-9]{8}\.js\z/D', $filename) !== 1) {
-            _stattic_connectors_refuse(404, 'not_found', 'This client module does not exist.');
-        }
-        $relative = 'chunks/' . $filename;
-    }
-    $path = __DIR__ . '/space-client/' . $relative;
-    $body = is_file($path) ? file_get_contents($path) : false;
-    if (!is_string($body)) {
+    require_once __DIR__ . '/spacefast-sdk.php';
+    $base = $requestPath === STATTIC_SPACE_CLIENT_PATH
+        ? _stattic_spacefast_sdk_base_url(_stattic_spacefast_sdk_config(_stattic_page_serving()))
+        : null;
+    if ($base === null) {
         _stattic_connectors_refuse(404, 'not_found', 'This client module does not exist.');
     }
+    $source = json_encode($base . '/sdk/v1/client.js', JSON_UNESCAPED_SLASHES);
+    $body = 'export*from' . $source . ";\n";
     $etag = '"' . hash('sha256', $body) . '"';
     header('Content-Type: text/javascript; charset=utf-8', true);
     header('X-Content-Type-Options: nosniff', true);
-    header('Cache-Control: ' . ($entry ? 'public, max-age=0, must-revalidate' : 'public, max-age=31536000, immutable'), true);
+    header('Cache-Control: public, max-age=0, must-revalidate', true);
     header('ETag: ' . $etag, true);
     if (trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
         http_response_code(304);

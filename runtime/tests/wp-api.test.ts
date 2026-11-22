@@ -3,7 +3,9 @@ import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFileSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { deploy, get, type Runtime, startRuntime } from "./harness.ts";
+import { z } from "zod";
+
+import { api, deploy, get, RUNTIME_HTTP_API_BASE, type Runtime, startRuntime } from "./harness.ts";
 
 // The WP API door: /wp-json reaches WordPress as the principal a Space
 // credential resolves to. The gate's contract is the WordPress context it
@@ -305,7 +307,20 @@ beforeAll(async () => {
     },
     activate: {
       route_name: "production",
-      config: { ...accessConfig(true), sdk: { revision: "sdk-1", config: {} } },
+      // Analytics on, so its pages carry the SDK tag.
+      config: {
+        ...accessConfig(true),
+        sdk: {
+          revision: "sdk-1",
+          config: {
+            tracker: {
+              src: "/__spacefast/t.js",
+              endpoint: "https://beacon.example.test",
+              key: "pk",
+            },
+          },
+        },
+      },
       production_hostnames: [OPEN_HOST],
       version_hostnames: [],
     },
@@ -755,6 +770,33 @@ test("a protected Space answers REST the way it answers a page", async () => {
   });
 });
 
+// WordPress admits through the same enforcement as a page, so a box out of
+// touch fails a private Space's REST closed before WordPress runs.
+test("a box out of touch fails a private Space's WordPress closed", async () => {
+  const lease = { box_sync_lease: 10_800 };
+  expect(
+    (await api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", lease))
+      .status,
+  ).toBe(200);
+  const staleAt = Math.floor(Date.now() / 1000) - 3660;
+  writeFileSync(
+    path.join(runtime.storageRoot, "runtime/box-sync.json"),
+    `${JSON.stringify({ synced_at: staleAt, enforce_until: staleAt + 10_800 })}\n`,
+  );
+  try {
+    const token = await machineToken({ spaceId: CLOSED_SPACE, host: CLOSED_HOST });
+    const stale = await wpContext(CLOSED_HOST, "/wp-json/wp/v2/posts", {
+      "x-sf-authorization": `Bearer ${token}`,
+    });
+    expect(stale.status).toBe(503);
+    expect(stale.headers.get("retry-after")).toBe("60");
+    expect(stale.headers.get("x-spacefast-unavailable")).toBe("box_sync_stale");
+    expect(stale.body).not.toContain("served_by");
+  } finally {
+    await api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", lease);
+  }
+});
+
 test("a Space with no WordPress never claims /wp-json", async () => {
   // Most Spaces are static. On those /wp-json is an ordinary URL the Space does
   // not publish, so it gets the Space's own answer — not an editor-session gate
@@ -785,6 +827,35 @@ test("classic WordPress admin receives the same authenticated Space scope", asyn
   });
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ space: OPEN_SPACE, role: "editor" });
+
+  // A native admin request that changes something acts as the signed-in
+  // person only from the Space's own origin. Another origin on the same site
+  // can send the Space's Lax session cookie, never its Origin.
+  writeFileSync(
+    path.join(runtime.root, "wp-admin/admin-ajax.php"),
+    "<?php header('Content-Type: application/json'); echo json_encode(['role' => $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] ?? null]);",
+  );
+  const accessCookie = principalCookie("access");
+  const ajax = async (headers: Record<string, string>) => {
+    const answer = await get(runtime, OPEN_HOST, "/wp-admin/admin-ajax.php", {
+      method: "POST",
+      headers: {
+        cookie: accessCookie,
+        "content-type": "application/x-www-form-urlencoded",
+        ...headers,
+      },
+      body: "action=probe",
+    });
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    return z.object({ role: z.string().nullable() }).parse(await answer.json()).role;
+  };
+  expect(await ajax({ origin: `http://${OPEN_HOST}`, "sec-fetch-site": "same-origin" })).toBe(
+    "editor",
+  );
+  expect(
+    await ajax({ origin: "http://sibling.wp-api-open.test", "sec-fetch-site": "same-site" }),
+  ).toBeNull();
+  expect(await ajax({})).toBeNull();
 
   const includesRoot = path.join(runtime.root, "wp-admin/includes");
   mkdirSync(includesRoot, { recursive: true });

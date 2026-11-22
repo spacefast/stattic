@@ -1893,6 +1893,21 @@ test("a host canonical redirect follows the Space's anonymous verdict", async ()
     expect(privateRedirect.status).toBe(308);
     expect(privateRedirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(privateRedirect.headers.get("cache-control")).toBe("private, no-store");
+    // A sign-in, unlock card or share link started on the redirect host goes to
+    // the canonical host first, so its cookies and callback bind there.
+    for (const lane of [
+      "/__spacefast/sign-in?return=%2Fabout%2F",
+      "/__spacefast/unlock?return=%2Fabout%2F",
+      "/__",
+    ]) {
+      const started = await get(runtime, `www.${PUBLIC_HOST}`, lane);
+      expect(started.status).toBe(308);
+      expect(started.headers.get("location")).toBe(`https://${PUBLIC_HOST}${lane}`);
+      expect(started.headers.getSetCookie()).toEqual([]);
+    }
+    // The callback is bound to the host its code was issued for: never moved.
+    const callback = await get(runtime, `www.${PUBLIC_HOST}`, "/__spacefast/callback?code=x");
+    expect(callback.status).not.toBe(308);
   } finally {
     await putRoute(runtime, PUBLIC_SPACE, "production", {
       version_id: PUBLIC_VERSION,

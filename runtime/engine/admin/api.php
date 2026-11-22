@@ -159,6 +159,11 @@ function _stattic_runtime_admin_run_route(string $privateRoot, array $route, arr
             $required[$field] = _stattic_runtime_id($matches[$captureIndex], $field);
         }
         $claims = _stattic_runtime_require_management_jwt($privateRoot, $route['action'], $required);
+        // A heartbeat arms the stale-box cutoff for its lease; a write from a
+        // control plane that runs no heartbeat sweep disarms it
+        // (shared/box-sync.php).
+        require_once __DIR__ . '/../shared/box-sync.php';
+        _stattic_box_sync_observe($privateRoot, $route['action'], $route['methods'][0], $claims);
         // Handlers trust this scope validation and never re-run it: they receive
         // the validated (trimmed) ids positionally.
         $args = [$privateRoot, ...array_values($required), $claims];
@@ -214,6 +219,8 @@ function _stattic_runtime_admin_management_routes(): array
 {
     $rows = [
         ['GET', '#^/state$#', 'read_state', [], 'none', false, '_stattic_runtime_state_route'],
+        // The control plane's signed proof that it can still reach this box.
+        ['POST', '#^/heartbeat$#', 'box_heartbeat', [], 'none', false, '_stattic_runtime_heartbeat_route'],
         ['POST', '#^/events/drain$#', 'drain_events', [], 'none', false, '_stattic_runtime_drain_callback_events'],
         ['POST', '#^/events/ack$#', 'ack_events', [], 'none', false, '_stattic_runtime_ack_callback_events'],
         ['POST', '#^/application-journal/drain$#', 'drain_application_journal', [], 'none', false, '_stattic_runtime_application_journal_drain'],

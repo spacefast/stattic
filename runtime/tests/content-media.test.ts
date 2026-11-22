@@ -4,10 +4,12 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  api,
   DASHBOARD_ORIGIN,
   deploy,
   get,
   publicAccessConfig,
+  RUNTIME_HTTP_API_BASE,
   type Runtime,
   startRuntime,
 } from "./harness.ts";
@@ -261,6 +263,32 @@ test("protected Content media never reaches an unauthenticated requester", async
   });
   expect(sibling.status).toBe(403);
   expect(await sibling.text()).not.toContain("private-media-bytes");
+});
+
+// Private Content media admits through the same enforcement as a page, so a
+// box out of touch fails it closed with the same 503.
+test("a box out of touch fails private Content media closed", async () => {
+  const lease = { box_sync_lease: 10_800 };
+  expect(
+    (await api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", lease))
+      .status,
+  ).toBe(200);
+  const staleAt = Math.floor(Date.now() / 1000) - 3660;
+  writeFileSync(
+    path.join(runtime.storageRoot, "runtime/box-sync.json"),
+    `${JSON.stringify({ synced_at: staleAt, enforce_until: staleAt + 10_800 })}\n`,
+  );
+  try {
+    const stale = await get(runtime, PRIVATE_HOST, mediaUrl(PRIVATE_SPACE), {
+      headers: { cookie: visitorSession() },
+    });
+    expect(stale.status).toBe(503);
+    expect(stale.headers.get("retry-after")).toBe("60");
+    expect(stale.headers.get("x-spacefast-unavailable")).toBe("box_sync_stale");
+    expect(await stale.text()).not.toContain("private-media-bytes");
+  } finally {
+    await api(runtime, "POST", `${RUNTIME_HTTP_API_BASE}/heartbeat`, "box_heartbeat", lease);
+  }
 });
 
 test("a host-bound Content admin session reads unpublished Space media", async () => {

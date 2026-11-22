@@ -25,7 +25,7 @@ function _stattic_wordpress_rest_origin_allowed(string $host, string $method): b
 /** Presence only suppresses cookies; the receiving authenticator must verify it. */
 function _stattic_wordpress_rest_has_explicit_credentials(): bool
 {
-    foreach (['HTTP_X_SF_AUTHORIZATION', 'HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION', 'PHP_AUTH_USER', 'PHP_AUTH_PW'] as $header) {
+    foreach (['HTTP_X_SF_AUTHORIZATION', 'HTTP_SF_AUTHORIZATION', 'HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION', 'PHP_AUTH_USER', 'PHP_AUTH_PW'] as $header) {
         if (trim((string) ($_SERVER[$header] ?? '')) !== '') return true;
     }
     return false;

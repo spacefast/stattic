@@ -82,10 +82,31 @@ function _stattic_refusal_header_mark(string $code): void
     _stattic_refusal_header_code($code);
 }
 
+/**
+ * The authenticated-response cache ceiling. Set once a request needed a Grant
+ * to be admitted, or once a person was projected into WordPress for it; from
+ * then on the response leaves PHP `private, no-store` with the edge opt-out,
+ * whatever the handler, the app or its render cache set. The edge keys on host
+ * and path and ignores Cookie and Vary, so one public copy of a response that
+ * depended on who asked would answer everyone.
+ */
+function _stattic_authenticated_response(?bool $set = null): bool
+{
+    static $marked = false;
+    if ($set === true) $marked = true;
+    return $marked;
+}
+
 function _stattic_send_document_isolation_headers(): void
 {
     if (headers_sent()) {
         return;
+    }
+    if (_stattic_authenticated_response()) {
+        header_remove('Expires');
+        header_remove('Surrogate-Control');
+        header('Cache-Control: private, no-store', true);
+        header('a8c-edge-cache: no-cache', true);
     }
     // An authored header map's copy goes; the one the engine's emitter
     // recorded is sent.

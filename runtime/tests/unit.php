@@ -4264,14 +4264,21 @@ check(
 // The static lane decides from the version's record alone: a page it lists as
 // undecorated gets the engine's tag, any other page and any version without
 // the record get none, and nothing is read to find out.
-$recorded = ['sdk' => ['config' => []], 'inject' => ['undecorated' => [str_repeat('a', 64)]]];
+// Analytics on, so the page has something for sdk.js to do.
+$trackedSdk = ['config' => ['tracker' => ['src' => '/__spacefast/t.js', 'endpoint' => 'https://beacon.test', 'key' => 'pk']]];
+$recorded = ['sdk' => $trackedSdk, 'inject' => ['undecorated' => [str_repeat('a', 64)]]];
 check(_stattic_static_page_sdk_tag($recorded, null, str_repeat('a', 64)) === $sdkTag, 'a page finalize could not decorate gets the engine SDK tag');
 check(_stattic_static_page_sdk_tag($recorded, null, str_repeat('b', 64)) === '', 'a decorated page gets no engine SDK tag');
-check(_stattic_static_page_sdk_tag(['sdk' => ['config' => []], 'inject' => null], null, str_repeat('a', 64)) === '', 'a version from before the record gets no engine SDK tag');
+check(_stattic_static_page_sdk_tag(['sdk' => $trackedSdk, 'inject' => null], null, str_repeat('a', 64)) === '', 'a version from before the record gets no engine SDK tag');
+// Nothing on (no Comments, bar, Remix, chip, analytics, tags or Users): no tag,
+// so a default public live page runs no Spacefast JavaScript at all. A draft
+// view still gets it.
+check(_stattic_static_page_sdk_tag(['sdk' => ['config' => []], 'inject' => ['undecorated' => [str_repeat('a', 64)]]], null, str_repeat('a', 64)) === '', 'a page with nothing on gets no engine SDK tag');
+check(_stattic_static_page_sdk_tag(['sdk' => ['config' => []], 'inject' => ['undecorated' => [str_repeat('a', 64)]]], 'tok', str_repeat('a', 64)) !== '', 'a draft view of it still gets the tag');
 // A dynamic response always gets the engine's tag; the version's own baked
 // SDK snippet never rides along beside it.
 $_SERVER['REQUEST_METHOD'] = 'GET';
-$dynamicPayload = _stattic_html_insert_payload(['sdk' => ['config' => []], 'inject' => ['bodyEnd' => ['<div id="end"></div>', '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>']]]);
+$dynamicPayload = _stattic_html_insert_payload(['sdk' => $trackedSdk, 'inject' => ['bodyEnd' => ['<div id="end"></div>', '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>']]]);
 check($dynamicPayload['sdk'] === $sdkTag && $dynamicPayload['bodyEnd'] === '<div id="end"></div>', 'a dynamic response carries the engine SDK tag, not the baked one');
 
 // The injection plan (shared/injection-plan.php). The served version's entry
@@ -4351,6 +4358,356 @@ file_put_contents($typedPressRoot . '/manifest.json', '{"format":"typedpress.hos
 check((_stattic_typedpress_manifest($typedPressRoot)['appHash'] ?? null) === 'a', 'a TypedPress manifest is read');
 unlink($typedPressRoot . '/manifest.json');
 rmdir($typedPressRoot);
+
+// --- the whole-Space role a TypedPress app lends on each request -------------
+
+require_once __DIR__ . '/../engine/shared/space-roles.php';
+foreach ([
+    [[], 'viewer'],
+    [['page.view'], 'viewer'],
+    [['page.view', 'comments.read', 'comments.write'], 'commenter'],
+    [['page.view', 'content.publish'], 'editor'],
+    [['comments.write', 'access.manage'], 'manager'],
+] as [$capabilities, $expected]) {
+    check(_stattic_space_role_for_capabilities($capabilities) === $expected, 'space role: ' . json_encode($capabilities) . ' is ' . $expected);
+}
+$wholeSpaceGrant = static fn (string $id, string $subject, array $capabilities, array $extra = []): array => [
+    'id' => $id,
+    'generation' => 1,
+    'audience' => ['kind' => 'external', 'issuer' => 'spacefast-share', 'subject' => $subject],
+    'resources' => ['include' => ['/**'], 'exclude' => []],
+    'capabilities' => $capabilities,
+    'constraints' => [],
+    'target' => ['kind' => 'live'],
+    'source' => ['kind' => 'system', 'reference' => 'role-test:' . $id],
+    ...$extra,
+];
+$roleAuthority = static fn (string $subject): string => 'external:' . hash('sha256', "spacefast-share\0" . $subject);
+$roleProjection = _stattic_compile_authorization_projection([
+    'generation' => 1,
+    'sessionVersion' => 0,
+    'fence' => 'none',
+    'acquireUrl' => 'https://access.spacefast.test/acquire/role-test',
+    'spaceClaimed' => true,
+    'grants' => [
+        $wholeSpaceGrant('grt_manager', 'manager', ['page.view', 'comments.read', 'comments.write', 'content.publish', 'access.manage']),
+        $wholeSpaceGrant('grt_viewer', 'viewer', ['page.view']),
+        // Two Grants that each fall short of a role never add up to one.
+        $wholeSpaceGrant('grt_split_view', 'split', ['page.view']),
+        $wholeSpaceGrant('grt_split_publish', 'split', ['content.publish']),
+        // Access to one folder, one preview, or a few uses is not a role in the app.
+        $wholeSpaceGrant('grt_folder', 'folder', ['page.view', 'content.publish', 'access.manage'], ['resources' => ['include' => ['/notes/**'], 'exclude' => []]]),
+        $wholeSpaceGrant('grt_excluding', 'excluding', ['page.view', 'access.manage'], ['resources' => ['include' => ['/**'], 'exclude' => ['/admin/**']]]),
+        $wholeSpaceGrant('grt_preview', 'preview', ['page.view', 'access.manage'], ['target' => ['kind' => 'branch', 'branch' => 'feature']]),
+        $wholeSpaceGrant('grt_limited', 'limited', ['page.view', 'access.manage'], ['constraints' => ['maxUses' => 3]]),
+        $wholeSpaceGrant('grt_lapsed', 'lapsed', ['page.view', 'access.manage'], ['constraints' => ['expiresAt' => '2001-01-01T00:00:00Z']]),
+        $wholeSpaceGrant('grt_needs_email', 'unverified', ['page.view', 'content.publish'], ['constraints' => ['requireVerifiedEmail' => true]]),
+    ],
+]);
+check(is_array($roleProjection), 'space role: the fixture projection compiles');
+if (is_array($roleProjection)) {
+    $roleOf = static fn (string $subject, bool $verified = false): ?string => _stattic_whole_space_role(
+        $roleProjection,
+        [$roleAuthority($subject)],
+        $verified ? [$roleAuthority($subject)] : []
+    );
+    check($roleOf('manager') === 'manager', 'space role: a whole-Space manager Grant lends manager');
+    check($roleOf('viewer') === 'viewer', 'space role: a whole-Space viewer Grant lends viewer');
+    check($roleOf('split') === 'viewer', 'space role: capabilities never combine across Grants');
+    foreach (['folder', 'excluding', 'preview', 'limited', 'lapsed'] as $subject) {
+        check($roleOf($subject) === null, 'space role: no role from a ' . $subject . ' Grant');
+    }
+    check($roleOf('unverified') === null && $roleOf('unverified', true) === 'editor', 'space role: a Grant that needs a verified email lends only to a verified session');
+    check($roleOf('nobody') === null, 'space role: an account with no Grant holds no role');
+    check(_stattic_whole_space_role($roleProjection, [$roleAuthority('manager'), $roleAuthority('viewer')], []) === 'manager', 'space role: the strongest single Grant decides');
+}
+
+// --- real-authority Space sessions: capped authorities, ended session ids ---
+
+$capGrant = static fn (string $id, array $audience, array $capabilities): array => [
+    'id' => $id,
+    'generation' => 1,
+    'audience' => $audience,
+    'resources' => ['include' => ['/**'], 'exclude' => []],
+    'capabilities' => $capabilities,
+    'constraints' => [],
+    'target' => ['kind' => 'live'],
+    'source' => ['kind' => 'system', 'reference' => 'cap-test:' . $id],
+];
+$capSid = str_repeat('a', 64);
+$capOtherSid = str_repeat('b', 64);
+$capRaw = [
+    'generation' => 1,
+    'sessionVersion' => 0,
+    'sessionKey' => str_repeat('cd', 32),
+    'fence' => 'none',
+    'acquireUrl' => 'https://access.spacefast.test/acquire/cap-test',
+    'accessPage' => [
+        'displayName' => null,
+        'accountUrl' => null,
+        'connections' => [],
+        'exchange' => ['passwordUrl' => 'https://access.spacefast.test/p', 'requestUrl' => 'https://access.spacefast.test/r', 'credential' => str_repeat('y', 32)],
+    ],
+    'spaceClaimed' => true,
+    'teamId' => 'team_cap',
+    'membershipEpoch' => 0,
+    'grants' => [
+        $capGrant('grt_cap_team', ['kind' => 'team', 'teamId' => 'team_cap'], ['page.view', 'comments.read', 'comments.write', 'content.publish', 'access.manage']),
+        $capGrant('grt_cap_person_publish', ['kind' => 'person', 'personId' => 'per_cap'], ['content.publish']),
+    ],
+];
+$capProjection = _stattic_compile_authorization_projection($capRaw);
+check(is_array($capProjection), 'real-authority: the fixture projection compiles');
+check(
+    _stattic_compile_authorization_projection([...$capRaw, 'endedSessions' => ['not-a-session']]) === null
+        && _stattic_compile_authorization_projection([...$capRaw, 'endedSessions' => array_fill(0, 1025, $capSid)]) === null,
+    'real-authority: a malformed or oversized ended-session list refuses the projection'
+);
+if (is_array($capProjection)) {
+    $spaceOriginCap = ['page.view', 'comments.read', 'comments.write'];
+    $decide = static fn (array $authorities, array $caps = []): array => _stattic_grant_decision(
+        $capProjection, '/', ['kind' => 'live'], $authorities, [], '', '', false, true, authorityCapabilities: $caps
+    )['capabilities'];
+    $uncapped = $decide(['member:mem_cap']);
+    sort($uncapped);
+    check(in_array('access.manage', $uncapped, true), 'real-authority: an uncapped member session holds what its Grant gives');
+    $capped = $decide(['member:mem_cap'], ['member:mem_cap' => $spaceOriginCap]);
+    sort($capped);
+    check($capped === ['comments.read', 'comments.write', 'page.view'], 'real-authority: the Space-origin cap holds a manager Grant to view and comment');
+    check(
+        $decide(['person:per_cap'], ['person:per_cap' => $spaceOriginCap]) === [],
+        'real-authority: a Grant whose capabilities the cap removes entirely admits nothing'
+    );
+    check(
+        $decide(['member:mem_cap', 'person:per_cap'], ['person:per_cap' => $spaceOriginCap]) !== []
+            && !in_array('content.publish', $decide(['member:mem_cap', 'person:per_cap'], ['member:mem_cap' => $spaceOriginCap, 'person:per_cap' => $spaceOriginCap]), true),
+        'real-authority: each authority is capped on its own, and caps never add up to more'
+    );
+    $narrowed = $decide(['member:mem_cap'], ['member:mem_cap' => ['page.view']]);
+    check($narrowed === ['page.view'], 'real-authority: the cap never exceeds the consented capabilities');
+
+    // A session signed under the cap carries it in its signed claims, and the
+    // claim version an older engine refuses.
+    $capServing = ['space_id' => 'spc_cap', 'authorization' => $capProjection];
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = $capServing;
+    $now = time();
+    $entry = static fn (string $reference, ?array $cap, ?string $origin = null): array => [
+        'reference' => $reference,
+        'generation' => (string) _stattic_authority_generation($capProjection, $reference),
+        'emailVerifiedUntil' => null,
+        'openedAt' => $now,
+        'lastSeenAt' => $now,
+        ...($cap !== null ? ['capabilities' => $cap] : []),
+        ...($origin !== null ? ['origin' => $origin] : []),
+    ];
+    $capClaims = [
+        'v' => 1,
+        'sid' => $capSid,
+        'principal' => 'account:ps1_cap',
+        'authorities' => [$entry('member:mem_cap', $spaceOriginCap), $entry('person:per_cap', $spaceOriginCap, $capOtherSid)],
+        'sessionVersion' => 0,
+        'accessGeneration' => 0,
+        'spaceId' => 'spc_cap',
+        'host' => 'cap.test',
+        'iat' => $now,
+        'exp' => $now + 900,
+    ];
+    $capCookie = _stattic_access_session_encode($capServing, 'cap.test', $capClaims);
+    $decoded = is_string($capCookie) ? _stattic_access_session_decode($capServing, 'cap.test', $capCookie) : null;
+    $payload = is_string($capCookie)
+        ? json_decode(_stattic_base64url_decode(explode('.', substr($capCookie, strlen('sfv2_')))[0]), true)
+        : null;
+    check(
+        is_array($decoded) && ($payload['v'] ?? null) === 2
+            && ($decoded['authorities'][0]['capabilities'] ?? null) === $spaceOriginCap
+            && !array_key_exists('origin', $decoded['authorities'][0])
+            && ($decoded['authorities'][1]['origin'] ?? null) === $capOtherSid,
+        'real-authority: a capped session is signed as claim version 2 with its cap, and a carried authority keeps the session that acquired it'
+    );
+    check(
+        _stattic_identity_authority_capabilities(['authorityEntries' => $decoded['authorities'] ?? []]) === [
+            'member:mem_cap' => $spaceOriginCap,
+            'person:per_cap' => $spaceOriginCap,
+        ],
+        'real-authority: the session identity names each capped authority'
+    );
+    // Ending a session drops what it acquired, and only that.
+    $endedRaw = _stattic_compile_authorization_projection([...$capRaw, 'endedSessions' => [$capOtherSid]]);
+    $remaining = is_array($endedRaw) && is_array($decoded) ? _stattic_access_session_unended_entries($decoded, $endedRaw) : null;
+    check(
+        is_array($remaining) && array_column($remaining, 'reference') === ['member:mem_cap'],
+        'real-authority: an ended session id ends the authorities that session acquired'
+    );
+    $allEnded = _stattic_compile_authorization_projection([...$capRaw, 'endedSessions' => [$capSid, $capOtherSid]]);
+    check(
+        is_array($allEnded) && is_array($decoded) && _stattic_access_session_unended_entries($decoded, $allEnded) === [],
+        'real-authority: ending every session the authorities came from leaves the session nothing'
+    );
+    // Past the list's bound, a cutoff ends every capped authority opened at or
+    // before it, and leaves an uncapped one (another lane) alone.
+    $cutoffRaw = _stattic_compile_authorization_projection([...$capRaw, 'endedBefore' => $now]);
+    $withUncapped = is_array($decoded)
+        ? [...$decoded, 'authorities' => [...$decoded['authorities'], $entry('member:mem_other', null)]]
+        : null;
+    $afterCutoff = is_array($cutoffRaw) && is_array($withUncapped) ? _stattic_access_session_unended_entries($withUncapped, $cutoffRaw) : null;
+    check(
+        is_array($afterCutoff) && array_column($afterCutoff, 'reference') === ['member:mem_other'],
+        'real-authority: an overflow cutoff ends every capped authority opened before it, early and never late'
+    );
+    $earlierCutoff = _stattic_compile_authorization_projection([...$capRaw, 'endedBefore' => $now - 60]);
+    check(
+        is_array($earlierCutoff) && is_array($decoded) && count(_stattic_access_session_unended_entries($decoded, $earlierCutoff)) === 2,
+        'real-authority: a session opened after the cutoff keeps its authorities'
+    );
+    check(
+        _stattic_compile_authorization_projection([...$capRaw, 'endedBefore' => 'soon']) === null,
+        'real-authority: a malformed cutoff refuses the projection'
+    );
+    // A handoff's `spaceOrigin` is validated before anything is opened.
+    check(
+        _stattic_handoff_capability_cap([]) === null
+            && _stattic_handoff_capability_cap(['spaceOrigin' => ['authorities' => ['member:mem_cap'], 'capabilities' => $spaceOriginCap]]) === $spaceOriginCap
+            && _stattic_handoff_capability_cap(['spaceOrigin' => ['authorities' => ['member:mem_cap'], 'capabilities' => ['root']]]) === false
+            && _stattic_handoff_capability_cap(['spaceOrigin' => ['authorities' => [], 'capabilities' => $spaceOriginCap]]) === false,
+        'real-authority: a handoff names a valid cap and real authorities, or is refused'
+    );
+    check(
+        _stattic_callback_authorities(['claims' => [
+            'authorities' => ['external:' . str_repeat('e', 64)],
+            'spaceOrigin' => ['authorities' => ['member:mem_cap', 'person:per_cap'], 'capabilities' => $spaceOriginCap],
+        ]]) === ['member:mem_cap', 'person:per_cap'],
+        'real-authority: a capped handoff opens its real authorities, never the consent authority it names for older engines'
+    );
+    // Merging an uncapped handoff for an already-capped authority preserves the
+    // existing cap (and origin); merging two capped handoffs keeps their intersection.
+    $mergedUncapped = _stattic_merge_authority_lru(
+        [$entry('member:mem_cap', $spaceOriginCap, $capOtherSid)],
+        ['member:mem_cap'],
+        $capProjection,
+        true,
+        $now + 10,
+        null,
+        null,
+        null
+    );
+    check(
+        count($mergedUncapped) === 1
+            && ($mergedUncapped[0]['capabilities'] ?? null) === $spaceOriginCap
+            && ($mergedUncapped[0]['origin'] ?? null) === $capOtherSid,
+        'real-authority: an uncapped merge never strips an existing authority cap or origin'
+    );
+    $mergedNarrower = _stattic_merge_authority_lru(
+        [$entry('member:mem_cap', $spaceOriginCap, $capOtherSid)],
+        ['member:mem_cap'],
+        $capProjection,
+        true,
+        $now + 10,
+        null,
+        ['page.view', 'access.manage'],
+        $capSid
+    );
+    check(
+        count($mergedNarrower) === 1
+            && ($mergedNarrower[0]['capabilities'] ?? null) === ['page.view']
+            && ($mergedNarrower[0]['origin'] ?? null) === $capSid,
+        'real-authority: merging two capped entries intersects their capability caps'
+    );
+    // Ending an account session whose cookie also carries a guest link authority
+    // drops the account identity back to anonymous while keeping the link alive.
+    $capWithLinkRaw = [
+        ...$capRaw,
+        'grants' => [
+            ...$capRaw['grants'],
+            [
+                'id' => 'grt_cap_link',
+                'generation' => 1,
+                'audience' => ['kind' => 'link', 'linkId' => 'lnk_cap'],
+                'resources' => ['include' => ['/**'], 'exclude' => []],
+                'capabilities' => ['page.view'],
+                'constraints' => [],
+                'target' => ['kind' => 'live'],
+                'source' => ['kind' => 'managed', 'reference' => 'grt_cap_link'],
+            ],
+        ],
+    ];
+    $capWithLinkProjection = _stattic_compile_authorization_projection([
+        ...$capWithLinkRaw,
+        'endedSessions' => [$capOtherSid],
+    ]);
+    $capLinkBase = sys_get_temp_dir() . '/sf-cap-link-' . bin2hex(random_bytes(6));
+    $capLinkTmp = $capLinkBase . '/.stattic/storage';
+    mkdir($capLinkTmp, 0700, true);
+    $prevPrivateRoot = $GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT'] ?? null;
+    $GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT'] = $capLinkTmp;
+    try {
+        check(is_array($capWithLinkProjection), 'real-authority: link+account projection compiles');
+        if (is_array($capWithLinkProjection)) {
+            $linkServing = ['space_id' => 'spc_cap', 'authorization' => $capWithLinkProjection];
+            $GLOBALS['SPACEFAST_PAGE_SERVING'] = $linkServing;
+            $linkClaims = [
+                'v' => 1,
+                'sid' => $capSid,
+                'principal' => 'account:ps1_cap',
+                'profile' => ['name' => 'Cap Owner'],
+                'authorities' => [
+                    [
+                        'reference' => 'member:mem_cap',
+                        'generation' => (string) _stattic_authority_generation($capWithLinkProjection, 'member:mem_cap'),
+                        'emailVerifiedUntil' => null,
+                        'openedAt' => $now,
+                        'lastSeenAt' => $now,
+                        'capabilities' => $spaceOriginCap,
+                        'origin' => $capOtherSid,
+                    ],
+                    [
+                        'reference' => 'link:lnk_cap',
+                        'generation' => (string) _stattic_authority_generation($capWithLinkProjection, 'link:lnk_cap'),
+                        'emailVerifiedUntil' => null,
+                        'openedAt' => $now,
+                        'lastSeenAt' => $now,
+                    ],
+                ],
+                'sessionVersion' => 0,
+                'accessGeneration' => 0,
+                'spaceId' => 'spc_cap',
+                'host' => 'cap.test',
+                'iat' => $now,
+                'exp' => $now + 900,
+            ];
+            _stattic_access_session_record_write($capLinkTmp, $capSid, [
+                'sid' => $capSid,
+                'spaceId' => 'spc_cap',
+                'openedAt' => $now,
+                'lastSeenAt' => $now,
+            ]);
+            $mixedCookie = _stattic_access_session_encode($linkServing, 'cap.test', $linkClaims);
+            $verifiedMixed = is_string($mixedCookie)
+                ? _stattic_access_session_verify($mixedCookie, $linkServing, 'cap.test')
+                : null;
+            check(
+                is_array($verifiedMixed)
+                    && ($verifiedMixed['authorities'] ?? null) === ['link:lnk_cap']
+                    && ($verifiedMixed['sessionRecord']['principal'] ?? null) === STATTIC_SESSION_PRINCIPAL_ANONYMOUS
+                    && !isset($verifiedMixed['profile']),
+                'real-authority: ending the account session clears the account principal when only a guest link remains'
+            );
+        }
+    } finally {
+        if ($prevPrivateRoot === null) {
+            unset($GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT']);
+        } else {
+            $GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT'] = $prevPrivateRoot;
+        }
+        foreach (glob($capLinkTmp . '/sessions/*') ?: [] as $f) {
+            @unlink($f);
+        }
+        @rmdir($capLinkTmp . '/sessions');
+        @rmdir($capLinkTmp);
+        @rmdir($capLinkBase . '/.stattic');
+        @rmdir($capLinkBase);
+    }
+    unset($GLOBALS['SPACEFAST_PAGE_SERVING']);
+}
 
 // --- Zero v2 version state and advisory lock integration ----------------------------
 require_once __DIR__ . '/../engine/shared/zero-v2.php';

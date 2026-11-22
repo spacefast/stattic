@@ -38,16 +38,23 @@ return static function (array $loader): void {
     if (isset($GLOBALS['SPACEFAST_ZERO_V2_ROOT'])) {
         require_once $releaseReal . '/engine/shared/zero-v2-scope.php';
         _stattic_zero_v2_bind_wordpress();
-        if (_stattic_typedpress_manifest($GLOBALS['SPACEFAST_ZERO_V2_ROOT']) !== null) {
+        // Space Users on v2 is the version's zero-identity on the Space's tables;
+        // the mount loads it, then installs the same host hooks.
+        require_once $releaseReal . '/engine/wordpress/space-users.php';
+        $typedPress = _stattic_typedpress_manifest($GLOBALS['SPACEFAST_ZERO_V2_ROOT']) !== null;
+        if ($typedPress) {
+            // The Spacefast must-use plugin, installed before the app mounts
+            // (a tp_v1 app loads here, at once) so its hooks come before any of
+            // the app's own: the sign-in provider, the lent Space role, the
+            // capability ceiling and the credential refusals.
+            require_once $releaseReal . '/engine/wordpress/typedpress.php';
+            spacefast_tp_install();
             _stattic_zero_v2_mount();
         } else {
             add_action('plugins_loaded', '_stattic_zero_v2_mount', 1);
         }
-        // Space Users on v2 is the version's zero-identity on the Space's tables;
-        // the mount loads it, then installs the same host hooks.
-        require_once $releaseReal . '/engine/wordpress/space-users.php';
         // Only the content entrypoint's Users management lane acts for a
-        // dashboard principal; no other v2 request projects a Space role.
+        // dashboard principal on a v2 build.
         if (($GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] ?? false) === true) {
             require_once $releaseReal . '/engine/shared/wordpress-scope.php';
             require_once $releaseReal . '/engine/wordpress/content-principals.php';

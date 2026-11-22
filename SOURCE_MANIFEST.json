@@ -1,7 +1,7 @@
 {
-  "revision": "f7a4d4552a5ab53a946de5da32ca70c9d90e7a7d",
+  "revision": "9d640ccf467458a18954882dd6518427bb4b0739",
   "sourceHash": "f9246c0f4dd4f6b0b41dbd86b60a963b8fe44715d203c9c888f4278ef5466085",
-  "manifestSha256": "d559cce2eb49ac906e5a5e8d772a22e4de9c3c02796b2a31a116f04a95a338dc",
+  "manifestSha256": "336feb3ef6981f1341e70908651ddaf7b4b8036ad92755a5f9597cb23ea027cd",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "808f6933e23096bf7d931f68de637ed2a5602b2ac48d9403282f499194c5d8d7"
+      "sha256": "2803e0299e8b64fbd459b2f5cb61d0894266df8dfbd1c39b187e677b0fd3582b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "34ec7b1fd9b6f6df9d2c23aa47bb408c5e9a37df14140ff0beefb051d53519a3"
+      "sha256": "367ba12870e6e740652b2ec8ef0ee50685cb6d71deceb28ee7f827254061ffa1"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -30509,11 +30509,11 @@
     },
     {
       "path": "runtime/tests/access-chain.test.ts",
-      "sha256": "172a6847ca74e958b46a51473b04b0c092b3bf98e9b1d8251bb7e863f1863bdf"
+      "sha256": "03e4b33efe78ac3a1622a190a900863d888fc4739dcaa1698c7171f2a9403124"
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "206d65260de24f4ddf2fd1c087722c9f79eb28a87ff780d1701f7bef5d42c48d"
+      "sha256": "2882543125293e7cdd64759e6d5c5355d553826d595c26ef5ef82cd43a58b21b"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -30521,7 +30521,7 @@
     },
     {
       "path": "runtime/tests/access-rules.test.ts",
-      "sha256": "ccee60b10b7f58fa3583887b36aa776c4895e3e488aff5c508d15f2ad0915988"
+      "sha256": "99e16d980f26db13206fc784f27ad003c815627962f78047193185ed451f19d1"
     },
     {
       "path": "runtime/tests/access-security-helpers.test.ts",
@@ -30817,7 +30817,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "aac41c9c4ecb6db3c66916bd87c30ebe80089909af9d5ffed11e12c303dc9bcf"
+      "sha256": "a61cf1676144e6a0b4b1a37614a5febeb0f37f5922cb9be86d235efd907c9ca8"
     },
     {
       "path": "runtime/tests/headers.test.ts",
@@ -30909,7 +30909,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "62654167e0b5930133d11ea3b1629a610160ed78bf1539e80b73e76d8569b1bd"
+      "sha256": "4a11bd0ecc34518d1e93fca4c768d099559372e99f94ace78d500d31c9d65114"
     },
     {
       "path": "runtime/tests/run-ci.sh",
@@ -30977,7 +30977,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "ee6d2c6d5f4cd91aabae5bcf4a646ee13fb4ec1d3183ab7dad4e6eeb3f3243c1"
+      "sha256": "61f061a92bb684897451ac723eba618a218ad50dfeda1745d2365b94849f7510"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
@@ -31013,7 +31013,7 @@
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "5e5ad88e68e0ada2e7e9a6afdd016ba968f864229a21cd650f23d1f4d0f65d9b"
+      "sha256": "cb212142270206f5c3e2ccf2f692c52b3c645857145eca33d920f3625164adb0"
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",

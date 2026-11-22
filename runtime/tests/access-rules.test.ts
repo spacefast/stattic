@@ -1,16 +1,3 @@
-// Access enforcement against the v4 engine (contracts §7, §15, §16).
-//
-// The v4 session is the cookie: `sfv2_<base64url(claims)>.<hmac>`, signed with a
-// key derived from the Space's runtime exchange credential. Authorities, their
-// generations, the [access_gen, session_ver] tuple and the expiry all ride in
-// the value; the hot path verifies one HMAC and reads no file (D120). The only
-// server-side artifact is a revocation record at
-// `spaces/<s>/sessions/<sid>.json`, read only on the cold lane, which is what
-// makes exact revocation possible without a global logout (D85).
-//
-// Because the signing key is the exchange credential, this file mints and edits
-// cookies the way the runtime does (see `encodeSession`). Every fixture must
-// publish an access-page exchange, or no session can be minted for it.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
@@ -53,10 +40,6 @@ const collaborationLogoutCalls: Array<Record<string, string>> = [];
 let failCollaborationLogout = false;
 let collaborationLogoutMissing = false;
 
-// An external audience is (issuer, subject), and the reference the engine
-// derives for it hashes both (_stattic_grant_audience_reference). The subject is
-// unrecoverable from the reference, so fixtures mint the pair here and the
-// projection builder looks the subject back up.
 const EXTERNAL_IDENTITY_ISSUER = "https://identity.example/oidc";
 const externalSubjectByReference = new Map<string, string>();
 function externalAuthorityReference(subject: string): string {
@@ -91,8 +74,6 @@ const PATH_HOST = "paths.access.test";
 const PATH_SPACE = "spc_access_paths";
 const PATH_VERSION = "ver_access_paths";
 const CACHE_HOST = "cache.access.test";
-// Version-pinned alias, `v<number>--` shaped like production immutable hosts:
-// a content publish must never purge it; the public→private sweep must.
 const CACHE_VERSION_HOST = "v7--cache.access.test";
 const CACHE_SPACE = "spc_access_cache";
 const CACHE_VERSION = "ver_access_cache";
@@ -121,25 +102,17 @@ const CREDENTIAL_SCOPE_VERSION = "ver_access_credential_scope";
 
 const EXCHANGE_CREDENTIAL = "runtime-exchange-credential-0123456789abcdef";
 const COOKIE_NAME = "spacefast_session_dev";
-// The returning-account marker's plain-HTTP spelling, which this suite serves.
 const RETURNING_MARKER = "spacefast_returning_dev";
 const SESSION_PREFIX = "sfv2_";
 const ANONYMOUS_PREFIX = "sfa1_";
 const EDGE_CACHE_HEADER = "a8c-edge-cache";
-// access-rules.php: SPACEFAST_ACCESS_SESSION_*.
 const SESSION_IDLE_SECONDS = 604_800;
 const SESSION_ABSOLUTE_SECONDS = 2_592_000;
 const SESSION_TOUCH_INTERVAL_SECONDS = 21_600;
 const SESSION_CLAIM_TTL_SECONDS = 900;
 const SESSION_AUTHORITY_LIMIT = 16;
 const SESSION_CLOCK_HEADER = "x-spacefast-test-access-session-now";
-// The runtime never reads a request's scheme, because X-Forwarded-Proto is
-// attacker-controlled (contracts §16). It builds its own origin from the
-// SPACEFAST_INSECURE_COOKIES config the harness sets, http here. The logout
-// CSRF check compares against that origin, and the collaboration revoke's
-// returnUrl carries it.
 const RUNTIME_SCHEME = "http";
-// The private Space's own live origin, as its Collab overlay carries it.
 const SPACE_LIVE_ORIGIN = `${RUNTIME_SCHEME}://${PRIVATE_HOST}`;
 
 const keyPair = generateKeyPairSync("ed25519");
@@ -167,10 +140,6 @@ function spaceForHost(host: string): string {
   return groups.find(([, hosts]) => hosts.includes(host))?.[0] ?? PRIVATE_SPACE;
 }
 
-// ---------------------------------------------------------------------------
-// Route projections
-// ---------------------------------------------------------------------------
-
 type ProjectionInput = {
   mode?: "private" | "public";
   spaceClaimed?: boolean;
@@ -179,13 +148,6 @@ type ProjectionInput = {
   grantGenerations?: Record<string, number>;
   sessionVersion?: number;
   memberRefs?: string[];
-  /**
-   * The access-page exchange, present by default. Its `credential` signs every
-   * `sfv2_`/`sfa1_` cookie (access-rules.php
-   * `_stattic_access_session_hmac_key`), so a Space without it can hold no
-   * session. `"stale"` is a bundle written before collaboration logout existed;
-   * `false` is the lane-less Space that only shows the uniform deny.
-   */
   exchange?: boolean | "stale";
   publicConstraints?: Record<string, unknown>;
   overrides?: Array<{ scope: string; mode: "limited" | "public" }>;
@@ -198,16 +160,10 @@ type ProjectionInput = {
     target?: { kind: "live" } | { kind: "all_versions" };
   }>;
   claimPreview?: { claimId: string; expiresAt: string };
-  /**
-   * Team-shaped manager Grants plus the envelope's `teamId` and
-   * `membershipEpoch`. Any `member:*` authority the control plane signs is
-   * admitted; moving the epoch retires every member session.
-   */
   team?: {
     teamId: string;
     membershipEpoch: number;
     grantGeneration?: number;
-    /** The team the Grants name; defaults to `teamId`. Set to prove another team's Grant is inert. */
     grantTeamId?: string;
   };
 };
@@ -330,8 +286,6 @@ function projection(input: ProjectionInput = {}) {
 
   const exchange = input.exchange ?? true;
   const generation = (input.accessGeneration ?? 0) + (input.sessionVersion ?? 0);
-  // Present only for team-shaped fixtures; the envelope fields are optional and
-  // an old control plane never sends them.
   const teamEnvelope = input.team
     ? { teamId: input.team.teamId, membershipEpoch: input.team.membershipEpoch }
     : undefined;
@@ -380,19 +334,9 @@ function projection(input: ProjectionInput = {}) {
   };
 }
 
-/**
- * The Public fixture's resting state. The member Grant is what lets this Space
- * mint a session: an unconstrained Public Grant admits everyone and proves
- * nothing about identity. It never makes the anonymous response private,
- * because an unconstrained Public Grant stays shared-cacheable.
- */
 function publicBaseConfig() {
   return projection({ mode: "public", memberRefs: ["member:mem_public_owner"] });
 }
-
-// ---------------------------------------------------------------------------
-// Handoff tokens and the redeem lane
-// ---------------------------------------------------------------------------
 
 function callbackToken(
   host: string,
@@ -401,8 +345,6 @@ function callbackToken(
     audience = spaceForHost(host),
     tokenHost = host,
     emailVerified = false,
-    // Only the account lane states a principal. Every other lane proves a
-    // capability and says nothing about who is holding it.
     principal,
     identity,
     generation = 0,
@@ -453,8 +395,6 @@ function runtimeBearerToken(host: string, authorities: string[], { expiresIn = 3
     generation: 0,
     sid: createHash("sha256").update(randomUUID()).digest("hex"),
     emailVerified: false,
-    // Older than the handoff redemption window by design: this credential is
-    // governed by its explicit expiry, not handoff freshness.
     iat: now - 120,
     nbf: now - 120,
     exp: now + expiresIn,
@@ -493,11 +433,6 @@ function sessionClockHeaders(now: number): Record<string, string> {
   return { [SESSION_CLOCK_HEADER]: String(now) };
 }
 
-// ---------------------------------------------------------------------------
-// The cookie is the session: mint, read and edit it the way the runtime does
-// (access-rules.php `_stattic_access_session_encode` / `_decode`).
-// ---------------------------------------------------------------------------
-
 type SessionAuthority = {
   reference: string;
   generation: string;
@@ -523,8 +458,6 @@ type SessionClaims = {
   identityCheckedAt?: number;
 };
 
-// SPACEFAST_ACCESS_SESSION_AUTHORITY_KEYS: entries travel under one-letter keys
-// because a Set-Cookie has ~4096 bytes for everything.
 const AUTHORITY_KEYS = [
   ["reference", "r"],
   ["generation", "g"],
@@ -534,7 +467,6 @@ const AUTHORITY_KEYS = [
   ["expiresAt", "x"],
 ] as const;
 
-/** The key the box signs this host's sessions with, so a cookie built here is one it minted. */
 function sessionSigningKey(host: string, label: string): string {
   return createHmac("sha256", spaceSessionKey(runtime, spaceForHost(host)))
     .update(label)
@@ -587,7 +519,6 @@ function encodeSession(host: string, claims: SessionClaims): string {
   return `${COOKIE_NAME}=${SESSION_PREFIX}${encoded}.${signature}`;
 }
 
-/** Rewrites a cookie's claims and re-signs it, exactly as the runtime would. */
 function editSession(host: string, cookie: string, edit: (claims: SessionClaims) => void): string {
   const claims = decodeSession(cookie);
   edit(claims);
@@ -606,12 +537,6 @@ function authorityReferences(cookie: string): string[] {
     .toSorted();
 }
 
-// The authority-less form of the same cookie: a visitor who proved nothing,
-// built the way a browser presents it so the runtime's reader runs end to end.
-// `sv` is the session-version half of the gen tuple (D30, never summed with
-// access_gen): the stateless session is re-keyed on it so the sign-everyone-out
-// lever reaches a visitor holding no authority, and a payload that omits it
-// verifies against nothing.
 function anonymousSessionCookie(
   host: string,
   payload: Record<string, unknown>,
@@ -631,10 +556,6 @@ function anonymousSessionPayload(cookie: string): Record<string, unknown> {
   const encoded = credential.slice(ANONYMOUS_PREFIX.length).split(".")[0] ?? "";
   return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>;
 }
-
-// ---------------------------------------------------------------------------
-// The revocation record (contracts §7 / D85): spaces/<s>/sessions/<sid>.json
-// ---------------------------------------------------------------------------
 
 function sessionsDirectory(spaceId: string): string {
   return path.join(spaceRoot(runtime, spaceId), "sessions");
@@ -661,9 +582,6 @@ async function pollUntil<T>(probe: () => T | null, label: string): Promise<T> {
   }
 }
 
-// ---------------------------------------------------------------------------
-
-// The private preview-image Space: only its owner reads it.
 function previewProjection(input: ProjectionInput = {}) {
   return projection({ memberRefs: ["member:mem_owner"], ...input });
 }
@@ -689,9 +607,6 @@ const FIXTURE_FILES = {
   "admin/index.html": "<h1>admin</h1>\n",
 };
 
-// A publisher may describe their own bytes; they may never widen the platform's
-// authorization boundary. `/docs/*` deliberately asks for everything a private
-// response must neutralize.
 const PERMISSIVE_HEADERS = [
   "/docs/",
   "  Access-Control-Allow-Origin: *",
@@ -700,11 +615,6 @@ const PERMISSIVE_HEADERS = [
   "  X-Robots-Tag: all",
 ].join("\n");
 
-/**
- * The Collab overlay a Space with Comments carries. The framing boundary reads
- * only `live_url`, the Space's own live origin, which is the one origin besides
- * the responding host that the runtime can prove belongs to this Space.
- */
 function collabOverlay(liveUrl: string): Record<string, unknown> {
   return {
     revision: "access-collab-1",
@@ -784,8 +694,6 @@ beforeAll(async () => {
       spaceId: LANELESS_SPACE,
       versionId: LANELESS_VERSION,
       hosts: [LANELESS_HOST],
-      // A scheme-relative `live_url`: origin-shaped but not an origin. The
-      // framing boundary must refuse it.
       config: { ...projection({ exchange: false }), sdk: collabOverlay("//evil.test/") },
     },
     {
@@ -839,10 +747,6 @@ beforeAll(async () => {
       }),
     },
     {
-      // A Space whose team-shaped Grant arrives through activation, not a later
-      // route PUT. The control plane projects team Grants this way now, so the
-      // finalize/activate path has to compile one — putRoute alone never
-      // exercised the overlay the activation writes.
       spaceId: TEAM_ACTIVATION_SPACE,
       versionId: TEAM_ACTIVATION_VERSION,
       hosts: [TEAM_ACTIVATION_HOST],
@@ -891,12 +795,9 @@ beforeAll(async () => {
         "index.html": "<html><head><title>Home</title></head><body><h1>home</h1></body></html>\n",
         "docs/index.html":
           "<html><head><title>Docs</title></head><body><h1>docs</h1></body></html>\n",
-        // A public page whose declared image sits under the members-only /docs.
         "gallery/index.html":
           '<html><head><title>Gallery</title><meta property="og:image" content="/docs/pic.png"></head><body>Gallery</body></html>\n',
         "docs/pic.png": { content: PNG_BYTES, contentType: "image/png" },
-        // A public page whose image URL is public, but is served from under
-        // /private, which anonymous visitors may not read.
         "cover/index.html":
           '<html><head><title>Cover</title><meta property="og:image" content="/cover.png"></head><body>Cover</body></html>\n',
         "private/cover.png": { content: PNG_BYTES, contentType: "image/png" },
@@ -924,7 +825,6 @@ beforeAll(async () => {
       },
     });
   }
-  // A private Space whose pages declare share images.
   await deploy(runtime, {
     spaceId: PREVIEW_SPACE,
     versionId: PREVIEW_VERSION,
@@ -932,7 +832,6 @@ beforeAll(async () => {
     files: {
       ...FIXTURE_FILES,
       "og.png": { content: PNG_BYTES, contentType: "image/png" },
-      // Most agent-built pages write their own tag, as an absolute URL.
       "trip/index.html": `<html><head><meta property="og:image" content="https://${PREVIEW_HOST}/trip/cover.jpg?v=c778f02a"><meta name="twitter:image" content="https://cdn.example.test/other.png"></head><body><h1>trip</h1></body></html>\n`,
       "trip/cover.jpg": { content: JPEG_BYTES, contentType: "image/jpeg" },
       "trip/relative.html":
@@ -954,10 +853,6 @@ afterAll(() => {
   logoutServer?.stop(true);
 });
 
-// ---------------------------------------------------------------------------
-// Admission
-// ---------------------------------------------------------------------------
-
 test("canonical admission is private by default, host-bound, and neutralizes publisher headers", async () => {
   const anonymous = await get(runtime, PRIVATE_HOST, "/docs/");
   expect(anonymous.status).toBe(403);
@@ -968,7 +863,6 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const rootWall = await get(runtime, PRIVATE_HOST, "/", { method: "HEAD" });
   expect(rootWall.status).toBe(403);
   expect(rootWall.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
-  // The wall is this version's: health answers for it without admitting anyone.
   expect(await healthServing(runtime, PRIVATE_HOST, PRIVATE_VERSION)).toMatchObject({
     state: "serving",
     version_match: true,
@@ -997,17 +891,12 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     headers: { cookie },
   });
   expect(admittedHead.headers.get("x-spacefast-version")).toBe(PRIVATE_VERSION);
-  // Private bytes never enter a shared cache, and the edge is told so.
   expect(admitted.headers.get("cache-control")).toStartWith("private");
   expect(admitted.headers.get(EDGE_CACHE_HEADER)).toBe("no-cache");
   expect(admitted.headers.get("vary")).toContain("Cookie");
-  // The publisher asked for `*` on all three; the platform boundary wins.
   expect(admitted.headers.get("x-robots-tag")).toBe("noindex, nofollow");
   expect(admitted.headers.get("cross-origin-resource-policy")).toBe("same-origin");
 
-  // An all-Versions Link covers immutable Version hosts only, never the live
-  // host and never a branch; a live URL needs a live-target Link. The same
-  // authority is refused on live and admitted on the Version host.
   const liveLinkCookie = await openAuthorities(PRIVATE_HOST, ["link:lnk_all_versions"]);
   expect(
     (await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: liveLinkCookie } })).status,
@@ -1017,19 +906,12 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     (await get(runtime, PRIVATE_VERSION_HOST, "/", { headers: { cookie: versionLinkCookie } }))
       .status,
   ).toBe(200);
-  // Private content is framable only by a framer this request PROVED, and this
-  // request proved none. Nothing is standing any more — not the Space's own
-  // origin, not its live origin, which is why the publisher's `*` collapses all
-  // the way to `'none'` rather than to a narrower allowlist.
   expect(admitted.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
   expect(admitted.headers.get("access-control-allow-origin")).toBeNull();
 
-  // The cookie is signed with the host inside the message, so a sibling host
-  // that shares the Space still rejects it.
   const crossHost = await get(runtime, OTHER_PRIVATE_HOST, "/docs/", { headers: { cookie } });
   expect(crossHost.status).toBe(403);
   expect(crossHost.headers.get("cache-control")).toBe("private, no-store");
-  // A session that is not admitted learns nothing about the version.
   expect(crossHost.headers.get("x-spacefast-version")).toBeNull();
 
   const external = await openAuthorities(PRIVATE_HOST, [
@@ -1039,7 +921,6 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
     200,
   );
 
-  // Declaring an image does not grant anonymous access to private bytes.
   for (const host of [PREVIEW_HOST, PREVIEW_VERSION_HOST]) {
     const image = await get(runtime, host, "/trip/cover.jpg?v=c778f02a");
     expect(image.status, host).toBe(403);
@@ -1064,7 +945,6 @@ test("canonical admission is private by default, host-bound, and neutralizes pub
   const tour = await (await get(runtime, PREVIEW_HOST, "/tour", member)).text();
   expect(tour).toContain('name="twitter:image" content="/trip/cover.jpg"');
 
-  // An explicit Public Grant admits the image under normal cache policy.
   try {
     await putRoute(runtime, PREVIEW_SPACE, "production", {
       version_id: PREVIEW_VERSION,
@@ -1107,12 +987,9 @@ test("a Space with no visitor lanes denies uniformly and discloses nothing", asy
   expect(denied.headers.get("access-control-allow-origin")).toBeNull();
   const body = await denied.text();
   expect(body).toContain("This page is private");
-  // No lane, no acquisition surface, no hostname echoed back to a crawler.
   expect(body).not.toContain("sf-access-request");
   expect(body).not.toContain(LANELESS_HOST);
 
-  // The refusal names its stable code in one platform header, whatever the
-  // body format, so a client can say why without asking again.
   expect(denied.headers.get("x-spacefast-refusal")).toBe("access_denied");
   const deniedJson = await get(runtime, LANELESS_HOST, "/", {
     headers: { accept: "application/json" },
@@ -1152,7 +1029,6 @@ test("access callback handoffs require both the Space audience and request host"
   expect(mismatchedHost.headers.get("x-spacefast-refusal")).toBe("access_route_not_found");
   expect(mismatchedHost.headers.get("cache-control")).toBe("no-store");
 
-  // The older engine's handoff address refuses a cross-origin form by name.
   const crossOrigin = await get(runtime, PRIVATE_HOST, "/__sf/redeem", {
     method: "POST",
     headers: {
@@ -1217,7 +1093,6 @@ test("a signed platform header admits directly without creating a browser cookie
   });
   expect(secondBearerRequest.status).toBe(200);
 
-  // Expiry has no grace period: a bearer 30 seconds past `exp` is refused.
   const expiredBearer = runtimeBearerToken(PRIVATE_HOST, ["member:mem_owner"], {
     expiresIn: -30,
   });
@@ -1226,10 +1101,6 @@ test("a signed platform header admits directly without creating a browser cookie
   });
   expect(expiredBearerRequest.status).toBe(403);
 });
-
-// ---------------------------------------------------------------------------
-// The session itself (contracts §7, D85/D120)
-// ---------------------------------------------------------------------------
 
 test("the cookie decides the request and the record only revokes it", async () => {
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
@@ -1241,16 +1112,11 @@ test("the cookie decides the request and the record only revokes it", async () =
 
   const recordPath = sessionRecordPath(SESSION_SPACE, cookie);
   expect(existsSync(recordPath)).toBe(true);
-  // The record holds no authority: losing it can only deny.
   const record = JSON.parse(readFileSync(recordPath, "utf8")) as Record<string, unknown>;
   expect(record.sid).toBe(claims.sid);
   expect(record.spaceId).toBe(SESSION_SPACE);
   expect(record).not.toHaveProperty("authorities");
 
-  // The same claims signed the older way, under a key derived from the
-  // exchange credential the control plane computes from its own secret, are
-  // refused: once the box has its own session key, nothing outside it can
-  // mint a session, and the browser gets the authority-less form.
   const encodedClaims = cookieCredential(cookie).slice(SESSION_PREFIX.length).split(".")[0] ?? "";
   const olderKey = createHmac("sha256", EXCHANGE_CREDENTIAL)
     .update("spacefast-access-session")
@@ -1262,15 +1128,11 @@ test("the cookie decides the request and the record only revokes it", async () =
   expect(refused.status).toBe(403);
   expect(refused.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=${ANONYMOUS_PREFIX}`);
 
-  // Hot lane (D120): fresh claims read no file, so a missing record changes
-  // nothing until the claims go stale.
   rmSync(recordPath, { force: true });
   const hot = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
   expect(hot.status).toBe(200);
   expect(hot.headers.get("set-cookie")).toBeNull();
 
-  // Cold lane: aged-out claims consult the record exactly once. It is gone, so
-  // this session ends and the browser gets the authority-less form.
   const stale = editSession(SESSION_HOST, cookie, (value) => {
     value.exp = value.iat - 1;
   });
@@ -1278,14 +1140,12 @@ test("the cookie decides the request and the record only revokes it", async () =
   expect(revoked.status).toBe(403);
   expect(revoked.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=${ANONYMOUS_PREFIX}`);
 
-  // A second, live session of the same Space is untouched by that revocation.
   const survivor = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   const survivorStale = editSession(SESSION_HOST, survivor, (value) => {
     value.exp = value.iat - 1;
   });
   const renewed = await get(runtime, SESSION_HOST, "/", { headers: { cookie: survivorStale } });
   expect(renewed.status).toBe(200);
-  // Its record was still there, so the cold lane re-minted rather than denied.
   const reissued = setCookieValue(renewed);
   expect(reissued).toStartWith(`${COOKIE_NAME}=${SESSION_PREFIX}`);
   const reissuedClaims = decodeSession(reissued);
@@ -1356,8 +1216,6 @@ test("a globally retired session version denies every cookie minted before it", 
     });
     expect(session.status).toBe(200);
     expect(await session.json()).toEqual({ data: { state: "anonymous" } });
-    // The record is not what denied this: session_ver is a tuple member the
-    // cookie carries, checked before any file is consulted.
     expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(true);
   } finally {
     await putRoute(runtime, SESSION_SPACE, "production", {
@@ -1374,9 +1232,6 @@ test("a durable session survives an access-generation move but not losing its Gr
   const journalStart = journalRecords(runtime).length;
   const cookie = await openAuthorities(SESSION_HOST, ["member:mem_session"]);
   try {
-    // A revoked Space connection reaches the box as the same route without
-    // its consent's Grants, at the same access generation. The session that
-    // consent opened is refused on its very next request.
     const consent = externalAuthorityReference("share-consent-session");
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
@@ -1393,24 +1248,16 @@ test("a durable session survives an access-generation move but not losing its Gr
     expect(
       (await get(runtime, SESSION_HOST, "/", { headers: { cookie: consentCookie } })).status,
     ).toBe(403);
-    // Everyone else's session is untouched.
     expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
 
-    // Ordinary Grant edits rotate the generation so stale handoffs cannot be
-    // redeemed. A browser session follows its own still-live authority instead,
-    // which is what lets a scoped Link created before a Space is claimed keep
-    // working after the claim.
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
       config: projection({ memberRefs: ["member:mem_session"], accessGeneration: 1 }),
     });
     const survived = await get(runtime, SESSION_HOST, "/", { headers: { cookie } });
     expect(survived.status).toBe(200);
-    // The gen moved, so the cold lane re-minted the cookie against it.
     expect(decodeSession(setCookieValue(survived)).accessGeneration).toBe(1);
 
-    // Withdraw the Grant entirely: the authority no longer resolves, so the
-    // re-mint retains nothing and the session retires.
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
       config: projection({ accessGeneration: 2 }),
@@ -1443,9 +1290,6 @@ test("a durable session survives an access-generation move but not losing its Gr
 });
 
 test("a team-shaped Grant activated with the version serves its Space", async () => {
-  // The whole point: the overlay this asserts on was written by finalize's
-  // activation, not by a later route PUT. A Space whose first serving state
-  // already names a team must still admit, refuse and render normally.
   const anonymous = await get(runtime, TEAM_ACTIVATION_HOST, "/");
   expect(anonymous.status).toBe(403);
   expect(await healthServing(runtime, TEAM_ACTIVATION_HOST, TEAM_ACTIVATION_VERSION)).toMatchObject(
@@ -1465,12 +1309,8 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
     config: projection({ team }),
   });
   try {
-    // The projection names the team, never the member. The control plane
-    // signed this member's authority, so the engine admits it.
     const cookie = await openAuthorities(SESSION_HOST, ["member:mem_never_projected"]);
     expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie } })).status).toBe(200);
-    // The immutable Version host reads the same production projection, so a
-    // member added after it was installed opens a pinned Version too.
     const versionCookie = await openAuthorities(SESSION_VERSION_HOST, [
       "member:mem_joined_after_projection",
     ]);
@@ -1479,8 +1319,6 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
         .status,
     ).toBe(200);
 
-    // Another team's Grant admits nobody, even with a valid member authority:
-    // the handoff mints no session and the direct header lane is refused.
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
       config: projection({ team: { ...team, grantTeamId: "team_other" } }),
@@ -1497,8 +1335,6 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
       config: projection({ team }),
     });
 
-    // A reduction moves the epoch and the access generation together. The
-    // session revalidates against the new digest, finds no match, and retires.
     await putRoute(runtime, SESSION_SPACE, "production", {
       version_id: SESSION_VERSION,
       config: projection({ team: { ...team, membershipEpoch: 1 }, accessGeneration: 1 }),
@@ -1512,10 +1348,6 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
     expect(revokedVersion.status).toBe(403);
     expect(existsSync(sessionRecordPath(SESSION_SPACE, versionCookie))).toBe(false);
 
-    // A fresh handoff at the new generation admits again: revocation is per
-    // epoch, not per member, and the control plane decides who gets a new
-    // handoff. Handoffs are bound to the projection generation they were cut
-    // for, so the token names the moved one.
     const reopenedCallback = await redeemHandoff(
       runtime,
       SESSION_HOST,
@@ -1539,10 +1371,6 @@ test("a team-shaped Grant admits any member authority and an epoch bump retires 
   }
 });
 
-// Catches: a membership reduction (the epoch bump member removal makes, and
-// Require SSO will make) signing out visitors, or a member's team authority
-// outliving it through a person share they also hold. Member sessions ending
-// belongs to the test above.
 test("an epoch bump retires member authority and keeps person shares, for visitors and members alike", async () => {
   const team = { teamId: "team_session", membershipEpoch: 0 };
   const people = [
@@ -1572,8 +1400,6 @@ test("an epoch bump retires member authority and keeps person shares, for visito
     expect((await get(runtime, SESSION_HOST, "/", { headers: { cookie: visitor } })).status).toBe(
       200,
     );
-    // A person share is visitor authority, members included: the session goes
-    // on with that authority alone.
     const continued = await get(runtime, SESSION_HOST, "/", {
       headers: { cookie: memberWithShare },
     });
@@ -1613,7 +1439,6 @@ test("logout revokes only the presented session and fails closed when the record
     200,
   );
 
-  // A logout is state-changing, so it needs a same-origin top-level request.
   const crossSite = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout?return=/", {
     headers: { cookie: firstCookie, "sec-fetch-site": "cross-site" },
   });
@@ -1627,8 +1452,6 @@ test("logout revokes only the presented session and fails closed when the record
     },
   });
   expect(subresource.status).toBe(403);
-  // A navigation without Fetch Metadata ends nothing either, but it is not a
-  // dead end: it asks, and its button posts back same-origin.
   const unproven = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout?return=/docs/", {
     headers: { cookie: firstCookie, accept: "text/html" },
   });
@@ -1642,7 +1465,6 @@ test("logout revokes only the presented session and fails closed when the record
   expect(unproven.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
   // Its own post must carry a real Origin, which no-referrer would blank.
   expect(unproven.headers.get("referrer-policy")).toBe("same-origin");
-  // Another site's form post is refused whatever Fetch Metadata says, or omits.
   for (const origin of ["https://evil.example", "null"]) {
     const forged = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
       method: "POST",
@@ -1655,8 +1477,6 @@ test("logout revokes only the presented session and fails closed when the record
   expect((await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: firstCookie } })).status).toBe(
     200,
   );
-  // The confirmation's own post carries this Space's Origin and nothing else:
-  // a browser that sends no Fetch Metadata still signs out.
   const confirmed = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
     method: "POST",
     headers: {
@@ -1671,9 +1491,6 @@ test("logout revokes only the presented session and fails closed when the record
   const secondCookieRestored = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
 
   const callsBefore = collaborationLogoutCalls.length;
-  // Signed out here means staying out: the returning-account marker goes with
-  // the session, so the overlay never signs this browser straight back in, and
-  // so do the system-view (both namespaces) and frame proofs that open pages.
   const loggedOut = await logout(`${firstCookie}; ${RETURNING_MARKER}=1`);
   expect(loggedOut.status).toBe(303);
   const cleared = loggedOut.headers.getSetCookie().map((cookie) => cookie.split(";")[0]);
@@ -1697,22 +1514,15 @@ test("logout revokes only the presented session and fails closed when the record
     })
     .parse(revokes[0]);
   expect(revoked.spaceId).toBe(PRIVATE_SPACE);
-  // The control plane is told whose session ended, so the browser's hop
-  // through the clear URL keeps that account signed out of this Space.
   expect(revoked.principal).toBe("account:ps1_logout_owner");
   expect(revoked.runtimeHost).toBe(PRIVATE_HOST);
   expect(revoked.returnUrl).toBe(`${RUNTIME_SCHEME}://${PRIVATE_HOST}/`);
-  // Ending the access session ends its Cast session: one id names both. That id
-  // comes from the signed claims, never the cookie value, which is a bearer
-  // credential and must not reach the control plane or a Cast room.
   expect(revoked.sessionId).toBe(decodeSession(firstCookie).sid);
   expect(loggedOut.headers.get("location")).toBe(
     `${logoutOrigin}/logout-cleared/${revoked.sessionId}`,
   );
   expect(existsSync(sessionRecordPath(PRIVATE_SPACE, firstCookie))).toBe(false);
 
-  // Replaying the revoked credential proves nothing once its claims age out,
-  // and the other session of the same visitor is untouched.
   const replayed = await get(runtime, PRIVATE_HOST, "/", {
     headers: {
       cookie: editSession(PRIVATE_HOST, firstCookie, (claims) => {
@@ -1726,12 +1536,9 @@ test("logout revokes only the presented session and fails closed when the record
     (await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: secondCookieRestored } })).status,
   ).toBe(200);
 
-  // Nothing to revoke is a successful logout, not an error.
   expect((await logout()).status).toBe(303);
   expect((await logout(`${COOKIE_NAME}=malformed`)).status).toBe(303);
 
-  // Central revocation is part of the logout: 404 means there was no Comments
-  // session to end (fine), 503 means the logout did not happen (fail closed).
   const preRegistration = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
   collaborationLogoutMissing = true;
   try {
@@ -1757,8 +1564,6 @@ test("logout revokes only the presented session and fails closed when the record
     (await get(runtime, PRIVATE_HOST, "/", { headers: { cookie: centralFailure } })).status,
   ).toBe(200);
 
-  // Reporting success while the record survives would leave a revoked cookie
-  // working. A record path that cannot be unlinked is the fail-closed case.
   const undeletable = await openAuthorities(PRIVATE_HOST, ["member:mem_owner"]);
   const undeletablePath = sessionRecordPath(PRIVATE_SPACE, undeletable);
   const contents = readFileSync(undeletablePath);
@@ -1811,10 +1616,6 @@ test("a route bundle written before collaboration logout keeps its access-reques
   }
 });
 
-// ---------------------------------------------------------------------------
-// Public admission and the edge
-// ---------------------------------------------------------------------------
-
 test("unconstrained Public access is anonymously cacheable and opts the edge in", async () => {
   const anonymous = await get(runtime, PUBLIC_HOST, "/");
   expect(anonymous.status).toBe(200);
@@ -1825,8 +1626,6 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   // both a public Cache-Control and the A8C opt-in.
   expect(anonymous.headers.get(EDGE_CACHE_HEADER)).toBe("cache");
 
-  // An identity that changes nothing about the bytes must not privatize a
-  // URL-stable public page.
   const irrelevant = await openAuthorities(PUBLIC_HOST, ["member:mem_public_owner"]);
   const withIdentity = await get(runtime, PUBLIC_HOST, "/", {
     headers: { cookie: irrelevant },
@@ -1836,10 +1635,6 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   expect(withIdentity.headers.get(EDGE_CACHE_HEADER)).toBe("cache");
   expect(withIdentity.headers.get("set-cookie")).toBeNull();
 
-  // A cookie that verifies against nothing still gets the public bytes, but the
-  // response that retires it is state-changing and stays out of every cache. The
-  // authority-less form replaces it rather than deleting it, so the next
-  // navigation can say why the visitor is signed out.
   const forged = `${COOKIE_NAME}=${SESSION_PREFIX}not-a-real-session.deadbeef`;
   const cleared = await get(runtime, PUBLIC_HOST, "/", { headers: { cookie: forged } });
   expect(cleared.status).toBe(200);
@@ -1847,14 +1642,12 @@ test("unconstrained Public access is anonymously cacheable and opts the edge in"
   expect(cleared.headers.get(EDGE_CACHE_HEADER)).toBe("no-cache");
   expect(cleared.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=${ANONYMOUS_PREFIX}`);
 
-  // Machine callers never fall back: an unusable platform bearer is a denial.
   const invalidBearer = await get(runtime, PUBLIC_HOST, "/", {
     headers: { "x-sf-authorization": "Bearer invalid-public-machine-token" },
   });
   expect(invalidBearer.status).toBe(403);
   expect(invalidBearer.headers.get("cache-control")).toBe("private, no-store");
 
-  // A customer application's own Authorization header is not ours to read.
   const customerAuthorization = await get(runtime, PUBLIC_HOST, "/", {
     headers: { authorization: "Bearer customer-application-token" },
   });
@@ -1893,8 +1686,6 @@ test("a host canonical redirect follows the Space's anonymous verdict", async ()
     expect(privateRedirect.status).toBe(308);
     expect(privateRedirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(privateRedirect.headers.get("cache-control")).toBe("private, no-store");
-    // A sign-in, unlock card or share link started on the redirect host goes to
-    // the canonical host first, so its cookies and callback bind there.
     for (const lane of [
       "/__spacefast/sign-in?return=%2Fabout%2F",
       "/__spacefast/unlock?return=%2Fabout%2F",
@@ -1905,7 +1696,6 @@ test("a host canonical redirect follows the Space's anonymous verdict", async ()
       expect(started.headers.get("location")).toBe(`https://${PUBLIC_HOST}${lane}`);
       expect(started.headers.getSetCookie()).toEqual([]);
     }
-    // The callback is bound to the host its code was issued for: never moved.
     const callback = await get(runtime, `www.${PUBLIC_HOST}`, "/__spacefast/callback?code=x");
     expect(callback.status).not.toBe(308);
   } finally {
@@ -1919,8 +1709,6 @@ test("a host canonical redirect follows the Space's anonymous verdict", async ()
 
 test("Grant constraints gate a Public Grant per request", async () => {
   try {
-    // Any constraint at all makes the Grant conditional, so the response stops
-    // being shared-cacheable even while it still admits everyone.
     await putRoute(runtime, PUBLIC_SPACE, "production", {
       version_id: PUBLIC_VERSION,
       config: projection({
@@ -1946,7 +1734,6 @@ test("Grant constraints gate a Public Grant per request", async () => {
     expect(
       (await get(runtime, PUBLIC_HOST, "/", { headers: { "user-agent": "BadBot/1.0" } })).status,
     ).toBe(403);
-    // No user agent at all is not proof of not being the excluded one.
     expect((await get(runtime, PUBLIC_HOST, "/", { headers: { "user-agent": "" } })).status).toBe(
       403,
     );
@@ -1977,8 +1764,6 @@ test("an IP network constraint admits nobody and is journaled once", async () =>
       version_id: PUBLIC_VERSION,
       config: projection({
         mode: "public",
-        // §16: X-Real-IP and CF-Connecting-IP reach PHP attacker-controlled, so
-        // "matches the CIDR" would only mean "sent the right header".
         publicConstraints: { network: { ipCidrs: ["127.0.0.0/8"] } },
       }),
     });
@@ -2039,8 +1824,6 @@ test("a Public path becoming Private announces both exposure digests and denies 
     public: false,
     authorizationDigest: "b".repeat(64),
   };
-  // Still public: a content-shaped route write purges only the live serving
-  // hostname, since the version-pinned alias never changes bytes on activation.
   await putRoute(runtime, CACHE_SPACE, "production", {
     version_id: CACHE_VERSION,
     config: {
@@ -2080,9 +1863,6 @@ test("a Public path becoming Private announces both exposure digests and denies 
   expect((await get(runtime, CACHE_HOST, "/docs/")).status).toBe(403);
   expect((await get(runtime, CACHE_HOST, "/")).status).toBe(200);
 
-  // Public→private is the one transition that owes every alias a sweep: the
-  // edge holds long-TTL copies of the formerly-public HTML on all of them, live
-  // host first, version-pinned aliases behind it.
   const sweepPurge = await edgePurgeCallsBy(runtime, () =>
     putRoute(runtime, CACHE_SPACE, "production", {
       version_id: CACHE_VERSION,
@@ -2094,15 +1874,10 @@ test("a Public path becoming Private announces both exposure digests and denies 
       config_digest: privateConfigDigest,
     }),
   );
-  // Every named host in full (domain scope: no purge_uris), live host first,
-  // version-pinned alias behind it, one POST each.
   expect(sweepPurge.every((call) => call.reason === "space_access_privatized")).toBe(true);
   expect(sweepPurge.every((call) => call.uris.length === 0)).toBe(true);
   expect(sweepPurge.map((call) => call.hostname)).toEqual([CACHE_HOST, CACHE_VERSION_HOST]);
 
-  // Version ids cannot say whether cached anonymous bytes just became private,
-  // because a config-only access change keeps the same pointer. The journal's
-  // before/after exposure descriptors answer that.
   const routeEvent = journalRecords(runtime).findLast(
     (event) =>
       event.event === "route_updated" &&
@@ -2114,18 +1889,12 @@ test("a Public path becoming Private announces both exposure digests and denies 
   expect(routeEvent?.previous_public_exposure).toEqual(partialExposure);
   expect(routeEvent?.public_exposure).toEqual(privateExposure);
 
-  // Authorization runs before anything a stale browser copy could present, so a
-  // held validator can never be traded back into the bytes it describes.
   const conditional = await get(runtime, CACHE_HOST, "/docs/", {
     headers: { "if-none-match": etag ?? '"missing"' },
   });
   expect(conditional.status).toBe(403);
   expect(conditional.headers.get("cache-control")).toBe("private, no-store");
 });
-
-// ---------------------------------------------------------------------------
-// Fences (D82)
-// ---------------------------------------------------------------------------
 
 test("an exposure fence denies an existing session before the stale projection syncs", async () => {
   const staleLink: ProjectionInput = {
@@ -2141,9 +1910,6 @@ test("an exposure fence denies an existing session before the stale projection s
       200,
     );
 
-    // The desired projection still contains the revoked Link, so the
-    // transition's temporary exposure fence is the only thing that can deny an
-    // already-minted session while background sync is parked.
     await putRoute(runtime, PRIVATE_SPACE, "production", {
       version_id: PRIVATE_VERSION,
       config: projection({ ...staleLink, accessFence: "exposure" }),
@@ -2152,8 +1918,6 @@ test("an exposure fence denies an existing session before the stale projection s
     expect(denied.status).toBe(403);
     expect(denied.headers.get("cache-control")).toContain("no-store");
 
-    // A fenced Space accepts no handoff either: a session minted mid-fence
-    // would outlive the hold it was supposed to be kept behind.
     const handoff = await redeemHandoff(
       runtime,
       PRIVATE_HOST,
@@ -2188,8 +1952,6 @@ test("an ownership fence preserves Public production but denies identity-bound p
     expect(anonymous.status).toBe(200);
     expect(anonymous.headers.get("cache-control")).toContain("public");
 
-    // Nothing identity-bound resolves while ownership is in question, not even
-    // for the member who would otherwise hold it.
     const ownerCookie = await openAuthorities(PUBLIC_HOST, ["member:mem_public_owner"]);
     const privatePath = await get(runtime, PUBLIC_HOST, "/private", {
       headers: { cookie: ownerCookie },
@@ -2204,10 +1966,6 @@ test("an ownership fence preserves Public production but denies identity-bound p
   }
 });
 
-// ---------------------------------------------------------------------------
-// Scopes
-// ---------------------------------------------------------------------------
-
 test("Open callbacks union Link and member refs while a scoped Grant blocks broader paths", async () => {
   const linkCookie = await openAuthorities(SCOPED_HOST, ["link:lnk_shared"]);
   expect(
@@ -2217,11 +1975,6 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
     (await get(runtime, SCOPED_HOST, "/admin/", { headers: { cookie: linkCookie } })).status,
   ).toBe(403);
 
-  // Attaching is one visitor gaining a capability, not a second visitor: the
-  // session id rotates to the handoff's, the record the browser left is gone,
-  // and the Comments identity rides across so a thread does not change author
-  // mid-conversation. Neither authority states an identity, so the attached
-  // session is still anonymous.
   const linkClaims = decodeSession(linkCookie);
   const unionCookie = await openAuthorities(SCOPED_HOST, ["member:mem_owner"], {
     cookie: linkCookie,
@@ -2235,16 +1988,11 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect(authorityReferences(unionCookie)).toEqual(["link:lnk_shared", "member:mem_owner"]);
   expect(existsSync(sessionRecordPath(SCOPED_SPACE, linkCookie))).toBe(false);
   const unionClaims = decodeSession(unionCookie);
-  // Attaching a credential rotates the session, so the one id Cast disconnects
-  // moves with it. The visitor's pseudonym does not: renaming them mid-thread
-  // because they opened a share Link would be the bug.
   expect(unionClaims.sid).not.toBe(linkClaims.sid);
   expect(unionClaims.anonymousId).toBe(linkClaims.anonymousId);
   expect(linkClaims.principal).toBe("anonymous");
   expect(unionClaims.principal).toBe("anonymous");
 
-  // An account-lane handoff states who the session is. A later link redeem
-  // proves only a capability and must not re-anonymize them.
   const accountCookie = await openAuthorities(SCOPED_HOST, ["member:mem_owner"], {
     principal: "account:usr_scoped",
     identity: { issuer: "https://api.spacefast.com/v1/auth", subject: "usr_scoped" },
@@ -2265,10 +2013,6 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   expect((await redeemHandoff(runtime, SCOPED_HOST, mismatchedIdentity, "/")).status).toBe(404);
   expect(authorityReferences(accountByLink)).toEqual(["link:lnk_shared", "member:mem_owner"]);
 
-  // The authority-less form: what a visitor holds before they prove anything.
-  // It admits nothing and is not a session in the store, so presenting it never
-  // makes the runtime write one. Redeeming an authority over it upgrades that
-  // visitor in place, keeping the pseudonym they had.
   const carried = {
     sid: "a".repeat(64),
     anonymousId: `pg1_${"b".repeat(43)}`,
@@ -2296,8 +2040,6 @@ test("Open callbacks union Link and member refs while a scoped Grant blocks broa
   });
   expect(decodeSession(olderUpgraded).anonymousId).toBe(older.anonymousId);
 
-  // A broad Grant does not reach into a scope carved out from under it; the
-  // narrower Grant on that scope is the only thing that opens it.
   const broadPerson = await openAuthorities(SCOPED_HOST, ["person:per_broad"]);
   expect(
     (await get(runtime, SCOPED_HOST, "/docs/", { headers: { cookie: broadPerson } })).status,
@@ -2314,8 +2056,6 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   expect(home.headers.get("x-spacefast-share-image")).toBe("eligible");
   expect(await home.text()).toContain('data-spacefast-auto-image="og:image"');
 
-  // Publishing a page that names a protected image never grants access to
-  // that image, including an image reached through a rewrite.
   const gallery = await get(runtime, BOUNDARY_HOST, "/gallery/");
   expect(gallery.status).toBe(200);
   expect(await gallery.text()).toContain('property="og:image" content="/docs/pic.png"');
@@ -2325,8 +2065,6 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
   expect(await cover.text()).toContain('property="og:image" content="/cover.png"');
   expect((await get(runtime, BOUNDARY_HOST, "/cover.png")).status).toBeGreaterThanOrEqual(400);
 
-  // A constrained Public Grant admits this request without declaring the
-  // page publicly readable to screenshot and analytics consumers.
   await putRoute(runtime, BOUNDARY_SPACE, "production", {
     version_id: BOUNDARY_VERSION,
     config: boundaryProjection({ expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() }),
@@ -2358,8 +2096,6 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
     expect(body, requestPath).not.toContain("<h1>docs</h1>");
   }
 
-  // A traversal that would climb out of the excluded scope is not a path
-  // identity at all; it never resolves to the bytes it was aiming past.
   for (const requestPath of ["/safe/%2e%2e%2fprivate", "/safe/%252e%252e/private"]) {
     const response = await get(runtime, BOUNDARY_HOST, requestPath);
     expect(response.status, requestPath).toBeGreaterThanOrEqual(400);
@@ -2377,12 +2113,10 @@ test("a scope exclusion cannot be widened by an alternate spelling of the same p
 
 test("the engine names each of its own refusals in one header, whatever the body", async () => {
   for (const accept of ["text/html", "application/json"]) {
-    // A path that is no path: invalid_path.
     const invalid = await get(runtime, PRIVATE_HOST, "/%2fdocs", { headers: { accept } });
     expect(invalid.status, accept).toBe(403);
     expect(invalid.headers.get("x-spacefast-refusal"), accept).toBe("invalid_path");
     expect(invalid.headers.get("cache-control"), accept).toBe("no-store");
-    // A sign-out that did not come from this Space's own page: access_origin_invalid.
     const signOut = await get(runtime, PRIVATE_HOST, "/__spacefast/access/logout", {
       headers: { accept, "sec-fetch-site": "cross-site" },
     });
@@ -2399,9 +2133,6 @@ test("ambiguous path identities fail closed instead of being sanitized", async (
   }
 });
 
-// D110: normalization is intl's Normalizer behind an ASCII fast path. One scope
-// identity per page, whichever spelling the request carried, and `index.html`
-// is the same identity as the directory it indexes.
 test("scope identities NFC-normalize and canonicalize their index alias", () => {
   const accessRulesPath = path.resolve(import.meta.dir, "../engine/runtime/access-rules.php");
   const probe = spawnSync(
@@ -2417,7 +2148,6 @@ test("scope identities NFC-normalize and canonicalize their index alias", () => 
         "_stattic_artifact_scope_path('/docs/index.html'),",
         '_stattic_scope_path("/cafe\\u{0301}"),',
         '_stattic_scope_path("/caf\\u{00e9}"),',
-        // Invalid UTF-8 is not a path identity at all, in either lane.
         '_stattic_scope_path("/\\xff"),',
         "]);",
       ].join(" "),
@@ -2523,11 +2253,6 @@ test("Public admission stays live-only while branch previews require management 
       expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     },
   });
-  // A Public Grant on the live version says nothing about an immutable branch
-  // preview; only a grant that names that branch does. Access is a Space
-  // property in v4: one overlay carries the whole grant set (contracts §4), so
-  // a branch preview is admitted by a `target: branch` Grant in that set, never
-  // by a second projection hung off the branch route.
   spaceConfig.authorization.grants.push(
     {
       id: "grt_branch_manager",
@@ -2559,8 +2284,6 @@ test("Public admission stays live-only while branch previews require management 
     version_id: BRANCH_VERSION,
     config: spaceConfig,
   });
-  // The branch route only maps a hostname at a version; it carries no access
-  // answer of its own.
   await putRoute(runtime, BRANCH_SPACE, "branch-docs", {
     version_id: BRANCH_VERSION,
     production_hostnames: [BRANCH_HOST],
@@ -2585,10 +2308,6 @@ test("Public admission stays live-only while branch previews require management 
   expect(openBranch.headers.get("cache-control")).toStartWith("private");
 });
 
-// ---------------------------------------------------------------------------
-// Authorities inside one session
-// ---------------------------------------------------------------------------
-
 test("a maxUses credential session remains authorized after its winning redemption", async () => {
   const config = projection();
   config.authorization.grants.push({
@@ -2606,8 +2325,6 @@ test("a maxUses credential session remains authorized after its winning redempti
     config,
   });
   try {
-    // maxUses is consumed at acquisition. The session it produced keeps
-    // working: a one-use link is not a one-page-view link.
     const cookie = await openAuthorities(PRIVATE_HOST, ["link:single_use_link"]);
     for (const requestPath of ["/", "/docs/"]) {
       const admitted = await get(runtime, PRIVATE_HOST, requestPath, { headers: { cookie } });
@@ -2630,8 +2347,6 @@ test("authority entries expire independently and unrelated use does not extend t
     return openAuthorities(AUTHORITY_LRU_HOST, ["person:per_lru_4"], { cookie: first });
   };
 
-  // Absolute lifetime is per authority: the aged one is dropped on the next
-  // re-mint while the session and its other authority survive.
   const absolute = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {
     const entry = authorityIn(claims, "person:per_lru_3");
     entry.openedAt = now - SESSION_ABSOLUTE_SECONDS - 1;
@@ -2703,7 +2418,6 @@ test("authority entries expire independently and unrelated use does not extend t
   expect(afterIdentityExpiry.principal).toBe("anonymous");
   expect(afterIdentityExpiry.identity).toBeUndefined();
 
-  // Idle expiry is the same shape, measured from last use rather than acquisition.
   const idle = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {
     const entry = authorityIn(claims, "person:per_lru_3");
     entry.openedAt = now - SESSION_IDLE_SECONDS - 60;
@@ -2716,8 +2430,6 @@ test("authority entries expire independently and unrelated use does not extend t
     (await get(runtime, AUTHORITY_LRU_HOST, "/p4/", { headers: { cookie: idle } })).status,
   ).toBe(200);
 
-  // Use moves only the authority that admitted the request, and only once per
-  // touch interval, so a read-mostly session re-mints nothing.
   const preserved = { openedAt: now - 1_000, lastSeenAt: now - 500 };
   const recent = { openedAt: now - 60, lastSeenAt: now - 2 };
   const untouched = editSession(AUTHORITY_LRU_HOST, await twoAuthorities(), (claims) => {
@@ -2780,7 +2492,6 @@ test("the seventeenth authority evicts the least recently seen and reopening res
   }
   if (cookie === undefined) throw new Error("no session was minted");
   expect(decodeSession(cookie).authorities).toHaveLength(SESSION_AUTHORITY_LIMIT);
-  // p0 was acquired first and never used since, so it is what the cap sheds.
   expect(authorityReferences(cookie)).not.toContain("person:per_lru_0");
   expect((await get(runtime, AUTHORITY_LRU_HOST, "/p0/", { headers: { cookie } })).status).toBe(
     403,
@@ -2789,8 +2500,6 @@ test("the seventeenth authority evicts the least recently seen and reopening res
     200,
   );
 
-  // Recency, not acquisition age: p1 is the oldest proof by openedAt, but it is
-  // also the most recently seen, so the next acquisition must not shed it.
   const now = Math.floor(Date.now() / 1000);
   const recentlyUsed = editSession(AUTHORITY_LRU_HOST, cookie, (claims) => {
     for (const entry of claims.authorities) {
@@ -2813,7 +2522,7 @@ test("the seventeenth authority evicts the least recently seen and reopening res
   expect(
     (await get(runtime, AUTHORITY_LRU_HOST, "/p1/", { headers: { cookie: reopened } })).status,
   ).toBe(200);
-  // SPACEFAST_ACCESS_SESSION_MAX_BYTES: a Set-Cookie has ~4096 bytes for
+  // STATTIC_ACCESS_SESSION_MAX_BYTES: a Set-Cookie has ~4096 bytes for
   // everything, so the signed claim payload stays inside its own budget.
   const payload = cookieCredential(reopened).slice(SESSION_PREFIX.length).split(".")[0] ?? "";
   expect(payload.length).toBeLessThanOrEqual(3900);
@@ -2845,11 +2554,8 @@ test("credential rotation and verified email are scoped to one Grant authority",
   expect(
     authorityIn(decodeSession(cookie), "link:lnk_email_bound").emailVerifiedUntil,
   ).not.toBeNull();
-  // Only the authority the verified handoff named carries the proof.
   expect(authorityIn(decodeSession(cookie), "link:lnk_unrelated").emailVerifiedUntil).toBeNull();
 
-  // Letting the email proof lapse closes the Grant that required it and leaves
-  // the unrelated one alone.
   const lapsed = editSession(CREDENTIAL_SCOPE_HOST, cookie, (claims) => {
     authorityIn(claims, "link:lnk_email_bound").emailVerifiedUntil =
       Math.floor(Date.now() / 1000) - 1;
@@ -2863,8 +2569,6 @@ test("credential rotation and verified email are scoped to one Grant authority",
   ).toBe(200);
 
   try {
-    // Rotating one Link's Grant generation retires that authority on the next
-    // revalidation; the session and its other authority survive.
     cookie = await openAuthorities(CREDENTIAL_SCOPE_HOST, ["link:lnk_email_bound"], {
       cookie,
       emailVerified: true,
@@ -2891,13 +2595,6 @@ test("credential rotation and verified email are scoped to one Grant authority",
   }
 });
 
-// The session records one generation per authority: a digest over every Grant
-// that admits it, not the one Grant it happened to redeem. Committing to the
-// whole set is what makes rotating the real admitting Grant unforgeable; with a
-// single candidate standing in, whichever Grant sorted first kept a revoked
-// credential alive. The cost is that any other edit to that set, such as the
-// added overlapping Grant here, also retires the authority, which
-// re-acquisition resolves.
 test("editing the Grant set behind an authority retires the session and degrades it in place", async () => {
   const links = [{ linkId: "lnk_unrelated", scopes: ["/shared"], expiresAt: null }];
   await putRoute(runtime, CREDENTIAL_SCOPE_SPACE, "production", {
@@ -2933,12 +2630,6 @@ test("editing the Grant set behind an authority retires the session and degrades
   });
   const revoked = await get(runtime, CREDENTIAL_SCOPE_HOST, "/shared/", { headers: { cookie } });
   expect(revoked.status).toBe(403);
-  // The edit took away what this visitor may do, not who they are. The record
-  // retires and the browser gets the authority-less form. It keeps the
-  // pseudonym already in use, since losing that would rename the visitor
-  // mid-thread, and the session id it was already on, so the Cast session
-  // survives the demotion. It also carries the one fact that explains the wall,
-  // so the page says their access expired rather than only that it is private.
   expect(existsSync(sessionRecordPath(CREDENTIAL_SCOPE_SPACE, cookie))).toBe(false);
   const replacement =
     revoked.headers
@@ -2974,10 +2665,7 @@ test("a host-clock rollback inside the verifier's skew admits, and beyond it fai
   const request = (now: number) =>
     get(runtime, SESSION_HOST, "/", { headers: { cookie, ...sessionClockHeaders(now) } });
 
-  // A 60-second rollback stays inside the bounded skew the verifier allows.
   expect((await request(wallNow - 60)).status).toBe(200);
-  // A much larger one fails closed for the interval rather than destroying a
-  // session that is merely future-dated relative to this request's clock.
   expect((await request(wallNow - 900)).status).toBe(403);
   expect(existsSync(sessionRecordPath(SESSION_SPACE, cookie))).toBe(true);
   expect((await request(wallNow)).status).toBe(200);

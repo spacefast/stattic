@@ -1,11 +1,3 @@
-// The v4 ingest surface (contracts §9): a manifest declared once on the
-// management lane, then two path-blind blob routes on the upload lane —
-// `POST /spaces/{s}/blobs/have` and `PUT /spaces/{s}/blobs/{sha}` — plus
-// path-addressed direct-byte and URL-fetch lanes. Covered here: the
-// upload lane's JWT/audience/scope boundary, blob negotiation and resume,
-// streamed sha verification, the ingest admission cap (D25), path policy at
-// its new seam (manifest declaration, D26), and finalize consuming the
-// publish session.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -60,10 +52,7 @@ import {
 let rt: Runtime;
 
 const SPACE = "spc_up";
-// Its own space so seeding the per-space admission counter cannot disturb the
-// other tests' uploads.
 const ADMISSION_SPACE = "spc_up_adm";
-// STATTIC_RUNTIME_INGEST_CONCURRENCY_PER_SPACE (D25).
 const INGEST_LIMIT = 4;
 
 beforeAll(async () => {
@@ -93,14 +82,12 @@ test("upload preflight is answered before compact-route parsing and authorizatio
   expect(response.status).toBe(204);
   expect(response.headers.get("access-control-allow-origin")).toBe("https://my.spacefast.com");
   expect(response.headers.get("access-control-allow-methods")).toContain("PUT");
-  // Both spellings of the platform credential header are allowed.
   const allowed = (response.headers.get("access-control-allow-headers") ?? "").split(/,\s*/);
   expect(allowed).toEqual(
     expect.arrayContaining(["Authorization", "X-SF-Authorization", "SF-Authorization"]),
   );
 });
 
-/** Raw `POST /spaces/{s}/versions` so a rejected manifest can be inspected. */
 async function declareManifest(
   versionId: string,
   files: DeployFiles,
@@ -152,7 +139,6 @@ test("upload tokens are verified: bearer, audience, instance, expiry, signature"
   expect(forged.status).toBe(401);
   expect(await errorCode(forged)).toBe("runtime_token_bad_signature");
 
-  // The right token still works: the boundary is the token, not the route.
   expect((await put(session.token)).status).toBe(200);
 });
 
@@ -162,8 +148,6 @@ test("upload token scope is pinned to its space, session and version", async () 
   const digest = sha256(content);
   const put = (token: string) => putBlob(rt, SPACE, token, digest, content);
 
-  // Path-blind routes address the space, so the space claim is checked against
-  // the URL before the session record is even loaded.
   const otherSpace = await put(uploadToken("spc_other", session.uploadId, session.versionId));
   expect(otherSpace.status).toBe(403);
   expect(await errorCode(otherSpace)).toBe("upload_scope_forbidden");
@@ -176,8 +160,6 @@ test("upload token scope is pinned to its space, session and version", async () 
   expect(otherVersion.status).toBe(403);
   expect(await errorCode(otherVersion)).toBe("upload_scope_forbidden");
 
-  // A well-formed token for a session that does not exist is a 404, not a
-  // scope failure: there is nothing to compare against.
   const unknownSession = await put(uploadToken(SPACE, "upl_ghost", session.versionId));
   expect(unknownSession.status).toBe(404);
   expect(await errorCode(unknownSession)).toBe("upload_not_found");
@@ -198,7 +180,6 @@ test("management JWTs enforce action scope and reject jti replay", async () => {
   expect(replayed.status).toBe(403);
   expect(await errorCode(replayed)).toBe("runtime_jti_replayed");
 
-  // A token minted for one action cannot drive another.
   const wrongAction = await fetch(managementUrl(`/spaces/${SPACE}/versions/ver_replay/finalize`), {
     method: "POST",
     headers: {
@@ -210,7 +191,6 @@ test("management JWTs enforce action scope and reject jti replay", async () => {
   expect(wrongAction.status).toBe(403);
   expect(await errorCode(wrongAction)).toBe("runtime_action_forbidden");
 
-  // Scope claims must match the request path.
   const wrongScope = await fetch(managementUrl(`/spaces/${SPACE}/versions`), {
     method: "POST",
     headers: {
@@ -267,11 +247,6 @@ test("create version replays return the original upload session and reject chang
 });
 
 test("a version's session is found through its pointer, and sessions from before the index are indexed once", async () => {
-  // The session store is keyed by upload id. Answering "the session for this
-  // version" used to decode every record in the store, which grew with the
-  // records held and exhausted PHP's memory on the dashboard Space. A pointer
-  // per version now answers it; the store is walked once, to index what
-  // predates the pointers, and never again.
   const versionId = "ver_indexed";
   const files = { "index.html": "indexed\n" };
   const indexRoot = storagePath(rt, "spaces", SPACE, "publish-session-index");
@@ -295,8 +270,6 @@ test("a version's session is found through its pointer, and sessions from before
   const first = await createDeclaredSession(rt, SPACE, versionId, files);
   expect(readPointer().upload_id).toBe(first.uploadId);
 
-  // A store from before the index: no pointers, no marker. The first lookup
-  // walks it, finds the session, indexes it and stamps the marker.
   rmSync(indexRoot, { recursive: true, force: true });
   const buildsBefore = indexBuilds();
   const found = await getUploads();
@@ -306,8 +279,6 @@ test("a version's session is found through its pointer, and sessions from before
   expect(existsSync(markerPath)).toBe(true);
   expect(indexBuilds()).toBe(buildsBefore + 1);
 
-  // With the marker in place a version without a pointer has no session, and
-  // the store is not walked again to say so.
   const unknown = await api(
     rt,
     "GET",
@@ -319,9 +290,6 @@ test("a version's session is found through its pointer, and sessions from before
   expect(await errorCode(unknown)).toBe("version_upload_not_found");
   expect(indexBuilds()).toBe(buildsBefore + 1);
 
-  // A pointer at a session that is gone (swept, say) is stale: a lock-free read
-  // reports no session and leaves it; create, under the space lock, repairs it
-  // and the replacement session gets the pointer.
   rmSync(storagePath(rt, "spaces", SPACE, "publish-sessions", `${first.uploadId}.json`));
   const gone = await getUploads();
   expect(gone.status).toBe(404);
@@ -331,7 +299,6 @@ test("a version's session is found through its pointer, and sessions from before
   expect(readPointer().upload_id).toBe(second.uploadId);
   expect(indexBuilds()).toBe(buildsBefore + 1);
 
-  // Finalize releases the session, and the pointer goes with it.
   await uploadSessionBlobs(rt, second, files);
   const finalized = await finalize(rt, SPACE, versionId, { upload_id: second.uploadId });
   expect(finalized.status).toBe(200);
@@ -349,9 +316,6 @@ test("a session is never written without its pointer, and a legacy walk that cou
       (event) => event.event === "publish_session_index_built" && event.space_id === SPACE,
     );
 
-  // The pointer is written before the session is claimed, so a pointer write
-  // that fails refuses the create and leaves no orphan session behind. A file
-  // where the index directory should be makes every pointer write fail.
   rmSync(indexRoot, { recursive: true, force: true });
   writeFileSync(indexRoot, "");
   const sessionsBefore = readdirSync(sessionsRoot).length;
@@ -370,8 +334,6 @@ test("a session is never written without its pointer, and a legacy walk that cou
   }
   expect(readdirSync(sessionsRoot).length).toBe(sessionsBefore);
 
-  // A legacy walk that cannot read one record indexes the rest and does not
-  // stamp the marker, so the unreadable session is still found once it reads.
   const readable = await createDeclaredSession(rt, SPACE, "ver_legacy_readable", {
     "index.html": "readable\n",
   });
@@ -398,8 +360,6 @@ test("a session is never written without its pointer, and a legacy walk that cou
   } finally {
     chmodSync(blockedRecord, 0o644);
   }
-  // A record that reads but does not decode can never be a live session, and
-  // under evidence retention it stays on disk: it must not hold the marker back.
   writeFileSync(path.join(sessionsRoot, "upl_malformed_legacy.json"), "{not json");
   const unblocked = await api(
     rt,
@@ -415,9 +375,6 @@ test("a session is never written without its pointer, and a legacy walk that cou
   expect(walks().at(-1)).toMatchObject({ complete: true });
   expect(existsSync(markerPath)).toBe(true);
 
-  // Once the marker exists, a pointer that cannot be read is not proof the
-  // version has no session: the lookup walks the store and finds it, and the
-  // walk rewrites the pointer.
   const pointerPath = path.join(indexRoot, "ver_legacy_readable.json");
   const walksBefore = walks().length;
   chmodSync(pointerPath, 0o000);
@@ -445,10 +402,6 @@ test("a session is never written without its pointer, and a legacy walk that cou
 });
 
 test("releasing an expired session leaves the version's pointer to create-version", async () => {
-  // Release runs lock-free from the upload lanes when a load finds the session
-  // expired. Dropping the pointer there could remove the one a concurrent
-  // create had just written for the replacement session; the lookup already
-  // ignores a pointer at an expired session, and create repairs it under lock.
   const versionId = "ver_expired_release";
   const files = { "index.html": "expired\n" };
   const content = files["index.html"];
@@ -462,7 +415,6 @@ test("releasing an expired session leaves the version's pointer to create-versio
     "publish-session-index",
     `${versionId}.json`,
   );
-  // The pointer a replacement session would have left.
   writeFileSync(
     pointerPath,
     JSON.stringify({
@@ -472,8 +424,6 @@ test("releasing an expired session leaves the version's pointer to create-versio
   );
   const put = await putBlob(rt, SPACE, expired.token, sha256(content), content);
   expect(put.status).toBe(404);
-  // The load released the expired session (gone, or kept expired under the
-  // evidence hold); the pointer it would have dropped is still the replacement's.
   const record = storagePath(rt, "spaces", SPACE, "publish-sessions", `${expired.uploadId}.json`);
   if (existsSync(record)) {
     const kept = z
@@ -540,20 +490,12 @@ test("build source archives persist, stream, scope, and delete on the provider r
   expect(await errorCode(missing)).toBe("build_source_not_found");
 });
 
-// Auth lanes are hard security boundaries in the unified admin dispatcher
-// (engine/admin/api.php): every lane pins its own JWT `aud`, so a token minted
-// for one lane must never authorize another lane's route. Wrong-aud tokens fail
-// the audience check (401 runtime_token_expired) before any claim, replay
-// marker, or byte of storage is touched. The third audience is the blob gate
-// (contracts §7); it must be just as powerless on the admin surfaces.
 test("a token for one auth lane never authorizes another lane's route", async () => {
   const content = "<h1>lanes</h1>\n";
   const session = await createDeclaredSession(rt, SPACE, "ver_lanes", { "index.html": content });
   const digest = sha256(content);
   const gateToken = blobGateToken(SPACE, digest, { versionId: session.versionId });
 
-  // Management lane: the version file list, the one metadata read every file
-  // surface goes through.
   const managementRoute = managementUrl(`/spaces/${SPACE}/versions/${session.versionId}/files`);
   for (const crossToken of [session.token, gateToken]) {
     const crossManagement = await fetch(managementRoute, {
@@ -563,7 +505,6 @@ test("a token for one auth lane never authorizes another lane's route", async ()
     expect(await errorCode(crossManagement)).toBe("runtime_token_expired");
   }
 
-  // Upload lane: both blob routes.
   for (const crossToken of [managementToken("read_state"), gateToken]) {
     const crossPut = await putBlob(rt, SPACE, crossToken, digest, content);
     expect(crossPut.status).toBe(401);
@@ -574,7 +515,6 @@ test("a token for one auth lane never authorizes another lane's route", async ()
     expect(await errorCode(crossHave)).toBe("runtime_token_expired");
   }
 
-  // The right-lane token still works.
   expect((await putBlob(rt, SPACE, session.token, digest, content)).status).toBe(200);
 });
 
@@ -591,9 +531,6 @@ test("blob negotiation reports the missing shas and lets an interrupted publish 
     [indexSha, appSha].toSorted(),
   );
 
-  // Malformed negotiation input is rejected rather than coerced. It belongs to
-  // the live session: the route resolves the session before it reads the body,
-  // so probing this after finalize would only prove the session was consumed.
   const notAList = await fetch(uploadUrl(`/spaces/${SPACE}/blobs/have`), {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${session.token}` },
@@ -606,18 +543,13 @@ test("blob negotiation reports the missing shas and lets an interrupted publish 
   expect(badSha.status).toBe(422);
   expect(await errorCode(badSha)).toBe("invalid_blob_sha");
 
-  // Half the publish lands, then the client dies.
   expect((await putBlob(rt, SPACE, session.token, indexSha, files["index.html"])).status).toBe(200);
 
-  // Resume is a re-negotiation, not a re-upload: the accepted blob drops out of
-  // `missing` and finalize takes the session as-is (D23, no re-hash).
   expect(await blobsHaveMissing(rt, session, [indexSha, appSha])).toEqual([appSha]);
   await uploadSessionBlobs(rt, session, files);
   const finalized = await finalize(rt, SPACE, "ver_resume", { upload_id: session.uploadId });
   expect(finalized.status).toBe(200);
 
-  // A later publish of the same bytes needs no PUT at all: negotiation both
-  // reports the CAS hit and marks the session's declaration accepted.
   const deduped = await createDeclaredSession(rt, SPACE, "ver_resume_dedupe", files);
   expect(await blobsHaveMissing(rt, deduped, [indexSha, appSha])).toEqual([]);
   const dedupedFinalize = await finalize(rt, SPACE, "ver_resume_dedupe", {
@@ -662,13 +594,6 @@ test("bulk CAS ZIP accepts declared blobs in one upload and completes the sessio
 });
 
 test("a CAS object damaged to another length is renegotiated and repaired, not deduped away", async () => {
-  // The production wedge this covers: a version's blob was left on disk under a
-  // name its bytes do not hash to (the write-through hardlink bug, since fixed;
-  // the catalogs and CAS objects it damaged are permanent). Every recovery path
-  // a publisher has runs through the two presence checks below, and both used to
-  // answer on `is_file` alone — so negotiation said "already have it", the PUT
-  // that followed was discarded as a duplicate, and finalize refused the version
-  // for a file the client had just sent. Nothing the client could do repaired it.
   const files = {
     "index.html": "<h1>damaged</h1>\n",
     "confetti.js": "console.log('confetti');\n",
@@ -685,7 +610,6 @@ test("a CAS object damaged to another length is renegotiated and repaired, not d
   expect(readBlob(rt, SPACE, confettiSha)?.length).toBe(0);
 
   const repair = await createDeclaredSession(rt, SPACE, "ver_cas_damage_repair", files);
-  // A resident length that is not the declared one is not a CAS hit.
   expect(await blobsHaveMissing(rt, repair, [confettiSha])).toEqual([confettiSha]);
   expect((await putBlob(rt, SPACE, repair.token, confettiSha, files["confetti.js"])).status).toBe(
     200,
@@ -699,12 +623,6 @@ test("a CAS object damaged to another length is renegotiated and repaired, not d
 });
 
 test("an open session is what authorizes reads of the bytes it accepted", async () => {
-  // The read finalize itself depends on: the control plane compiles `sf.jsonc`
-  // and `_pages/*` out of bytes that exist ONLY in the open session, because the
-  // version's catalog is written by the very finalize those reads feed.
-  // There is deliberately no deployed base or route pointer: a first publish
-  // must read these bytes through the runtime host before it can create one.
-
   const config = '{ "headers": [] }\n';
   const files = { "index.html": "<h1>session gate</h1>\n", "sf.jsonc": config };
   const versionId = "ver_session_gate";
@@ -728,8 +646,6 @@ test("an open session is what authorizes reads of the bytes it accepted", async 
       },
     );
 
-  // Declared is not accepted: until the runtime has hashed and committed the
-  // bytes, the session authorizes nothing.
   expect((await fromSession()).status).toBe(404);
   const unavailableManagementSource = await fromManagement();
   expect({
@@ -761,14 +677,10 @@ test("an open session is what authorizes reads of the bytes it accepted", async 
     body: config,
   });
   expect((await fromManagement(config.length - 1)).status).toBe(204);
-  // The version lane cannot stand in for it — this is exactly the read that
-  // silently returned "file absent" and made finalize ignore a fresh config.
   expect((await fromVersion()).status).toBe(404);
 
   expect((await finalize(rt, SPACE, versionId, { upload_id: session.uploadId })).status).toBe(200);
 
-  // Finalize hands authority over: the catalog answers, the consumed session
-  // does not.
   expect((await fromVersion()).status).toBe(200);
   expect((await fromSession()).status).toBe(404);
   expect((await fromManagement()).status).toBe(204);
@@ -805,9 +717,6 @@ test("retained-only lazy finalize preserves the empty accepted object", async ()
   expect(finalized.status).toBe(200);
 });
 
-// The inference this replaced was silent and lossy, so its absence is loud: a
-// caller that names a base without stating what to keep is refused, never
-// reinterpreted as "keep everything".
 test("naming a reusable version without a retention mode is refused", async () => {
   const refused = await api(
     rt,
@@ -844,7 +753,6 @@ test("blob PUT verifies the streamed bytes against the URL sha and the declared 
   expect(undersized.status).toBe(422);
   expect(await errorCode(undersized)).toBe("upload_size_mismatch");
 
-  // Same byte length as the declared content, different bytes.
   const wrongHash = await put(digest, "<h1>tampered</h1>\n");
   expect(wrongHash.status).toBe(422);
   expect(await errorCode(wrongHash)).toBe("upload_hash_mismatch");
@@ -920,7 +828,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
     system_variables: {},
   };
 
-  // Finalizing before the bytes arrive fails closed, naming what is missing.
   const incomplete = await finalize(rt, SPACE, versionId, { upload_id: session.uploadId });
   expect(incomplete.status).toBe(409);
   const incompletePayload = (await incomplete.json()) as {
@@ -978,9 +885,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
     sha256: sha256(content),
     contentType: "text/html; charset=utf-8",
   });
-  // The receipt carries what the finalizer COMPILED, because it is the only
-  // compiler: the control plane stores these instead of recompiling the same
-  // files itself.
   expect(finalized.catalog_digests.source).toMatch(/^sha256:[a-f0-9]{64}$/);
   expect(finalized.catalog_digests.served).toMatch(/^sha256:[a-f0-9]{64}$/);
   expect(finalized.variable_digests).toEqual({ REGION: sha256("eu") });
@@ -990,9 +894,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
     header_rule_count: 1,
     proxy_rule_count: 1,
     proxy_rules: [{ source: "/api/*", destination: "https://api.example.com/:splat" }],
-    // A finalize without `placement_enabled` still names every rule, each
-    // staying at the origin because it was never judged. A proxy is reported
-    // as the rewrite it is, not as a redirect.
     placement: [
       {
         kind: "rewrite",
@@ -1026,11 +927,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
   );
   expect(finalized.route_inventory.routes[0]?.id).toMatch(/^sha256:[a-f0-9]{64}$/);
 
-  // Idempotency for control-plane retries after a successful runtime commit:
-  // finalize removes the publish session, so a duplicate finalize must observe
-  // the already-materialized version instead of failing with upload_not_found.
-  // The replay never re-runs the finalizer, so every compiled field it answers
-  // with has to come from what the first call recorded.
   const replayed = await apiJson<FinalizeResult>(
     rt,
     "POST",
@@ -1046,8 +942,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
   expect(replayed.routing).toEqual(finalized.routing);
   expect(replayed.route_inventory).toEqual(finalized.route_inventory);
 
-  // The journal is the only sink (D53): one record for the commit, none for the
-  // replay that committed nothing.
   const finalizeEvents = journalRecords(rt).filter(
     (record) => record.operation_action === "finalize_version" && record.version_id === versionId,
   );
@@ -1055,10 +949,6 @@ test("finalize consumes the publish session, is idempotent, and journals once", 
   expect(finalizeEvents[0]?.upload_id).toBe(session.uploadId);
 });
 
-// A Functions worker the control plane compiled at finalize: the publisher
-// never uploaded it, so the engine takes it on its own route and finalize adds
-// it to the session as an uploaded file, on a first publish with no base and
-// with no change to how the publisher's own files were declared.
 test("finalize adds a generated Functions bundle the control plane wrote to the space store", async () => {
   const bundle = JSON.stringify({
     format: "bundle",
@@ -1081,8 +971,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   expect(await errorCode(mismatched)).toBe("upload_hash_mismatch");
   expect(readBlob(rt, SPACE, digest)).toBeNull();
 
-  // The route takes the largest bundle the builder emits and nothing larger:
-  // a full-size body is read to the end and fails only on its digest.
   const atCap = await putGenerated("x".repeat(FUNCTIONS_BUNDLE_MAX_BYTES));
   expect(atCap.status).toBe(422);
   expect(await errorCode(atCap)).toBe("upload_hash_mismatch");
@@ -1094,8 +982,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   const session = await createDeclaredSession(rt, SPACE, "ver_generated", files);
   const generated = [{ path: bundlePath, sha256: digest, size: bundle.length }];
 
-  // An attempt that fails after naming a bundle leaves the session as the
-  // publisher made it, so the retry's different bundle is the only one.
   const staleBundle = JSON.stringify({ format: "bundle", modules: { "worker.js": "stale" } });
   const staleDigest = sha256(staleBundle);
   expect((await putGenerated(staleBundle, staleDigest)).status).toBe(200);
@@ -1113,7 +999,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   expect(await errorCode(incomplete)).toBe("version_upload_incomplete");
   await uploadSessionBlobs(rt, session, files);
 
-  // Naming a bundle that was never written is refused before anything commits.
   const unwritten = await finalize(rt, SPACE, session.versionId, {
     upload_id: session.uploadId,
     generated_files: generated,
@@ -1126,7 +1011,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   expect(await stored.json()).toEqual({ sha256: digest, size: bundle.length });
   expect(readBlob(rt, SPACE, digest)?.toString()).toBe(bundle);
 
-  // The lane only places the bundle at its own address, never a page.
   const wrongPath = await finalize(rt, SPACE, session.versionId, {
     upload_id: session.uploadId,
     generated_files: [{ ...generated[0], path: "index.html" }],
@@ -1143,8 +1027,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
     { upload_id: session.uploadId, generated_files: generated },
   );
   expect(finalized.status).toBe("ready");
-  // The version's catalog holds the bundle beside the uploaded page, which is
-  // what a later publish retains it from.
   const catalogFiles = async (versionId: string) =>
     (
       await apiJson<{ files: Array<{ path: string; sha256: string; size: number }> }>(
@@ -1160,8 +1042,6 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
     { path: "index.html", sha256: sha256(files["index.html"]), size: files["index.html"].length },
   ]);
 
-  // A lazy session materialized by the finalize itself, retaining the page
-  // and uploading nothing, takes the same bundle.
   const lazyVersionId = "ver_generated_lazy";
   const lazyUploadId = "upl_generated_lazy";
   const lazy = await finalize(rt, SPACE, lazyVersionId, {
@@ -1195,15 +1075,11 @@ test("ingest sheds above four concurrent uploads per space", async () => {
     return response;
   };
 
-  // A real upload both proves the ingest lane takes a slot and creates the
-  // counter generation the seeding below writes into.
   expect((await put(sha256("a"), "a", 0)).status).toBe(200);
 
-  // At capacity minus one an upload still admits: the cap is 4, not 3.
   seedIngestCounter(ADMISSION_SPACE, INGEST_LIMIT - 1);
   expect((await put(sha256("bb"), "bb", INGEST_LIMIT - 1)).status).toBe(200);
 
-  // At capacity the next upload sheds with the ingest-specific code (D25).
   seedIngestCounter(ADMISSION_SPACE, INGEST_LIMIT);
   const shed = await fetch(uploadUrl(`/spaces/${ADMISSION_SPACE}/blobs/${sha256("ccc")}`), {
     method: "PUT",
@@ -1214,15 +1090,10 @@ test("ingest sheds above four concurrent uploads per space", async () => {
   expect(shed.headers.get("retry-after")).toBe("2");
   expect(await errorCode(shed)).toBe("ingest_admission_exceeded");
 
-  // A refusal reserves nothing: back under capacity, the same upload lands.
   seedIngestCounter(ADMISSION_SPACE, 0);
   expect((await put(sha256("ccc"), "ccc", 0)).status).toBe(200);
 }, 15_000);
 
-// The per-space ingest counter is the file-backed windowed counter in
-// shared/admission.php: a generation pointer plus the counted file it names.
-// Writing the count directly is how a single-process test reaches capacity
-// without racing real concurrent uploads against each other.
 function ingestCounterPath(spaceId: string): string {
   return path.join(rt.storageRoot, "runtime/admission", `${spaceId}.json`);
 }
@@ -1292,18 +1163,7 @@ async function waitForIngestCounter(spaceId: string, expected: number): Promise<
   }
 }
 
-// Path policy moved to the manifest declaration (D26): the blob routes are
-// path-blind, so `POST /spaces/{s}/versions` is the one place a control path
-// can be refused — and refusing it there rejects the whole publish before a
-// single byte is negotiated.
 test("manifest declaration is where upload path policy is enforced", async () => {
-  // WHICH paths the policy denies is settled by
-  // packages/common/src/utils/publish-policy.fixtures.json, which
-  // apps/control-plane/src/runtime/php-policy-parity.test.ts runs through both
-  // the TypeScript policy and this runtime's upload-policy.php. What this test
-  // adds is the HTTP seam: that declaration is where a refusal happens, and that
-  // each verdict reaches the caller as a 422 carrying the policy's own code. One
-  // path per code is enough for that — more would re-walk the fixture.
   const rejected: Array<[string, string]> = [
     [".htaccess", "static_control_file_not_supported"],
     ["__zero/open.html", "static_runtime_control_path_not_supported"],
@@ -1317,8 +1177,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
     expect([filePath, await errorCode(response)]).toEqual([filePath, code]);
   }
 
-  // The build artifacts a publisher IS allowed to write under `__spacefast/`
-  // reach 201 through the same seam.
   const allowed = await declareManifest("ver_policy_allowed", {
     "__spacefast/zero/deploy.json": '{"digest":"sha256:zero"}\n',
     "__spacefast/functions/bundles/app.js": "export default 1;\n",
@@ -1326,7 +1184,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   });
   expect(allowed.status).toBe(201);
 
-  // The manifest must also be internally consistent before anything is pinned.
   const duplicate = await api(
     rt,
     "POST",
@@ -1382,10 +1239,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
     expect([size, await errorCode(coerced)]).toEqual([size, "invalid_file"]);
   }
 
-  // Every file here is individually legal; only their sum is not publishable.
-  // The runtime charges the aggregate at declaration, before a session record
-  // or a pin exists, so a skipped control plane cannot buy an unbounded tree
-  // with many small legal uploads. Exactly at the ceiling still publishes.
   const chunk = 64 * 1024 * 1024;
   const atCeiling = Array.from({ length: MAX_VERSION_TOTAL_BYTES / chunk }, (_, entry) => ({
     path: `media/chunk-${entry}.bin`,
@@ -1416,12 +1269,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   expect(overCeiling.status).toBe(413);
   expect(await errorCode(overCeiling)).toBe("version_total_bytes_exceeded");
 
-  // The ceiling's one escape, at the seam that has to let it through: a base
-  // already over the ceiling may be republished as long as the publish does not
-  // grow it. The republish is itself an upload, so its DECLARATION is over the
-  // ceiling too — charging that declaration alone refused the only publish that
-  // can shrink the Space, and the finalizer that would have staged it was never
-  // reached. The verdict belongs to the base, so the base is read.
   const base = versionRoot(rt, SPACE, "ver_policy_oversized_base");
   mkdirSync(base, { recursive: true });
   const oversizedPaths = [0, 1, 2].map((index) => ({
@@ -1456,8 +1303,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
       },
     }),
   );
-  // 2.5 GiB declared against a 3 GiB base: over the ceiling on its own, and
-  // still a shrink.
   const shrinking = oversizedPaths.map((file, index) => ({
     ...file,
     size: index === 2 ? file.size / 2 : file.size,
@@ -1477,10 +1322,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   );
   expect(shrunk.status).toBe(201);
 
-  // A declaration past the base's own total is growth however oversized the
-  // base already was, and stays refused — as does one that names no base at
-  // all. What the version finally materializes is still the finalizer's to
-  // count: retained declarations never enter the sum here.
   const grown = await api(
     rt,
     "POST",
@@ -1510,11 +1351,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   expect(baseless.status).toBe(413);
   expect(await errorCode(baseless)).toBe("version_total_bytes_exceeded");
 
-  // The other lane that charges a declaration, and the one the control plane
-  // actually uses for a small file list: a lazy session, materialized on first
-  // contact out of the descriptor its token carries. Same verdict, which is why
-  // the base's identity travels in that descriptor even though the retained
-  // list — unbounded, and unused while accepting bytes — does not.
   const lazyUpload = "upl_policy_lazy_shrink";
   const lazyVersion = "ver_policy_lazy_shrink";
   const lazy = await fetch(uploadUrl(`/spaces/${SPACE}/blobs/have`), {
@@ -1537,8 +1373,6 @@ test("manifest declaration is where upload path policy is enforced", async () =>
   expect(await lazy.json()).toEqual({ missing: shrinking.map((file) => file.sha256) });
 });
 
-// URL fetch is the path-addressed remote ingest route. Unlike direct-byte path
-// uploads, it needs its own egress guard.
 test("URL uploads reject egress-unsafe fetch targets before streaming", async () => {
   const session = await createDeclaredSession(rt, SPACE, "ver_source_url_egress", {
     "index.html": "safe\n",
@@ -1662,8 +1496,6 @@ test("URL transport rejects error headers without consuming the body and removes
       status: 422,
       code: "upload_source_url_fetch_failed",
     });
-    // The provider received the request and its body never reaches EOF. The
-    // PHP process finishing proves it stopped at the rejected response headers.
     await received.promise;
     expect(existsSync(temporary)).toBe(false);
   } finally {
@@ -1695,13 +1527,11 @@ test("the upload surface rejects unsupported operations, and refusals stay reada
   expect(copySource.status).toBe(405);
   expect(await errorCode(copySource)).toBe("runtime_upload_operation_not_supported");
 
-  // Each blob route pins its own method...
   const wrongMethod = await fetch(uploadUrl(`/spaces/${SPACE}/blobs/have`), { headers: auth });
   expect(wrongMethod.status).toBe(405);
   expect(wrongMethod.headers.get("allow")).toBe("POST");
   expect(await errorCode(wrongMethod)).toBe("runtime_upload_operation_not_supported");
 
-  // ...and anything else on this surface is not a route at all.
   const unknown = await fetch(uploadUrl(`/spaces/${SPACE}/blobs/${digest}/parts/1`), {
     method: "PUT",
     headers: auth,
@@ -1709,16 +1539,8 @@ test("the upload surface rejects unsupported operations, and refusals stay reada
   });
   expect(unknown.status).toBe(404);
   expect(await errorCode(unknown)).toBe("runtime_upload_route_not_found");
-  // A caller that sent no Origin is not a browser (CLI, MCP, the control
-  // plane) and gets no CORS grant.
   expect(unknown.headers.get("access-control-allow-origin")).toBeNull();
 
-  // The dashboard uploads from my.spacefast.com straight to the box, so every
-  // answer this surface can give a browser has to be readable by one. The
-  // preflight comes first and carries no credentials, so it is answered before
-  // the route is resolved: a preflight that 404s blocks the upload outright,
-  // and a 404 emitted without the grant reaches the caller as an opaque CORS
-  // failure naming the wrong problem.
   const origin = "https://my.spacefast.com";
   const preflight = await fetch(
     runtimeUploadFileUrl({ baseUrl: rt.baseUrl, uploadId: session.uploadId, path: "index.html" }),
@@ -1736,8 +1558,6 @@ test("the upload surface rejects unsupported operations, and refusals stay reada
   expect(preflight.headers.get("access-control-allow-methods")).toContain("PUT");
   expect(preflight.headers.get("access-control-allow-headers")).toContain("Authorization");
 
-  // Nothing here resolves to a route, so the refusal is raised before dispatch
-  // — the seam where the grant used to be skipped.
   const unroutable = `${rt.baseUrl}${RUNTIME_UPLOAD_API_BASE}?op=nonsense&upload_id=${session.uploadId}`;
   const unroutablePreflight = await fetch(unroutable, {
     method: "OPTIONS",
@@ -1798,9 +1618,6 @@ test("finalize retains the upload session when a post-finalize artifact write fa
     },
   };
 
-  // Rust finalize succeeds and produces zero/migrations.json; PHP then runs
-  // post-finalize steps and fails in _stattic_runtime_apply_zero_migrations
-  // because this harness has no database configured.
   const failed = await api(
     rt,
     "POST",
@@ -1814,8 +1631,6 @@ test("finalize retains the upload session when a post-finalize artifact write fa
   expect(failed.status).toBe(500);
   expect(await errorCode(failed)).toBe("zero_migration_failed");
   expect(existsSync(migrationsPath)).toBe(true);
-  // Session must remain active (unexpired and indexed) so a retry can finish
-  // post-finalize steps instead of seeing a released session.
   expect((await getUploadSession()).status).toBe(200);
 
   rmSync(migrationsPath);

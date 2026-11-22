@@ -28,19 +28,11 @@ let exchangeServer: ReturnType<typeof Bun.serve>;
 let exchangeCount = 0;
 let expectedChallenge = "";
 const usedCodes = new Set<string>();
-// The nonce the provider bound to each code, as Better Auth stores it beside the
-// code. A code with no entry gets a handoff that names no nonce.
 const nonceForCode = new Map<string, string>();
-// The session version the control plane read for a code; unset names none.
 const sessionVersionForCode = new Map<string, number>();
-// Runs after the token endpoint accepts a code and before it mints the
-// handoff: the box's request is still waiting on the response.
 let beforeHandoff: ((code: string) => Promise<void>) | null = null;
-// The control plane's answer to a share link the box exchanges at LINK_PATH:
-// the handoff it mints, after whatever else happens while the box waits.
 let linkHandoff: (() => Promise<string>) | null = null;
 const LINK_PATH = "/acquire/opaque/link";
-// The token exchange an opaque header credential is traded at.
 const TOKEN_EXCHANGE_PATH = "/acquire/opaque/token";
 let tokenHandoff: (() => Promise<string>) | null = null;
 // The authorize endpoint and the issuer live on different origins here, as
@@ -48,7 +40,6 @@ let tokenHandoff: (() => Promise<string>) | null = null;
 const OAUTH_AUTHORIZE_URL = "https://api.spacefast.test/v1/auth/oauth2/authorize";
 const OAUTH_ISSUER = "https://auth.spacefast.test/v1/auth";
 const OAUTH_HOST = "oauth-chain.test";
-// An invite email's one-use token, as the Space's invite link carries it.
 const INVITE_TOKEN = "Bhf_1nv1t3_0ne_use_t0ken_x";
 const OAUTH_SPACE = "spc_oauth_chain";
 const OAUTH_VERSION = "ver_oauth_chain";
@@ -56,27 +47,18 @@ const OAUTH_VERSION = "ver_oauth_chain";
 const HOST = "chain.test";
 const SPACE = "spc_chain";
 const VERSION = "ver_chain_1";
-// A second Space so the gen-tuple test can move the overlay without disturbing
-// the chain Space's live session.
 const GEN_HOST = "chain-gen.test";
 const GEN_SPACE = "spc_chain_gen";
 const GEN_VERSION = "ver_chain_gen_1";
 const SHARE_REFERENCE =
   `external:${createHash("sha256").update("spacefast-share\0consent.view").digest("hex")}` as const;
-// Finalized but never promoted: only its immutable version host serves.
 const PREVIEW_HOST = "chain-preview--v1.test";
 const PREVIEW_SPACE = "spc_chain_preview";
 const PREVIEW_VERSION = "ver_chain_preview_1";
 const MEMBER = "member:mem_chain_owner";
-// Contracts §5/§6 (D121/D123): a protected Space collapses every compiled cache
-// class onto one policy. No cache may retain private bytes.
 const PROTECTED = "private, no-store";
-// Contracts §4: every `sfv2_` session cookie is signed with a key derived from
-// this, so a projection without one can mint no session.
 const EXCHANGE_CREDENTIAL = "runtime-chain-exchange-credential-0123456789";
 
-// Set the real control-plane signing material before importing the mint or
-// JWKS producer, so both come from production functions, not test fixtures.
 const platformKey = generateKeyPairSync("ed25519");
 process.env.SPACEFAST_RUNTIME_JWT_PRIVATE_KEY = Buffer.from(
   platformKey.privateKey.export({ format: "pem", type: "pkcs8" }),
@@ -95,11 +77,6 @@ const [{ mintAuthorityToken }, { runtimeJwks }, unclaimedTerms, { signToken }, a
     import("../../packages/common/src/contracts/access-core.ts"),
   ]);
 
-/**
- * The raw route config management compiles into the overlay's grant index. The
- * gen tuple's halves are set independently: the overlay stores
- * `[access_gen, session_ver]` and must never sum them (contracts §4/D30).
- */
 function accessConfig(accessGeneration: number, sessionVersion: number) {
   return {
     projection_generation: accessGeneration,
@@ -123,7 +100,6 @@ function accessConfig(accessGeneration: number, sessionVersion: number) {
       grants: [
         {
           id: "grt_chain_owner",
-          // The Grant's own generation, untouched by either half of the tuple.
           generation: 1,
           audience: {
             kind: "external",
@@ -160,8 +136,6 @@ beforeAll(async () => {
         if (!tokenHandoff) return Response.json({ code: "unknown_credential" }, { status: 403 });
         return Response.json({ fields: { token: await tokenHandoff(), return: "/" } });
       }
-      // The standard token request: form-encoded, at the issuer's token
-      // endpoint, with nothing in it but OAuth's own parameters.
       expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
       const fields = z
         .strictObject({
@@ -172,8 +146,6 @@ beforeAll(async () => {
           code_verifier: z.string(),
         })
         .parse(Object.fromEntries(new URLSearchParams(await request.text())));
-      // Sent to the configured issuer's token endpoint, not to the authorize
-      // URL's origin: a split auth host keeps them apart.
       expect(request.headers.get("host")).toBe(new URL(OAUTH_ISSUER).host);
       expect(new URL(request.url).pathname).toBe("/v1/auth/oauth2/token");
       expect(request.headers.get("spacefast-runtime-exchange")).toBe(EXCHANGE_CREDENTIAL);
@@ -184,7 +156,6 @@ beforeAll(async () => {
         expectedChallenge,
       );
       exchangeCount++;
-      // The API suite owns native single-use codes; this boundary returns its refusal.
       if (usedCodes.has(fields.code))
         return Response.json(
           { error: "invalid_grant", error_description: "The sign-in server refused this code." },
@@ -192,14 +163,12 @@ beforeAll(async () => {
         );
       usedCodes.add(fields.code);
       if (beforeHandoff) await beforeHandoff(fields.code);
-      // Share sign-in always signs in an account, so this handoff names one.
       const now = Math.floor(Date.now() / 1000);
       return Response.json({
         access_token: "opaque-access-token",
         token_type: "Bearer",
         expires_in: 300,
         scope: "openid profile email",
-        // What this runtime's credential adds to the standard response.
         spacefast_handoff: {
           token: signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {
             sub: SHARE_REFERENCE,
@@ -213,8 +182,6 @@ beforeAll(async () => {
             generation: 1,
             sid: createHash("sha256").update(randomUUID()).digest("hex"),
             emailVerified: false,
-            // The control plane copies the authorize request's nonce here; a
-            // code the test never bound gets an empty one, which matches nothing.
             nonce: nonceForCode.get(fields.code) ?? "",
             sessionVersion: sessionVersionForCode.get(fields.code),
             iat: now,
@@ -232,7 +199,6 @@ beforeAll(async () => {
     env: {
       SPACEFAST_INSECURE_COOKIES: "",
       SPACEFAST_RUNTIME_TEST_ACCESS_SESSION_CLOCK: "1",
-      // A route update must land while a callback waits on the token endpoint.
       PHP_CLI_SERVER_WORKERS: "4",
       SPACEFAST_ACCESS_EXCHANGE_TEST_CONNECT_ORIGIN: `http://127.0.0.1:${exchangeServer.port}`,
     },
@@ -341,14 +307,12 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     audience: { kind: "external", issuer: "spacefast-share", subject: "consent.view" },
     capabilities: ["page.view"],
   });
-  // A share link, so a link can be followed through an account sign-in.
   config.authorization.grants.push({
     ...owner,
     id: "grt_chain_link",
     audience: { kind: "link", linkId: "lnk_chain" },
     capabilities: ["page.view", "comments.read"],
   });
-  // What a session cookie says: who it is, and what it may do on `/`.
   const sessionOf = (cookie: string) => {
     const php = Bun.spawnSync(
       [
@@ -444,8 +408,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(
     (await readdir(privateRoot, { recursive: true })).filter((path) => !before.includes(path)),
   ).toEqual([]);
-  // The gate's own probe is a complete silent authorization request, and a
-  // refusal nobody clicked for lands back on the page instead of on a wall.
   const probe = await get(runtime, OAUTH_HOST, "/docs/?tab=9", {
     headers: { "sec-fetch-dest": "document" },
   });
@@ -456,7 +418,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(probed.searchParams.get("response_type")).toBe("code");
   expect(probed.searchParams.get("scope")).toBe("openid profile email");
   expect(probed.searchParams.get("nonce")).toMatch(/^[a-f0-9]{64}$/);
-  // The client names the Space; the request carries no parameter of its own for it.
   expect(probed.searchParams.has("space_id")).toBe(false);
   expect(probed.searchParams.get("redirect_uri")).toBe(
     `https://${OAUTH_HOST}/__spacefast/callback`,
@@ -476,8 +437,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   );
   expect(refusedProbe.status).toBe(303);
   expect(refusedProbe.headers.get("location")).toBe("/docs/?tab=9");
-  // Probed once: the next navigation renders the gate, whose button signs in
-  // in this tab because the callback never closes a popup.
   const gate = await get(runtime, OAUTH_HOST, "/docs/?tab=9", {
     headers: { cookie: probeCookies, "sec-fetch-dest": "document" },
   });
@@ -485,9 +444,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   const gateHtml = await gate.text();
   expect(gateHtml).toContain(">Continue with Spacefast</a>");
   expect(gateHtml).not.toContain("data-sf-access-popup");
-  // A refused account's "Use another account" is this Space's own sign-in
-  // asking which account, so the door shows its chooser; it never takes the
-  // older account lane.
   const refused = await (
     await get(runtime, OAUTH_HOST, "/docs/?sf_access=no-grant", {
       headers: { cookie: probeCookies },
@@ -515,8 +471,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       ?.split(";")[0] ?? "";
   expect(capabilities(ownerCookie)).toContain("access.manage");
   const startedAt = Math.floor(Date.now() / 1000);
-  // The gate's button starts sign-in at the Space's own `/__spacefast/sign-in`;
-  // bare `/__spacefast` is the door that offers it.
   expect(gateHtml).toContain('href="/__spacefast/sign-in?return=%2Fdocs%2F%3Ftab%3D9"');
   const start = await get(
     runtime,
@@ -530,10 +484,7 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(destination.searchParams.get("code_challenge_method")).toBe("S256");
   expect(destination.searchParams.has("code_verifier")).toBe(false);
   expect(destination.searchParams.get("return")).toBe("/docs/?tab=2");
-  // An invite email's raw one-use token reaches authorize untouched.
   expect(destination.searchParams.get("invite")).toBe(INVITE_TOKEN);
-  // A plain start asks nothing; the bar's Switch account asks which account,
-  // and nothing else a page sends becomes a prompt.
   expect(destination.searchParams.has("prompt")).toBe(false);
   // A page the older gate rendered before this Space took the new sign-in
   // still links its switch as `addAccount=1`, which asks the same.
@@ -556,8 +507,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(state).toMatch(/^[a-f0-9]{64}$/);
   const cookie = (start.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   nonceForCode.set("one-use-code", destination.searchParams.get("nonce") ?? "");
-  // As the provider sends it: the response names the configured issuer, which
-  // is not the authorize URL's origin.
   const callback = `/__spacefast/callback?code=one-use-code&state=${state}&iss=${encodeURIComponent(OAUTH_ISSUER)}`;
   // RFC 9207: a response that names another issuer, the authorize origin's
   // guess included, or none at all is refused before its code goes anywhere.
@@ -577,15 +526,11 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     const restart = await mixedUp.text();
     expect(restart).toContain("<h1>Sign-in didn’t finish</h1>");
     expect(restart).toContain("Start sign-in again in this browser.");
-    // A way back, not a dead end: it starts a fresh sign-in on this host.
     expect(restart).toContain('href="/__spacefast/sign-in?return=%2F">Sign In Again</a>');
   }
   const denied = await get(runtime, OAUTH_HOST, callback);
   expect(denied.status).toBe(403);
   expect(denied.headers.get("referrer-policy")).toBe("no-referrer");
-  // Login CSRF: browser A's valid code and state, delivered to browser B (which
-  // started sign-ins of its own), find no entry in B's cookie and sign B in as
-  // nobody. The code is never even exchanged.
   const browserB = await get(runtime, OAUTH_HOST, callback, { headers: { cookie: browserCookie } });
   expect(browserB.status).toBe(403);
   expect(
@@ -606,8 +551,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     (await get(runtime, OAUTH_HOST, callback, { headers: { cookie: tamperedCookie } })).status,
   ).toBe(403);
   expect(exchangeCount).toBe(0);
-  // A handoff minted for another authorization request names another nonce and
-  // opens nothing, even with this browser's state and a good code.
   nonceForCode.set("one-use-code-other-nonce", "f".repeat(64));
   const otherNonce = await get(
     runtime,
@@ -623,7 +566,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       .some((value) => value.startsWith("__Host-spacefast_session=")),
   ).toBe(false);
   expect(exchangeCount).toBe(1);
-  // That attempt spent this browser's state, so start again for the real one.
   const restart = await get(
     runtime,
     OAUTH_HOST,
@@ -648,9 +590,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(sessionHeader).toContain("HttpOnly");
   expect(sessionHeader).toContain("__Host-spacefast_session=");
   expect(sessionHeader).toContain("Secure");
-  // An account session born here may renew silently after it expires, and
-  // the overlay renews it at this host's account start, with the Space's own
-  // sign-in.
   expect(
     accepted.headers
       .getSetCookie()
@@ -697,7 +636,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   expect(
     accepted.headers.getSetCookie().some((value) => value.startsWith(`${cookie.split("=")[0]}=;`)),
   ).toBe(true);
-  // The old cookie a browser kept still names the state; the spent code is refused.
   const replay = await get(runtime, OAUTH_HOST, restartedCallback, {
     headers: { cookie: restartedCookie },
   });
@@ -741,9 +679,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     keepCookies(response);
   }
   expect([...jar.keys()].filter((name) => name.startsWith("__Host-spacefast_oauth_"))).toEqual([]);
-  // Every way a handoff attaches (here `/__spacefast/in/`) keeps one account
-  // per session: another account's sign-in takes nothing the first account
-  // held, while a link or the same account attaches to what is there.
   const handoff = (claims: { sub: string; principal?: string }) => {
     const now = Math.floor(Date.now() / 1000);
     return signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {
@@ -798,15 +733,11 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
   );
   expect(sessionOf(sameAccount).principal).toBe("account:usr_oauth_chain");
   expect(capabilities(sameAccount)).toContain("access.manage");
-  // A link names nobody: the account that follows it stays itself and keeps
-  // what it held.
   const managerWithLink = await redeemOver(manager, handoff({ sub: "link:lnk_chain" }));
   expect(sessionOf(managerWithLink).principal).toBe("account:usr_oauth_chain");
   expect(capabilities(managerWithLink)).toEqual(
     expect.arrayContaining(["access.manage", "comments.read"]),
   );
-  // A guest's link says what the holder may do, never who they are, so it
-  // stays when the guest signs in.
   const guest = await redeemOver("", handoff({ sub: "link:lnk_chain" }));
   expect(capabilities(guest)).toContain("comments.read");
   const guestSignedIn = await redeemOver(
@@ -834,9 +765,6 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       },
     },
   });
-  // The box signs its sessions with a key of its own, so a new exchange
-  // credential (a rotated SPACEFAST_SECRET_KEYS) signs nobody out
-  // and leaves a sign-in in flight intact.
   expect((await get(runtime, OAUTH_HOST, "/docs/", { headers: { cookie: session } })).status).toBe(
     200,
   );
@@ -849,9 +777,6 @@ test("control-plane mint and JWKS drive a real private runtime session", async (
   expect(anonymous.status).toBe(403);
   expect(anonymous.headers.get("cache-control")).toBe("private, no-store");
 
-  // The account lane as a browser walks it: the control plane 303s the signed
-  // handoff to the runtime's one way in, which trades it for a local session
-  // and redirects to the requested page.
   const token = await mintCallbackToken();
   const callback = await redeemHandoff(runtime, HOST, token, "/docs/");
   expect(callback.status).toBe(303);
@@ -886,9 +811,7 @@ test("an old control plane's /__sf/redeem handoff signs the person in on this en
   const cookie = (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
   expect((await get(runtime, HOST, "/docs/", { headers: { cookie } })).status).toBe(200);
 
-  // Still one use, whichever address spends it.
   expect((await redeemHandoff(runtime, HOST, token, "/docs/")).status).toBe(404);
-  // A silent renewal that will not redeem returns to its page, signed out.
   const silent = oldEngineHandoffUrl(true, { host: HOST, token, returnTo: "/docs/", silent: true });
   const bounced = await get(runtime, HOST, `${silent.pathname}${silent.search}`);
   expect(bounced.status).toBe(303);
@@ -913,23 +836,16 @@ test("an old control plane's /__sf/redeem handoff signs the person in on this en
 });
 
 test("a handoff is gated on the overlay's access_gen alone, never on the summed tuple", async () => {
-  // The two halves land in the overlay as separate ints (contracts §4).
   expect(spaceOverlay(runtime, GEN_SPACE)).toMatchObject({ access_gen: 1, session_ver: 0 });
 
-  // A fresh mint per attempt: each carries its own jti, so a rejection never
-  // borrows the replay guard's verdict.
   const redeem = async (generation: number): Promise<number> => {
     const token = await mintCallbackToken({ host: GEN_HOST, spaceId: GEN_SPACE, generation });
     const response = await redeemHandoff(runtime, GEN_HOST, token);
     return response.status;
   };
 
-  // Minted for a generation the Space has not reached yet.
   expect(await redeem(2)).toBe(404);
 
-  // access_gen 1 + session_ver 1: a summing runtime would see "2" here and
-  // admit the generation-2 handoff. Rotating the session version signs everyone
-  // out and must not advance the Grant generation.
   await putRoute(runtime, GEN_SPACE, "production", {
     version_id: GEN_VERSION,
     config: accessConfig(1, 1),
@@ -937,8 +853,6 @@ test("a handoff is gated on the overlay's access_gen alone, never on the summed 
   expect(spaceOverlay(runtime, GEN_SPACE)).toMatchObject({ access_gen: 1, session_ver: 1 });
   expect(await redeem(2)).toBe(404);
 
-  // access_gen 2 + session_ver 1: the sum is 3 and the handoff still admits,
-  // because only the access_gen half is ever compared.
   await putRoute(runtime, GEN_SPACE, "production", {
     version_id: GEN_VERSION,
     config: accessConfig(2, 1),
@@ -998,20 +912,16 @@ test("a handoff issued before everyone was signed out opens no session", async (
       `/__sf/redeem?sf_token=${encodeURIComponent(token)}&return=%2Fdocs%2F${extra}`,
     );
 
-  // Issued while the box holds version 0 and held across a sign-out of everyone.
   const held = await Promise.all([mint(0), mint(0), mint(0), mint(0)]);
   await project(1);
-  // Each address answers a stale handoff as it answers any failed one.
   const [inPath, redeemGet, redeemPost, silent] = [
     await redeemHandoff(runtime, host, held[0] ?? "", "/docs/"),
     await legacy(held[1] ?? ""),
-    // A released CLI's same-origin form post.
     await get(runtime, host, "/__sf/redeem", {
       method: "POST",
       headers: { origin: `https://${host}`, "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token: held[2] ?? "", return: "/docs/" }).toString(),
     }),
-    // A renewal nobody clicked for lands back on its page.
     await legacy(held[3] ?? "", "&silent=1"),
   ];
   for (const refused of [inPath, redeemGet, redeemPost]) {
@@ -1021,7 +931,6 @@ test("a handoff issued before everyone was signed out opens no session", async (
   expect(silent.status).toBe(303);
   expect(silent.headers.get("location")).toBe("/docs/");
   expect(sessionCookie(silent)).toBeUndefined();
-  // The refusal spent nothing a fresh sign-in needs: one issued now opens.
   const fresh = await redeemHandoff(runtime, host, await mint(1), "/docs/");
   expect(fresh.status).toBe(303);
   expect(fresh.headers.get("location")).toBe("/docs/");
@@ -1052,8 +961,6 @@ test("a handoff issued before everyone was signed out opens no session", async (
   expect(older.headers.get("location")).toBe("/docs/");
   expect((await docs(sessionCookie(older) ?? "")).status).toBe(200);
 
-  // Issued after a sign-out whose projection has not reached the box yet: it
-  // opens a session now, and that session ends when the projection lands.
   const ahead = await redeemHandoff(runtime, host, await mint(2), "/docs/");
   expect(ahead.status).toBe(303);
   const aheadCookie = sessionCookie(ahead) ?? "";
@@ -1066,7 +973,6 @@ test("a link attached while everyone is signed out carries nothing from the sess
   const host = "chain-attach.test";
   const spaceId = "spc_chain_attach";
   const versionId = "ver_chain_attach_1";
-  // The owner opens every page; the link opens only /docs/.
   const config = (sessionVersion: number) => {
     const base = accessConfig(1, sessionVersion);
     const { exchange } = base.authorization.accessPage;
@@ -1128,9 +1034,6 @@ test("a link attached while everyone is signed out carries nothing from the sess
   const owner = sessionCookie(signedIn);
   expect((await page(owner, "/")).status).toBe(200);
 
-  // The owner opens a share link. While the box waits on the exchange, everyone
-  // is signed out, and the control plane mints the link's handoff at the new
-  // version: the handoff is current, the browser's session is not.
   linkHandoff = async () => {
     await putRoute(runtime, spaceId, "production", { version_id: versionId, config: config(1) });
     return mintCallbackToken({
@@ -1156,8 +1059,6 @@ test("a link attached while everyone is signed out carries nothing from the sess
   expect(attached.status).toBe(303);
   expect(attached.headers.get("location")).toBe("/docs/");
   const linked = sessionCookie(attached);
-  // Only what the link proved: its page opens, the owner's pages do not, and
-  // the session is nobody in particular.
   expect((await page(linked, "/docs/")).status).toBe(200);
   expect((await page(linked, "/")).status).toBe(403);
   expect(claims(linked)).toMatchObject({ principal: "anonymous", sessionVersion: 1 });
@@ -1169,8 +1070,6 @@ test("a real-authority sign-in is capped at view and comment and ends by its ses
   const host = "chain-real.test";
   const spaceId = "spc_chain_real";
   const versionId = "ver_chain_real_1";
-  // The member holds a manager Grant on the whole Space; a second account
-  // holds the same, to show one ended session touches no other.
   const config = (generation: number, endedSessions?: string[]) => {
     const base = accessConfig(generation, 0);
     const owner = base.authorization.grants[0];
@@ -1234,8 +1133,6 @@ test("a real-authority sign-in is capped at view and comment and ends by its ses
   const second = await capped("cns_second");
   const page = (cookie: string) => get(runtime, host, "/", { headers: { cookie } });
   expect((await page(first.cookie)).status).toBe(200);
-  // A manager Grant behind a capped authority is not a manager on the
-  // Space's origin: the exposure fence, which needs access.manage, refuses it.
   const fenced = config(1);
   await putRoute(runtime, spaceId, "production", {
     version_id: versionId,
@@ -1244,8 +1141,6 @@ test("a real-authority sign-in is capped at view and comment and ends by its ses
   expect((await page(first.cookie)).status).toBe(403);
   await putRoute(runtime, spaceId, "production", { version_id: versionId, config: config(1) });
   expect((await page(first.cookie)).status).toBe(200);
-  // Ending the first sign-in by id ends it on the next request, with no
-  // Grant edit and no sign-out of everyone; the other session stays.
   await putRoute(runtime, spaceId, "production", {
     version_id: versionId,
     config: config(1, [first.sessionId]),
@@ -1276,8 +1171,6 @@ test("a header handoff issued before everyone was signed out admits nothing", as
     });
   const present = (token: string) =>
     get(runtime, host, "/", { headers: { "x-sf-authorization": `Bearer ${token}` } });
-  // An integration presents an opaque credential; the box trades it at the
-  // token exchange for a one-request handoff, as it does for a machine key.
   const presentOpaque = (token: Promise<string>, during?: () => Promise<void>) => {
     tokenHandoff = async () => {
       const minted = await token;
@@ -1293,23 +1186,17 @@ test("a header handoff issued before everyone was signed out admits nothing", as
   const mint = (sessionVersion: number) => mintCallbackToken({ host, spaceId, sessionVersion });
   expect((await presentOpaque(mint(0))).status).toBe(200);
 
-  // Minted at version 0; everyone is signed out while the box waits on the
-  // exchange, and the handoff from before comes back: it admits nothing.
   const stale = await presentOpaque(mint(0), () => signOutEveryone(1));
   expect(stale.status).toBe(403);
   expect(stale.headers.get("set-cookie") ?? "").not.toContain("sfv2_");
 
-  // A handoff below the version the box already holds is refused before its
-  // jti is spent: the box does not consume it, so the refusal is the floor's.
   const held = await mint(0);
   expect((await present(held)).status).toBe(403);
   await signOutEveryone(0);
   expect((await present(held)).status).toBe(200);
-  // Admitted once, then spent.
   expect((await present(held)).status).toBe(403);
   await signOutEveryone(1);
 
-  // A current handoff still admits.
   expect((await presentOpaque(mint(1))).status).toBe(200);
 
   // An older control plane names no version: admitted as before.
@@ -1336,7 +1223,6 @@ test("a header handoff issued before everyone was signed out admits nothing", as
 
 describe("a Share sign-in that crosses a sign-out of everyone", () => {
   const versionId = "ver_oauth_chain_signed_out";
-  // The Share Space, with an identity lane so a signed-out page probes once.
   const shareConfig = (sessionVersion: number) => {
     const config = accessConfig(1, sessionVersion);
     const owner = config.authorization.grants[0];
@@ -1366,7 +1252,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
   let deployed = false;
   const reset = async (sessionVersion: number) => {
     if (!deployed) {
-      // Its own version: the first OAuth test may already have committed OAUTH_VERSION.
       await deploy(runtime, {
         spaceId: OAUTH_SPACE,
         versionId,
@@ -1382,9 +1267,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
     } else await project(sessionVersion);
   };
 
-  // A browser with its own cookies that follows redirects. At the authorize URL
-  // it plays the sign-in server, which always hands back a code; the token
-  // endpoint then mints at `issuerVersion` (a number, or read when it mints).
   const browse = (issuerVersion: () => number) => {
     const jar = new Map<string, string>();
     const authorizations: URL[] = [];
@@ -1425,7 +1307,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
       follow,
       authorizations,
       exchanges: () => exchangeCount - exchangesBefore,
-      // Only an account session; a probe leaves its stateless `sfa1_` marker.
       signedIn: () =>
         /^__Host-spacefast_session=sfv2_/.test(jar.get("__Host-spacefast_session") ?? ""),
     };
@@ -1433,16 +1314,13 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
 
   test("a silent probe that gets a stale handoff stops at the gate", async () => {
     await reset(1);
-    // The issuer is stuck one version behind: every handoff it signs is stale.
     const browser = browse(() => 0);
     const page = await browser.follow("/docs/");
     expect(page.status).toBe(403);
     expect(await page.text()).toContain(">Continue with Spacefast</a>");
-    // One silent authorization for this lapse, one exchange, then the page.
     expect(browser.authorizations.map((url) => url.searchParams.get("prompt"))).toEqual(["none"]);
     expect(browser.exchanges()).toBe(1);
     expect(browser.signedIn()).toBe(false);
-    // Loading the page again does not probe again.
     expect((await browser.follow("/docs/")).status).toBe(403);
     expect(browser.authorizations).toHaveLength(1);
   });
@@ -1452,7 +1330,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
     const browser = browse(() => 0);
     const page = await browser.follow("/__spacefast/sign-in?return=%2Fdocs%2F");
     expect(page.status).toBe(403);
-    // The existing "try again" state of a failed exchange, with its button.
     const html = await page.text();
     expect(html).toContain("Couldn&#039;t reach Spacefast to check that. Try again in a moment.");
     expect(html).toContain('href="/__spacefast/sign-in?return=%2Fdocs%2F"');
@@ -1466,7 +1343,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
     const start = await get(runtime, OAUTH_HOST, "/__spacefast/sign-in?return=%2Fdocs%2F");
     const authorize = new URL(start.headers.get("location") ?? "");
     expectedChallenge = authorize.searchParams.get("code_challenge") ?? "";
-    // Signed for some other sign-in's nonce, and below the box's version.
     nonceForCode.set("one-use-code-other-request-stale", "e".repeat(64));
     sessionVersionForCode.set("one-use-code-other-request-stale", 0);
     const callback = await get(
@@ -1485,8 +1361,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
   });
 
   test("a sign-out that reaches the box while the callback waits is honoured", async () => {
-    // The issuer minted at version 1, then everyone was signed out and the box
-    // learned version 2 while the callback waited on the token endpoint.
     await reset(1);
     const stale = browse(() => 1);
     beforeHandoff = () => project(2);
@@ -1497,8 +1371,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
     } finally {
       beforeHandoff = null;
     }
-    // Here the issuer read version 3 after the sign-out and the box learned it
-    // during the wait: the session it opens carries 3 and keeps working.
     await reset(2);
     const current = browse(() => 2);
     beforeHandoff = async (code) => {
@@ -1509,8 +1381,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
       const page = await current.follow("/__spacefast/sign-in?return=%2Fdocs%2F");
       expect(page.status).toBe(200);
       expect(await page.text()).toBe("private OAuth docs");
-      // In one sign-in: a session tagged with the version from before the
-      // wait would be refused on arrival and need a second, silent one.
       expect(current.authorizations).toHaveLength(1);
       expect(current.exchanges()).toBe(1);
     } finally {
@@ -1520,8 +1390,6 @@ describe("a Share sign-in that crosses a sign-out of everyone", () => {
 });
 
 test("a handoff minted outside the 60-second freshness window is refused", async () => {
-  // Long-lived on purpose: `exp` is still in the future, so only the runtime's
-  // 60s cap on the mint's `iat` can reject this token.
   setSystemTime(new Date(Date.now() - 120_000));
   let stale: string;
   try {
@@ -1541,11 +1409,8 @@ test("a never-live Space admits its owner to a version host once its Space confi
       await mintCallbackToken({ host: PREVIEW_HOST, spaceId: PREVIEW_SPACE, generation: 2 }),
       "/docs/",
     );
-  // No production pointer means no issuer or keys: every handoff is refused.
   expect((await redeem()).status).toBe(404);
 
-  // The owner Grant re-aimed at every version host: the shape a team Space's
-  // `all_versions` Grant takes. A `live` Grant never reaches a version host.
   const versionHostConfig = (accessGeneration: number) => {
     const config = accessConfig(accessGeneration, 0);
     const authorization = z
@@ -1572,7 +1437,6 @@ test("a never-live Space admits its owner to a version host once its Space confi
     );
   expect((await push(2)).status).toBe(200);
   expect(spaceOverlay(runtime, PREVIEW_SPACE)).toMatchObject({ access_gen: 2 });
-  // A body without a config never wipes the access a version host admits with.
   const empty = await api(
     runtime,
     "PUT",
@@ -1583,15 +1447,11 @@ test("a never-live Space admits its owner to a version host once its Space confi
   );
   expect(empty.status).toBe(422);
   expect(spaceOverlay(runtime, PREVIEW_SPACE)).toMatchObject({ access_gen: 2 });
-  // A write that died after space-config.json landed left a retired policy
-  // document behind; the identical retry still finishes the cleanup.
   const retiredPolicy = path.join(spaceRoot(runtime, PREVIEW_SPACE), "policy.json");
   writeFileSync(retiredPolicy, "{}");
   const retry = await push(2);
   expect(await retry.json()).toMatchObject({ unchanged: true });
   expect(existsSync(retiredPolicy)).toBe(false);
-  // A writer holding an older read (a finalize that started before an access
-  // change) leaves the newer config in place.
   const stale = await push(1);
   expect(stale.status).toBe(200);
   expect(await stale.json()).toMatchObject({ unchanged: true });
@@ -1606,17 +1466,12 @@ test("a never-live Space admits its owner to a version host once its Space confi
   expect(await served.text()).toBe("<h1>private docs</h1>\n");
 });
 
-// A Space that lets accounts in and has a password: one card on its own host,
-// Continue with Spacefast on top. A returning account goes straight to
-// sign-in; a first visit tries one silent check and falls back to the card.
 test("the hybrid unlock card: returning accounts skip it, a first visit checks silently once", async () => {
   const HYBRID_HOST = "hybrid-unlock.test";
   const HYBRID_SPACE = "spc_hybrid_unlock";
   const config = accessConfig(1, 0);
   const owner = config.authorization.grants[0];
   if (!owner) throw new Error("owner fixture missing");
-  // A password Grant beside the owner's: the projection shape is the same,
-  // only the audience differs.
   const grants = [
     owner,
     {
@@ -1649,7 +1504,6 @@ test("the hybrid unlock card: returning accounts skip it, a first visit checks s
     },
   });
   const navigate = { "sec-fetch-dest": "document" };
-  // First visit: one silent check, the card marked as tried.
   const first = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2F", {
     headers: navigate,
   });
@@ -1657,8 +1511,6 @@ test("the hybrid unlock card: returning accounts skip it, a first visit checks s
   const silent = new URL(first.headers.get("location") ?? "");
   expect(silent.origin + silent.pathname).toBe(OAUTH_AUTHORIZE_URL);
   expect(silent.searchParams.get("prompt")).toBe("none");
-  // It comes back marked, in the URL: a browser that keeps no cookies gets
-  // the card on its return instead of another silent check.
   expect(silent.searchParams.get("return")).toBe("/__spacefast/unlock?return=%2F&silent=tried");
   const cookieless = await get(
     runtime,
@@ -1675,7 +1527,6 @@ test("the hybrid unlock card: returning accounts skip it, a first visit checks s
     .map((header) => header.split(";")[0] ?? "")
     .join("; ");
   expect(tried).toContain(`__Host-spacefast_unlock_tried_${HYBRID_SPACE}=1`);
-  // The fallback (or a refresh) renders the card instead of looping.
   const card = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2F", {
     headers: { ...navigate, cookie: tried },
   });
@@ -1687,14 +1538,12 @@ test("the hybrid unlock card: returning accounts skip it, a first visit checks s
   expect(password).toBeGreaterThan(spacefast);
   expect(html).toContain("or enter password");
   expect(html).toContain("<h1>Hybrid Notes</h1>");
-  // A browser an account signed in to before: straight to sign-in, no card.
   const returning = await get(runtime, HYBRID_HOST, "/__spacefast/unlock?return=%2Fdocs%2F", {
     headers: { ...navigate, cookie: "__Host-spacefast_returning=1" },
   });
   expect(returning.status).toBe(302);
   expect(returning.headers.get("location")).toBe("/__spacefast/sign-in?return=%2Fdocs%2F");
   expect(returning.headers.get("referrer-policy")).toBe("no-referrer");
-  // Asking for the password itself draws the card, returning account or not.
   const byPassword = await get(
     runtime,
     HYBRID_HOST,
@@ -1705,15 +1554,12 @@ test("the hybrid unlock card: returning accounts skip it, a first visit checks s
   const byPasswordHtml = await byPassword.text();
   expect(byPasswordHtml).toContain('name="password"');
   expect(byPasswordHtml).toContain('name="return" value="/docs/"');
-  // A script's fetch is never bounced off the host.
   const fetched = await get(runtime, HYBRID_HOST, "/__spacefast/unlock", {
     headers: { "sec-fetch-dest": "empty" },
   });
   expect(fetched.status).toBe(401);
 });
 
-// The box's sync watermark: a private page fails closed once the control
-// plane has not reached the box for over an hour; a public one keeps serving.
 test("a box out of touch for over an hour fails private pages closed and keeps public ones", async () => {
   const PUBLIC_STALE_HOST = "public-stale.test";
   const base = accessConfig(1, 0);
@@ -1748,8 +1594,6 @@ test("a box out of touch for over an hour fails private pages closed and keeps p
   const writeWatermark = (value: Record<string, number>) =>
     writeFileSync(syncPath, `${JSON.stringify(value)}\n`);
 
-  // An ordinary management write never arms the cutoff: only a heartbeat
-  // does, so a box nothing heartbeats can never trip on it.
   rmSync(syncPath, { force: true });
   await putRoute(runtime, "spc_public_stale", "production", {
     version_id: "ver_public_stale",
@@ -1773,7 +1617,6 @@ test("a box out of touch for over an hour fails private pages closed and keeps p
   expect(recorded.enforce_until - recorded.synced_at).toBe(10_800);
   expect(await privateStatus()).toBe(200);
 
-  // An hour and a minute without contact, inside the lease.
   writeWatermark({ synced_at: staleAt, enforce_until: staleAt + 10_800 });
   const stalePrivate = await get(runtime, HOST, "/", { headers: admitted });
   expect(stalePrivate.status).toBe(503);
@@ -1784,12 +1627,9 @@ test("a box out of touch for over an hour fails private pages closed and keeps p
   expect(stalePublic.status).toBe(200);
   expect(await stalePublic.text()).toContain("open");
 
-  // A heartbeat signed long ago and delivered late is refused by its own
-  // timestamps, and neither moves the watermark back nor counts as contact.
   const replayed = await beat({ ...lease, iat: staleAt - 10, exp: staleAt + 290 });
   expect(replayed.status).toBe(401);
   expect(await privateStatus()).toBe(503);
-  // A write stamped by a control plane that runs the sweep leaves it alone.
   await putRoute(runtime, "spc_public_stale", "production", {
     version_id: "ver_public_stale",
     config: publicConfig,
@@ -1800,7 +1640,6 @@ test("a box out of touch for over an hour fails private pages closed and keeps p
   expect((await beat()).status).toBe(200);
   expect(await privateStatus()).toBe(200);
 
-  // Past its lease, a box nobody heartbeats serves again.
   writeWatermark({ synced_at: staleAt - 10_800, enforce_until: staleAt - 60 });
   expect(await privateStatus()).toBe(200);
 
@@ -1826,7 +1665,6 @@ test("a box out of touch for over an hour fails private pages closed and keeps p
   expect(await privateStatus()).toBe(200);
 });
 
-/** When the engine recorded this Space going private, from its live overlay. */
 function privateSince(spaceId: string): number | null {
   const probe = Bun.spawnSync([
     "php",
@@ -1840,9 +1678,6 @@ function privateSince(spaceId: string): number | null {
   return z.number().nullable().parse(JSON.parse(probe.stdout.toString()));
 }
 
-// A Space that goes from public to private: a browser arriving at the gate
-// afterwards is told to drop what it kept from the public pages. One that
-// stays private, or arrives with a session, is not.
 test("going private clears a returning browser's public copies, once the gate answers", async () => {
   const host = "went-private.test";
   const spaceId = "spc_went_private";
@@ -1886,19 +1721,12 @@ test("going private clears a returning browser's public copies, once the gate an
   const gate = await get(runtime, host, "/");
   expect(gate.status).toBe(403);
   expect(gate.headers.get("clear-site-data")).toBe('"cache", "storage"');
-  // Another sync while it stays private keeps the same switch time.
   await route(accessConfig(3, 0));
   expect((await get(runtime, host, "/")).headers.get("clear-site-data")).not.toBeNull();
-  // A private Space that never was public tells nobody anything.
   expect((await get(runtime, HOST, "/")).headers.get("clear-site-data")).toBeNull();
 
-  // A platform fence on a public Space is a hold, not an access change: it
-  // never starts the clear, and lifting it doesn't either. The Space going
-  // private afterwards still does.
   const fencedHost = "went-fenced.test";
   const fencedSpace = "spc_went_fenced";
-  // What the control plane sends under an exposure fence: its descriptor
-  // says not public (runtime/public-exposure.ts) while the Grants are unchanged.
   const fencedExposure = { ...publicConfig.public_exposure, public: false };
   const fenced = {
     ...publicConfig,
@@ -1935,9 +1763,6 @@ test("going private clears a returning browser's public copies, once the gate an
   const lifted = await get(runtime, fencedHost, "/");
   expect(lifted.status).toBe(200);
   expect(lifted.headers.get("clear-site-data")).toBeNull();
-  // A public Space with one private path, fenced and then unfenced: its
-  // gate answers on that path afterwards, and says nothing, because a fence
-  // never made the Space "not public".
   const partlyPrivate = (fence: string) => ({
     ...publicConfig,
     public_exposure: fence === "none" ? publicConfig.public_exposure : fencedExposure,
@@ -1964,8 +1789,6 @@ test("going private clears a returning browser's public copies, once the gate an
   const membersGate = await get(runtime, fencedHost, "/members/");
   expect(membersGate.status).toBe(403);
   expect(membersGate.headers.get("clear-site-data")).toBeNull();
-  // Fenced, then made private: going private is the change, so the week of
-  // clearing is counted from then. A fence never stamps a switch time.
   await fencedRoute(fenced);
   expect(privateSince(fencedSpace)).toBeNull();
   await fencedRoute(privateConfig);
@@ -1975,18 +1798,14 @@ test("going private clears a returning browser's public copies, once the gate an
   expect(wentPrivate.headers.get("clear-site-data")).toBe('"cache", "storage"');
 });
 
-// Nothing under Spacefast's own namespace can become a service worker.
 test("a service worker script from a reserved path is refused", async () => {
   for (const path of ["/__spacefast/sdk.js", "/__spacefast/unlock", "/__"]) {
     const worker = await get(runtime, HOST, path, { headers: { "service-worker": "script" } });
     expect(worker.status, path).toBe(403);
   }
-  // An ordinary request for the same path is answered as before.
   expect((await get(runtime, HOST, "/__")).status).toBe(200);
 });
 
-// An unclaimed preview: a browser agrees to the current Terms once, on the
-// platform page. When the Terms version changes, it is asked again.
 test("an unclaimed preview asks each browser to agree to the current Terms, and again when they change", async () => {
   const host = "terms-preview.test";
   const spaceId = "spc_terms_preview";
@@ -2020,15 +1839,11 @@ test("an unclaimed preview asks each browser to agree to the current Terms, and 
   const first = await get(runtime, host, "/docs?tab=2", { headers: navigate });
   expect(first.status).toBe(302);
   expect(first.headers.get("location")).toBe(`${termsUrl}?return=%2Fdocs%3Ftab%3D2&host=${host}`);
-  // A return too long for the Terms page comes back to the root instead.
   const long = await get(runtime, host, `/docs?q=${"x".repeat(2100)}`, { headers: navigate });
   expect(long.status).toBe(302);
   expect(long.headers.get("location")).toBe(`${termsUrl}?return=%2F&host=${host}`);
-  // A subresource is never sent away.
   expect((await get(runtime, host, "/app.css")).status).toBe(200);
 
-  // The Terms page comes back with the acceptance the control plane's own
-  // Terms page mints, under the current Terms.
   const { UNCLAIMED_TERMS_VERSION } = accessCore;
   const back = await get(
     runtime,
@@ -2046,7 +1861,6 @@ test("an unclaimed preview asks each browser to agree to the current Terms, and 
   expect(cookie).not.toBe("");
   expect((await get(runtime, host, "/", { headers: { ...navigate, cookie } })).status).toBe(200);
 
-  // An acceptance signed by the same key for older Terms remembers nothing.
   const { token: stale } = await signToken(
     { purpose: "terms-acceptance", issuer: "spacefast-api", audience: spaceId },
     { host, termsVersion: "2025-01-01", jti: `uta_${randomUUID()}` },
@@ -2058,7 +1872,6 @@ test("an unclaimed preview asks each browser to agree to the current Terms, and 
   expect(refused.headers.getSetCookie().some((line) => line.includes("spacefast_terms_"))).toBe(
     false,
   );
-  // Another Space's acceptance, from the real mint, remembers nothing either.
   const elsewhere = await unclaimedTerms.mintTermsAcceptanceToken({
     spaceId: "spc_other_preview",
     host,
@@ -2069,7 +1882,6 @@ test("an unclaimed preview asks each browser to agree to the current Terms, and 
     false,
   );
 
-  // The Terms change: the same browser is asked again.
   await putRoute(runtime, spaceId, "production", {
     version_id: "ver_terms_preview",
     config: config("2026-12-01"),

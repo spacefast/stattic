@@ -1,21 +1,3 @@
-// Which bytes answer which URL, on the schema-v4 engine.
-//
-// v4 compiles every answer at finalize (contracts §5): one response table keyed
-// by request path, plus the reserved keys the serve path probes when no exact
-// key matches — `\0spa`, `\0404:<dir>`/`\0404`, `\0rules`, `\0robots`. Routing is
-// therefore "which key answers, and what did the ordered residue do first",
-// which is what this file tests.
-//
-// Deliberately NOT here, because another suite owns the seam:
-//   * cache-control classes, the `A8C-Edge-Cache` opt-in, `_headers` rules,
-//     noindex/robots.txt and the accel lane -> headers.test.ts;
-//   * the agent-detection table itself -> agent-detection.test.ts (this file
-//     only proves that a conditional rule selects a representation);
-//   * access decisions and protected-space policy -> access-rules.test.ts;
-//   * Zero and Functions execution -> zero-runtime.test.ts, functions-*.test.ts.
-//
-// Compression remains server-owned. Byte ranges and ETag conditionals on the
-// PHP fallback are exercised through the canonical serving route below.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   chmodSync,
@@ -82,17 +64,9 @@ const APP_JS = "console.log('app');\n";
 const APP_JS_GZIP = gzipSync(Buffer.from(APP_JS));
 const APP_JS_BROTLI = brotliCompressSync(Buffer.from(APP_JS));
 const GUIDE_HTML = "<h1>browser guide</h1>\n";
-// `raw: true` is how a Markdown file asks to be published as itself. Without
-// it a `.md` source is private and unreachable, so a rewrite could not target
-// it — and an agent negotiation whose whole point is serving the Markdown needs
-// the source on the public tree. The frontmatter block is part of the published
-// bytes, because a raw file is published verbatim.
 const GUIDE_MD = "---\nraw: true\n---\n# agent guide\n";
 const GUIDE_MD_GZIP = gzipSync(Buffer.from(GUIDE_MD));
 const DRAFT_MD = "---\ndraft: true\n---\n# Private draft\n";
-// A gzip member under an extension nothing has a MIME for: finalize sniffs the
-// magic bytes so the response describes the bytes, and no lane invents a
-// Content-Encoding for them.
 const GZIP_PAYLOAD = Buffer.from([
   0x1f, 0x8b, 0x08, 0x00, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64,
 ]);
@@ -122,8 +96,6 @@ beforeAll(async () => {
       "café.html": "<h1>café</h1>\n",
       "404.html": ROOT_404,
       "docs/index.html": "<h1>docs</h1>\n",
-      // An ordinary folder: Zero's runtime artifacts sit in the version root,
-      // never in the file catalog, so they cannot claim this name.
       "zero/index.html": "<h1>zero</h1>\n",
       "zero/notes.txt": "zero notes\n",
       "blog/404.html": BLOG_404,
@@ -131,8 +103,6 @@ beforeAll(async () => {
       "assets/app.js": APP_JS,
       "movie.mp4": "0123456789".repeat(100200),
       "empty.txt": "",
-      // A published `.gz` is an ordinary file at its own URL: v4 compiles no
-      // sidecar relationship and never negotiates an encoding.
       "assets/app.js.gz": APP_JS_GZIP,
       "assets/app.js.br": APP_JS_BROTLI,
       "pagefind/index.pf_index": GZIP_PAYLOAD,
@@ -148,41 +118,29 @@ beforeAll(async () => {
         "  Content-Type: text/html; charset=utf-8",
         "  ! Content-Disposition",
       ].join("\n"),
-      // Uppercase near-misses of the convention names are ordinary content.
       _HEADERS: "ordinary uppercase file\n",
       "SF.JSONC": '{ "private": true }\n',
       "SF.JSONC.gz": gzipSync(Buffer.from('{ "private": true }\n')),
-      // Config, sidecars and server/function source below the root are
-      // compile inputs too, while a folder's own pages still serve.
       "public/sf.jsonc": '{ "private": "nested" }\n',
       "docs/_headers": "/*\n  X-Nested: private\n",
       "server/index.ts": "export const secret = 'server source';\n",
       "functions/hello.ts": "export const secret = 'function source';\n",
       "server/about.html": "<h1>server page</h1>\n",
       ".well-known/security.txt": "Contact: mailto:security@site.test\n",
-      // The fixture's only redirect input: native finalize parses it and lowers
-      // it into the canonical ordered `\0rules` map.
       _redirects: [
         "/old /about.html 301",
-        // Sends a clean URL to its `.html` file: that page keeps the `.html`
-        // spelling, or the two redirects would loop.
         "/loop-page /loop-page.html 301",
         "/found /about.html 302",
         "/docs-redirect /docs/ 302",
-        // Forced: the target path is a committed file and the rewrite still wins.
         "/about.html /index.html 200!",
         "/unicode-nfd /café.html 200!",
         "/unicode-encoded /caf%C3%A9.html 200!",
-        // Non-forced: yields wherever bytes exist, applies where they do not.
         "/yield/* /index.html 200",
         "/gone/* /blog/404.html 404",
-        // One path family with two representations, chosen per visitor.
         "/guide/* /guide.md 200! Agent=true",
         "/guide/* /guide.html 200!",
         `/preserve/* ${redirectReceiverUrl("/receiver")} 307`,
         "/escape/* /:splat 302",
-        // Matches on its own query and builds the destination from it, so it
-        // copies nothing of the visitor's query string.
         "/campaign utm_source=:source /landing/:source 302",
       ].join("\n"),
     },
@@ -208,9 +166,6 @@ afterAll(() => {
   redirectReceiver?.stop(true);
 });
 
-// The version is its root pointer, the content-addressed root it names, and the
-// tables that root names (§5). One table until the 512 KiB split, and the serve
-// path validates the root's schema and nothing else (D4/D86).
 test("a version publishes one content-addressed root over a single response table", () => {
   const root = versionRootArtifact(rt, "spc_site", "ver_site_1");
   expect(root?.schema).toBe(RESPONSES.schema);
@@ -224,17 +179,13 @@ test("a published path serves its compiled entry and precomputed validator", asy
   expect(response.status).toBe(200);
   expect(await response.text()).toBe(APP_JS);
   expect(response.headers.get("content-type")).toBe("text/javascript; charset=utf-8");
-  // Compiled once at finalize and quoted exactly once at send time (D121/D132).
   expect(response.headers.get("etag")).toBe(`"${sha256(APP_JS)}"`);
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   expect(await healthServing(rt, SITE, "ver_site_1")).toMatchObject({ version_match: true });
-  // Nothing in this runtime compresses or negotiates: no sidecar is consulted,
-  // and no lane invents a Content-Encoding.
   expect(response.headers.get("content-encoding")).toBeNull();
 });
 
 test("compressed uploads are served as the bytes they are, never as an encoding", async () => {
-  // A `.gz` published beside its source is a file, not a representation of one.
   const sidecar = await get(rt, SITE, "/assets/app.js.gz");
   expect(sidecar.status).toBe(200);
   expect(sidecar.headers.get("content-type")).toBe("application/gzip");
@@ -250,15 +201,12 @@ test("compressed uploads are served as the bytes they are, never as an encoding"
   expect(rawMarkdown.status).toBe(200);
   expect(new Uint8Array(await rawMarkdown.arrayBuffer())).toEqual(new Uint8Array(GUIDE_MD_GZIP));
 
-  // Its source keeps serving identity bytes whatever the client accepts.
   const source = await get(rt, SITE, "/assets/app.js", {
     headers: { "accept-encoding": "br, gzip" },
   });
   expect(source.headers.get("content-encoding")).toBeNull();
   expect(await source.text()).toBe(APP_JS);
 
-  // Gzip magic under an extension no MIME table knows: the sniffed type
-  // describes the bytes, and it is still not an encoding.
   const opaque = await get(rt, SITE, "/pagefind/index.pf_index");
   expect(opaque.status).toBe(200);
   expect(opaque.headers.get("content-type")).toBe("application/gzip");
@@ -286,8 +234,6 @@ test("index and directory URLs resolve to their compiled keys", async () => {
 });
 
 test("W7.1 clean URLs serve <path>.html and canonicalize the slashed form", async () => {
-  // `blog/post.html` has no directory-index form; an extensionless request must
-  // still serve those bytes (Hugo uglyURLs / Jekyll / hand-written flat HTML).
   const clean = await get(rt, SITE, "/blog/post");
   expect(clean.status).toBe(200);
   expect(await clean.text()).toBe(POST);
@@ -296,8 +242,6 @@ test("W7.1 clean URLs serve <path>.html and canonicalize the slashed form", asyn
   expect(slashed.status).toBe(308);
   expect(slashed.headers.get("location")).toBe("/blog/post");
 
-  // One page, one URL, as on Cloudflare Pages and Vercel: a page's own file
-  // URL moves to the URL it is served at, query intact.
   for (const [from, to] of [
     ["/blog/post.html?ref=a", "/blog/post?ref=a"],
     ["/index.html", "/"],
@@ -309,21 +253,18 @@ test("W7.1 clean URLs serve <path>.html and canonicalize the slashed form", asyn
     expect(moved.status, from).toBe(308);
     expect(moved.headers.get("location"), from).toBe(to);
   }
-  // A publisher rule sends `/loop-page` to its file, so that file stays put.
   const ruled = await get(rt, SITE, "/loop-page");
   expect(ruled.status).toBe(301);
   expect(ruled.headers.get("location")).toBe("/loop-page.html");
   const kept = await get(rt, SITE, "/loop-page.html");
   expect(kept.status).toBe(200);
   expect(await kept.text()).toBe("<h1>loop page</h1>\n");
-  // An internal rewrite onto a page's file URL is not a client redirect.
   const rewritten = await get(rt, SITE, "/yield/absent-page");
   expect(rewritten.status).toBe(200);
   expect(await rewritten.text()).toBe(INDEX);
 });
 
 test("the nearest custom 404 answers, walking up from the requested directory", async () => {
-  // `\0404:blog` for anything under /blog, `\0404` for everything else.
   const nested = await get(rt, SITE, "/blog/missing");
   expect(nested.status).toBe(404);
   expect(await nested.text()).toBe(BLOG_404);
@@ -333,15 +274,12 @@ test("the nearest custom 404 answers, walking up from the requested directory", 
   expect(root.headers.get("content-range")).toBeNull();
   expect(await root.text()).toBe(ROOT_404);
 
-  // A `404!` rule names its own document and keeps the rewritten status.
   const ruled = await get(rt, SITE, "/gone/forever");
   expect(ruled.status).toBe(404);
   expect(await ruled.text()).toBe(BLOG_404);
 });
 
 test("private source files and their companions are never served", async () => {
-  // Committed content that compiles to a not-found action: the miss is
-  // indistinguishable from any other, so nothing confirms the file exists.
   for (const requestPath of [
     "/_redirects",
     "/%5Fredirects",
@@ -358,8 +296,6 @@ test("private source files and their companions are never served", async () => {
     expect(await response.text(), requestPath).toBe(ROOT_404);
   }
 
-  // An uppercase near-miss is ordinary content, not a convention file, and so
-  // is a page that happens to live in a source directory or beside a config.
   const uppercase = await get(rt, SITE, "/_HEADERS");
   expect(uppercase.status).toBe(200);
   expect(await uppercase.text()).toBe("ordinary uppercase file\n");
@@ -379,16 +315,11 @@ test("dot paths are forbidden except /.well-known", async () => {
   expect(await wellKnown.text()).toContain("security@site.test");
 });
 
-// Path identity is NFC, decided once at intake: two spellings of the same name
-// are the same file, so the manifest may not carry both and either spelling must
-// answer the same bytes at serve time.
 test("path identity is NFC at both intake and serve time", async () => {
   const nfc = "café.html"; // U+00E9
   const nfd = "café.html"; // e + U+0301
   const content = "<h1>cafe</h1>\n";
 
-  // Declared, not finalized: path policy is enforced once, where the manifest
-  // enters the runtime.
   const entry = { size: content.length, sha256: sha256(content) };
   const duplicate = await api(
     rt,
@@ -419,7 +350,6 @@ test("path identity is NFC at both intake and serve time", async () => {
     },
   });
 
-  // Declared as NFD, addressable by either spelling of its clean URL.
   for (const requestForm of [nfc, nfd]) {
     const clean = requestForm.replace(/\.html$/, "");
     const response = await get(rt, "nfc.test", `/${encodeURIComponent(clean)}`);
@@ -454,7 +384,6 @@ test("literal consecutive dots in a file name survive finalization", async () =>
     },
   });
 
-  // The lone HTML file is the homepage, so its own URL moves to `/`.
   const own = await get(rt, host, `/${filePath}`);
   expect(own.status).toBe(308);
   expect(own.headers.get("location")).toBe("/");
@@ -520,13 +449,6 @@ test("large exact redirect catalogs preserve normalized ordered matching", async
   expect(directory.headers.get("location")).toBe("/docs/");
 });
 
-// The Space's own rules are a third authoring lane, and the only one the
-// finalizer cannot read off the staged tree — it rides the finalize body. This
-// version stages NO routing at all: no `_redirects`, no `_headers`, no
-// `sf.jsonc`. A Space whose only rules are dashboard rules still serves them,
-// which is the whole point of the tab that writes them. (Which lane wins when
-// they collide is settled in the compiler, not over HTTP: see
-// routing::tests::overlay_rules_run_ahead_of_both_file_lanes_and_stay_named_overlay.)
 test("a Space whose only routing is its overlay serves it", async () => {
   const OVERLAY_HOST = "overlay.test";
   const OVERLAY_VERSION_HOST = "overlay--v1.test";
@@ -545,8 +467,6 @@ test("a Space whose only routing is its overlay serves it", async () => {
     },
     activate: {
       route_name: "production",
-      // The version host has to be public too: this case is about which rule
-      // answers, and an access gate would answer first.
       config: publicAccessConfig({}, "live_and_all_versions"),
       production_hostnames: [OVERLAY_HOST],
       version_hostnames: [{ hostname: OVERLAY_VERSION_HOST, version_id: "ver_overlay_1" }],
@@ -558,16 +478,9 @@ test("a Space whose only routing is its overlay serves it", async () => {
   expect(served.headers.get("location")).toBe("/dashboard.html");
 });
 
-// The origin gives a rule up only where the edge demonstrably holds it: the
-// live production surface, on a host that was in the edge scope at finalize.
-// Each host below fails exactly one of those two conditions, or neither.
 test("an edge-placed rule is the edge's only on the hosts the edge was told about", async () => {
   const PLACED_HOST = "placed.test";
-  // In the edge scope, but attached to the Space's live route only AFTER this
-  // version was finalized — so the edge holds nothing for it.
   const ATTACHED_LATER_HOST = "attached-later.test";
-  // In the edge scope too, but it follows a branch route, which serves its own
-  // content and never gets the Space's production rules.
   const BRANCH_HOST = "branch.test";
   const PLACED_VERSION_HOST = "placed--v1.test";
   const LEGACY = "<h1>legacy</h1>\n";
@@ -577,10 +490,6 @@ test("an edge-placed rule is the edge's only on the hosts the edge was told abou
     metadata: { title: "Placed" },
     files: {
       "index.html": "<h1>placed</h1>\n",
-      // Forced, so the rule outranks the committed bytes and placement does
-      // not refuse it as shadowed. That is what makes the hosts visibly
-      // disagree: whoever evaluates the rule redirects, and whoever skips it
-      // finds a published file underneath.
       "legacy.html": LEGACY,
       "new.html": "<h1>new</h1>\n",
       _redirects: "/legacy.html /new.html 301!",
@@ -597,28 +506,19 @@ test("an edge-placed rule is the edge's only on the hosts the edge was told abou
     },
   });
 
-  // Production, and in the frozen edge scope: the edge holds this rule, so the
-  // origin steps over it and answers with the file the rule sits on top of.
   const production = await get(rt, PLACED_HOST, "/legacy.html");
   expect(production.status).toBe(200);
   expect(await production.text()).toBe(LEGACY);
   expect(production.headers.get("location")).toBeNull();
 
-  // A domain attached after the publish serves the same live route, but the
-  // version's edge scope froze without it. Giving the rule up here would
-  // delete it: nobody would answer.
   const attachedLater = await get(rt, ATTACHED_LATER_HOST, "/legacy.html");
   expect(attachedLater.status).toBe(301);
   expect(attachedLater.headers.get("location")).toBe("/new.html");
 
-  // The version host is a preview surface with no edge rules of its own, so it
-  // still runs the whole table.
   const preview = await get(rt, PLACED_VERSION_HOST, "/legacy.html");
   expect(preview.status).toBe(301);
   expect(preview.headers.get("location")).toBe("/new.html");
 
-  // Repointing the Space's hostnames at a branch route: BRANCH_HOST is in the
-  // edge scope, so only its route name keeps the rule at the origin.
   await putRoute(rt, "spc_placed", "beta", {
     version_id: "ver_placed_1",
     config: publicAccessConfig(),
@@ -632,13 +532,10 @@ test("an edge-placed rule is the edge's only on the hosts the edge was told abou
 });
 
 test("ordered redirects preserve the request query and RFC method semantics", async () => {
-  // The ordered lane is a pure function of host+path+query, so the query it did
-  // not consume travels to the destination.
   const withQuery = await get(rt, SITE, "/preserve/resource?ref=1");
   expect(withQuery.status).toBe(307);
   expect(withQuery.headers.get("location")).toBe(`${redirectReceiverUrl("/receiver")}?ref=1`);
 
-  // 307 preserves the method AND the body; the receiver reports what arrived.
   const body = "field=value";
   for (const method of ["POST", "PUT"]) {
     const followed = await fetch(`${rt.baseUrl}/preserve/form`, {
@@ -651,8 +548,6 @@ test("ordered redirects preserve the request query and RFC method semantics", as
     expect(await followed.json(), method).toEqual({ method, body });
   }
 
-  // A method no visitor lane accepts is refused by the rule that matched, and
-  // the refusal advertises every method that could have selected the redirect.
   const rejected = await get(rt, SITE, "/preserve/blocked", { method: "TRACE" });
   expect(rejected.status).toBe(405);
   expect(rejected.headers.get("allow")).toBe("GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
@@ -665,7 +560,6 @@ test("ordered redirects preserve the request query and RFC method semantics", as
 // may be shared.
 test("a redirect that copies the visitor's query string is never shared-cached", async () => {
   const places: [string, string, string, string][] = [
-    // [label, host, path, location without the query]
     ["canonical address", SITE, "/docs", "/docs/"],
     ["exact rule", SITE, "/found", "/about.html"],
     ["pattern rule", SITE, "/preserve/resource", redirectReceiverUrl("/receiver")],
@@ -685,7 +579,6 @@ test("a redirect that copies the visitor's query string is never shared-cached",
     }
   }
 
-  // A rule that matches on its own query copies nothing, so it stays shared.
   const ruled = await get(rt, SITE, "/campaign?utm_source=a");
   expect(ruled.status).toBe(302);
   expect(ruled.headers.get("location")).toBe("/landing/a");
@@ -699,23 +592,18 @@ test("capture expansion cannot turn a same-origin redirect into an authority", a
 });
 
 test("forced rewrites override committed bytes; non-forced ones yield to them", async () => {
-  // `/about.html` is a committed file, and the rule is forced.
   const forced = await get(rt, SITE, "/about.html");
   expect(forced.status).toBe(200);
   expect(await forced.text()).toBe(INDEX);
 
-  // Same pattern, not forced: bytes win where they exist...
   const existing = await get(rt, SITE, "/yield/keep.txt");
   expect(existing.status).toBe(200);
   expect(await existing.text()).toBe("kept\n");
 
-  // ...and the rewrite applies where they do not.
   const missing = await get(rt, SITE, "/yield/absent.txt");
   expect(missing.status).toBe(200);
   expect(await missing.text()).toBe(INDEX);
 
-  // A rewrite target resolves through the same NFC path identity as a request,
-  // whether the rule spelled it decomposed or percent-encoded.
   for (const requestPath of ["/unicode-nfd", "/unicode-encoded"]) {
     const unicode = await get(rt, SITE, requestPath);
     expect(unicode.status, requestPath).toBe(200);
@@ -724,8 +612,6 @@ test("forced rewrites override committed bytes; non-forced ones yield to them", 
 });
 
 test("a conditional rule picks one representation per visitor class", async () => {
-  // Markdown goes to agents and HTML goes to browsers.
-  // (Which requests count as agents is agent-detection.test.ts's table.)
   const guidePaths = ["/guide/install", "/guide/publish"];
   for (const requestPath of guidePaths) {
     const browser = await get(rt, SITE, requestPath, { headers: BROWSER_HEADERS });
@@ -738,22 +624,17 @@ test("a conditional rule picks one representation per visitor class", async () =
     const agent = await get(rt, SITE, requestPath, { headers: AGENT_HEADERS });
     expect(agent.status, requestPath).toBe(200);
     expect(await agent.text(), requestPath).toBe(GUIDE_MD);
-    // Two bodies at one URL that the edge keys without Vary: unstorable.
     expect(agent.headers.get("cache-control"), requestPath).toBe("no-store");
     expect(agent.headers.get("vary"), requestPath).toContain("Accept");
     expect(agent.headers.get("vary"), requestPath).toContain("User-Agent");
   }
 
-  // The catchers are segment-bounded, so a slug that merely shares the prefix
-  // falls through to ordinary routing — here, the root 404.
   for (const slug of ["/guide-team", "/guides", "/guide-team/~/settings"]) {
     const response = await get(rt, SITE, slug, { headers: BROWSER_HEADERS });
     expect(response.status, slug).toBe(404);
     expect(await response.text(), slug).toBe(ROOT_404);
   }
 
-  // The catchers claim `/guide/…` and nothing else, so the source document
-  // keeps serving its own bytes at its own URL, to every audience.
   const direct = await get(rt, SITE, "/guide.md", { headers: BROWSER_HEADERS });
   expect(direct.status).toBe(200);
   expect(await direct.text()).toBe(GUIDE_MD);
@@ -847,7 +728,6 @@ test("PHP fallback serves single byte ranges and checks validators before slicin
 });
 
 test("host classes: canonical redirects, and a version-pinned host serves its version", async () => {
-  // Host canonicalization keeps the path and the query.
   const canonical = await get(rt, WWW, "/blog/post.html?from=www&return=%2Fdocs%3Fa%3D1");
   expect(canonical.status).toBe(308);
   expect(canonical.headers.get("location")).toBe(
@@ -868,12 +748,10 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
     "https://site.test/blog/post.html?from=old&view=full",
   );
 
-  // A redirect to another domain keeps the destination's own base path.
   const domain = await get(rt, "redirect-domain.test", "/blog/post.html");
   expect(domain.status).toBe(302);
   expect(domain.headers.get("location")).toBe("https://destination.example/base/blog/post.html");
 
-  // A version host names its version outright instead of following the route.
   const pinned = await get(rt, VERSION_HOST, "/");
   expect(pinned.status).toBe(200);
   expect(await pinned.text()).toBe(INDEX);
@@ -885,10 +763,7 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
 test("unknown hosts get the undeployed platform page", async () => {
   const response = await get(rt, "unknown.test", "/");
   expect(response.status).toBe(404);
-  // The body, not the status, tells it apart from a missing page, and it must
-  // never be cached: the first publish has to replace it immediately.
   expect(response.headers.get("cache-control")).toBe("no-store");
-  // Control-plane crawlers key on this to retry instead of treating the 404 as a refusal.
   expect(response.headers.get("x-spacefast-undeployed")).toBe("1");
   expect(await response.text()).toContain("This space hasn't been published yet.");
 });
@@ -932,23 +807,16 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
   expect(fallback.status).toBe(200);
   expect(await fallback.text()).toBe("<h1>spa</h1>\n");
 
-  // W7.3: the fallback is an application-route shell, not a catch-all asset
-  // server. A missing path carrying a known asset or document extension must
-  // 404 rather than hand a download request an HTML 200.
   for (const requestPath of ["/main-old.js", "/files/report.pdf"]) {
     const missing = await get(rt, "spa.test", requestPath);
     expect(missing.status, requestPath).toBe(404);
     expect(await missing.text(), requestPath).toContain("Page not found");
   }
 
-  // ...but the guard is a denylist, not "any dot": dotted client-side routes
-  // stay SPA-eligible.
   const dotted = await get(rt, "spa.test", "/users/jane.doe");
   expect(dotted.status).toBe(200);
   expect(await dotted.text()).toBe("<h1>spa</h1>\n");
 
-  // A residual dot segment is ambiguous to a deeper decoder, so its miss must
-  // never become a shared 404.
   for (let depth = 2; depth <= 4; depth++) {
     const encodedDot = `%${"25".repeat(depth)}2e`;
     const ambiguous = await get(rt, "spa.test", `/a/${encodedDot}${encodedDot}/x.js`);
@@ -984,8 +852,6 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
       pattern: [],
     }),
   );
-  // The redirect walk trims trailing slashes, so `/unpublished-rename/` reads
-  // the same rules and must get the same published-destination filter.
   for (const requestPath of ["/unpublished-rename", "/unpublished-rename/"]) {
     const unpublished = await get(rt, "spa.test", requestPath);
     expect(unpublished.status, requestPath).toBe(200);
@@ -997,8 +863,6 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
   const renamed = await get(rt, "spa.test", "/old-slug");
   expect(renamed.status).toBe(301);
   expect(renamed.headers.get("location")).toBe("/new-slug");
-  // Edited without a publish, so no control-plane ask follows its purge: the
-  // short shared window bounds a racing fill instead.
   expect(renamed.headers.get("cache-control")).toBe(
     "public, max-age=0, s-maxage=600, must-revalidate",
   );
@@ -1007,15 +871,6 @@ test("SPA mode serves the shell for app routes, never for asset-looking paths", 
   expect(await asset.text()).toBe("void 0;\n");
 });
 
-// A configured 200 fallback IS the version's homepage declaration, so `/` is the
-// first application route the shell owns — not a directory the runtime may
-// infer a file browser for. A dashboard build that emitted `_shell.html` plus a
-// second root-level HTML file and no `index.html` served `<title>Files</title>`
-// at `/` while every deep route correctly served the shell.
-//
-// The same app shell, pinned as the homepage with `index`, must not hide the
-// pages the framework prerendered beside it: `index` names the homepage only,
-// and every folder still serves its own `index.html`.
 test("a configured SPA fallback owns `/` without hiding prerendered pages", async () => {
   const shell = "<h1>app shell</h1>\n";
   const files = {
@@ -1025,7 +880,6 @@ test("a configured SPA fallback owns `/` without hiding prerendered pages", asyn
     "sign-in/_shell.html": "<h1>not a directory index</h1>\n",
   };
   for (const [suffix, config] of [
-    // Zero config: `_shell.html` is the SPA fallback and the homepage.
     ["inferred", {}],
     ["pinned", { index: "_shell.html", fallback: { path: "_shell.html", status: 200 } }],
   ] as const) {
@@ -1047,15 +901,11 @@ test("a configured SPA fallback owns `/` without hiding prerendered pages", asyn
     expect(home.status, suffix).toBe(200);
     expect(await home.text(), suffix).toBe(shell);
     expect(await (await get(rt, host, "/client/route/42")).text(), suffix).toBe(shell);
-    // Prerendered pages answer at their clean URLs, ahead of the shell.
     expect(await (await get(rt, host, "/secondary")).text(), suffix).toBe("<h1>secondary</h1>\n");
     expect(await (await get(rt, host, "/sign-in/")).text(), suffix).toBe("<h1>sign in</h1>\n");
   }
 });
 
-// Framework builds with no `sf.jsonc`, on the shapes their generators write:
-// the shell answers client routes only for an app build, a root `404.html`
-// keeps misses honest, and an opt-out sticks.
 test("an app build gets its SPA fallback with no config", async () => {
   const cases = [
     {
@@ -1110,7 +960,6 @@ test("an app build gets its SPA fallback with no config", async () => {
     const deep = await get(rt, host, "/dashboard/42");
     expect(deep.status, label).toBe(route.status);
     if (route.body) expect(await deep.text(), label).toBe(route.body);
-    // A typo'd asset never gets the shell.
     expect((await get(rt, host, "/assets/missing.js")).status, label).toBe(404);
   }
   expect(await (await get(rt, "spa-inferred-1.test", "/privacy")).text()).toBe(
@@ -1119,8 +968,6 @@ test("an app build gets its SPA fallback with no config", async () => {
 });
 
 test("W7.1 a committed page wins its clean URL over a 200 SPA fallback unless clean URLs are off", async () => {
-  // Default: a prerendered `doc.html` answers `/doc`, and only routes no file
-  // claims reach the shell — the order every major static host uses.
   await deploy(rt, {
     spaceId: "spc_spa_clean",
     versionId: "ver_spa_clean_1",
@@ -1138,7 +985,6 @@ test("W7.1 a committed page wins its clean URL over a 200 SPA fallback unless cl
     "<h1>spa shell</h1>\n",
   );
 
-  // Explicit clean_urls: false hands extensionless routes back to the shell.
   await deploy(rt, {
     spaceId: "spc_spa_clean_off",
     versionId: "ver_spa_clean_off_1",
@@ -1171,8 +1017,6 @@ test("W7.1 clean URLs follow the config, and a 404 fallback is not SPA routing",
   expect((await get(rt, "static-clean-off.test", "/doc")).status).toBe(404);
   expect(await (await get(rt, "static-clean-off.test", "/doc.html")).text()).toBe("<h1>doc</h1>\n");
 
-  // A 404-status fallback is a custom not-found page, not SPA routing, so clean
-  // URLs stay on by default and misses still serve the custom document.
   await deploy(rt, {
     spaceId: "spc_404_clean",
     versionId: "ver_404_clean_1",
@@ -1212,7 +1056,6 @@ test("W7.1 a clean URL never resolves to a literal `<name>.html/` directory inde
   expect(directory.status).toBe(200);
   expect(await directory.text()).toBe("<h1>weird dir</h1>\n");
 
-  // There is no flat `weird.html` file, so `/weird` has no key to alias.
   expect((await get(rt, "htmldir.test", "/weird")).status).toBe(404);
 });
 
@@ -1223,16 +1066,11 @@ test("a version with no index compiles a directory listing per directory", async
     metadata: { mode: "files", title: "Drop" },
     files: {
       "report.pdf.txt": "report\n",
-      // A listing enumerates what is served, so the Markdown in it has to be
-      // served: `raw: true` publishes the source instead of rendering a page
-      // from it and keeping the source private.
       "notes.md": "---\nraw: true\n---\n# notes\n",
       "data/items.json": "[]\n",
       "SF.JSONC": '{ "private": true }\n',
       ".SF/CONFIG.JSON": '{ "private": true }\n',
     },
-    // A version with no root index infers files mode anyway; state it so the
-    // fixture cannot drift with the inference rules of another suite.
     serving: { config: { listing: true, viewer: false } },
     activate: {
       route_name: "production",
@@ -1249,10 +1087,8 @@ test("a version with no index compiles a directory listing per directory", async
   expect(html).toContain('href="/report.pdf.txt"');
   expect(html).toContain('href="/notes.md"');
   expect(html).toContain('href="/data/"');
-  // Private configuration is not content, in the listing or anywhere else.
   expect(html).not.toContain('href="/SF.JSONC"');
   expect(html).not.toContain('href="/.SF/"');
-  // Compiled listing order: every subdirectory first, then files alphabetically.
   expect(html.indexOf('href="/data/"')).toBeLessThan(html.indexOf('href="/notes.md"'));
   expect(html.indexOf('href="/notes.md"')).toBeLessThan(html.indexOf('href="/report.pdf.txt"'));
 
@@ -1260,14 +1096,11 @@ test("a version with no index compiles a directory listing per directory", async
   expect(nested.status).toBe(200);
   expect(await nested.text()).toContain('href="/data/items.json"');
 
-  // The listing route canonicalizes its slashless form like any directory.
   const canonical = await get(rt, "files.test", "/data");
   expect(canonical.status).toBe(308);
   expect(canonical.headers.get("location")).toBe("/data/");
 });
 
-// `index: false` turns off the *inferred* index, not the publisher's own files:
-// a real index.html is still the document for its directory, at every depth.
 test("committed index documents answer their directory even when the index knob is off", async () => {
   const root = "<h1>root index</h1>\n";
   const docs = "<h1>docs index</h1>\n";
@@ -1299,7 +1132,6 @@ test("a single HTML file becomes the version's index", async () => {
     versionId: "ver_single_1",
     files: {
       "page.html": "<h1>single</h1>\n",
-      // Convention files never count toward the single-file inference.
       _redirects: "# none\n",
       "sf.jsonc": "{}\n",
     },
@@ -1312,7 +1144,6 @@ test("a single HTML file becomes the version's index", async () => {
   });
 
   expect(await (await get(rt, "single.test", "/")).text()).toBe("<h1>single</h1>\n");
-  // The file's own URL is not a second homepage.
   const own = await get(rt, "single.test", "/page.html");
   expect(own.status).toBe(308);
   expect(own.headers.get("location")).toBe("/");
@@ -1327,11 +1158,7 @@ test("a Functions version dispatches its compiled routes; everything else routes
     files: {
       "index.html": "<h1>home</h1>",
       "api/static.txt": "asset wins",
-      // A content-hashed name under the claimed subtree: its bytes are the
-      // same in and out of a draft session, so the bypass must not touch it.
       "api/app.3f9c2d1a.js": "void 0;",
-      // Committed bytes AND a Functions route at another method on one path:
-      // the method-rule assertions below need both lanes to own it.
       "hybrid.txt": "hybrid bytes",
     },
     functions: {
@@ -1341,8 +1168,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
         mainModule: "index.js",
         compatibilityDate: "2026-07-01",
         compatibilityFlags: [],
-        // A draft/preview session is named by cookie: a request carrying one of
-        // these must reach the worker even where the page was extracted to disk.
         bypassCookies: ["__prerender_bypass", "__next_preview_data"],
         routes: [
           { method: null, path: "/api", subtree: true },
@@ -1355,8 +1180,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
     },
     activate: {
       route_name: "production",
-      // Open (public on every target), so the serve path loads no access code:
-      // the Functions lane must bring its own admission dependency.
       config: publicAccessConfig(
         { mode: "website", site_title: "Functions routes" },
         "live_and_all_versions",
@@ -1367,8 +1190,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
     },
   });
 
-  // A matched route dispatches. The 503 is the edge host being unreachable by
-  // design, which is what proves dispatch was entered at all.
   for (const requestPath of ["/api", "/api/users/1"]) {
     const matched = await get(rt, host, requestPath);
     expect(matched.status, requestPath).toBe(503);
@@ -1376,7 +1197,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
   }
   expect((await get(rt, host, "/submit", { method: "POST" })).status).toBe(503);
 
-  // Committed bytes under a covering route still win: they are a table key.
   const asset = await get(rt, host, "/api/static.txt");
   expect(asset.status).toBe(200);
   expect(await asset.text()).toBe("asset wins");
@@ -1386,23 +1206,16 @@ test("a Functions version dispatches its compiled routes; everything else routes
   expect(asset.headers.get("cache-control")).toBe("no-store");
   expect(asset.headers.get("a8c-edge-cache")).toBe("no-cache");
 
-  // A content-addressed entry is carved out of the bypass on both sides: its
-  // bytes are identical in and out of a draft session, so a whole-site
-  // middleware claim costs it neither its immutable year nor its edge copy.
   const hashed = await get(rt, host, "/api/app.3f9c2d1a.js");
   expect(hashed.status).toBe(200);
   expect(hashed.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
   expect(hashed.headers.get("a8c-edge-cache")).toBe("cache");
-  // ...and a draft session keeps answering from disk instead of dispatching.
   const hashedDraft = await get(rt, host, "/api/app.3f9c2d1a.js", {
     headers: { Cookie: "__prerender_bypass=1" },
   });
   expect(hashedDraft.status).toBe(200);
   expect(await hashedDraft.text()).toBe("void 0;");
 
-  // Failure is not "no bypass": if the sidecar exists but cannot be read, an
-  // ordinary response must remain uncacheable or it can permanently hide a
-  // later draft cookie from PHP at this URL.
   const functionsConfig = storagePath(
     rt,
     "spaces",
@@ -1455,18 +1268,12 @@ test("a Functions version dispatches its compiled routes; everything else routes
     writeFileSync(functionsRoutes, routesBefore);
   }
 
-  // ...unless the request is a draft session. A declared bypass cookie on a
-  // path the worker claims makes the committed file yield to dispatch — the
-  // 503 again standing in for the unreachable edge.
   for (const cookie of ["__prerender_bypass=1", "a=b; __next_preview_data=xyz"]) {
     const draft = await get(rt, host, "/api/static.txt", { headers: { Cookie: cookie } });
     expect(draft.status, cookie).toBe(503);
     expect(await draft.text(), cookie).toContain("Function execution is not available.");
   }
 
-  // The cookie name is matched at a cookie boundary, not as a substring: a
-  // different cookie that merely ends with a declared name is somebody else's
-  // cookie, and must not turn every visitor into a draft session.
   for (const cookie of [
     "foo__prerender_bypass=1",
     "sf_session=abc",
@@ -1477,8 +1284,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
     expect(await plain.text(), cookie).toBe("asset wins");
   }
 
-  // The bypass is route-scoped too: a committed path no route claims keeps
-  // answering from disk however the request is cookied.
   const unclaimed = await get(rt, host, "/", { headers: { Cookie: "__prerender_bypass=1" } });
   expect(unclaimed.status).toBe(200);
   expect(await unclaimed.text()).toBe("<h1>home</h1>");
@@ -1486,7 +1291,6 @@ test("a Functions version dispatches its compiled routes; everything else routes
   expect(unclaimed.headers.get("cache-control")).not.toContain("no-store");
   expect(unclaimed.headers.get("a8c-edge-cache")).toBe("cache");
 
-  // Unmatched paths are ordinary misses — the worker never wakes for junk.
   for (const requestPath of ["/nope", "/deep/junk/path.js"]) {
     expect((await get(rt, host, requestPath)).status, requestPath).toBe(404);
   }
@@ -1495,16 +1299,10 @@ test("a Functions version dispatches its compiled routes; everything else routes
   expect(wrongMethod.headers.get("allow")).toBe("POST");
   expect(await (await get(rt, host, "/")).text()).toBe("<h1>home</h1>");
 
-  // The method rule: a committed file declines a non-GET/HEAD request instead
-  // of terminating it, so the covering Functions subtree still claims the
-  // method — the 503 proves dispatch was entered, exactly as above.
   const claimed = await get(rt, host, "/api/static.txt", { method: "POST" });
   expect(claimed.status).toBe(503);
   expect(await claimed.text()).toContain("Function execution is not available.");
 
-  // When no lane claims the method, the refusal names the Allow UNION
-  // accumulated across lanes — the static entry's {GET, HEAD} plus the
-  // router's PUT — and never falls through to a 404: the path exists.
   const union = await get(rt, host, "/hybrid.txt", { method: "POST" });
   expect(union.status).toBe(405);
   expect(union.headers.get("allow")).toBe("GET, HEAD, PUT");
@@ -1514,15 +1312,10 @@ test("a Functions version dispatches its compiled routes; everything else routes
   expect(union.headers.get("a8c-edge-cache")).toBe("no-cache");
   expect(union.headers.get("cache-control")).toBe("private, no-store");
 
-  // The claimed method dispatches; the file keeps answering its own verbs.
   expect((await get(rt, host, "/hybrid.txt", { method: "PUT" })).status).toBe(503);
   expect(await (await get(rt, host, "/hybrid.txt")).text()).toBe("hybrid bytes");
 });
 
-// The artifact is plan-agnostic: the compiler stamps `planGated` on every proxy
-// rule and names no plan, so the capability has to follow the entitlements doc
-// the control plane syncs onto the route -- with no republish, and failing
-// closed whenever that doc is missing.
 test("a planGated proxy rule follows the synced entitlements doc, without republishing", async () => {
   const host = "plangated.test";
   const route = (entitlements: unknown) => ({
@@ -1537,9 +1330,6 @@ test("a planGated proxy rule follows the synced entitlements doc, without republ
     versionId: "ver_plan_gated_1",
     files: {
       "index.html": "<h1>gated</h1>\n",
-      // Egress safety rejects loopback/private targets at finalize AND at
-      // connect time, so a local stand-in upstream is impossible. Only the
-      // gating decision is asserted -- never the proxied bytes.
       _redirects: "/api https://example.com/ 200\n",
     },
     activate: { route_name: "production", ...route({ externalProxy: false }) },
@@ -1550,14 +1340,11 @@ test("a planGated proxy rule follows the synced entitlements doc, without republ
     return { status: response.status, body: await response.text() };
   };
 
-  // Entitled: the same compiled artifact stops rendering the restriction page.
   await putRoute(rt, "spc_plan_gated", "production", route({ externalProxy: true }));
   const entitled = await restricted();
   expect(entitled.status).not.toBe(403);
   expect(entitled.body).not.toMatch(/free_external_proxy_disabled/);
 
-  // Downgrade, an absent field, and an explicit null all fail closed: a sync lag
-  // may only ever withhold the capability, never grant it.
   for (const entitlements of [{ externalProxy: false }, undefined, null]) {
     await putRoute(rt, "spc_plan_gated", "production", route(entitlements));
     const denied = await restricted();
@@ -1566,11 +1353,7 @@ test("a planGated proxy rule follows the synced entitlements doc, without republ
   }
 });
 
-// Channel template variants: one committed version, per-channel bytes chosen at
-// finalize. The version's own hostname always serves what was committed, so a
-// version host stays a faithful view of the artifact rather than of a channel.
 test("template variants select per-channel bytes; a version host serves the committed base", async () => {
-  // The version commits ONE template; the channel values are what differ.
   const template = "export const API = '{{ vars.API }}';\n";
   const base = "export const API = 'base';\n";
   const productionVariant = "export const API = 'production';\n";
@@ -1637,16 +1420,11 @@ test("template variants select per-channel bytes; a version host serves the comm
     expect(pinnedBody).toContain('name="channel-decoration"');
   }
 
-  // The version host is pinned to the artifact, not to the live channel.
   const pinned = await get(rt, versionHost, "/config.js");
   expect(pinned.status).toBe(200);
   expect(await pinned.text()).toBe(base);
   expect(pinned.headers.get("etag")).not.toBe(production.headers.get("etag"));
 
-  // The other channel's bytes are compiled and selectable by channel name. (A
-  // branch channel admits nobody anonymously, so its SERVING is an access proof
-  // and lives in access-rules.test.ts; what is asserted here is that finalize
-  // bound distinct bytes per channel.)
   const scan = await apiJson<{
     files: Array<{ path: string; sha256: string; variant_route?: string }>;
   }>(
@@ -1720,13 +1498,8 @@ test("tombstoned hostnames return the removed platform page", async () => {
 
   const tombstoned = await get(rt, "gone.tomb.test", "/");
   expect(tombstoned.status).toBe(404);
-  // A tombstone still names the runtime that produced it — otherwise it is
-  // indistinguishable from the provider's 404 for a host we never served.
   expect(tombstoned.headers.get("x-spacefast-runtime")).toBe("1");
 
-  // An incremental tombstone write is a read-modify-write. If the existing
-  // document cannot be read, abort instead of replacing every prior legal or
-  // suspension tombstone with only the incoming delta.
   const tombstonesPath = storagePath(rt, "spaces", "spc_tomb", "tombstones.json");
   chmodSync(tombstonesPath, 0o000);
   try {
@@ -1757,7 +1530,6 @@ test("tombstoned hostnames return the removed platform page", async () => {
   expect((await get(rt, "newly-gone.tomb.test", "/")).status).toBe(404);
   expect((await get(rt, "gone.tomb.test", "/")).status).toBe(404);
 
-  // The served hostname is unaffected.
   expect((await get(rt, "tomb.test", "/")).status).toBe(200);
 });
 
@@ -1895,7 +1667,6 @@ test("finalize purges released tombstones once and leaves unchanged replays cach
       },
     };
 
-    // The activating commit releases the tombstone and purges the edge for it.
     const activation = await finalize(rt, spaceId, secondVersionId, secondFinalizeBody);
     expect(activation.status).toBe(200);
     const activationBody = z
@@ -1911,7 +1682,6 @@ test("finalize purges released tombstones once and leaves unchanged replays cach
     expect((await get(rt, versionHost, "/")).status).toBe(200);
     expect(edgePurgeCalls(rt).length).toBe(purgesBefore);
 
-    // A later content activation leaves the retained version hostname cached.
     const versionPurges = edgePurgeCalls(rt).filter(
       (purge) => purge.hostname === versionHost,
     ).length;
@@ -1961,9 +1731,6 @@ test("finalize rejects proxy rules targeting internal or non-public upstreams", 
   }
 });
 
-// The Spacefast API is a public origin, and the serving enforcer in this
-// runtime has never denied it. Finalize must agree, or a route this runtime
-// would proxy happily fails a publish the space owner cannot fix from config.
 test("finalize accepts a proxy rule targeting the Spacefast API", async () => {
   const response = await finalizeRaw(
     rt,
@@ -1980,8 +1747,6 @@ test("finalize accepts a proxy rule targeting the Spacefast API", async () => {
 });
 
 test("finalize rejects private config targets in fallbacks and rewrites", async () => {
-  // The finalizer reads the config it finds, so the private file has to be a
-  // real one: what is under test is that it can never be SERVED, by either door.
   const files = { "index.html": "<h1>private target</h1>\n", "SF.JSONC": "{}\n" };
   const [fallback, rewrite] = await Promise.all([
     finalizeRaw(rt, "spc_private_fallback", "ver_private_fallback_1", files, {
@@ -2001,12 +1766,6 @@ test("finalize rejects private config targets in fallbacks and rewrites", async 
   expect(await errorCode(rewrite)).toBe("runtime_artifact_validation_failed");
 });
 
-// D34/§6: the visitor lane is the artifact walk and nothing else. Every module
-// below is a cost every request pays, so the set is pinned here rather than left
-// to whichever `require_once` someone adds at the top of a shared file — the
-// prohibited list is the contract: no access code for an open Space, no
-// bootstrap-config (its Atomic_Persistent_Data decrypt is a per-request
-// decrypt), no storage.php, no tier/S3 code on a local hit.
 test("public requests load only the modules their request class needs", async () => {
   const moduleRuntime = await startRuntime();
   const host = "lazy-modules.test";
@@ -2019,13 +1778,7 @@ test("public requests load only the modules their request class needs", async ()
       files: { "index.html": "static module path" },
       activate: {
         route_name: "production",
-        config: publicAccessConfig(
-          {},
-          // The whole point of this test: only a Space whose public grants cover
-          // both targets unconditionally compiles to `open`, and only an `open`
-          // Space is allowed to skip the access modules below.
-          "live_and_all_versions",
-        ),
+        config: publicAccessConfig({}, "live_and_all_versions"),
         production_hostnames: [host],
         version_hostnames: [],
       },
@@ -2084,11 +1837,6 @@ test("public requests load only the modules their request class needs", async ()
     expect(await page.text()).toBe("static module path");
 
     const enginePrefix = `${instrumentedRuntime.engineRoot}/`;
-    // The record is appended by a shutdown handler, which runs strictly AFTER
-    // the response bytes reach the client (and after the engine's own
-    // post-response deferred work), so an awaited fetch() does not imply its
-    // record has landed — and a concurrent append can leave a partial trailing
-    // line. Poll until every probed URI has a record.
     type IncludedRecord = { uri: string; files: string[] };
     const probedUris = ["/", "/__spacefast/health.php"];
     let records: IncludedRecord[] = [];
@@ -2101,7 +1849,7 @@ test("public requests load only the modules their request class needs", async ()
           try {
             return [JSON.parse(line) as IncludedRecord];
           } catch {
-            return []; // mid-append partial line; complete on a later poll
+            return [];
           }
         });
       if (probedUris.every((uri) => records.some((record) => record.uri === uri))) break;
@@ -2121,16 +1869,6 @@ test("public requests load only the modules their request class needs", async ()
         .map((file) => file.slice(enginePrefix.length))
         .toSorted() ?? [];
 
-    // Health is the no-auth path monitors poll hardest, and it is deliberately
-    // built from engine constants, the request host and the shared response
-    // emitter alone. Nothing else pins that: a `require_once
-    // shared/bootstrap-config.php` added to health.php would keep answering 200
-    // with the same body while paying a persistent-data decrypt on every poll.
-    // shared/brand.php rides problem.php (the `type` base is the brand
-    // document's) and is load-time inert: constants and function declarations,
-    // no config read until a problem document is actually built.
-    // loader/request.php is the engine's half of the thin loader, which every
-    // request passes through before any entrypoint runs; it reads no config.
     expect(modulesFor("/__spacefast/health.php")).toEqual(
       [
         "entrypoints/health.php",

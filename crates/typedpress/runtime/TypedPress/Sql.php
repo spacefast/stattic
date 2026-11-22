@@ -22,8 +22,10 @@ final class Sql
     private int $aliases = 0;
     /** @var list<int|float|string|null> */
     private array $params = [];
-    /** @var array<string, array<string, true>> alias => used columns */
+    /** @var array<string, array<string, string>> base alias => column name => join alias */
     private array $used = [];
+    /** @var array<string, array<string, int>> source column positions for collections that need joins */
+    private array $positions = [];
     /** @var array<string, Source> */
     private array $sources = [];
     /** @var array<string, list<array>> */
@@ -161,23 +163,17 @@ final class Sql
         return strtr($sql, ['{a}' => $alias, '{j}' => $join]);
     }
 
-    private function joinAlias(string $collection, string $col, string $alias): string
-    {
-        $i = array_search($col, array_keys($this->source($collection)->columns), true);
-
-        return $alias . '_m' . (int) $i;
-    }
-
     /** Value expression (storage form) or comparison expression for a column; marks it used. */
     private function ref(string $collection, string $col, string $alias, bool $cmp): string
     {
         $r = $this->source($collection)->columns[$col] ?? throw new \LogicException("Source for $collection has no column $col");
         $expr = $cmp && $r->cmpExpr !== '' ? $r->cmpExpr : $r->expr;
-        if (str_contains($expr, '{j}')) {
-            $this->used[$alias][$col] = true;
+        if (!str_contains($expr, '{j}')) {
+            return str_replace('{a}', $alias, $expr);
         }
-
-        return $this->sub($expr, $alias, $this->joinAlias($collection, $col, $alias));
+        $this->positions[$collection] ??= array_flip(array_keys($this->source($collection)->columns));
+        $join = $this->used[$alias][$col] ??= $alias . '_m' . $this->positions[$collection][$col];
+        return $this->sub($expr, $alias, $join);
     }
 
     private function cmpRef(string $collection, string $col, string $alias): string
@@ -187,10 +183,13 @@ final class Sql
 
     private function joins(string $collection, string $alias): string
     {
+        if ($this->used[$alias] === []) {
+            return '';
+        }
         $out = '';
         foreach ($this->source($collection)->columns as $name => $r) {
             if ($r->join !== '' && isset($this->used[$alias][$name])) {
-                $out .= ' ' . $this->sub($r->join, $alias, $this->joinAlias($collection, (string) $name, $alias));
+                $out .= ' ' . $this->sub($r->join, $alias, $this->used[$alias][$name]);
             }
         }
 

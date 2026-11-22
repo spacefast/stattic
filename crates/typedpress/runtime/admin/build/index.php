@@ -71,43 +71,15 @@ function wp_plugin_build_apps_register_wp_modules() {
  * Register frontend WP modules (packages marked with frontendOnly: true).
  */
 function wp_plugin_build_apps_register_frontend_wp_modules() {
-	// Compute plugin paths - assumes this file is in plugin_root/build/index.php.
-	$wp_plugin_build_path = plugin_dir_path( __FILE__ );
-	$wp_plugin_build_url  = plugin_dir_url( __FILE__ );
-	$modules_dir          = $wp_plugin_build_path . 'packages';
-
-	if ( ! is_dir( $modules_dir ) ) {
-		return;
-	}
-
-	$module_dirs = glob( $modules_dir . '/*', GLOB_ONLYDIR );
-
-	foreach ( $module_dirs as $module_dir ) {
-		$module_name       = basename( $module_dir );
-		$module_js         = $module_dir . '/index.js';
-		$module_asset_file = $module_dir . '/index.asset.php';
-		$package_file      = $module_dir . '/package.json';
-
-		if ( file_exists( $module_js ) && file_exists( $module_asset_file ) && file_exists( $package_file ) ) {
-			// phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
-			$package = json_decode( file_get_contents( $package_file ), true );
-
-			// Only process frontendOnly modules.
-			if ( ! is_array( $package ) || empty( $package['frontendOnly'] ) ) {
-				continue;
-			}
-
-			$asset        = require $module_asset_file;
-			$dependencies = $asset['moduleDependencies'] ?? array();
-
-			// Register the script module. The plugin code is responsible for enqueueing it.
-			wp_register_script_module(
-				$asset['name'],
-				$wp_plugin_build_url . 'packages/' . $module_name . '/index.js',
-				$dependencies,
-				$asset['version'] ?? '1.0.0'
-			);
-		}
+	// The build already knows which packages can appear on a public page.
+	foreach ( array(  ) as $module_name ) {
+		$asset = require __DIR__ . '/packages/' . $module_name . '/index.asset.php';
+		wp_register_script_module(
+			$asset['name'],
+			plugin_dir_url( __FILE__ ) . 'packages/' . $module_name . '/index.js',
+			$asset['moduleDependencies'] ?? array(),
+			$asset['version'] ?? '1.0.0'
+		);
 	}
 }
 

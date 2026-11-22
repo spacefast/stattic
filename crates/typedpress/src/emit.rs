@@ -1,5 +1,5 @@
 use crate::app_plugin::{readme, substitute};
-use crate::{pipeline::Built, platform, runtime_files, schema_php};
+use crate::{pipeline::Built, platform, runtime_files};
 use std::path::Path;
 
 /// Writes `content` to `path` unless the file already holds exactly those bytes, so an unchanged
@@ -92,17 +92,34 @@ pub(crate) fn runtime_tree() -> Vec<(String, std::borrow::Cow<'static, [u8]>)> {
     TREE.get_or_init(build_runtime_tree).clone()
 }
 
+/// Pack the browser entry modules with the same minifier used for app client modules.
+fn embedded_runtime() -> impl Iterator<Item = (&'static str, std::borrow::Cow<'static, [u8]>)> {
+    use std::borrow::Cow;
+
+    runtime_files::FILES
+        .iter()
+        .filter(|(rel, _)| rel.starts_with("TypedPress/"))
+        .map(|(rel, bytes)| {
+            let bytes = if rel.starts_with("TypedPress/Render/client/") && rel.ends_with(".js") {
+                let source = std::str::from_utf8(bytes).expect("runtime browser module is UTF-8");
+                Cow::Owned(crate::minify::module(source).into_bytes())
+            } else {
+                Cow::Borrowed(*bytes)
+            };
+            (*rel, bytes)
+        })
+}
+
 fn build_runtime_tree() -> Vec<(String, std::borrow::Cow<'static, [u8]>)> {
     use std::borrow::Cow;
+    let runtime: Vec<_> = embedded_runtime().collect();
     let runtime_hash = {
         use sha2::Digest;
         let mut hash = sha2::Sha256::new();
-        for (rel, bytes) in runtime_files::FILES {
-            if rel.starts_with("TypedPress/") {
-                hash.update(rel.as_bytes());
-                hash.update([0]);
-                hash.update(bytes);
-            }
+        for (rel, bytes) in &runtime {
+            hash.update(rel.as_bytes());
+            hash.update([0]);
+            hash.update(bytes.as_ref());
         }
         crate::hex(&hash.finalize()[..8])
     };
@@ -139,11 +156,17 @@ fn build_runtime_tree() -> Vec<(String, std::borrow::Cow<'static, [u8]>)> {
             "typedpress-loader.php".into(),
             Cow::Borrowed(runtime_file("wp-plugin/typedpress-loader.php").expect("embedded loader")),
         ),
+        (
+            "typedpress-commerce.php".into(),
+            Cow::Borrowed(runtime_file("wp-plugin/typedpress-commerce.php").expect("embedded commerce bootstrap")),
+        ),
     ];
+    files.extend(runtime.into_iter().map(|(rel, bytes)| {
+        let rest = rel.strip_prefix("TypedPress/").expect("TypedPress runtime tree");
+        (format!("typedpress-runtime/tp/{rest}"), bytes)
+    }));
     for (rel, bytes) in runtime_files::FILES {
-        if let Some(rest) = rel.strip_prefix("TypedPress/") {
-            files.push((format!("typedpress-runtime/tp/{rest}"), Cow::Borrowed(*bytes)));
-        } else if let Some(rest) = rel.strip_prefix("identity/") {
+        if let Some(rest) = rel.strip_prefix("identity/") {
             files.push((format!("typedpress-identity/{rest}"), Cow::Borrowed(*bytes)));
         } else if let Some(rest) = rel.strip_prefix("admin/") {
             // The committed admin plugin (PHP, routes.js, notices, the built modules); its header
@@ -197,15 +220,37 @@ pub(crate) type Files = Vec<(String, Vec<u8>)>;
 /// The app plugin's files (path below the plugins directory, bytes), and the `schema.php` they
 /// were made with.
 pub(crate) fn app_files(project: &Path, migrations: &Path, built: &Built) -> std::io::Result<(String, Files)> {
-    let schema_php = schema_php::render(&built.schema);
-    let public = project.join("public");
-    let public = if public.is_dir() {
-        read_tree(&public)?
-    } else {
-        Vec::new()
-    };
-    let files = crate::app_plugin::files(built, &schema_php, read_sql(migrations)?, public);
+    let (schema_php, mut files) = crate::app_plugin::package(built, read_sql(migrations)?, public_files(project)?);
+    if built.schema.ships_seed() {
+        let seeds = crate::bundle::seed_records(&crate::loader::Disk, project, &built.schema, true)
+            .map_err(|e| std::io::Error::other(e.message))?;
+        use sha2::{Digest, Sha256};
+        let mut hashes = serde_json::Map::new();
+        for (name, records) in seeds {
+            let php = format!("<?php\nreturn {};\n", crate::compile::php_json(&records));
+            hashes.insert(format!("{name}.php"), crate::hex(Sha256::digest(php.as_bytes())).into());
+            files.push((
+                format!("typedpress-app-{}/tp/app/seed/{name}.php", built.schema.name),
+                php.into_bytes(),
+            ));
+        }
+        let manifest = crate::compile::php_json(&serde_json::Value::Object(hashes));
+        files.push((
+            format!("typedpress-app-{}/tp/app/seed-version.php", built.schema.name),
+            format!("<?php return {manifest};\n").into_bytes(),
+        ));
+    }
     Ok((schema_php, files))
+}
+
+/// The public files carried in the app plugin, with paths relative to `public/`.
+pub(crate) fn public_files(project: &Path) -> std::io::Result<Files> {
+    let public = project.join("public");
+    if public.is_dir() {
+        read_tree(&public)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]

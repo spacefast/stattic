@@ -519,13 +519,10 @@ pub fn finalize_site(input: SiteFinalizeInput, dry_run: bool) -> Result<SiteFina
 /// Server-owned generation is independent of publisher metadata and capture mode.
 fn validate_zero_generation(
     input: &SiteFinalizeInput,
+    stage: &Path,
     files: &BTreeMap<String, FileMeta>,
 ) -> Result<()> {
-    let source = files.keys().any(|path| {
-        path == "zero.config.ts"
-            || path.starts_with(".zero-source/")
-            || crate::typedpress::declared(path)
-    });
+    let source = crate::spacepress::is_declared(stage, files);
     // `zero/` is an ordinary tenant folder; only the platform deploy manifest
     // or a declared capsule marks a 0.8 version.
     let legacy = input.body.get("zero").is_some_and(Value::is_object)
@@ -536,34 +533,38 @@ fn validate_zero_generation(
     if source && legacy {
         return invalid(
             "zero_mixed_generation",
-            "A version cannot combine Zero v2 source and Zero 0.8 capsules.",
+            "A version cannot combine SpacePress/Zero v2 source and Zero 0.8 capsules.",
         );
     }
-    if legacy && matches!(generation, Some("v2" | "tp_v1")) {
+    if legacy && matches!(generation, Some("v2" | "tp_v1" | "spacepress")) {
         return invalid(
             "zero_generation_locked",
-            "A Zero v2 Space cannot finalize a Zero 0.8 capsule.",
+            "A SpacePress Space cannot finalize a Zero 0.8 capsule.",
         );
     }
     if source {
-        let typedpress = files.keys().any(|path| crate::typedpress::declared(path));
-        if (typedpress && generation == Some("v2")) || (!typedpress && generation == Some("tp_v1"))
-        {
+        let legacy_zero = files
+            .keys()
+            .any(|path| crate::spacepress::is_legacy_zero_path(path));
+        if legacy_zero && matches!(generation, Some("tp_v1" | "spacepress")) {
             return invalid(
                 "zero_generation_locked",
                 "This source belongs to a different runtime.",
             );
         }
-        if !matches!(generation, Some("none" | "legacy_0_8" | "v2" | "tp_v1")) {
+        if !matches!(
+            generation,
+            Some("none" | "legacy_0_8" | "v2" | "tp_v1" | "spacepress")
+        ) {
             return invalid(
                 "zero_generation_locked",
-                "Zero source requires server-owned Space generation.",
+                "SpacePress source requires server-owned Space generation.",
             );
         }
         if generation == Some("legacy_0_8") {
             return invalid(
                 "zero_migration_required",
-                "This Space can't publish a zero.config.ts app yet. Moving existing Zero Spaces is coming.",
+                "This Space can't publish a SpacePress app yet. Moving existing Zero 0.8 Spaces is coming.",
             );
         }
     }
@@ -613,9 +614,9 @@ fn run_finalize_pipeline(
         )
     })?;
     telemetry.staged_files = files.len();
-    validate_zero_generation(input, files)?;
+    validate_zero_generation(input, stage_root, files)?;
     let zero_v2 = timed(&mut telemetry.zero_v2_compile_ms, || {
-        crate::zero_v2::compile(input, private_root, stage_root, files)
+        crate::spacepress::compile(input, private_root, stage_root, files)
     })?;
     let mut diagnostics = Vec::new();
     let mut substitution = timed(&mut telemetry.template_substitution_ms, || {
@@ -631,12 +632,12 @@ fn run_finalize_pipeline(
                         .flat_map(|files| files.keys()),
                 )
                 .any(|path| {
-                    path.starts_with(".zero-source/") || path.starts_with(".typedpress-source/")
+                    path.starts_with(".zero-source/") || path.starts_with(".spacepress-source/")
                 })
         {
             return invalid(
                 "zero_v2_source_transformed",
-                "Zero source bundles cannot contain host template substitutions.",
+                "SpacePress source bundles cannot contain host template substitutions.",
             );
         }
         apply_templates(&substitution.template_files, stage_root, files)?;
@@ -800,7 +801,7 @@ fn run_finalize_pipeline(
             .keys()
             .chain(pipeline.generated.iter())
             .filter(|path| {
-                (path.starts_with(".zero-source/") || path.starts_with(".typedpress-source/"))
+                (path.starts_with(".zero-source/") || path.starts_with(".spacepress-source/"))
                     || path.starts_with("_spacefast/pages/documents/")
                     || (pages.is_some() && path.starts_with("pages/"))
             })
@@ -812,7 +813,7 @@ fn run_finalize_pipeline(
         .filter(|path| {
             let mut source = crate::serving_paths::precompressed_source(path);
             while let Some(path) = source {
-                if private.contains(path) || crate::responses::php_function_route(path).is_some() {
+                if private.contains(path) {
                     return true;
                 }
                 source = crate::serving_paths::precompressed_source(path);
@@ -1112,17 +1113,15 @@ fn run_finalize_pipeline(
         },
     )?;
     // This is the exact predicate serving passes to an unforced rewrite: the
-    // finished response table, including generated aliases, listings, PHP
-    // functions, and Zero actions. Readiness lookup is intentionally narrower
-    // and cannot stand in for serving ownership here.
+    // finished response table, including generated aliases, listings, and Zero
+    // actions. Readiness lookup is intentionally narrower and cannot stand in
+    // for serving ownership here.
     let exact_response_paths: BTreeSet<String> = table
         .keys()
         .filter(|path| path.starts_with('/'))
         .cloned()
         .collect();
     let route_inventory = compile_route_inventory(RouteInventoryInput {
-        files,
-        private: &private,
         redirects: &route_redirects,
         config_path: substitution
             .routing_config
@@ -1426,7 +1425,7 @@ fn pipeline_context_digest(
         let Some(reference) = reference.and_then(Value::as_str) else {
             return Value::Null;
         };
-        json!([reference, reference.strip_prefix('/').and_then(&staged_sha),])
+        json!([reference, reference.strip_prefix('/').and_then(staged_sha),])
     };
     stable_json_sha256(&json!({
         "engine": env!("CARGO_PKG_VERSION"),
@@ -2481,17 +2480,12 @@ mod tests {
     fn finalize_enforces_server_owned_zero_generation() {
         for (files, body, code) in [
             (
-                vec![("zero.config.ts", b"export default {};".as_slice())],
-                json!({"zero_generation":"tp_v1"}),
-                "zero_generation_locked",
-            ),
-            (
-                vec![("typedpress.config.ts", b"export default {};".as_slice())],
-                json!({"zero_generation":"v2"}),
-                "zero_generation_locked",
-            ),
-            (
                 vec![(".zero-source/manifest.json", b"{}".as_slice())],
+                json!({}),
+                "zero_generation_locked",
+            ),
+            (
+                vec![("spacepress.config.ts", b"export default {};".as_slice())],
                 json!({}),
                 "zero_generation_locked",
             ),
@@ -2511,11 +2505,24 @@ mod tests {
                 "zero_generation_locked",
             ),
             (
+                vec![("__spacefast/zero/deploy.json", b"{}".as_slice())],
+                json!({"zero_generation":"spacepress"}),
+                "zero_generation_locked",
+            ),
+            (
                 vec![
                     ("__spacefast/zero/deploy.json", b"{}".as_slice()),
                     (".zero-source/manifest.json", b"{}".as_slice()),
                 ],
                 json!({"zero_generation":"v2"}),
+                "zero_mixed_generation",
+            ),
+            (
+                vec![
+                    ("__spacefast/zero/deploy.json", b"{}".as_slice()),
+                    (".spacepress-source/manifest.json", b"{}".as_slice()),
+                ],
+                json!({"zero_generation":"spacepress"}),
                 "zero_mixed_generation",
             ),
         ] {
@@ -2527,7 +2534,7 @@ mod tests {
             }
         }
         // A tenant's own zero/ folder is static content on any Space.
-        for generation in ["none", "v2"] {
+        for generation in ["none", "v2", "spacepress"] {
             let (_temp, _private, result) = finalize_fixture(
                 &[
                     ("index.html", b"<h1>home</h1>".as_slice()),
@@ -2542,26 +2549,202 @@ mod tests {
     }
 
     #[test]
-    fn finalize_compiles_typedpress_and_keeps_source_private() {
+    fn finalize_compiles_spacepress_and_coexists_with_frontend_and_functions() {
         let (_temp, private, result) = finalize_fixture(
             &[
-                ("typedpress.config.ts", br#"import { defineConfig } from "typedpress"; export default defineConfig({ name: "hosted", admin: false });"#),
-                ("public/index.html", b"typedpress app"),
-                ("notes.md", b"private source"),
+                (
+                    "spacepress.config.ts",
+                    br#"import { defineConfig } from "spacepress"; export { ping } from "./tp/actions"; export default defineConfig({ name: "hosted", admin: false });"#,
+                ),
+                (
+                    "tp/actions.ts",
+                    br#"import { action } from "spacepress"; export const ping = action({ access: "anyone", handler() { return { ok: true }; } });"#,
+                ),
+                ("index.html", b"<!doctype html><html><body>astro home</body></html>"),
+                ("_astro/app.a1b2c3d4.js", b"console.log('astro');"),
+                ("assets/style.css", b"body { color: black; }"),
+                ("public/favicon.svg", b"<svg></svg>"),
+                ("functions/api.ts", b"export default { fetch() { return new Response('ok'); } };"),
+                (
+                    "__spacefast/functions/bundles/abc123/bundle.json",
+                    b"{\"format\":\"spacefast.functions.bundle.v1\"}",
+                ),
+            ],
+            json!({"mode":"website"}),
+            json!({
+                "zero_generation": "none",
+                "functions": {
+                    "artifact": {
+                        "entry": "functions/api.ts",
+                        "routes": [{ "path": "/api/hello", "method": "GET" }],
+                    }
+                }
+            }),
+        );
+        result.unwrap();
+        let catalog = finalized_catalog(&private);
+        for private_path in [
+            "spacepress.config.ts",
+            "tp/actions.ts",
+            "public/favicon.svg",
+            "functions/api.ts",
+            "__spacefast/functions/bundles/abc123/bundle.json",
+        ] {
+            assert!(
+                !catalog.paths[private_path].public,
+                "{private_path} must stay private"
+            );
+        }
+        // Built frontend output and promoted public/ assets coexist publicly.
+        assert!(catalog.paths["index.html"].public);
+        assert!(catalog.paths["_astro/app.a1b2c3d4.js"].public);
+        assert!(catalog.paths["assets/style.css"].public);
+        assert!(catalog.paths["favicon.svg"].public);
+        assert_eq!(
+            served_body(&private, "v", "assets/style.css"),
+            b"body { color: black; }"
+        );
+        assert_eq!(served_body(&private, "v", "favicon.svg"), b"<svg></svg>");
+
+        let root = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["hostContract"], 2);
+        assert_eq!(
+            manifest["summary"]["actionPathPrefix"],
+            "/wp-json/spacepress/v1/actions/"
+        );
+        assert!(root
+            .join(format!(
+                "store/build/{}.json",
+                manifest["build"].as_str().unwrap()
+            ))
+            .is_file());
+
+        let metadata = finalized_metadata(&private);
+        let routes = metadata["routeInventory"]["routes"].as_array().unwrap();
+        assert!(routes
+            .iter()
+            .any(|route| route["kind"] == "functions" && route["path"] == "/api/hello"));
+    }
+
+    #[test]
+    fn finalize_compiles_captured_spacepress_with_frontend_and_functions() {
+        let app_json = serde_json::to_vec(&json!({
+            "files": {
+                "spacepress.config.ts": r#"import { defineConfig } from "spacepress"; export default defineConfig({ name: "captured-sp", admin: false });"#
+            },
+            "canonical": {
+                "spacepress.config.ts": "spacepress.config.ts"
+            }
+        }))
+        .unwrap();
+        let vendor_json = serde_json::to_vec(&json!({
+            "files": {},
+            "canonical": {}
+        }))
+        .unwrap();
+        let manifest_json = serde_json::to_vec(&json!({
+            "format": "spacepress.source-bundle.v1",
+            "name": "captured-sp",
+            "app_sha256": sha256(&app_json),
+            "vendor_sha256": sha256(&vendor_json),
+        }))
+        .unwrap();
+
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                (".spacepress-source/app.spacepress.json", &app_json),
+                (".spacepress-source/vendor.spacepress.json", &vendor_json),
+                (".spacepress-source/manifest.json", &manifest_json),
+                (
+                    "index.html",
+                    b"<!doctype html><html><body>vite app</body></html>",
+                ),
+                ("assets/main.deadbeef.js", b"export const ok = true;"),
+                (
+                    "_worker.js",
+                    b"export default { fetch() { return new Response('ssr'); } };",
+                ),
+                (
+                    "functions/ssr.ts",
+                    b"export default { fetch() { return new Response('ssr'); } };",
+                ),
+            ],
+            json!({"mode":"website"}),
+            json!({
+                "zero_generation": "spacepress",
+                "functions": {
+                    "artifact": {
+                        "entry": "_worker.js",
+                        "routes": [{ "path": "/ssr", "subtree": true }],
+                    }
+                }
+            }),
+        );
+        result.unwrap();
+        let catalog = finalized_catalog(&private);
+        for private_path in [
+            ".spacepress-source/app.spacepress.json",
+            ".spacepress-source/vendor.spacepress.json",
+            ".spacepress-source/manifest.json",
+            "functions/ssr.ts",
+        ] {
+            assert!(
+                !catalog.paths[private_path].public,
+                "{private_path} must stay private"
+            );
+            assert!(catalog.paths[private_path].served.is_none());
+        }
+        assert!(catalog.paths["index.html"].public);
+        assert!(catalog.paths["assets/main.deadbeef.js"].public);
+        assert_eq!(
+            served_body(&private, "v", "assets/main.deadbeef.js"),
+            b"export const ok = true;"
+        );
+        let root = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["hostContract"], 2);
+        assert_eq!(
+            manifest["summary"]["actionPathPrefix"],
+            "/wp-json/spacepress/v1/actions/"
+        );
+    }
+
+    #[test]
+    fn finalize_compiles_inline_app_in_spacefast_config_ts_with_frontend() {
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                (
+                    "spacefast.config.ts",
+                    br#"import { defineSpaceConfig } from "spacefast";
+export default defineSpaceConfig({
+  cleanUrls: true,
+  app: {
+    name: "inlineapp",
+    admin: false,
+  },
+});"#,
+                ),
+                (
+                    "index.html",
+                    b"<!doctype html><html><body>inline app</body></html>",
+                ),
+                ("_astro/index.1234abcd.js", b"console.log(1);"),
             ],
             json!({"mode":"website"}),
             json!({"zero_generation":"none"}),
         );
         result.unwrap();
         let catalog = finalized_catalog(&private);
-        assert!(!catalog.paths["typedpress.config.ts"].public);
-        assert!(!catalog.paths["notes.md"].public);
-        assert_eq!(served_body(&private, "v", "index.html"), b"typedpress app");
+        assert!(!catalog.paths["spacefast.config.ts"].public);
+        assert!(catalog.paths["index.html"].public);
+        assert!(catalog.paths["_astro/index.1234abcd.js"].public);
         let root = private.join("spaces/s/versions/v/.zero-compiled");
         let manifest: Value =
             serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
-        assert_eq!(manifest["format"], "typedpress.hosted.v1");
-        assert_eq!(manifest["hostContract"], 1);
+        assert_eq!(manifest["hostContract"], 2);
         assert!(root
             .join(format!(
                 "store/build/{}.json",
@@ -2602,7 +2785,7 @@ mod tests {
         let source: Value = serde_json::from_str(include_str!("../../zero/SOURCE.json")).unwrap();
         assert_eq!(manifest["compilerRevision"], source["revision"]);
         assert!(compiled
-            .join("plugins/zero-app-hosted/zero/app/functions.php")
+            .join("plugins/zero-runtime/zero/bootstrap.php")
             .is_file());
     }
 
@@ -2703,7 +2886,7 @@ mod tests {
         let source: Value = serde_json::from_str(include_str!("../../zero/SOURCE.json")).unwrap();
         assert_eq!(manifest["compilerRevision"], source["revision"]);
         assert!(compiled
-            .join("plugins/zero-app-captured/zero/app/schema.php")
+            .join("plugins/zero-runtime/zero/bootstrap.php")
             .is_file());
     }
 
@@ -3038,11 +3221,11 @@ mod tests {
         project[2].1 = b"raw again".to_vec();
         publish_over(&private, "raw", "mixed", &borrowed(&project), vec![]).unwrap();
         assert_private("raw");
-        let compiled = private.join("spaces/s/versions/raw/.zero-compiled/plugins");
-        assert!(compiled
-            .join("zero-app-rawagain/zero/app/schema.php")
-            .is_file());
-        assert!(!compiled.join("zero-app-mixed").exists());
+        let raw_manifest: Value = serde_json::from_slice(
+            &fs::read(private.join("spaces/s/versions/raw/.zero-compiled/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw_manifest["app"], "rawagain");
         let catalog = catalog_at(&private, "raw");
         assert!(!catalog
             .paths
@@ -5546,24 +5729,27 @@ mod tests {
         assert!(proxy["id"]
             .as_str()
             .is_some_and(|id| id.starts_with("sha256:") && id.len() == 71));
-        let function = routes
-            .iter()
-            .find(|route| route["kind"] == "php-function")
-            .expect("PHP function route");
-        assert_eq!(function["source"], json!("functions/ping.php"));
-        assert_eq!(function["runtime"], json!("php"));
-        assert_eq!(function["path"], json!("/ping"));
+        assert!(
+            !routes.iter().any(|route| route["kind"] == "php-function"),
+            "uploaded PHP files must not emit php-function routes"
+        );
     }
 
     #[test]
     fn finalize_rejects_cross_source_exact_route_ownership() {
         let (_temp, _private, output) = finalize_fixture(
-            &[
-                ("index.html", b"home"),
-                ("functions/__spacefast/zero/config.php", b"<?php echo '{}';"),
-            ],
+            &[("index.html", b"home")],
             json!({"mode":"website"}),
-            json!({"zero":{"runtimeKind":"zero"},"serving":{"config":{}}}),
+            json!({
+                "functions": {
+                    "artifact": {
+                        "entry": "functions/config.ts",
+                        "routes": [{"path": "/__spacefast/zero/config"}],
+                    }
+                },
+                "zero": {"runtimeKind": "zero"},
+                "serving": {"config": {}},
+            }),
         );
         match output {
             Err(FinalizeError::Invalid {
@@ -5574,7 +5760,7 @@ mod tests {
                 let collision = &details["collisions"][0];
                 assert_eq!(collision["host"], json!("*"));
                 assert_eq!(collision["path"], json!("/__spacefast/zero/config"));
-                assert_eq!(collision["left"]["kind"], json!("php-function"));
+                assert_eq!(collision["left"]["kind"], json!("functions"));
                 assert_eq!(collision["right"]["kind"], json!("zero-control"));
             }
             other => panic!("expected a route ownership conflict, got {other:?}"),
@@ -5633,15 +5819,15 @@ mod tests {
     }
 
     #[test]
-    fn finalize_uses_served_php_function_entries_for_unforced_rewrites() {
+    fn finalize_uses_served_clean_url_entries_for_unforced_rewrites() {
         let (_temp, _private, output) = finalize_fixture(
             &[
                 ("index.html", b"home"),
-                ("functions/a.php", b"<?php echo 'function';"),
+                ("a.html", b"<h1>a</h1>"),
                 ("_redirects", b"/a /outside 200\n/a /b 301\n/b /a 302"),
             ],
             json!({"mode":"website"}),
-            json!({"serving":{"config":{}}}),
+            json!({"serving":{"config":{"clean_urls":true}}}),
         );
         match output {
             Err(FinalizeError::Invalid {
@@ -5652,7 +5838,7 @@ mod tests {
                 assert_eq!(details["cycles"][0]["paths"], json!(["/a", "/b"]));
             }
             other => {
-                panic!("expected the PHP function to expose the redirect cycle, got {other:?}")
+                panic!("expected the served route to expose the redirect cycle, got {other:?}")
             }
         }
     }

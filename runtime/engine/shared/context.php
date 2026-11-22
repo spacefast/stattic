@@ -274,7 +274,8 @@ function _stattic_path_is_internal_artifact(string $path): bool
     $foldedPlatformPath = strtolower(trim($path, '/'));
     return str_starts_with($foldedPlatformPath, '.zero-source/')
         || str_starts_with($foldedPlatformPath, '.zero-compiled/')
-        || str_starts_with($foldedPlatformPath, '.typedpress-source/')
+        || str_starts_with($foldedPlatformPath, '.spacepress-source/')
+        || str_starts_with($foldedPlatformPath, '.spacepress-compiled/')
         || $foldedPlatformPath === '__spacefast'
         || str_starts_with($foldedPlatformPath, '__spacefast/');
 }

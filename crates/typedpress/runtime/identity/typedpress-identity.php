@@ -10,15 +10,7 @@
  */
 declare(strict_types=1);
 defined("ABSPATH") || exit();
-require_once __DIR__ . "/vendor-prefixed/autoload.php";
-spl_autoload_register(static function (string $class): void {
-    if (str_starts_with($class, "TypedPress\\Identity\\") && !str_starts_with($class, "TypedPress\\Identity\\Vendor\\")) {
-        $file = __DIR__ . "/src/" . str_replace("\\", "/", substr($class, strlen("TypedPress\\Identity\\"))) . ".php";
-        if (is_file($file)) {
-            require $file;
-        }
-    }
-});
+require __DIR__ . '/src/autoload.php';
 register_activation_hook(__FILE__, static function (): void {
     global $wpdb;
     \TypedPress\Identity\Legacy\ZeroNames::upgrade(new \TypedPress\Identity\DB($wpdb));

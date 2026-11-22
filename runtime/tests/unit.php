@@ -32,10 +32,9 @@ require_once __DIR__ . '/../engine/runtime/functions-artifacts.php'; // signed b
 require_once __DIR__ . '/../engine/runtime/functions-dispatch.php'; // origin -> host dispatch contract
 require_once __DIR__ . '/../engine/shared/runtime-log.php'; // the one runtime log writer
 require_once __DIR__ . '/../engine/shared/space-mail.php';
-require_once __DIR__ . '/../engine/runtime/php-functions.php';
 require_once __DIR__ . '/../engine/shared/db-broker.php'; // MySQL broker value encoding (pure helpers only here)
 require_once __DIR__ . '/../engine/runtime/space-users.php'; // app-session cookie read before WordPress loads
-require_once __DIR__ . '/../engine/shared/typedpress.php'; // hosted-build manifest read on every Zero v2 request
+require_once __DIR__ . '/../engine/shared/spacepress.php'; // SpacePress core runtime manifest & route matching
 
 $assertions = 0;
 $failures = [];
@@ -144,17 +143,6 @@ try {
     unlink($mailBootstrapRoot . '/wp-load.php');
     rmdir($mailBootstrapRoot);
 }
-$phpFunctionsState = &_stattic_php_functions_state();
-$phpFunctionsState['services'] = ['env' => ['SPACEFAST_SERVICE_EMAIL_DOMAIN' => 'example.com']];
-$defaultFromPayload = _stattic_php_functions_email_payload([
-    'to' => 'visitor@example.com', 'subject' => 'Hello', 'text' => 'Hello',
-]);
-check($defaultFromPayload['from']['email'] === 'noreply@example.com', 'PHP mail defaults to noreply on the primary domain');
-$phpFunctionsState['services'] = null;
-foreach (['clear-site-data', 'x-accel-redirect', 'a8c-edge-cache', 'strict-transport-security'] as $refusedHandlerHeader) {
-    check(_stattic_php_functions_header_denied($refusedHandlerHeader), 'PHP handlers cannot set ' . $refusedHandlerHeader);
-}
-check(!_stattic_php_functions_header_denied('x-safe'), 'PHP handlers keep ordinary response headers');
 
 // --- PHP 8.5 platform contract ------------------------------------------------------
 
@@ -2668,6 +2656,7 @@ check(_stattic_control_path_admits_visitor('/__zero/auth/start'), 'front door: c
 check(_stattic_control_path_admits_visitor('/__spacefast/zero/auth/gravatar/start'), 'front door: frozen-client zero auth alias stays reachable');
 check(!_stattic_control_path_admits_visitor('/__zero/unknown'), 'front door: unknown canonical zero paths refuse');
 check(_stattic_path_is_reserved('/__zero/anything'), 'front door: the canonical zero namespace is reserved from tenant code');
+require_once __DIR__ . '/../engine/deprecated/zero-0.8/context.php';
 check(_stattic_zero_legacy_control_path('/__zero/run') === '/__spacefast/zero/run', 'fold: canonical run folds to the legacy table key');
 check(_stattic_zero_legacy_control_path('/__zero/auth/start') === '/__spacefast/zero/auth/gravatar/start', 'fold: auth start folds to the gravatar spelling');
 check(_stattic_zero_legacy_control_path('/api/run') === null, 'fold: ordinary paths never fold');
@@ -4346,18 +4335,46 @@ check(
     'social card URL encodes the decoded path once per segment'
 );
 
-// A Zero v2 version's manifest is read on every request: one that is not a
-// TypedPress build, readable or not, is simply not TypedPress.
-$typedPressRoot = sys_get_temp_dir() . '/stattic-typedpress-manifest-' . bin2hex(random_bytes(4));
-mkdir($typedPressRoot);
+// SpacePress manifest and route claiming: `spacepress.hosted.v1` and legacy
+// `typedpress.hosted.v1` manifests are SpacePress, and `/identity` is never claimed at the root.
+$spacepressRoot = sys_get_temp_dir() . '/stattic-spacepress-manifest-' . bin2hex(random_bytes(4));
+mkdir($spacepressRoot);
 foreach (['{"format":"zero.v2"}', '{"format":', str_repeat('[', 40) . str_repeat(']', 40)] as $manifestBody) {
-    file_put_contents($typedPressRoot . '/manifest.json', $manifestBody);
-    check(_stattic_typedpress_manifest($typedPressRoot) === null, 'a non-TypedPress manifest is not TypedPress: ' . substr($manifestBody, 0, 12));
+    file_put_contents($spacepressRoot . '/manifest.json', $manifestBody);
+    check(_stattic_spacepress_manifest($spacepressRoot) === null, 'a non-SpacePress manifest is not SpacePress: ' . substr($manifestBody, 0, 24));
 }
-file_put_contents($typedPressRoot . '/manifest.json', '{"format":"typedpress.hosted.v1","appHash":"a"}');
-check((_stattic_typedpress_manifest($typedPressRoot)['appHash'] ?? null) === 'a', 'a TypedPress manifest is read');
-unlink($typedPressRoot . '/manifest.json');
-rmdir($typedPressRoot);
+file_put_contents($spacepressRoot . '/manifest.json', '{"format":"typedpress.hosted.v1","appHash":"a"}');
+$tpManifest = _stattic_spacepress_manifest($spacepressRoot);
+check(($tpManifest['appHash'] ?? null) === 'a', 'legacy typedpress.hosted.v1 manifest stays recognized for pre-cutover Spaces');
+check(_stattic_spacepress_path_claimed('/identity', $tpManifest), 'legacy typedpress.hosted.v1 claims /identity');
+check(_stattic_spacepress_path_claimed('/identity/login', $tpManifest), 'legacy typedpress.hosted.v1 claims /identity/*');
+check(_stattic_spacepress_path_claimed('/typedpress-admin', $tpManifest), 'legacy typedpress.hosted.v1 claims /typedpress-admin');
+check(_stattic_spacepress_path_claimed('/typedpress-admin/posts', $tpManifest), 'legacy typedpress.hosted.v1 claims /typedpress-admin/*');
+check(_stattic_spacepress_path_claimed('/__tp/assets/client.js', $tpManifest), 'legacy typedpress.hosted.v1 claims /__tp/*');
+check(_stattic_spacepress_path_claimed('/wp-json/typedpress-identity/v1/session', $tpManifest), 'legacy typedpress.hosted.v1 claims /wp-json/typedpress-identity/*');
+check(_stattic_spacepress_path_claimed('/wp-json/typedpress/v1/actions/ping', $tpManifest), 'legacy typedpress.hosted.v1 claims /wp-json/typedpress/v1/*');
+check(_stattic_spacepress_uses_legacy_prefix($tpManifest, []), 'legacy typedpress.hosted.v1 uses legacy prefix');
+file_put_contents($spacepressRoot . '/manifest.json', '{"format":"spacepress.hosted.v1","appHash":"a","pagePaths":["/","/posts/:slug"],"routes":[{"path":"/api/custom/*rest"}]}');
+$spManifest = _stattic_spacepress_manifest($spacepressRoot);
+check(($spManifest['appHash'] ?? null) === 'a', 'a SpacePress manifest is read');
+check(!_stattic_spacepress_uses_legacy_prefix($spManifest, []), 'native SpacePress defaults to Atomic table prefix');
+check(_stattic_spacepress_uses_legacy_prefix($spManifest, ['legacy_prefix' => true]), 'upgraded SpacePress with legacy_prefix keeps sfz_<sha>_ prefix');
+check(_stattic_spacepress_uses_legacy_prefix($spManifest, ['zero_generation' => 'tp_v1']), 'pre-sync tp_v1 overlay keeps sfz_<sha>_ prefix');
+check(str_contains(_stattic_spacepress_wp_bootstrap('/priv', 'spc_1', 'ver_1', false, true), "'legacy_prefix' => true"), 'SpacePress worker bootstrap carries legacy_prefix into child authority');
+check(!str_contains(_stattic_spacepress_wp_bootstrap('/priv', 'spc_1', 'ver_1', false, false), 'legacy_prefix'), 'native SpacePress worker bootstrap omits legacy_prefix');
+check(_stattic_spacepress_path_claimed('/wp-json/spacepress/v1/actions/ping', $spManifest), 'SpacePress claims /wp-json/spacepress/v1/*');
+check(_stattic_spacepress_path_claimed('/wp-json/spacepress-identity/v1/session', $spManifest), 'SpacePress claims /wp-json/spacepress-identity/v1/*');
+check(_stattic_spacepress_path_claimed('/__spacefast/auth/login', $spManifest), 'SpacePress claims /__spacefast/auth/*');
+check(_stattic_spacepress_path_claimed('/wp-admin/new/posts', $spManifest), 'SpacePress claims /wp-admin/new/*');
+check(_stattic_spacepress_path_claimed('/posts/hello-world', $spManifest), 'SpacePress claims declared dynamic pagePaths');
+check(_stattic_spacepress_path_claimed('/api/custom/a/b', $spManifest), 'SpacePress claims declared splat routes');
+check(!_stattic_spacepress_path_claimed('/identity', $spManifest), 'SpacePress never claims /identity at root');
+check(!_stattic_spacepress_path_claimed('/identity/account', $spManifest), 'SpacePress never claims /identity/* at root');
+check(!_stattic_spacepress_path_claimed('/typedpress-admin', $spManifest), 'SpacePress never claims /typedpress-admin');
+check(!_stattic_spacepress_path_claimed('/__tp/assets/client.js', $spManifest), 'SpacePress never claims /__tp/*');
+check(!_stattic_spacepress_path_claimed('/unclaimed-page', $spManifest), 'SpacePress leaves unclaimed paths for CF Workers / SPA / 404');
+unlink($spacepressRoot . '/manifest.json');
+rmdir($spacepressRoot);
 
 // --- the whole-Space role a TypedPress app lends on each request -------------
 

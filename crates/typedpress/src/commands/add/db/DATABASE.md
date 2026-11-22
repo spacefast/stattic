@@ -44,7 +44,7 @@ read the SQL.
 ## Reading and writing
 
 - From a browser or another server: the generated client (`first.tasks.list(...)`) or
-  `/__tp/api/v1/tasks`. Both apply the table's `access` rules.
+  `/wp-json/typedpress/v1/tasks`. Both apply the table's `access` rules.
 - From an action, a hook or a job: `import { tasks } from "typedpress:db"` and call `tasks.list()`,
   `tasks.create()` and the rest. An action runs in one transaction with everything it writes, to
   tables and to WordPress content alike; a throw rolls all of it back.

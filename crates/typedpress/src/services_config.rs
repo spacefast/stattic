@@ -285,21 +285,10 @@ pub fn parse(config: &Value, ev: &Evaluator<'_>, schema: &Schema, span: Span) ->
 /// The private filter that hands a parsed `services` config to the runtime, for the generated
 /// functions.php body.
 pub fn php(services: &Json) -> String {
+    // Tabs and WordPress's spacing, like every other generated function (src/php_layout.rs formats
+    // the config value; these lines are fixed).
     format!(
-        r#"
-\add_filter('tp_services_config', static function (array $config): array {{
-    $authored = {};
-    foreach (['forms', 'search', 'products'] as $key) {{
-        if (isset($authored[$key])) {{
-            $config[$key] = \array_replace($config[$key] ?? [], $authored[$key]);
-        }}
-    }}
-    if (isset($authored['checkoutReturnUrl'])) {{
-        $config['checkoutReturnUrl'] = $authored['checkoutReturnUrl'];
-    }}
-    return $config;
-}}, 10);
-"#,
+        "\n\\add_filter(\n\t'tp_services_config',\n\tstatic function ( array $config ): array {{\n\t\t$authored = {};\n\t\tforeach ( array( 'forms', 'search', 'products' ) as $key ) {{\n\t\t\tif ( isset( $authored[ $key ] ) ) {{\n\t\t\t\t$config[ $key ] = \\array_replace( $config[ $key ] ?? array(), $authored[ $key ] );\n\t\t\t}}\n\t\t}}\n\t\tif ( isset( $authored['checkoutReturnUrl'] ) ) {{\n\t\t\t$config['checkoutReturnUrl'] = $authored['checkoutReturnUrl'];\n\t\t}}\n\t\treturn $config;\n\t}},\n\t10\n);\n",
         php_json(services)
     )
 }

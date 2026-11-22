@@ -271,7 +271,7 @@ export type Client = { readonly [K in CollectionKey]: CollectionClient<K> } & {
   readonly actions: ActionsClient;
   readonly globals: GlobalsClient;
   readonly auth: AuthClient;
-  /** `GET /__tp/api/v1`: the app's schema (kinds, fields, globals, actions), as `typedpress pull` reads it. */
+  /** `GET /wp-json/typedpress/v1`: the app's schema (kinds, fields, globals, actions), as `typedpress pull` reads it. */
   schema(): Promise<unknown>;
 };
 
@@ -330,7 +330,7 @@ export function registerRealtimeTransport(transport: RealtimeTransport): void {
 }
 
 export interface ClientOptions {
-  /** Base URL including the API prefix: "https://x.test/__tp/api/v1". Default: `/__tp/api/v1` on the page's origin. */
+  /** Base URL including the API prefix: "https://x.test/wp-json/typedpress/v1". Default: `/wp-json/typedpress/v1` on the page's origin. */
   url?: string;
   /** WordPress cookie auth: the REST nonce; sent as `X-WP-Nonce` with `credentials: "same-origin"`. */
   nonce?: string;
@@ -559,7 +559,7 @@ function authError(status: number, code: string, detail: string): TypedPressErro
 const refreshes = new Map<string, Promise<boolean>>();
 
 export function createClient(options: ClientOptions = {}): Client {
-  const base = (options.url ?? "/__tp/api/v1").replace(/\/+$/, "");
+  const base = (options.url ?? "/wp-json/typedpress/v1").replace(/\/+$/, "");
   const authOpts = options.auth ?? {};
   const doFetch = (input: string, init: RequestInit) => (options.fetch ?? globalThis.fetch)(input, init);
 

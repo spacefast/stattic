@@ -1,7 +1,33 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/legacy-zero.php';
+// Lightweight front-door predicates for legacy Zero 0.8 control paths, kept
+// inline here so static / CF-Worker / SpacePress requests never require
+// anything under `engine/deprecated/`.
+function _stattic_control_path_admit_zero_route(string $path): bool
+{
+    static $routes = [
+        '__zero/config' => true,
+        '__zero/run' => true,
+        '__zero/realtime/events' => true,
+        '__spacefast/zero/config' => true,
+        '__spacefast/zero/run' => true,
+        '__spacefast/zero/realtime/events' => true,
+        '__zero/auth/start' => true,
+        '__zero/auth/sign-out' => true,
+        '__spacefast/zero/auth/gravatar/start' => true,
+        '__spacefast/zero/auth/sign-out' => true,
+    ];
+    return isset($routes[trim(strtolower($path), '/')]);
+}
+
+function _stattic_control_path_admit_legacy_zero_connectors(string $path): bool
+{
+    return preg_match(
+        '~\A' . STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/connectors/([a-z][a-zA-Z0-9]{0,63})(?:/(connect|callback|disconnect))?\z~D',
+        $path
+    ) === 1;
+}
 
 const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_ZERO_V2_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'sdk', 'handler' => 'zero_v2_client'],
@@ -15,6 +41,8 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => '/__zero/auth/native', 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__zero/auth/api/', 'match' => 'prefix', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => '/__stattic_probe', 'match' => 'exact', 'visitor' => true, 'tenant' => true, 'stage' => 'probe', 'handler' => 'probe'],
+    // SpacePress browser auth routes (`SP_AUTH_PREFIX = '/__spacefast/auth'`).
+    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/auth', 'match' => 'namespace', 'visitor' => true, 'tenant' => false, 'stage' => null, 'handler' => null],
     ['path' => STATTIC_SHARE_OAUTH_START_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_account_start'],
     ['path' => STATTIC_SHARE_OAUTH_CALLBACK_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'share_oauth_callback'],
     // The Space's own server code answers here, after the access check; no
@@ -44,7 +72,8 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_COMMENTS_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_VERSION_URLS_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_COMMENTS_MENTIONABLE_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
-    ...STATTIC_LEGACY_ZERO_TICKET_PATHS,
+    ['path' => STATTIC_ZERO_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
+    ['path' => STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'comments_exchange'],
     ['path' => STATTIC_ACCESS_ENTRY_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_entry_token', 'visitor' => true, 'tenant' => true, 'stage' => 'entry', 'handler' => 'access_link_entry'],
     ['path' => STATTIC_ACCESS_LEGACY_REDEEM_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_legacy_redeem'],
     ['path' => STATTIC_ACCESS_IN_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_access_in_token', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'access_in'],
@@ -67,11 +96,12 @@ const SPACEFAST_CONTROL_PATHS = [
     ['path' => STATTIC_SPACE_CLIENT_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'space_client'],
     ['path' => STATTIC_SPACE_CLIENT_TYPES_URL_PATH, 'match' => 'exact', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
     ['path' => STATTIC_CONNECTORS_PATH_PREFIX, 'match' => 'prefix', 'admit' => '_stattic_connectors_route', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
-    ...STATTIC_LEGACY_ZERO_CONNECTOR_PATHS,
-    ...STATTIC_LEGACY_ZERO_CONTROL_PATHS,
+    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/connectors/', 'match' => 'prefix', 'admit' => '_stattic_control_path_admit_legacy_zero_connectors', 'visitor' => true, 'tenant' => false, 'stage' => 'entry', 'handler' => 'connectors'],
+    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_admit_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
+    ['path' => STATTIC_RUNTIME_NAMESPACE_PATH . '/zero', 'match' => 'namespace', 'fold' => true, 'admit' => '_stattic_control_path_admit_zero_route', 'visitor' => true, 'tenant' => false, 'stage' => 'route-index', 'handler' => 'invoke_zero'],
     // Unknown `/__zero/*` and `/__first/*` paths refuse exactly like unknown
     // `/__spacefast/*`: each namespace is private-by-default.
-    ...STATTIC_LEGACY_ZERO_PRIVATE_PATHS,
+    ['path' => STATTIC_ZERO_CANONICAL_NAMESPACE_PATH, 'match' => 'namespace', 'fold' => true, 'visitor' => false, 'tenant' => false, 'stage' => null, 'handler' => null],
     // `destination`: First's `/__first/api/v1` is a public API other frontends
     // call, so a proxy upstream or redirect may point into it. Tenant files and
     // tenant routes still may not claim it.

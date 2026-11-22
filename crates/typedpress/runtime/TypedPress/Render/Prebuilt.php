@@ -12,6 +12,7 @@ use TypedPress\Wp\AppRouter;
 use TypedPress\Wp\KindUrls;
 use TypedPress\Wp\MarkdownTwins;
 use TypedPress\Wp\Plugin;
+use TypedPress\Wp\PublicFiles;
 use TypedPress\Wp\WpFiles;
 
 /**
@@ -32,12 +33,14 @@ use TypedPress\Wp\WpFiles;
  *   (an option, a menu, the time) is never older than that. Site-wide settings drop every file.
  * - The `<build>` directory is named by the app's compiled files, the runtime's content hash, and
  *   the WordPress, theme and plugin versions that write the page's head and assets.
- * - `GET /__tp/api/v1/prerender` lists the URLs for `typedpress export`, to an editor.
+ * - `GET /wp-json/typedpress/v1/prerender` lists the URLs for `typedpress export`, to an editor.
  */
 final class Prebuilt
 {
     public const HEADER = 'X-TypedPress-Prerender';
     public const REFUSED = 'X-TypedPress-Prerender-Refused';
+    /** REFUSED's value for a prerender the page cache's read index couldn't record ({@see unrecorded()}). */
+    public const UNRECORDED = 'unrecorded';
     public const ACTION = 'tp_prebuild';
     public const ROUTE = 'prerender';
     /** URLs one action renders; the rest go to a following action. */
@@ -73,7 +76,7 @@ final class Prebuilt
     {
         $app = $plugin->schema->app();
         // A build mounted to inspect serves no page and schedules no build of them.
-        if (!is_array($app) || !self::any($app) || \TypedPress\Wp\Runtime::inspecting()) {
+        if (!is_array($app) || !$app['hasPrebuilt'] || \TypedPress\Wp\Runtime::inspecting()) {
             return;
         }
         self::$plugin = $plugin;
@@ -166,22 +169,13 @@ final class Prebuilt
         add_filter('wp_speculation_rules_configuration', '__return_null');
     }
 
-    /** Whether any route of the table is prebuilt. */
-    private static function any(array $app): bool
-    {
-        foreach ($app['routes'] as $route) {
-            if ($route['prerender'] ?? false) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** The option that says this build's files have been scheduled. */
     private static function option(): string
     {
         return 'tp_prebuilt_' . substr(self::build_id(), 0, 16);
     }
+
+    private const COMPILED_FILES = ['schema.php', 'functions.php', 'content.php'];
 
     /**
      * What a prebuilt file was rendered from: the app's compiled schema, page functions and content
@@ -194,35 +188,47 @@ final class Prebuilt
         if ($id !== null || self::$plugin === null) {
             return (string) $id;
         }
-        // The full id reads every compiled file and every plugin's header: computed once per change
-        // of what it is made from, not on every request the file lane answers. The key is cheap: the
-        // compiled files' sizes and times, the runtime's hash, and the version and plugin options.
-        $key = [defined('TP_RUNTIME_HASH') ? TP_RUNTIME_HASH : '', get_bloginfo('version'), get_option('stylesheet'),
+        // The store has already hashed managed app and runtime trees. A loose app must inspect its
+        // files. Hash the small script map even on a cache hit: an asset-only rebuild can replace
+        // it with another map of the same size in the same second.
+        $manifest = self::$plugin->mountedManifest();
+        $trees = $manifest === null ? null : ['app' => $manifest['app'], 'runtime' => $manifest['runtime']];
+        $key = [$trees ?? (defined('TP_RUNTIME_HASH') ? TP_RUNTIME_HASH : ''), get_bloginfo('version'), get_option('stylesheet'),
             get_option('active_plugins'), get_site_option('active_sitewide_plugins'), wp_get_mu_plugins()];
-        foreach (['schema.php', 'functions.php', 'content.php'] as $file) {
-            $path = self::$plugin->dir . '/tp/app/' . $file;
-            $key[] = [@filesize($path), @filemtime($path)];
+        $mapHash = '-';
+        if ($trees === null) {
+            $root = self::$plugin->dir . '/tp/app/';
+            foreach (self::COMPILED_FILES as $file) {
+                $key[] = [@filesize($root . $file), @filemtime($root . $file)];
+            }
+            $mapHash = PublicFiles::manifestHash(self::$plugin) ?? '-';
+            $key[] = $mapHash;
         }
         $key = md5((string) wp_json_encode($key));
         $stored = get_option('tp_prebuilt_id');
         if (is_array($stored) && ($stored['key'] ?? null) === $key && is_string($stored['id'] ?? null)) {
             return $id = $stored['id'];
         }
-        $id = self::computeId();
+        $id = self::computeId($trees, $mapHash);
         update_option('tp_prebuilt_id', ['key' => $key, 'id' => $id], true);
         return $id;
     }
 
-    private static function computeId(): string
+    /** @param ?array{app: string, runtime: string} $trees */
+    private static function computeId(?array $trees, string $mapHash): string
     {
         $hash = hash_init('sha256');
-        foreach (['schema.php', 'functions.php', 'content.php'] as $file) {
-            $path = self::$plugin->dir . '/tp/app/' . $file;
-            hash_update($hash, $file . ':' . (is_file($path) ? (string) hash_file('sha256', $path) : '-') . "\n");
+        if ($trees !== null) {
+            hash_update($hash, 'app:' . $trees['app'] . "\nruntime:" . $trees['runtime'] . "\n");
+        } else {
+            foreach (self::COMPILED_FILES as $file) {
+                $path = self::$plugin->dir . '/tp/app/' . $file;
+                hash_update($hash, $file . ':' . (is_file($path) ? (string) hash_file('sha256', $path) : '-') . "\n");
+            }
+            hash_update($hash, 'public-files:' . $mapHash . "\n");
+            hash_update($hash, 'runtime:' . (defined('TP_RUNTIME_HASH') ? TP_RUNTIME_HASH : \TypedPress\Wp\Runtime::VERSION) . "\n");
         }
-        // The runtime renders the document around the page (its files by content, stamped by the
-        // build), and WordPress, the theme and the active plugins write its head and its assets.
-        hash_update($hash, 'runtime:' . (defined('TP_RUNTIME_HASH') ? TP_RUNTIME_HASH : \TypedPress\Wp\Runtime::VERSION) . "\n");
+        // WordPress, the theme and the active plugins write the document's head and assets.
         hash_update($hash, 'wp:' . get_bloginfo('version') . ':' . get_option('stylesheet') . ':' . (string) wp_get_theme()->get('Version') . "\n");
         // Network-activated plugins, must-use plugins and drop-ins write page heads too.
         $plugins = [...(array) get_option('active_plugins', []), ...array_keys((array) get_site_option('active_sitewide_plugins', []))];
@@ -277,10 +283,29 @@ final class Prebuilt
     /** A viewer function ran while prerendering: the page can't be one file for everyone. */
     public static function viewerCall(string $function): void
     {
-        if (self::prerendering() && self::$refused === null) {
-            self::$refused = $function;
+        if (self::prerendering()) {
+            self::refuse($function);
+        }
+    }
+
+    /**
+     * The read index couldn't record this prerender (Cache::record said no, as for an address longer
+     * than the index holds), so no write would mark its file stale. In `output: "server"` no file is
+     * written and the URL renders per request; a static export keeps no index, so it is not refused.
+     */
+    public static function unrecorded(): void
+    {
+        if (self::prerendering() && ((self::$plugin?->schema->app()['output'] ?? 'server') === 'server')) {
+            self::refuse(self::UNRECORDED);
+        }
+    }
+
+    private static function refuse(string $why): void
+    {
+        if (self::$refused === null) {
+            self::$refused = $why;
             if (!headers_sent()) {
-                header(self::REFUSED . ': ' . $function);
+                header(self::REFUSED . ': ' . $why);
             }
         }
     }
@@ -301,7 +326,7 @@ final class Prebuilt
         $redirects = [];
         $anonymous = new Viewer(null);
         foreach ($app['routes'] as $route) {
-            if (!($route['prerender'] ?? false) || ($route['page'] ?? null) === null) {
+            if (!($route['prerender'] ?? false) || ($route['page'] ?? null) === null || $route['guards'] !== []) {
                 continue;
             }
             $pattern = (string) $route['pattern'];
@@ -329,8 +354,8 @@ final class Prebuilt
             }
         }
         $seen = [];
-        $urls = array_values(array_filter($urls, static function (array $u) use (&$seen): bool {
-            if (isset($seen[$u['path']])) {
+        $urls = array_values(array_filter($urls, static function (array $u) use (&$seen, $plugin): bool {
+            if (isset($seen[$u['path']]) || \TypedPress\Commerce\Module::privatePath($plugin, $u['path'])) {
                 return false;
             }
             return $seen[$u['path']] = true;
@@ -383,6 +408,8 @@ final class Prebuilt
         do {
             $where = $after === null ? [] : [$pk => ['gt' => $after]];
             $rows = Seam::asViewer($viewer, static fn () => \TypedPress\Db::instance()->findMany($kind, ['where' => $where, 'orderBy' => [$pk => 'asc'], 'limit' => 500], $viewer));
+            // The batch's posts and their meta (`_wp_old_slug`, a field in the URL) in two reads, not two per item.
+            _prime_post_caches(array_map(static fn (array $row): int => (int) $row[$pk], $rows), false, true);
             foreach ($rows as $row) {
                 $after = $row[$pk];
                 $post = get_post((int) $row[$pk]);
@@ -433,7 +460,7 @@ final class Prebuilt
         return '/' . implode('/', $out);
     }
 
-    /** `GET /__tp/api/v1/prerender`: the URLs to build, to someone who may edit the site. */
+    /** `GET /wp-json/typedpress/v1/prerender`: the URLs to build, to someone who may edit the site. */
     public static function route(string $method, array $parts, array $query, string $body, Viewer $viewer): array
     {
         \TypedPress\App::allow($method, ['GET']);
@@ -507,10 +534,8 @@ final class Prebuilt
         if (str_contains(strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? '')), 'text/markdown')) {
             return;
         }
-        foreach (array_keys($_COOKIE) as $name) {
-            if (preg_match('/^(wordpress_logged_in_|wordpress_sec_|wp-postpass_|comment_author_|wp_lang$|zi_session$|__Host-zi_session$)/', (string) $name) === 1) {
-                return;
-            }
+        if (Cache::viewerCookie()) {
+            return;
         }
         $request = (string) ($_SERVER['REQUEST_URI'] ?? '/');
         // `//x` is a scheme-relative URL to wp_parse_url(), not a path: not a prebuilt page's URL.
@@ -533,6 +558,9 @@ final class Prebuilt
         }
         $markdown = str_ends_with($path, '.md');
         $html = $markdown ? (substr($path, 0, -3) === '/index' ? '/' : substr($path, 0, -3)) : $path;
+        if (self::$plugin !== null && \TypedPress\Commerce\Module::privatePath(self::$plugin, $html)) {
+            return;
+        }
         // A page only at its one address (`/about/`, AppRouter::address): the other spelling reaches
         // the router, which redirects it. A twin is `/about.md` only, so `/about/.md` is rejected below.
         if (!$markdown) {
@@ -580,7 +608,7 @@ final class Prebuilt
             return;
         }
         [$control] = Cache::policy(200, true, false);
-        header('Cache-Control: ' . $control);
+        Cache::send($control);
         header('X-TypedPress-Prebuilt: 1');
         if ($markdown) {
             header('Content-Type: ' . MarkdownTwins::CONTENT_TYPE);
@@ -687,7 +715,9 @@ final class Prebuilt
         if ($code !== 200 || $refused !== '') {
             @unlink($html);
             @unlink($md);
-            if ($refused !== '') {
+            if ($refused === self::UNRECORDED) {
+                error_log("TypedPress: $path is prebuilt, but the page cache's read index could not record its render (an address longer than the index holds?), so no write would rebuild its file; it renders per request instead");
+            } elseif ($refused !== '') {
                 error_log("TypedPress: $path is prebuilt, and its render called $refused; it renders per request instead");
             }
             return true;
@@ -706,7 +736,8 @@ final class Prebuilt
         $markdown = $fetch($twin, (string) (wp_parse_url($twin, PHP_URL_PATH) ?? ''));
         // The twin is written only from an answer rendered for this prerender, as the page is.
         $twinOk = !is_wp_error($markdown) && (int) wp_remote_retrieve_response_code($markdown) === 200
-            && wp_remote_retrieve_header($markdown, 'x-typedpress-prerendered') === '1';
+            && wp_remote_retrieve_header($markdown, 'x-typedpress-prerendered') === '1'
+            && (string) wp_remote_retrieve_header($markdown, strtolower(self::REFUSED)) === '';
         if (!self::write($html, (string) wp_remote_retrieve_body($page), $path, $started)) {
             return true;
         }
@@ -819,7 +850,7 @@ final class Prebuilt
                 $path = substr($path, strlen($base)) ?: '/';
             }
             $path = $path === '/' ? '/' : rtrim($path, '/');
-            $match = AppRouter::match($app['routes'], $path);
+            $match = AppRouter::match($app['routes'], $path, $app['routeIndex'] ?? null);
             if ($match !== null && ($match['route']['prerender'] ?? false)) {
                 $hit[$path] = true;
             }

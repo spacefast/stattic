@@ -35,17 +35,22 @@ final class Platform
 
     public static function versions(): array
     {
+        return self::requiredVersions() + [
+            // Not a platform requirement: spam checks use the Akismet a site sets up through Jetpack, and run
+            // only while it has a key (Jetpack's connection or WPCOM_API_KEY). Without either they fail open.
+            'akismet' => ['version' => defined('AKISMET_VERSION') ? AKISMET_VERSION : null, 'spamChecks' => self::spamChecks()],
+            'identity' => Runtime::identity(), 'imageCdn' => function_exists('jetpack_photon_url'),
+        ];
+    }
+
+    private static function requiredVersions(): array
+    {
         global $wpdb;
         $server = (string) $wpdb->db_server_info();
         $maria = stripos($server, 'mariadb') !== false;
         preg_match('/(?:5\.5\.5-)?(\d+\.\d+(?:\.\d+)?)/', $server, $match);
         // The SQLite Database Integration plugin answers as MySQL 8; what matters is its own version.
         $sqlite = $wpdb->dbh instanceof \PDO;
-        $headers = [];
-        foreach (self::PLUGINS as $slug => $_) {
-            $file = WP_PLUGIN_DIR . '/' . $slug . '/' . $slug . '.php';
-            $headers[$slug] = is_file($file) ? get_file_data($file, ['version' => 'Version'])['version'] : null;
-        }
         return [
             'version' => (string) get_bloginfo('version'), 'php' => PHP_VERSION,
             'database' => $sqlite
@@ -55,15 +60,18 @@ final class Platform
             // Action Scheduler registers its version on plugins_loaded. A plugin activated after that hook
             // fired (several activated in one WP-CLI call) never registers in that request, so the registry
             // is empty; read the plugin's header instead.
-            'actionScheduler' => class_exists('ActionScheduler_Versions') ? (\ActionScheduler_Versions::instance()->latest_version() ?: $headers['action-scheduler']) : null,
-            'mcpAdapter' => in_array('mcp-adapter/mcp-adapter.php', (array) get_option('active_plugins', []), true) || isset(get_site_option('active_sitewide_plugins', [])['mcp-adapter/mcp-adapter.php']) ? (defined('MCP_ADAPTER_VERSION') ? MCP_ADAPTER_VERSION : $headers['mcp-adapter']) : null,
-            // Not a platform requirement: spam checks use the Akismet a site sets up through Jetpack, and run
-            // only while it has a key (Jetpack's connection or WPCOM_API_KEY). Without either they fail open.
-            'akismet' => ['version' => defined('AKISMET_VERSION') ? AKISMET_VERSION : null, 'spamChecks' => self::spamChecks()],
+            'actionScheduler' => class_exists('ActionScheduler_Versions') ? (\ActionScheduler_Versions::instance()->latest_version() ?: self::headerVersion('action-scheduler')) : null,
+            'mcpAdapter' => in_array('mcp-adapter/mcp-adapter.php', (array) get_option('active_plugins', []), true) || isset(get_site_option('active_sitewide_plugins', [])['mcp-adapter/mcp-adapter.php']) ? (defined('MCP_ADAPTER_VERSION') ? MCP_ADAPTER_VERSION : self::headerVersion('mcp-adapter')) : null,
             'twoFactor' => defined('TWO_FACTOR_VERSION') ? TWO_FACTOR_VERSION : null,
             'polylang' => defined('POLYLANG_VERSION') ? POLYLANG_VERSION : null,
-            'identity' => Runtime::identity(), 'imageCdn' => function_exists('jetpack_photon_url'),
         ];
+    }
+
+    private static function headerVersion(string $slug): ?string
+    {
+        $file = WP_PLUGIN_DIR . '/' . $slug . '/' . $slug . '.php';
+
+        return is_file($file) ? get_file_data($file, ['version' => 'Version'])['version'] : null;
     }
 
     /** True when $version (a `$wp_version`) is at or above the floor. */
@@ -81,7 +89,7 @@ final class Platform
     /** @return list<string> Every unmet platform row, rather than the first failure. */
     public static function problems(bool $localized = false): array
     {
-        $versions = self::versions();
+        $versions = self::requiredVersions();
         $required = ['wordpress' => self::WORDPRESS, 'php' => self::PHP];
         foreach (self::PLUGINS as $slug => $spec) {
             if ($slug !== 'polylang' || $localized) {

@@ -12,7 +12,7 @@ use TypedPress\Wp\Runtime;
 use TypedPress\Wp\SchemaVersions;
 
 /**
- * The runtime schema's own routes under `/__tp/api/v1/schema-versions` (spec §2.10; the hyphen keeps it clear of every kind name). Registered for
+ * The runtime schema's own routes under `/wp-json/typedpress/v1/schema-versions` (spec §2.10; the hyphen keeps it clear of every kind name). Registered for
  * every app; an app without `runtimeSchema: true` answers 404, as it would for any unknown path.
  *
  *   GET /schema-versions/lock     the site's active version as `tp/_generated/runtime-schema.json`

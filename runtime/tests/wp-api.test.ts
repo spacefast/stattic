@@ -515,8 +515,8 @@ beforeAll(async () => {
       "function spacefast_content_model_collection_term_slug($spaceId, $resourceId) {",
       "  return 'sf-' . substr(hash('sha256', $spaceId), 0, 16) . '-' . str_replace(['.', '_'], '-', $resourceId);",
       "}",
-      "function spacefast_content_space_id() { return (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''); }",
-      "function spacefast_content_require_space_id() { return spacefast_content_space_id(); }",
+      "if (!function_exists('spacefast_content_space_id')) { function spacefast_content_space_id() { return (string) ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''); } }",
+      "if (!function_exists('spacefast_content_require_space_id')) { function spacefast_content_require_space_id() { return spacefast_content_space_id(); } }",
       "function spacefast_content_space_meta_clause() {",
       "  return ['key' => '_spacefast_space_id', 'value' => spacefast_content_space_id(), 'compare' => '='];",
       "}",
@@ -563,7 +563,7 @@ beforeAll(async () => {
       "  }",
       "  return $found;",
       "}",
-      `require ${JSON.stringify(path.join(import.meta.dir, "../engine/wordpress/content-templates.php"))};`,
+      `require ${JSON.stringify(path.join(import.meta.dir, "../engine/deprecated/content/content-templates.php"))};`,
       "function setup_postdata($post) { $GLOBALS['post'] = $post; }",
       "function wp_reset_postdata() {}",
       "",
@@ -952,7 +952,7 @@ test("WordPress REST is available by default and retains the static Space's scop
 test("canonical WordPress documents share Customization styles", async () => {
   const page = await get(runtime, OPEN_HOST, "/about");
   const pageBody = await page.text();
-  expect(page.status).toBe(200);
+  expect(page.status, pageBody).toBe(200);
   expect(pageBody).toContain("WordPress about");
   expect(pageBody).toContain("/__spacefast_generated/theme.css");
   expect(pageBody.split(SDK_TAG)).toHaveLength(2);

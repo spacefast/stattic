@@ -38,10 +38,8 @@ const end = () => {
   if (--forms.pending === 0) idleNow();
 };
 
-const sameSite = (event, ref) =>
+const routerLink = (ref) =>
   ref instanceof HTMLAnchorElement &&
-  event.button === 0 &&
-  !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey &&
   (ref.target === "" || ref.target === "_self") &&
   !ref.hasAttribute("download") &&
   ref.origin === window.location.origin;
@@ -149,11 +147,23 @@ const announce = () => {
   setTimeout(() => { region.textContent = text; }, 50);
 };
 
+const canPrefetch = (ref) => routerLink(ref) && sameTemplate(ref) && !getConfig("core/router")?.clientNavigationDisabled;
+
 store("tp/router", {
+  callbacks: {
+    preparePrefetch() {
+      const { ref } = getElement();
+      // Core's document speculation and its region router have separate prefetch caches.
+      if (!canPrefetch(ref) || ref.classList.contains("no-prefetch")) return;
+      ref.classList.add("no-prefetch");
+      return () => ref.classList.remove("no-prefetch");
+    },
+  },
   actions: {
     navigate: withSyncEvent(function* (event) {
       const { ref } = getElement();
-      if (!sameSite(event, ref) || !sameTemplate(ref)) return;
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey ||
+          !routerLink(ref) || !sameTemplate(ref)) return;
       event.preventDefault();
       // Counted before anything waits: a submit whose answer comes in after this click drops it.
       forms.navigations++;
@@ -162,7 +172,7 @@ store("tp/router", {
     }),
     *prefetch() {
       const { ref } = getElement();
-      if (!(ref instanceof HTMLAnchorElement) || ref.origin !== window.location.origin || !sameTemplate(ref)) return;
+      if (!canPrefetch(ref)) return;
       const { actions } = yield import("@wordpress/interactivity-router");
       yield actions.prefetch(ref.href);
     },
@@ -252,8 +262,17 @@ store("tp/router", {
           showError(form);
           return;
         }
-        // The block template the answer renders in (`<body data-tp-template>`): one other than this
-        // page's has other chrome around its region, so it loads in full, as a <Link> to it would.
+        // A `<Live>` swap in progress finishes first; then this answer takes effect only if the
+        // visitor is still where they submitted from, the form is still on the page, and no later
+        // submit's answer is on the page already. Checked before the full-page fallback branches so
+        // a stale answer in another block template (or without a router region) never overrides a
+        // later navigation or submit.
+        yield forms.live;
+        if (forms.navigations !== navigations || pagePath(window.location.href) !== from || !form.isConnected) return;
+        if (ticket < forms.last) {
+          showError(form, "overtaken");
+          return;
+        }
         // An answer at another address, in another block template, has other chrome around its
         // region: it loads in full, as a <Link> to it would. The server kept its flash for that load
         // (the fetch said which template and page this is, `X-TP-Template`, `X-TP-From`), so the page
@@ -261,6 +280,7 @@ store("tp/router", {
         const answerTemplate = /<body\b[^>]*\sdata-tp-template="([^"]*)"/.exec(html)?.[1];
         if (answerTemplate !== undefined && answerTemplate !== document.body.dataset.tpTemplate && response.redirected && pagePath(response.url) !== from) {
           keepPending = true;
+          forms.last = ticket;
           forms.navigations++;
           window.location.assign(response.url);
           return;
@@ -269,19 +289,12 @@ store("tp/router", {
           // It came back to a page the router can't swap into: that page loads in full.
           if (response.redirected) {
             keepPending = true;
+            forms.last = ticket;
+            forms.navigations++;
             window.location.assign(withoutMarker(response.url));
           } else {
             showError(form);
           }
-          return;
-        }
-        // A `<Live>` swap in progress finishes first; then this answer renders only if the visitor
-        // is still where they submitted from, the form is still on the page, and no later submit's
-        // answer is on the page already.
-        yield forms.live;
-        if (forms.navigations !== navigations || pagePath(window.location.href) !== from || !form.isConnected) return;
-        if (ticket < forms.last) {
-          showError(form, "overtaken");
           return;
         }
         forms.last = ticket;

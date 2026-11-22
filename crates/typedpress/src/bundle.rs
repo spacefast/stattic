@@ -1,6 +1,8 @@
 //! Source-only publishing for hosts that own their compiler and WordPress platform.
 //! No package installation, plugin downloads, user PHP, or subprocesses.
 
+#[cfg(feature = "host")]
+use crate::schema::{ColType, Column};
 use crate::{
     diag::{Diag, Span},
     loader::{self, Fs},
@@ -15,6 +17,9 @@ use std::{
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SPACEPRESS_FORMAT: &str = "spacepress.source-bundle.v1";
+pub const SPACEPRESS_APP_FILE: &str = "app.spacepress.json";
+pub const SPACEPRESS_VENDOR_FILE: &str = "vendor.spacepress.json";
 pub const APP_FILE: &str = "app.typedpress.json";
 pub const VENDOR_FILE: &str = "vendor.typedpress.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
@@ -24,7 +29,66 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 #[serde(deny_unknown_fields)]
 pub struct SourceBundle {
     pub files: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub binary: BTreeMap<String, String>,
     pub canonical: BTreeMap<String, String>,
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = chunk.get(1).copied().unwrap_or(0);
+        let c = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(feature = "host")]
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let val = |b: u8| match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let bytes = text.as_bytes();
+    if !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.as_chunks::<4>().0 {
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        out.push((a << 2) | (b >> 4));
+        if chunk[2] != b'=' {
+            let c = val(chunk[2])?;
+            out.push((b << 4) | (c >> 2));
+            if chunk[3] != b'=' {
+                let d = val(chunk[3])?;
+                out.push((c << 6) | d);
+            }
+        } else if chunk[3] != b'=' {
+            return None;
+        }
+    }
+    Some(out)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +162,13 @@ impl Fs for Recording {
         self.files.borrow_mut().insert(relative(&self.root, &real)?);
         Ok(text)
     }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        let real = self.canonicalize(path)?;
+        let bytes = self.fs.read(&real)?;
+        self.files.borrow_mut().insert(relative(&self.root, path)?);
+        self.files.borrow_mut().insert(relative(&self.root, &real)?);
+        Ok(bytes)
+    }
     fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
         let real = self.fs.canonicalize(path)?;
         self.canonical
@@ -136,8 +207,9 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
         fs: fs.clone(),
         packages,
     });
-    let program =
-        loader::load_from(recording.clone(), &project.join("typedpress.config.ts")).map_err(|mut d| d.remove(0))?;
+    let entry = crate::layout::project_config(|p| fs.is_file(p), &project);
+    let is_spacepress_config = entry.file_name().is_some_and(|n| n == crate::layout::SPACEPRESS_CONFIG);
+    let program = loader::load_from(recording.clone(), &entry).map_err(|mut d| d.remove(0))?;
     let built = pipeline::build(&project, &program, || Ok(pipeline::Previous::none()), |_| None)?;
     if built.plugins.as_ref().is_some_and(|p| !p.plugins.is_empty()) {
         return Err(failure(
@@ -171,9 +243,15 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
     for path in recording.files.borrow().iter() {
         safe_input(path)?;
         let bundle = if is_vendor(path) { &mut vendor } else { &mut app };
-        bundle
-            .files
-            .insert(path.clone(), fs.read_to_string(&project.join(path)).map_err(io)?);
+        let bytes = fs.read(&project.join(path)).map_err(io)?;
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                bundle.files.insert(path.clone(), text);
+            }
+            Err(err) => {
+                bundle.binary.insert(path.clone(), base64_encode(&err.into_bytes()));
+            }
+        }
     }
     for (path, canonical) in recording.canonical.borrow().iter() {
         safe_input(path)?;
@@ -183,10 +261,18 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
     }
     let app = serde_json::to_string(&app).map_err(|e| failure(e.to_string()))?;
     let vendor = serde_json::to_string(&vendor).map_err(|e| failure(e.to_string()))?;
-    let manifest = manifest_for("typedpress.source-bundle.v1", &built.schema.name, &app, &vendor);
+    let format = if is_spacepress_config {
+        SPACEPRESS_FORMAT
+    } else {
+        "typedpress.source-bundle.v1"
+    };
+    let manifest = manifest_for(format, &built.schema.name, &app, &vendor);
     let mut public_files = Vec::new();
     capture_assets(&*fs, &project.join("public"), &project, &mut public_files)?;
     public_files.sort();
+    crate::assets::require_frontend_styles(&program, |file| {
+        public_files.binary_search(&format!("public/{file}")).is_ok()
+    })?;
     Ok(Capture {
         app,
         vendor,
@@ -253,16 +339,24 @@ fn capture_assets(fs: &dyn Fs, from: &Path, root: &Path, files: &mut Vec<String>
 /// Capture installed sources for the native CLI. The destination must be new.
 #[cfg(feature = "host")]
 pub fn sources(project: &Path, destination: &Path) -> Result<Manifest, Diag> {
+    #[cfg(feature = "cli")]
+    let _frontend = crate::frontend::prepare_styles(project)?;
     write_sources(project, destination, true)
 }
 
 #[cfg(feature = "host")]
 pub(crate) fn write_sources(project: &Path, destination: &Path, packages: bool) -> Result<Manifest, Diag> {
     let captured = capture(Rc::new(loader::Disk), project, packages)?;
+    let parsed: Manifest = serde_json::from_str(&captured.manifest).map_err(|e| failure(e.to_string()))?;
+    let (app_file, vendor_file) = if parsed.format == SPACEPRESS_FORMAT {
+        (SPACEPRESS_APP_FILE, SPACEPRESS_VENDOR_FILE)
+    } else {
+        (APP_FILE, VENDOR_FILE)
+    };
     write_capture(
         project,
         destination,
-        [(APP_FILE, &captured.app), (VENDOR_FILE, &captured.vendor)],
+        [(app_file, &captured.app), (vendor_file, &captured.vendor)],
         &captured.manifest,
     )
 }
@@ -387,6 +481,7 @@ impl Fs for CapturedFs {
             .sources
             .files
             .keys()
+            .chain(self.sources.binary.keys())
             .chain(self.sources.canonical.keys())
             .filter_map(|p| p.strip_prefix(&prefix))
             .filter_map(|p| p.split('/').next())
@@ -403,22 +498,47 @@ impl Fs for CapturedFs {
             .cloned()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "module not captured"))
     }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        let real = self.canonicalize(path)?;
+        let key = self.key(&real).unwrap();
+        if let Some(text) = self.sources.files.get(&key) {
+            return Ok(text.as_bytes().to_vec());
+        }
+        if let Some(encoded) = self.sources.binary.get(&key) {
+            return base64_decode(encoded).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid base64 in source bundle")
+            });
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "module not captured"))
+    }
     fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
         let key = self
             .key(path)
             .ok_or_else(|| std::io::Error::other("input escapes source bundle"))?;
         let canonical = self.sources.canonical.get(&key).unwrap_or(&key);
-        if !self.sources.files.contains_key(canonical) && !self.is_dir(&self.root.join(canonical)) {
+        if !self.sources.files.contains_key(canonical)
+            && !self.sources.binary.contains_key(canonical)
+            && !self.is_dir(&self.root.join(canonical))
+        {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound, key));
         }
         Ok(self.root.join(canonical))
     }
     fn is_file(&self, path: &Path) -> bool {
-        self.key(path).is_some_and(|p| self.sources.files.contains_key(&p))
+        self.key(path).is_some_and(|p| {
+            let target = self.sources.canonical.get(&p).unwrap_or(&p);
+            self.sources.files.contains_key(target) || self.sources.binary.contains_key(target)
+        })
     }
     fn is_dir(&self, path: &Path) -> bool {
-        self.key(path)
-            .is_some_and(|p| self.sources.files.keys().any(|f| f.starts_with(&(p.clone() + "/"))))
+        self.key(path).is_some_and(|p| {
+            let prefix = p + "/";
+            self.sources
+                .files
+                .keys()
+                .chain(self.sources.binary.keys())
+                .any(|f| f.starts_with(&prefix))
+        })
     }
     fn exists(&self, path: &Path) -> bool {
         self.is_file(path) || self.is_dir(path)
@@ -461,6 +581,7 @@ pub(crate) fn check_bundles(files: [(&str, Vec<u8>, &String); 2]) -> Result<Sour
         for path in bundle
             .files
             .keys()
+            .chain(bundle.binary.keys())
             .chain(bundle.canonical.keys())
             .chain(bundle.canonical.values())
         {
@@ -469,12 +590,14 @@ pub(crate) fn check_bundles(files: [(&str, Vec<u8>, &String); 2]) -> Result<Sour
         if bundle
             .files
             .keys()
+            .chain(bundle.binary.keys())
             .chain(bundle.canonical.keys())
             .any(|p| is_vendor(p) != vendor)
         {
             return Err(failure("app and vendor module ownership mismatch"));
         }
         sources.files.extend(bundle.files);
+        sources.binary.extend(bundle.binary);
         sources.canonical.extend(bundle.canonical);
     }
     Ok(sources)
@@ -494,19 +617,222 @@ pub(crate) struct Compiled {
     pub jobs: Vec<String>,
 }
 
+/// The line of a sync file that sets `key`: `key:` in front matter, `"key"` in JSON. Line 1 when
+/// the file doesn't name it (a missing field).
+#[cfg(feature = "host")]
+fn field_line(text: &str, key: &str) -> usize {
+    let quoted = format!("\"{key}\"");
+    text.lines()
+        .position(|line| {
+            let line = line.trim_start();
+            line.strip_prefix(key).is_some_and(|rest| rest.starts_with(':')) || line.starts_with(&quoted)
+        })
+        .map_or(1, |index| index + 1)
+}
+
+/// What the seed would refuse in one record's fields, as (field, message, help), in the runtime's
+/// own words (`Sync\Wire::decode`, `Schema::normalize`, `Schema::checkRules`, `Db::insert`).
+///
+/// Only what a file alone decides: an unknown field, a missing or null required field, a value
+/// outside an `enum`, text where a column takes text, and `min`/`max`. References, patterns,
+/// validators and nested values are checked when the record is written, and so is every value of
+/// a kind with a `beforeCreate` or `beforeUpdate` hook, which may change it first.
+#[cfg(feature = "host")]
+fn seed_field_problem(
+    collection: &crate::schema::Collection,
+    fields: &serde_json::Map<String, serde_json::Value>,
+    runtime_fields: bool,
+) -> Option<(String, String, Option<String>)> {
+    use crate::schema::HookKind;
+    use serde_json::Value;
+    let primary_key = collection.primary_key().map(|c| c.name.as_str());
+    let content = collection.content.as_deref();
+    let translations = |c: &Column| c.name == "translations" && collection.localized && c.system;
+    // `Sync\Wire::fieldNames`: the fields a record may carry.
+    let writable = |c: &Column| {
+        Some(c.name.as_str()) != primary_key
+            && Some(c.name.as_str()) != content
+            && c.name != "uid"
+            && !c.read_only
+            && c.on_update.is_none()
+            && !c.hidden
+            && (!c.derived || translations(c))
+    };
+    let hooked = [HookKind::BeforeCreate, HookKind::BeforeUpdate]
+        .iter()
+        .any(|hook| collection.hooks.contains_key(hook));
+    let count = |n: f64, unit: &str| {
+        let shown = if n.fract() == 0.0 {
+            format!("{}", n as i64)
+        } else {
+            n.to_string()
+        };
+        match unit {
+            "" => shown,
+            unit => format!("{shown} {unit}{}", if n == 1.0 { "" } else { "s" }),
+        }
+    };
+    for (name, value) in fields {
+        let Some(column) = collection.columns.get(name).filter(|c| writable(c)) else {
+            // With `runtimeSchema` the site may have fields this build doesn't declare.
+            if runtime_fields {
+                continue;
+            }
+            let names = collection
+                .columns
+                .values()
+                .filter(|c| writable(c))
+                .map(|c| c.name.as_str());
+            return Some((
+                name.clone(),
+                format!("Unknown or generated field '{name}'"),
+                crate::diag::suggest(name, names).map(|near| format!("did you mean `{near}`?")),
+            ));
+        };
+        // Drafts' own fields and references follow rules the write applies, and a hook runs
+        // before the checks below and may change the value they see.
+        if column.system || column.references.is_some() || hooked {
+            continue;
+        }
+        let stringy = column.ty.is_stringy() || column.ty == ColType::RichText;
+        if value.is_null() {
+            if column.not_null && column.default.is_none() && column.ty != ColType::Slug {
+                return Some((name.clone(), format!("{name} is required"), None));
+            }
+            continue;
+        }
+        if matches!(column.ty, ColType::Text | ColType::RichText) && !value.is_string() {
+            return Some((
+                name.clone(),
+                format!("{name} must be a string"),
+                (value.is_number() || value.is_boolean()).then(|| format!("quote it: `{name}: \"{value}\"`")),
+            ));
+        }
+        if column.ty != ColType::Select
+            && let (Some(allowed), Some(given)) = (&column.enum_values, value.as_str())
+            && !allowed.iter().any(|v| v == given)
+        {
+            return Some((
+                name.clone(),
+                format!("{name} must be one of: {}", allowed.join(", ")),
+                None,
+            ));
+        }
+        let (size, unit) = match value {
+            Value::String(text) if stringy => (text.chars().count() as f64, "character"),
+            Value::Array(items)
+                if matches!(
+                    column.ty,
+                    ColType::MediaList | ColType::Select | ColType::Repeater | ColType::Blocks
+                ) =>
+            {
+                (items.len() as f64, "item")
+            }
+            Value::Number(n) if matches!(column.ty, ColType::Integer | ColType::Real) => {
+                (n.as_f64().unwrap_or_default(), "")
+            }
+            _ => continue,
+        };
+        let verb = if unit == "item" { "have" } else { "be" };
+        if let Some(min) = column.rules.min.filter(|min| size < *min) {
+            return Some((
+                name.clone(),
+                format!("{name} must {verb} at least {}", count(min, unit)),
+                None,
+            ));
+        }
+        if let Some(max) = column.rules.max.filter(|max| size > *max) {
+            let has = match unit {
+                "" => String::new(),
+                unit => format!("it has {}", count(size, unit)),
+            };
+            return Some((
+                name.clone(),
+                format!("{name} must {verb} at most {}", count(max, unit)),
+                (!has.is_empty()).then_some(has),
+            ));
+        }
+    }
+    // A new record needs every required field (`Db::insert`); WooCommerce fills its own.
+    if collection.commerce.is_none() {
+        for column in collection.columns.values() {
+            if writable(column)
+                && !column.system
+                && !column.optional_on_insert()
+                && Some(column.name.as_str()) != collection.slug.as_deref()
+                && !collection.before_create_fills.contains(&column.name)
+                && !fields.contains_key(&column.name)
+            {
+                return Some((column.name.clone(), format!("{} is required", column.name), None));
+            }
+        }
+    }
+    None
+}
+
+/// The first HTML block of a Markdown body, as (line in the body, its opening text). The runtime
+/// reads one as a Custom HTML block (`core/html`), which `Sync\Markdown::fromBlocks` refuses to
+/// write back, so the record would be refused when it is seeded. HTML inside a line of text is
+/// kept, and code is text.
+///
+/// A body that holds serialized blocks (`<!-- wp:`) is read by WordPress's own parser, and one
+/// that writes a component's tag (`<Callout>`, when the app has components content may use) is
+/// split around its tags and judged by what it reads back as: the runtime decides both.
+#[cfg(feature = "host")]
+fn markdown_html_block(body: &str, components: bool) -> Option<(usize, String)> {
+    use pulldown_cmark::{Event, Parser, Tag};
+    if body.contains("<!-- wp:")
+        || components
+            && body.lines().any(|line| {
+                line.strip_prefix('<')
+                    .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_uppercase()))
+            })
+    {
+        return None;
+    }
+    for (event, range) in Parser::new(body).into_offset_iter() {
+        if !matches!(event, Event::Start(Tag::HtmlBlock)) {
+            continue;
+        }
+        let html = body[range.clone()].trim();
+        // pulldown-cmark's CommonMark adds `search` to the block tags; the runtime's
+        // league/commonmark doesn't, and reads `<search>` as inline HTML in a paragraph.
+        if html.get(..7).is_some_and(|tag| tag.eq_ignore_ascii_case("<search"))
+            && html[7..].starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace())
+        {
+            continue;
+        }
+        let line = body[..range.start].matches('\n').count() + 1;
+        let shown = html.lines().next().unwrap_or_default();
+        let shown = match shown.char_indices().nth(60) {
+            Some((end, _)) => format!("{}…", &shown[..end]),
+            None => shown.to_string(),
+        };
+        return Some((line, shown));
+    }
+    None
+}
+
 /// Each synced kind's files as seed records (`wp typedpress seed --records`), as a publish seeds a Space:
 /// one `{collection, format, records}` document per kind, by kind name, parents before children.
+///
+/// With `check`, a file the seed would refuse on the site is an error here, at the file and the
+/// field ([`seed_field_problem`], [`markdown_html_block`]): what a project built from disk gets,
+/// where the author can fix the file. A captured source bundle is compiled without it, as before:
+/// the site answers for each record there, and one it already has is kept whatever its file says.
 #[cfg(feature = "host")]
 pub(crate) fn seed_records(
     fs: &dyn Fs,
     root: &Path,
     schema: &crate::schema::Schema,
+    check: bool,
 ) -> Result<Vec<(String, serde_json::Value)>, Diag> {
     let mut seeds = Vec::new();
     for (name, collection) in &schema.collections {
         let Some(sync) = &collection.sync else { continue };
         let mut records = Vec::new();
-        let mut uids = BTreeSet::new();
+        // uid → the file that has it, so a copied file's error names both.
+        let mut uids: BTreeMap<String, String> = BTreeMap::new();
         let nested = sync["nested"] == true;
         let sync_dir = root.join(sync["dir"].as_str().unwrap_or("."));
         // A folder tree: (record index, the file holding its parent), resolved once every file is read.
@@ -536,6 +862,14 @@ pub(crate) fn seed_records(
                 )
             };
             let (mut fields, body) = parsed.map_err(|(line, message)| diagnostic(line, message))?;
+            if collection.commerce.as_deref() == Some("product")
+                && fields.get("price").is_some_and(|v| !v.is_string() && !v.is_null())
+            {
+                return Err(diagnostic(
+                    1,
+                    "price must be an exact decimal string (quote it in front matter)".into(),
+                ));
+            }
             // Below the sync folder: what a folder-tree file is named by, and its stable identity.
             let below = relative(&sync_dir, &path).map_err(io)?;
             let place = if nested {
@@ -589,16 +923,48 @@ pub(crate) fn seed_records(
                     ));
                 }
             };
-            if !uids.insert(uid.clone()) {
-                return Err(diagnostic(1, format!("duplicate sync uid {uid}")));
+            let shown = relative(root, &path).map_err(io)?;
+            if let Some(other) = uids.insert(uid.clone(), shown.clone()) {
+                return Err(diagnostic(
+                    field_line(&text, "uid"),
+                    format!("{shown} and {other} have the same uid {uid}"),
+                )
+                .help("a copied file keeps its `uid` line: delete that line from the copy"));
+            }
+            // What the seed would refuse, found here so the build names the file and the field.
+            if check
+                && let Some((field, message, help)) =
+                    seed_field_problem(collection, &fields, schema.runtime_schema.is_some())
+            {
+                let problem = diagnostic(field_line(&text, &field), message);
+                return Err(match help {
+                    Some(help) => problem.help(help),
+                    None => problem,
+                });
+            }
+            if check
+                && sync["format"] == "md"
+                && collection
+                    .content
+                    .as_ref()
+                    .is_some_and(|c| collection.columns.get(c).is_some_and(|c| c.ty == ColType::RichText))
+                && let Some(body) = &body
+                && let Some((line, html)) = markdown_html_block(body, !schema.blocks.is_empty())
+            {
+                // The body is the end of the file, so its lines count from where the front matter stops.
+                let unix = text.replace("\r\n", "\n");
+                let first = unix[..unix.len() - body.len()].matches('\n').count();
+                return Err(diagnostic(
+                    first + line,
+                    format!("`{html}` is an HTML block, which a Markdown file can't hold: WordPress stores it as a Custom HTML block that can't be written back as Markdown"),
+                )
+                .help("write it in Markdown, or put the markup in a component the content may use (`export const blocks` in tp/components/) and write its tag"));
             }
             if let Some(parent) = place {
                 parents.push((records.len(), parent));
                 by_path.insert(below, uid.clone());
             }
-            records.push(
-                serde_json::json!({"uid":uid,"fields":fields,"body":body,"path":relative(root,&path).map_err(io)?}),
-            );
+            records.push(serde_json::json!({"uid":uid,"fields":fields,"body":body,"path":shown}));
         }
         if nested {
             // Each record's parent is its folder's index file, by uid; parents are seeded before
@@ -652,7 +1018,8 @@ pub(crate) fn compile_tree(
     };
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| failure(e.to_string()))?;
     let legacy = manifest.format == crate::zero_bundle::FORMAT;
-    if !(legacy || manifest.format == "typedpress.source-bundle.v1")
+    let is_spacepress_bundle = manifest.format == SPACEPRESS_FORMAT;
+    if !(legacy || is_spacepress_bundle || manifest.format == "typedpress.source-bundle.v1")
         || manifest.name.is_empty()
         || !manifest
             .name
@@ -664,9 +1031,14 @@ pub(crate) fn compile_tree(
     let sources = if legacy {
         crate::zero_bundle::read(source, &manifest, raw)?
     } else {
+        let (app_file, vendor_file) = if is_spacepress_bundle && source.join(SPACEPRESS_APP_FILE).is_file() {
+            (SPACEPRESS_APP_FILE, SPACEPRESS_VENDOR_FILE)
+        } else {
+            (APP_FILE, VENDOR_FILE)
+        };
         let captured = read_bundles(
             source,
-            [(APP_FILE, &manifest.app_sha256), (VENDOR_FILE, &manifest.vendor_sha256)],
+            [(app_file, &manifest.app_sha256), (vendor_file, &manifest.vendor_sha256)],
         )?;
         // A bundle captured before `tp/_generated/` names its locks and ledger at their old paths.
         // The hashes cover the bytes as captured; only the paths are read on this layout.
@@ -675,6 +1047,11 @@ pub(crate) fn compile_tree(
                 .files
                 .into_iter()
                 .map(|(path, text)| (crate::layout::current(&path), text))
+                .collect(),
+            binary: captured
+                .binary
+                .into_iter()
+                .map(|(path, data)| (crate::layout::current(&path), data))
                 .collect(),
             canonical: captured
                 .canonical
@@ -719,7 +1096,8 @@ pub(crate) fn compile_tree(
         sources,
         module_alias: legacy.then_some(crate::zero_bundle::MODULE),
     });
-    let program = loader::load_from(fs.clone(), &root.join("typedpress.config.ts")).map_err(|mut d| d.remove(0))?;
+    let entry = crate::layout::project_config(|p| fs.is_file(p), &root);
+    let program = loader::load_from(fs.clone(), &entry).map_err(|mut d| d.remove(0))?;
     let snapshot = previous
         .map(|p| {
             std::fs::read(p.join("snapshot.json"))
@@ -745,8 +1123,10 @@ pub(crate) fn compile_tree(
     if built.plugins.as_ref().is_some_and(|p| !p.plugins.is_empty()) {
         return Err(failure("hosted apps cannot install WordPress plugins"));
     }
-    let seeds = seed_records(&*fs, &root, &built.schema)?;
-    public_assets(&assets.join("public"), None)?;
+    let seeds = seed_records(&*fs, &root, &built.schema, false)?;
+    let public = assets.join("public");
+    public_assets(&public, None)?;
+    crate::assets::require_frontend_styles(&program, |file| public.join(file).is_file())?;
     std::fs::create_dir(output).map_err(io)?;
     if !source_migrations.is_empty() {
         let archive = output.join("source-migrations");
@@ -787,10 +1167,11 @@ pub(crate) fn compile_tree(
         std::fs::create_dir_all(&client).map_err(io)?;
         std::fs::write(client.join(name), bytes).map_err(io)?;
     }
-    let requirements: BTreeMap<_, _> = crate::platform::plugins(built.schema.locales.is_some())
-        .into_iter()
-        .map(|p| (p.slug, p.version))
-        .collect();
+    let requirements: BTreeMap<_, _> =
+        crate::platform::app_plugins(built.schema.locales.is_some(), built.schema.store.is_some())
+            .into_iter()
+            .map(|p| (p.slug, p.version))
+            .collect();
     // The app's `tp/app/` routes and pages, so the host can tell which of its URLs outside
     // /wp-json to hand to WordPress without booting it to ask. Identity's /identity and the app
     // plugin's own files are not listed. Both lists use the route path grammar: a
@@ -851,7 +1232,7 @@ pub(crate) fn compile_tree(
     let mut tables: Vec<&str> = schema
         .collections
         .values()
-        .filter(|c| !c.editor && !c.auth && c.taxonomy.is_none())
+        .filter(|c| !c.editor && !c.auth && c.taxonomy.is_none() && c.commerce.is_none())
         .map(|c| c.table.as_str())
         .collect();
     tables.sort();
@@ -864,6 +1245,10 @@ pub(crate) fn compile_tree(
     let mut manifest = serde_json::json!({"format":"typedpress.hosted.v1", "hostContract":crate::host_contract::HOST_CONTRACT, "compiler":VERSION, "app":built.schema.name,
         "wordpress":crate::platform::WORDPRESS, "php":crate::platform::PHP, "requires":requirements, "routes":routes, "pagePaths":page_paths,
         "summary":summary, "host":crate::host_contract::manifest_host(), "appSourceSha256":manifest.app_sha256, "vendorSourceSha256":manifest.vendor_sha256});
+    if built.schema.store.is_some() {
+        manifest["maxTablePrefix"] = serde_json::json!(20);
+        manifest["host"]["maxTablePrefix"] = serde_json::json!(20);
+    }
     let sealed = sealed_plugins(&built.schema, hosted_first(&built.schema));
     // No key when the app isn't sealed, so an unsealed app's tree hashes as it did before.
     if let Some(sealed) = &sealed {
@@ -930,7 +1315,7 @@ pub(crate) fn sealed_plugins(
         // runs its builds through.
         .chain(["typedpress".to_string(), "typedpress-admin".to_string()])
         .chain(
-            crate::platform::plugins(schema.locales.is_some())
+            crate::platform::app_plugins(schema.locales.is_some(), schema.store.is_some())
                 .into_iter()
                 .map(|p| p.slug),
         )
@@ -1006,5 +1391,55 @@ pub(crate) fn compile_cli(args: &[String]) -> std::process::ExitCode {
             eprintln!("{}", crate::diag::render(&e, Path::new(".")));
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(all(test, feature = "host"))]
+mod seed_check_tests {
+    use super::markdown_html_block;
+
+    #[test]
+    fn an_html_block_is_found_with_its_line_and_inline_html_and_code_are_not() {
+        assert_eq!(
+            markdown_html_block("Hello\n\n<iframe src=\"https://example.com\"></iframe>\n\nBye\n", false),
+            Some((3, "<iframe src=\"https://example.com\"></iframe>".into()))
+        );
+        assert_eq!(
+            markdown_html_block("- one\n- <div>two</div>\n", false),
+            Some((2, "<div>two</div>".into()))
+        );
+        assert_eq!(
+            markdown_html_block("a\n\n<!-- a note -->\n", false),
+            Some((3, "<!-- a note -->".into()))
+        );
+        for kept in [
+            "press <kbd>Ctrl</kbd> and <iframe src=\"x\"></iframe> inline\n",
+            "```html\n<iframe></iframe>\n```\n",
+            "para\n\n    <iframe></iframe>\n",
+            "use `<iframe>` here\n",
+            "see <https://example.com>\n",
+            "<em>emphasis</em> first on its line\n",
+            // A block tag only in pulldown-cmark's CommonMark version; the runtime keeps it inline.
+            "text\n\n<search>x</search> more\n",
+            "text\n<search>x</search>\n",
+            "<SEARCH role=\"search\">x</SEARCH>\n",
+        ] {
+            assert_eq!(markdown_html_block(kept, false), None, "{kept}");
+        }
+    }
+
+    #[test]
+    fn serialized_blocks_and_component_tags_are_left_to_the_runtime() {
+        assert_eq!(
+            markdown_html_block("<!-- wp:paragraph -->\n<p>hi</p>\n<!-- /wp:paragraph -->\n", false),
+            None
+        );
+        let callout = "<Callout type=\"note\">\nhi\n</Callout>\n\n<div>x</div>\n";
+        assert_eq!(markdown_html_block(callout, true), None);
+        // Without components content may use, the tag is plain HTML to WordPress.
+        assert_eq!(
+            markdown_html_block(callout, false),
+            Some((1, "<Callout type=\"note\">".into()))
+        );
     }
 }

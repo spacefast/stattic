@@ -179,19 +179,29 @@ final class Organizations
                 $secret,
                 604800,
             );
-            if (
-                !wp_mail(
+            $siteName = get_bloginfo("name");
+            $identityUrl = home_url("/identity");
+            $invitationCode = $id . "." . $secret;
+            $subject = "Join your organization on " . $siteName;
+            $custom = class_exists(\TypedPress\Render\Email::class)
+                ? \TypedPress\Render\Email::invitation($siteName, $identityUrl, $invitationCode)
+                : null;
+            $sent = $custom === null
+                ? wp_mail(
                     $email,
-                    "Join your organization on " . get_bloginfo("name"),
-                    "Sign in at " .
-                        home_url("/identity") .
+                    $subject,
+                    "Sign in at " . $identityUrl .
                         " and verify this email. In Organizations, enter this invitation code:\n\n" .
-                        $id .
-                        "." .
-                        $secret .
-                        "\n\nExpires in seven days.",
+                        $invitationCode . "\n\nExpires in seven days.",
                 )
-            ) {
+                : \TypedPress\Mail::sendWordPress(
+                    $email,
+                    $subject,
+                    $custom['html'],
+                    ['Content-Type: text/html; charset=UTF-8'],
+                    $custom['text'],
+                );
+            if (!$sent) {
                 throw new Failure(
                     "email_delivery_failed",
                     "Invitation could not be sent.",

@@ -163,28 +163,7 @@ final class BlockTemplates
      */
     private static function chrome(?array $route): bool
     {
-        return self::choice($route, self::$plugin?->schema->app()['files'] ?? []) !== 'blank';
-    }
-
-    /**
-     * The template a route asks for: the page's `template`, else the nearest layout's, else
-     * `"theme"`.
-     *
-     * @param ?array<string, mixed> $route
-     * @param array<string, array<string, mixed>> $files
-     */
-    public static function choice(?array $route, array $files): string
-    {
-        if ($route === null) {
-            return 'theme';
-        }
-        foreach ([$route['page'] ?? null, ...array_reverse($route['layouts'] ?? [])] as $file) {
-            $template = is_string($file) ? ($files[$file]['template'] ?? null) : null;
-            if (is_string($template) && $template !== '') {
-                return $template;
-            }
-        }
-        return 'theme';
+        return ($route['template'] ?? 'theme') !== 'blank';
     }
 
     /** A choice as a template slug: `"theme"` and `"blank"` are TypedPress's own. */
@@ -205,17 +184,15 @@ final class BlockTemplates
     public static function resolve(string $slug): ?\WP_Block_Template
     {
         $template = self::published($slug);
-        $content = $template instanceof \WP_Block_Template ? self::expanded((string) $template->content) : '';
-        // The sign-in template shows the page only while the app has login.tsx: without it the
-        // page block prints nothing, and the template needs the Login form block instead.
-        $login = is_array(self::$plugin?->schema->app()['login'] ?? null);
-        $ok = match ($slug) {
-            self::NOT_FOUND => $template instanceof \WP_Block_Template,
-            self::LOGIN => ($login && has_block(self::PAGE_BLOCK, $content)) || has_block(self::LOGIN_BLOCK, $content),
-            default => has_block(self::PAGE_BLOCK, $content),
-        };
-        if ($ok) {
-            return $template;
+        // A custom 404 needs no slot. Login can use the page slot only if the app supplies login.tsx.
+        $login = $slug === self::LOGIN && is_array(self::$plugin?->schema->app()['login'] ?? null);
+        if ($template instanceof \WP_Block_Template) {
+            $slots = $slug === self::LOGIN
+                ? ($login ? [self::PAGE_BLOCK, self::LOGIN_BLOCK] : [self::LOGIN_BLOCK])
+                : [self::PAGE_BLOCK];
+            if ($slug === self::NOT_FOUND || self::containsSlot((string) $template->content, $slots)) {
+                return $template;
+            }
         }
         if ($slug === self::LOGIN && $template instanceof \WP_Block_Template) {
             error_log('TypedPress: the "' . self::LOGIN . '" block template has no sign-in form' . ($login ? '' : ' (the app has no login.tsx, so it needs the Login form block)') . '; its default content renders instead');
@@ -257,25 +234,26 @@ final class BlockTemplates
         return $template instanceof \WP_Block_Template ? $template : null;
     }
 
-    /**
-     * Template markup with each template part it places expanded to the part's own blocks, so a
-     * page block the owner put in a part counts as placed.
-     */
-    private static function expanded(string $content, int $depth = 0): string
+    /** Look inside template parts only when the template itself has no slot. @param list<string> $slots */
+    private static function containsSlot(string $content, array $slots, int $depth = 0): bool
     {
-        if ($depth > 3 || !str_contains($content, 'wp:template-part')) {
-            return $content;
+        foreach ($slots as $slot) {
+            if (has_block($slot, $content)) {
+                return true;
+            }
         }
-        $out = $content;
+        if ($depth >= 4 || !str_contains($content, 'wp:template-part')) {
+            return false;
+        }
         foreach (parse_blocks($content) as $block) {
             foreach (self::parts($block) as $slug) {
                 $part = get_block_template(get_stylesheet() . '//' . $slug, 'wp_template_part');
-                if ($part instanceof \WP_Block_Template) {
-                    $out .= "\n" . self::expanded((string) $part->content, $depth + 1);
+                if ($part instanceof \WP_Block_Template && self::containsSlot((string) $part->content, $slots, $depth + 1)) {
+                    return true;
                 }
             }
         }
-        return $out;
+        return false;
     }
 
     /** @return list<string> the slugs of the template parts a parsed block places, nested ones too */

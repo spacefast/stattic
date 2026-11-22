@@ -34,22 +34,6 @@ final class EditorSave
     /** Inserts of the open save's collection started inside it (hooks): their ids come first. */
     private static int $nested = 0;
 
-    public static function register(): void
-    {
-        add_filter('pre_wp_unique_post_slug', [self::class, 'uniqueSlug'], PHP_INT_MAX, 5);
-        add_filter('wp_insert_post_data', [self::class, 'begin'], PHP_INT_MAX, 4);
-        add_action('wp_insert_post', [self::class, 'inserted'], 0, 1);
-        // After fillEditorDefaults (8) and core's revision (9), before TypedPress's after hooks (20).
-        add_action('wp_after_insert_post', [self::class, 'check'], 9, 1);
-        add_action('wp_after_insert_post', [self::class, 'end'], PHP_INT_MAX, 1);
-        add_action('check_admin_referer', [self::class, 'beginRestore'], 10, 2);
-        // A permanent delete: beforeDelete, FK actions, core's delete and afterDelete, all or nothing.
-        add_action('before_delete_post', [self::class, 'beginDelete'], 0, 1);
-        add_action('deleted_post', [self::class, 'endDelete'], PHP_INT_MAX, 1);
-        add_action('wp_restore_post_revision', [self::class, 'endRestore'], PHP_INT_MAX, 1);
-        register_shutdown_function([self::class, 'shutdown']);
-    }
-
     /** Native collision resolution must not reveal competing slugs before save authorization. */
     public static function uniqueSlug(mixed $override, string $slug, ?int $postId, string $status, string $postType): mixed
     {

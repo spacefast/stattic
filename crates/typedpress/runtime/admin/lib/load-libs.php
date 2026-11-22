@@ -22,16 +22,43 @@ require_once __DIR__ . '/api/menu-items.php';
 require_once __DIR__ . '/api/init-modules.php';
 require_once __DIR__ . '/api/routes.php';
 
-// REST API overrides and endpoints.
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-attachments-controller.php';
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-field-collections-controller.php';
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-view-config-controller.php';
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-editor-controller.php';
+// Core and plugins can request a controller before REST initializes (for example, for attachments).
+spl_autoload_register(
+	static function ( $class ) {
+		static $files = array(
+			'typedpress_admin_rest_attachments_controller'       => 'class-typedpress-admin-rest-attachments-controller.php',
+			'typedpress_admin_rest_field_collections_controller' => 'class-typedpress-admin-rest-field-collections-controller.php',
+			'typedpress_admin_rest_view_config_controller'       => 'class-typedpress-admin-rest-view-config-controller.php',
+			'typedpress_admin_rest_editor_controller'            => 'class-typedpress-admin-rest-editor-controller.php',
+			'typedpress_admin_rest_themes_controller'            => 'class-wp-rest-themes-controller.php',
+			'typedpress_admin_rest_plugins_controller'           => 'class-typedpress-admin-rest-plugins-controller.php',
+			'typedpress_admin_rest_resolved_template_controller' => 'class-typedpress-admin-rest-resolved-template-controller.php',
+		);
+		$key = strtolower( $class );
+		if ( isset( $files[ $key ] ) ) {
+			require_once __DIR__ . '/rest-api/' . $files[ $key ];
+		}
+	}
+);
+
+add_action(
+	'rest_api_init',
+	static function () {
+		( new TypedPress_Admin_REST_Field_Collections_Controller() )->register_routes();
+		( new TypedPress_Admin_REST_View_Config_Controller() )->register_routes();
+		( new TypedPress_Admin_REST_Editor_Controller() )->register_routes();
+	}
+);
 require_once __DIR__ . '/rest-api/core-rest-api-overrides.php';
 
-require_once __DIR__ . '/rest-api/class-wp-rest-themes-controller.php';
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-plugins-controller.php';
-require_once __DIR__ . '/rest-api/class-typedpress-admin-rest-resolved-template-controller.php';
+add_action(
+	'rest_api_init',
+	static function () {
+		( new TypedPress_Admin_REST_Themes_Controller() )->register_routes();
+		( new TypedPress_Admin_REST_Plugins_Controller() )->register_routes();
+		( new TypedPress_Admin_REST_Resolved_Template_Controller() )->register_routes();
+	}
+);
 require_once __DIR__ . '/rest-api/plugins-rest-api-overrides.php';
 
 // Core Entities overrides.
@@ -52,6 +79,9 @@ require_once __DIR__ . '/menu.php';
 
 // Screens declared once for both admins.
 require_once __DIR__ . '/screens.php';
+
+// Composable dashboards and declarative widgets.
+require_once __DIR__ . '/dashboards.php';
 
 // Build output: registers the modules, routes and fields. Absent until the build is committed.
 if ( is_file( __DIR__ . '/../build/index.php' ) ) {

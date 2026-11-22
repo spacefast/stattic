@@ -28,20 +28,20 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
     mkdirSync(path.join(project, "tp/app"), { recursive: true });
     mkdirSync(path.join(project, "tp/components"), { recursive: true });
     writeFileSync(
-      path.join(project, "typedpress.config.ts"),
-      'import {defineConfig} from "typedpress"; export default defineConfig({name:"hosted",admin:false});',
+      path.join(project, "spacepress.config.ts"),
+      'import {defineConfig} from "spacepress"; export default defineConfig({name:"hosted",admin:false});',
     );
     writeFileSync(
       path.join(project, "tp/actions.ts"),
-      'import {action} from "typedpress"; export const ping = action({access:"anyone",handler(){return {message:"pong"};}});',
+      'import {action} from "spacepress"; export const ping = action({access:"anyone",handler(){return {message:"pong"};}});',
     );
     writeFileSync(
       path.join(project, "tp/app/page.tsx"),
-      'import {Counter} from "../components/Counter"; export default function Home(){return <main><h1>TypedPress hosted page</h1><Counter /></main>;}',
+      'import {Counter} from "../components/Counter"; export default function Home(){return <main><h1>SpacePress hosted page</h1><Counter /></main>;}',
     );
     writeFileSync(
       path.join(project, "tp/components/Counter.tsx"),
-      '"use client"; import {useState} from "typedpress/client"; export function Counter(){const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{count}</button>;}',
+      '"use client"; import {useState} from "spacepress/client"; export function Counter(){const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{count}</button>;}',
     );
     const step = await prepareZeroV2SourcePublish(project);
     assert.ok(step);
@@ -95,10 +95,10 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         version_id: "ver_typedpress",
         hostnames: [host],
         production_hostnames: [host],
-        config: publicAccessConfig({ zero_generation: "tp_v1" }, "live_and_all_versions"),
+        config: publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions"),
       });
       // An authored response that names a platform refusal code: the app's own
-      // WordPress code sets the header while the TypedPress page renders.
+      // WordPress code sets the header while the SpacePress page renders.
       const muPlugins = path.join(rt.root, "wp-content/mu-plugins");
       mkdirSync(muPlugins, { recursive: true });
       writeFileSync(
@@ -108,26 +108,26 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
       const page = await get(rt, host, "/");
       const body = await page.text();
       assert.equal(page.status, 200, body + rt.diagnostics());
-      assert.match(body, /TypedPress hosted page/);
+      assert.match(body, /SpacePress hosted page/);
       // An ordinary authored header map's copy is dropped at the send boundary,
       // while the same app code's other header arrives.
       assert.equal(page.headers.get("x-tp-proof"), "authored");
       assert.equal(page.headers.get("x-spacefast-refusal"), null);
-      const assetPath = body.match(/\/__tp\/assets\/[^"'<>\s]+\.(?:js|css)/)?.[0];
+      const assetPath = body.match(/\/wp-content\/spacepress-assets\/[^"'<>\s]+\.(?:js|css)/)?.[0];
       assert.ok(assetPath, "The rendered page declares a hosted client asset");
       const asset = await get(rt, host, assetPath);
       assert.equal(asset.status, 200, await asset.clone().text());
       const rewritten = await get(rt, host, "/welcome");
       const rewrittenBody = await rewritten.text();
       assert.equal(rewritten.status, 200, rewrittenBody + rt.diagnostics());
-      assert.match(rewrittenBody, /TypedPress hosted page/);
-      // The Space's content-type allowlist also covers TypedPress assets.
+      assert.match(rewrittenBody, /SpacePress hosted page/);
+      // The Space's content-type allowlist also covers SpacePress assets.
       await putRoute(rt, "spc_typedpress", "production", {
         version_id: "ver_typedpress",
         hostnames: [host],
         production_hostnames: [host],
         config: publicAccessConfig(
-          { zero_generation: "tp_v1", content_types: { allowed: ["text/html"] } },
+          { zero_generation: "spacepress", content_types: { allowed: ["text/html"] } },
           "live_and_all_versions",
         ),
       });
@@ -137,9 +137,9 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         version_id: "ver_typedpress",
         hostnames: [host],
         production_hostnames: [host],
-        config: publicAccessConfig({ zero_generation: "tp_v1" }, "live_and_all_versions"),
+        config: publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions"),
       });
-      const bootstrap = `require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/zero-v2.php"))};_stattic_zero_v2_select(${JSON.stringify(rt.storageRoot)},"spc_typedpress","ver_typedpress",["zero_generation"=>"tp_v1"]);`;
+      const bootstrap = `require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};require_once ${JSON.stringify(path.join(rt.engineRoot, "shared/spacepress.php"))};_stattic_spacepress_select(${JSON.stringify(rt.storageRoot)},"spc_typedpress","ver_typedpress",["zero_generation"=>"spacepress"]);`;
       wp(
         `--exec=${bootstrap}`,
         "eval",
@@ -173,7 +173,7 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
       assert.equal(status.status, "ran", out);
       assert.equal(status.failures, 0, out);
       assert.ok(status.processed > 0, out);
-      const action = await get(rt, host, "/__tp/api/v1/actions/ping", {
+      const action = await get(rt, host, "/wp-json/spacepress/v1/actions/ping", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{}",
@@ -181,23 +181,23 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
       const actionBody = await action.text();
       assert.equal(action.status, 200, actionBody);
       assert.deepEqual(JSON.parse(actionBody), { data: { message: "pong" } });
-      const source = await get(rt, host, "/.typedpress-source/app.typedpress.json");
+      const source = await get(rt, host, "/.spacepress-source/app.spacepress.json");
       assert.equal(source.status, 403);
       await deploy(rt, {
         spaceId: "spc_typedpress",
         versionId: "ver_typedpress_next",
         files,
-        finalize: { zero_generation: "tp_v1" },
+        finalize: { zero_generation: "spacepress" },
       });
       await putRoute(rt, "spc_typedpress", "production", {
         version_id: "ver_typedpress_next",
         hostnames: [host],
         production_hostnames: [host],
-        config: publicAccessConfig({ zero_generation: "tp_v1" }, "live_and_all_versions"),
+        config: publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions"),
       });
       const next = await get(rt, host, "/");
       assert.equal(next.status, 200, rt.diagnostics());
-      assert.match(await next.text(), /TypedPress hosted page/);
+      assert.match(await next.text(), /SpacePress hosted page/);
     } finally {
       await step.cleanup?.();
     }

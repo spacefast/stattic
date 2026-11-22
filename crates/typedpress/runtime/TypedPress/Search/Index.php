@@ -128,7 +128,7 @@ final class Index
     /** @return list<string> the kind's searchable fields: title, content, text and richText, never system ones */
     public static function fields(array $spec): array
     {
-        if ($spec['taxonomy'] ?? false) {
+        if (($spec['taxonomy'] ?? false) || ($spec['commerce'] ?? '') === 'order') {
             return []; // `search` on a taxonomy isn't built yet
         }
         $out = [];

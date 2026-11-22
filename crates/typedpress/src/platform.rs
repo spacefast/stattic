@@ -52,6 +52,23 @@ pub fn plugins(localized: bool) -> Vec<crate::wp_plugins::Plugin> {
         .collect()
 }
 
+/// Optional native commerce runtime, pinned like the other platform plugins.
+pub fn app_plugins(localized: bool, commerce: bool) -> Vec<crate::wp_plugins::Plugin> {
+    let mut pins = plugins(localized);
+    if commerce {
+        pins.push(crate::wp_plugins::Plugin {
+            slug: "woocommerce".into(),
+            version: "11.3.0".into(),
+            sha256: Some("d9eb1e46df8309eb37b6f7f3fba51480f2a9a00e7feb10b1487592fde39accc6".into()),
+            requires: Vec::new(),
+            plugin_data: Some(crate::wp_plugins::Resource::WordPress {
+                slug: "woocommerce.11.3.0.zip".into(),
+            }),
+        });
+    }
+    pins
+}
+
 pub fn requirements() -> serde_json::Value {
     let plugins: serde_json::Map<String, serde_json::Value> = plugins(true)
         .into_iter()

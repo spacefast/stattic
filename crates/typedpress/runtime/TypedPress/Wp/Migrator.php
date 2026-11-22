@@ -398,9 +398,9 @@ final class Migrator
      * to 30 seconds for another holder, then throws rather than letting the caller run on a schema
      * that is still changing.
      */
-    public static function locked(Connection $db, string $name, callable $fn): mixed
+    public static function locked(Connection $db, string $name, callable $fn, int $seconds = 30): mixed
     {
-        return $db->locked('typedpress:' . substr(hash('sha256', DB_NAME . ':' . $db->prefix() . ':' . $name), 0, 40), 30, $fn);
+        return $db->locked('typedpress:' . substr(hash('sha256', DB_NAME . ':' . $db->prefix() . ':' . $name), 0, 40), $seconds, $fn);
     }
 
     /**

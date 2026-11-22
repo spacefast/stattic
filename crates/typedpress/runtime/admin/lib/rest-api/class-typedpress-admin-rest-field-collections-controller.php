@@ -206,10 +206,3 @@ class TypedPress_Admin_REST_Field_Collections_Controller extends WP_REST_Control
 		return $params;
 	}
 }
-
-add_action(
-	'rest_api_init',
-	function () {
-		( new TypedPress_Admin_REST_Field_Collections_Controller() )->register_routes();
-	}
-);

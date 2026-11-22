@@ -11,12 +11,24 @@ namespace TypedPress\Wp;
  *   string except `?p=`, so each path is cleared in that form;
  * - the VIP edge cache (`wpvip_purge_edge_cache_for_url()`, or `wpcom_vip_purge_edge_cache_for_url()`
  *   on older VIP mu-plugins): absolute URLs, query strings dropped by VIP itself;
- * - Jetpack Boost's page cache, through its public `jetpack_boost_clear_page_cache_url` action.
+ * - Jetpack Boost's page cache, through its public `jetpack_boost_clear_page_cache_url` action;
+ * - the WP Cloud (Atomic) edge, through the platform's `edge_cache_purge_uris` action (absolute
+ *   URLs) and `edge_cache_purge_domain` for the whole host, the actions Jetpack fires. The platform
+ *   registers them on `init`, only where its purge API is configured, queues what they ask for and
+ *   sends it once at shutdown, clearing the host's Batcache entries first. The edge stores public
+ *   pages and keeps serving one past its `s-maxage` while it refreshes in the background, so a
+ *   purge is what makes a write show at once.
  * A whole-host purge (`/*`), or more paths than VIP queues in one request (VIP_URLS), bans the VIP
- * site; `/*` also clears Boost's whole cache. Batcache has no whole-site clear, so its entries run out
- * with the cache window. Boost clears a URL recursively, so the home page goes to its own home action.
- * Batcache counts only while its drop-in runs (`$batcache` is set): its manager plugin defines
- * `batcache_clear_url()` even when WP_CACHE is off.
+ * site; `/*` also clears Boost's whole cache and purges the WP Cloud edge domain. Batcache itself has
+ * no whole-site clear (its object-cache group is shared by every site of a network), so outside WP
+ * Cloud its entries run out with the cache window. Boost clears a URL recursively, so the home page
+ * goes to its own home action. Batcache counts only while its drop-in runs (`$batcache` is set): its
+ * manager plugin defines `batcache_clear_url()` even when WP_CACHE is off.
+ *
+ * Batcache stores what a request prints whatever its `Cache-Control` says, and skips only requests
+ * with WordPress cookies. A request signed in another way (an application password, a bearer token,
+ * an Identity session) would be stored and replayed to anonymous visitors, so any request that runs
+ * as a user cancels Batcache ({@see private()}).
  *
  * Nothing listens when none of them is loaded, so on a site without a page cache TypedPress records and
  * announces nothing (`has_action('tp_purge_urls')` stays false).
@@ -28,17 +40,36 @@ final class PageCaches
 
     public static function register(): void
     {
-        // After every plugin (Batcache, Jetpack Boost) and mu-plugin (VIP) has defined its functions;
-        // at once when the runtime is mounted later than that.
+        add_action('set_current_user', [self::class, 'private'], 0, 0);
+        // A plugin that loaded first may have signed the request in already (the deploy plugin does).
+        if (did_action('set_current_user') > 0) {
+            self::private();
+        }
+        // After every plugin (Batcache, Jetpack Boost) and mu-plugin (VIP) has defined its functions,
+        // and again after `init`, where the WP Cloud platform adds its purge actions; at once when the
+        // runtime is mounted later than that.
         $listen = static function (): void {
             if (self::present() !== [] && !has_action('tp_purge_urls', [self::class, 'purge'])) {
                 add_action('tp_purge_urls', [self::class, 'purge']);
             }
         };
-        if (did_action('plugins_loaded') > 0 && !doing_action('plugins_loaded')) {
-            $listen();
-        } else {
-            add_action('plugins_loaded', $listen, PHP_INT_MAX);
+        foreach (['plugins_loaded', 'init'] as $hook) {
+            if (did_action($hook) > 0 && !doing_action($hook)) {
+                $listen();
+            } else {
+                add_action($hook, $listen, PHP_INT_MAX);
+            }
+        }
+    }
+
+    /** set_current_user: a response this request makes as a signed-in user is never Batcache's to keep. */
+    public static function private(): void
+    {
+        // Read without resolving the user: this can run while plugins load, before every sign-in
+        // check is registered (the deploy plugin unsets the user for exactly that reason).
+        $user = $GLOBALS['current_user'] ?? null;
+        if ($user instanceof \WP_User && $user->ID > 0 && function_exists('batcache_cancel')) {
+            batcache_cancel();
         }
     }
 
@@ -49,7 +80,14 @@ final class PageCaches
             'batcache' => self::batcache(),
             'vip' => function_exists('wpvip_purge_edge_cache_for_url') || function_exists('wpcom_vip_purge_edge_cache_for_url'),
             'jetpack-boost' => has_action('jetpack_boost_clear_page_cache_url') !== false,
+            'wpcloud-edge' => has_action('edge_cache_purge_uris') !== false,
         ]));
+    }
+
+    /** @param list<string>|null $urls absolute URLs for the WP Cloud edge, or null for the whole domain */
+    private static function purgeEdge(?array $urls): void
+    {
+        $urls === null ? do_action('edge_cache_purge_domain') : do_action('edge_cache_purge_uris', $urls);
     }
 
     /** @param list<string> $paths root-relative paths with their query, as `tp_purge_urls` gives them */
@@ -61,9 +99,11 @@ final class PageCaches
         if ($vipSite) {
             wpvip_purge_edge_cache_for_site();
         }
+        $edge = [];
         foreach ($paths as $path) {
             if ($path === '/*') {
                 do_action('jetpack_boost_clear_page_cache_all');
+                self::purgeEdge(null);
                 continue;
             }
             $url = $origin . $path;
@@ -80,6 +120,11 @@ final class PageCaches
             } else {
                 do_action('jetpack_boost_clear_page_cache_url', $url);
             }
+            $edge[] = $url;
+        }
+        // One call for every URL: the platform sends them to the edge in one purge request.
+        if ($edge !== [] && !in_array('/*', $paths, true)) {
+            self::purgeEdge($edge);
         }
     }
 

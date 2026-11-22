@@ -130,6 +130,7 @@ pub enum Value {
     Bound(Rc<Value>, Rc<str>),
     Column(Rc<ColBuilder>),
     Collection(Rc<CollectionVal>),
+    Store(Rc<ActionVal>),
     /// `locations.id` / `r.locations.id`
     ColRef(Rc<ColRefVal>),
     Relation(Rc<RelVal>),
@@ -141,6 +142,10 @@ pub enum Value {
     Plugin(Rc<ActionVal>),
     /// `adminScreen({ ... })`: a TypedPress Admin screen, registered by its export (docs/admin-screens.md).
     Screen(Rc<ActionVal>),
+    /// `adminWidget({ ... })`: a TypedPress Admin dashboard widget, registered by its export.
+    Widget(Rc<ActionVal>),
+    /// `adminDashboard({ ... })`: a TypedPress Admin custom dashboard, registered by its export.
+    Dashboard(Rc<ActionVal>),
     FileBucket(Rc<FileBucketVal>),
     Env(Rc<str>),
     /// An imported file's URL (`import logo from "./compass.svg"`): its name below the app
@@ -276,11 +281,16 @@ pub enum Builtin {
     Field(&'static str),
     /// `global(name, fields, options)` from "typedpress".
     DefineGlobal,
+    Store,
     DefineRelations,
     DefineConfig,
     DefinePlugin,
     /// `adminScreen({ ... })` from "typedpress".
     AdminScreen,
+    /// `adminWidget({ ... })` from "typedpress".
+    AdminWidget,
+    /// `adminDashboard({ ... })` from "typedpress".
+    AdminDashboard,
     /// `item(path)` from "typedpress": the `{item.<path>}` placeholder of a screen action's input.
     Item,
     Action,
@@ -293,8 +303,10 @@ pub enum Builtin {
     Jobs,
     /// `"node:crypto"`: the module namespace (`None`) or one of its supported functions.
     NodeCrypto(Option<&'static str>),
-    /// `mail.send(message)` from "typedpress", compiled to `TypedPress\Mail::send`.
+    /// `mail.send(message)` from "typedpress" / "spacepress", compiled to `TypedPress\Mail::send`.
     Mail,
+    /// `connectors.call(role, tool, args?)` from "spacepress" / "typedpress", compiled to `TypedPress\Connectors::call`.
+    Connectors,
     /// `abilities.call(name, input)` from "php/wordpress", compiled to `TypedPress\Wp\Abilities\Call::run`.
     Abilities,
     /// A catalog WordPress function from "php/wordpress", compiled to `TypedPress\Wp\Functions::call`.
@@ -425,15 +437,32 @@ pub enum StorageKind {
     UserProjection,
     /// `taxonomy()`: terms in core's term tables (docs/decisions/2026-11-11-authoring-surface.md, ruling 25).
     Taxonomy,
+    Product,
+    ProductCategory,
+    ProductTag,
+    Order,
 }
 
 impl StorageKind {
+    pub fn commerce(self) -> bool {
+        matches!(
+            self,
+            Self::Product | Self::ProductCategory | Self::ProductTag | Self::Order
+        )
+    }
+    pub fn term(self) -> bool {
+        matches!(self, Self::Taxonomy | Self::ProductCategory | Self::ProductTag)
+    }
     pub fn builder(self) -> &'static str {
         match self {
             Self::Collection => "collection",
             Self::Table => "table",
             Self::UserProjection => "userProjection",
             Self::Taxonomy => "taxonomy",
+            Self::Product => "product",
+            Self::ProductCategory => "productCategory",
+            Self::ProductTag => "productTag",
+            Self::Order => "order",
         }
     }
 
@@ -443,6 +472,10 @@ impl StorageKind {
             Self::Table => "tables",
             Self::UserProjection => "users",
             Self::Taxonomy => "taxonomies",
+            Self::Product => "products",
+            Self::ProductCategory => "productCategories",
+            Self::ProductTag => "productTags",
+            Self::Order => "orders",
         }
     }
 }
@@ -653,9 +686,12 @@ impl Value {
             Value::Route(_) => "a route".into(),
             Value::Plugin(_) => "a plugin".into(),
             Value::Screen(_) => "an admin screen".into(),
+            Value::Widget(_) => "an admin widget".into(),
+            Value::Dashboard(_) => "an admin dashboard".into(),
             Value::FileBucket(_) => "a file bucket".into(),
             Value::Env(n) => format!("env({n:?})"),
             Value::Asset(file) => format!("the URL of {file}"),
+            Value::Store(_) => "a store".into(),
             Value::Global(g) => match g.name.get() {
                 Some(name) => format!("global \"{name}\""),
                 None => "a global".into(),

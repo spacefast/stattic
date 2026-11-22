@@ -48,7 +48,6 @@ if ($expectedVersion !== null) {
         _stattic_problem_response(400, 'invalid_version', 'v must be a version id.', [], ['Cache-Control' => 'no-store']);
     }
     require_once $engineRoot . '/shared/artifacts.php';
-    require_once $engineRoot . '/shared/zero-v2.php';
     $serving = _stattic_health_serving($storageRoot, $body['request_hostname']);
     // Only a yes/no for the version the caller already names: no response
     // names the version a hostname selects, so health never names it either.
@@ -124,11 +123,38 @@ function _stattic_health_serving(string $privateRoot, string $requestHost): arra
         return $none($rootState);
     }
     $serving = _stattic_v4_legacy_serving($resolved['space_id'], $versionId, $resolved['host_entry'], $resolved['overlay']);
+    $generation = is_string($serving['zero_generation'] ?? null) ? $serving['zero_generation'] : 'none';
+    $hasSpacepress = is_file($versionRoot . '/.spacepress-compiled/manifest.json');
+    $hasZeroCompiled = is_file($versionRoot . '/.zero-compiled/manifest.json');
+    $isSpacepress = false;
+    if ($hasSpacepress || $hasZeroCompiled) {
+        require_once dirname(__DIR__) . '/shared/spacepress.php';
+        $spRoot = _stattic_spacepress_version_root($versionRoot);
+        if ($spRoot !== null) {
+            $isSpacepress = true;
+            if (in_array($generation, ['legacy_0_8', 'v2'], true) || !is_file($spRoot . '/ready.json')) {
+                return $none('pending');
+            }
+        }
+    }
     if (
-        _stattic_zero_generation_refusal($versionRoot, $serving) !== null
-        || _stattic_zero_v2_version_state($versionRoot) === 'uninitialized'
+        !$isSpacepress
+        && ($hasZeroCompiled
+            || in_array($generation, ['legacy_0_8', 'v2'], true)
+            || is_file($versionRoot . '/zero/config.json')
+            || is_file($versionRoot . '/zero/routes.php')
+            || is_file($versionRoot . '/zero/capsule.json')
+            || is_dir($versionRoot . '/zero/actions')
+            || is_file($versionRoot . '/zero/endpoints-index.json')
+            || is_file($versionRoot . '/zero/runs-index.json'))
     ) {
-        return $none('pending');
+        require_once dirname(__DIR__) . '/deprecated/zero-v2/zero-v2.php';
+        if (
+            _stattic_zero_generation_refusal($versionRoot, $serving) !== null
+            || _stattic_zero_v2_version_state($versionRoot) === 'uninitialized'
+        ) {
+            return $none('pending');
+        }
     }
     return ['state' => 'serving', 'version_id' => $versionId];
 }

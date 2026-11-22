@@ -48,7 +48,7 @@ final class Hardening
 
     /**
      * The switches this app applies, in SWITCHES order: `xmlrpc` and `pings` only when the config turns
-     * them off. `GET /__tp/api/v1` lists these under `runtime.wp.hardening`.
+     * them off. `GET /wp-json/typedpress/v1` lists these under `runtime.wp.hardening`.
      *
      * @return list<string>
      */

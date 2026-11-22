@@ -194,6 +194,22 @@ final class Islands
             // A prebuilt page is the same file for days, past a nonce's lifetime, and only signed-out
             // visitors get it: they need no nonce, and an expired one would refuse their calls.
             $config = ['actions' => (object) $actions];
+            if (is_array($island['assets'] ?? null) && $island['assets'] !== []) {
+                $assets = [];
+                foreach ($island['assets'] as $name => $entry) {
+                    if (is_string($entry)) {
+                        $assets[$name] = Assets::url($entry);
+                    } elseif (is_array($entry) && is_string($entry['file'] ?? null)) {
+                        $assets[$name] = [
+                            'src' => Assets::url($entry['file']),
+                            'width' => (int) ($entry['width'] ?? 0),
+                            'height' => (int) ($entry['height'] ?? 0),
+                            'format' => (string) ($entry['format'] ?? ''),
+                        ];
+                    }
+                }
+                $config['assets'] = (object) $assets;
+            }
             if (!\TypedPress\Render\Prebuilt::prerendering()) {
                 $config['nonce'] = wp_create_nonce('wp_rest');
             }

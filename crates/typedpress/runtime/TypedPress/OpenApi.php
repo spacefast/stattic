@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace TypedPress;
 
 /**
- * `GET /__tp/api/v1/openapi.json`: the app's API as an OpenAPI 3.1 document. `typedpress build` writes
+ * `GET /wp-json/typedpress/v1/openapi.json`: the app's API as an OpenAPI 3.1 document. `typedpress build` writes
  * the document from the app's schema (the same data as schema.php and the typed client) into the
  * app plugin; this serves that file, with the site's own address as its server. Like
- * `GET /__tp/api/v1` it describes the app's kinds, fields, globals and actions (signed webhook
+ * `GET /wp-json/typedpress/v1` it describes the app's kinds, fields, globals and actions (signed webhook
  * actions left out, as there), never rows, so it is public and the same for everyone.
  */
 final class OpenApi

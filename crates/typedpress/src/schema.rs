@@ -207,6 +207,8 @@ pub struct Column {
     pub hidden: bool,
     /// Computed by storage and never written: a term's `count` and `url`.
     pub read_only: bool,
+    /// An authored Woo product field, stored via Woo's product metadata API.
+    pub commerce_meta: bool,
     /// `json<T>()` annotation, module and call position.
     pub ts_type: Option<(crate::ir::TyAnn, usize, crate::diag::Span)>,
     /// `.was("old")`: the stored name before a rename (spec §2.5).
@@ -241,6 +243,7 @@ impl Column {
             derived: false,
             hidden: false,
             read_only: false,
+            commerce_meta: false,
             ts_type: None,
             was: None,
         }
@@ -274,7 +277,8 @@ impl Column {
 
     /// Writers may omit it on insert.
     pub fn optional_on_insert(&self) -> bool {
-        !self.not_null
+        self.read_only
+            || !self.not_null
             || self.default.is_some()
             || self.auto_increment
             || self.ty == ColType::Slug && self.source.is_some()
@@ -459,8 +463,12 @@ pub struct Collection {
     /// `taxonomy()`: terms in core's term tables, attached to these kinds
     /// (docs/decisions/2026-11-11-authoring-surface.md, rulings 25-34).
     pub taxonomy: Option<Taxonomy>,
+    /// Native Woo resource; no TypedPress storage is registered.
+    pub commerce: Option<String>,
     /// `.index(fields, { unique? })`: compound indexes the author declared, as (fields, unique).
     pub indexes: Vec<(Vec<String>, bool)>,
+    /// Optional admin presentation metadata (`ui: { icon, singularLabel, description, group, defaultColumns, hidden }`).
+    pub ui: Option<Json>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -514,6 +522,12 @@ pub struct Action {
     pub signature: Option<Json>,
     /// The handler's result as a JSON Schema, from its TypeScript return type (filled after compile).
     pub output: Option<Json>,
+    /// The handler's code reads a WooCommerce order kind, calls an ability that needs a credential's
+    /// `personal` grant (an order kind's, `complete-order`), or calls an action that is itself
+    /// personal (filled after compile, in `pipeline.rs`). Marked from the code on every branch, not
+    /// from one call: a credential without the grant is not shown the action, and a call is refused
+    /// where it reaches that read or ability.
+    pub personal: bool,
 }
 
 /// One `wp-hooks/` handler, registered with `add_filter`/`add_action`.
@@ -549,6 +563,8 @@ pub struct Global {
     pub fields: IndexMap<String, Column>,
     /// "read" / "update" → rule.
     pub access: IndexMap<String, Access>,
+    /// Optional admin presentation metadata (`ui: { icon, description, group, hidden }`).
+    pub ui: Option<Json>,
 }
 
 /// Where a column lives, for attaching compiled functions after evaluation.
@@ -579,6 +595,10 @@ pub struct Schema {
     /// `adminScreen()` exports by screen id (the export name in kebab case): each one the
     /// declaration `tp_admin_register_screen()` takes (`crate::admin_screen`).
     pub screens: IndexMap<String, Json>,
+    /// `adminWidget()` exports by widget id (kebab case).
+    pub widgets: IndexMap<String, Json>,
+    /// `adminDashboard()` exports by dashboard id (kebab case).
+    pub dashboards: IndexMap<String, Json>,
     /// `wp-hooks/` handlers, in registration order.
     pub wp_hooks: Vec<WpHook>,
     /// Server components (`tp/components/<file>.tsx#<export>`) → their compiled PHP function.
@@ -587,9 +607,11 @@ pub struct Schema {
     pub islands: IndexMap<String, Island>,
     /// Components content may use as blocks (`export const blocks` in a component file).
     pub blocks: Vec<crate::content_blocks::Block>,
-    /// Imported stylesheets and images (`crate::assets`), by output file name below
+    /// Imported stylesheets and static assets (`crate::assets`), by output file name below
     /// `tp/app/assets/`.
     pub assets: IndexMap<String, Vec<u8>>,
+    /// Intrinsic dimensions and format for imported image assets, by output file name.
+    pub assets_meta: IndexMap<String, crate::assets::ImageMeta>,
     /// `tp/app/`: the route table and each route file's compiled exports (docs/spec/rendering.md).
     pub app: Option<App>,
     /// Hooks or WordPress functions hand `WP_Post`/`WP_User` views to compiled code.
@@ -599,6 +621,9 @@ pub struct Schema {
     pub media: Json,
     pub uploads: Option<Json>,
     pub locales: Option<Json>,
+    pub store: Option<Json>,
+    /// Compile synced records into the standalone plugin for its WordPress install.
+    pub seed: bool,
     /// The build ships the `typedpress-admin` plugin (the default); `defineConfig({ admin: false })` leaves it out.
     pub admin: bool,
     /// `defineConfig({ frontend })` (spec §5); `None` is the default: the theme, or `tp/app`.
@@ -640,6 +665,14 @@ pub struct RuntimeSchema {
     pub hash: String,
 }
 
+impl Schema {
+    /// The app plugin carries the project's synced files as its seed: `seed: true`, or a store,
+    /// whose products are seeded from their files.
+    pub fn ships_seed(&self) -> bool {
+        self.seed || self.store.is_some()
+    }
+}
+
 impl Default for Schema {
     fn default() -> Self {
         Schema {
@@ -649,18 +682,23 @@ impl Default for Schema {
             actions: IndexMap::new(),
             jobs: IndexMap::new(),
             screens: IndexMap::new(),
+            widgets: IndexMap::new(),
+            dashboards: IndexMap::new(),
             wp_hooks: Vec::new(),
             components: IndexMap::new(),
             app: None,
             islands: IndexMap::new(),
             blocks: Vec::new(),
             assets: IndexMap::new(),
+            assets_meta: IndexMap::new(),
             wp_views: false,
             files: IndexMap::new(),
             webhooks: Vec::new(),
             media: serde_json::json!({"sizes": {}}),
             uploads: None,
             locales: None,
+            store: None,
+            seed: false,
             admin: true,
             frontend: None,
             output: Output::Server,
@@ -799,6 +837,8 @@ pub struct AppRoute {
     pub error: Option<String>,
     /// The stylesheets the page and its layouts import, in link order (`assets::stylesheets`).
     pub styles: Vec<String>,
+    /// `@font-face` fonts referenced by this route's stylesheets, emitted as `<link rel="preload">`.
+    pub preloads: Vec<crate::assets::FontPreload>,
     /// The page is prebuilt: its file says `prerender = true`, or the config says `output: "static"`.
     pub prerender: bool,
     /// The kind whose `url` this page serves (spec §2.7), with each pattern placeholder's folder
@@ -812,13 +852,14 @@ pub struct AppFile {
     pub component: Option<String>,
     /// A literal metadata object, or `{ "fn": name }` for a function.
     pub metadata: Option<Json>,
+    /// Read access for a page or layout (`export const guard`).
     pub guard: Option<Access>,
     pub search: Option<AppSearch>,
     /// HTTP method → compiled handler.
     pub methods: IndexMap<String, String>,
-    /// Who may call the handlers (`export const access`), or the signature that authenticates
-    /// them (`export const signature`, a raw signed webhook). Exactly one when there are handlers.
-    pub access: Option<Access>,
+    /// Who may call the handlers (`guard`), or the signature authenticating a raw signed webhook.
+    /// Exactly one when there are handlers.
+    pub handler_guard: Option<Access>,
     pub signature: Option<Json>,
     /// `export const prerender = true | false` (pages): `None` when the page says nothing, so it
     /// follows the config's `output`.
@@ -836,6 +877,18 @@ pub struct AppSearch {
     pub fields: IndexMap<String, Column>,
 }
 
+/// An imported static asset exposed to a `"use client"` store through `getConfig(ns).assets`.
+#[derive(Debug, Clone)]
+pub enum IslandAsset {
+    Url(String),
+    Meta {
+        file: String,
+        width: u32,
+        height: u32,
+        format: String,
+    },
+}
+
 /// One compiled `"use client"` component: its store module and the server actions it calls.
 #[derive(Debug, Clone)]
 pub struct Island {
@@ -847,6 +900,8 @@ pub struct Island {
     /// What the app plugin ships: `source` minified (`crate::minify`).
     pub shipped: String,
     pub actions: Vec<String>,
+    /// Static assets imported by this client component, passed via `wp_interactivity_config`.
+    pub assets: std::collections::BTreeMap<String, IslandAsset>,
     /// The store keeps `useLive` reads current: the page also loads `@typedpress/live`.
     pub live: bool,
 }

@@ -1,5 +1,5 @@
 //! `typedpress init --github`: `.github/workflows/typedpress-sync.yml`, the GitHub Actions workflow that runs
-//! `typedpress sync --pr` (see `docs-site/docs/publishing/content-in-git.mdx`).
+//! `typedpress sync --pr` (see `www/content/docs/integrations/markdown-sync.md`).
 //!
 //! One job serves both directions, because `typedpress sync --pr` is the two-way sync: a run on a
 //! schedule or on the site's `repository_dispatch` brings site edits back as a pull request, and a
@@ -109,7 +109,7 @@ pub(super) fn workflow(project: &Path, dirs: &[String]) -> Option<(PathBuf, Stri
     let text = format!(
         "{header}
 #
-# Content in git (https://github.com/spacefast/zero/blob/main/docs-site/docs/publishing/content-in-git.mdx):
+# Content in git (https://spacepress.dev/docs/integrations/markdown-sync):
 # on a schedule, and on a {DISPATCH_EVENT} dispatch (a save on the site can send one), the site's
 # edits come back as one pull request; on a push to the default branch that changes synced files, those files go
 # to the site. Both are `typedpress sync --pr`.

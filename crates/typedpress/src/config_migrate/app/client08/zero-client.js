@@ -3,7 +3,7 @@
 //
 // It keeps the 0.8 hooks' call shapes and runs each call as the v2 action the converter generated
 // for the same handler: `useMutation("add")(a, b)` posts `{ <first input>: a, <second input>: b }`
-// to `/__tp/api/v1/actions/add` and resolves to the action's `data`. HANDLERS lists each
+// to `/wp-json/typedpress/v1/actions/add` and resolves to the action's `data`. HANDLERS lists each
 // handler's input names in 0.8's positional order.
 //
 // What differs from 0.8: reads refresh after this browser's own writes and when the tab regains
@@ -14,7 +14,7 @@ import { h, createContext, toChildArray } from "./preact/preact.js";
 import { useContext, useEffect, useMemo, useState } from "./preact/hooks.js";
 import HANDLERS from "./handlers.js";
 
-const API = "/__tp/api/v1";
+const API = "/wp-json/typedpress/v1";
 const SESSION = "zero08.session";
 
 function held() {

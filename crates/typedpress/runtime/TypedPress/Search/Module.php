@@ -13,7 +13,7 @@ use function TypedPress\db;
 
 /**
  * Search (spec §2.6, §3): the index ({@see Index}) behind every kind's `search` option and one
- * site-wide endpoint, `GET /__tp/api/v1/search?q=…`.
+ * site-wide endpoint, `GET /wp-json/typedpress/v1/search?q=…`.
  *
  * A kind's `search` (`posts.list({ search })`, `?search=` on the API and on core's list routes)
  * becomes a condition on the index, ANDed into the read. The kind's read rule, draft visibility and

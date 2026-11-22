@@ -18,14 +18,17 @@ final class Live
     /** @var ?array{id: string, html: ?string, reads: array, unseen: bool, found: bool} the region the endpoint asked for */
     private static ?array $capture = null;
 
+    /** @var ?array{regions: array<string, array{string, string}>, notices: array<string, true>} */
+    private static ?array $page = null;
+
     /** @var list<string> region ids this page rendered, for the browser module */
     private static array $rendered = [];
 
     /**
      * A `<Live>` region: its children rendered now, in an element the browser keeps current. In a
      * page's own render the element also carries the region's first answer for the subscription
-     * (`data-tp-live-seed`: its sealed token and the kinds it read), so the browser asks nothing
-     * until a notice, a write or the poll says it may have changed.
+     * (`data-tp-live-seed`). The browser checks the displayed HTML on its first subscription request
+     * and uses the recorded kinds to react to later change notices.
      */
     public static function region(string $id, \Closure $render): Html
     {
@@ -40,35 +43,49 @@ final class Live
         }
         self::$rendered[] = $id;
         $html = Html::child($render());
-        // The region's first answer for the browser's subscription: the endpoint's own render of this
-        // URL and region, so its token and kinds are exactly what the next poll compares against.
-        $seed = self::seed($id);
+        if (self::$page === null) {
+            return Html::element('div', ['data-tp-live' => $id], Html::raw($html));
+        }
+        // Later parts of the route can record dependencies (e.g. the comments notice).
+        // Fill this attribute once the entire page has rendered.
+        try {
+            $marker = bin2hex(random_bytes(16));
+        } catch (\Random\RandomException) {
+            return Html::element('div', ['data-tp-live' => $id], Html::raw($html));
+        }
+        self::$page['regions'][' data-tp-live-seed="' . $marker . '"'] = [$id, $html];
 
-        return Html::element('div', ['data-tp-live' => $id] + ($seed === null ? [] : ['data-tp-live-seed' => (string) json_encode($seed, JSON_UNESCAPED_SLASHES)]), Html::raw($html));
+        return Html::element('div', ['data-tp-live' => $id, 'data-tp-live-seed' => $marker], Html::raw($html));
     }
 
-    /** @return ?array{token: string, kinds: list<string>} */
-    private static function seed(string $id): ?array
+    /** Render the HTTP page once and seed its regions from the exact HTML and reads it produced. */
+    public static function page(\TypedPress\Db $db, ?\TypedPress\Viewer $viewer, callable $render, ?array &$reads = null, ?array &$also = null): array
     {
-        $plugin = \TypedPress\Wp\Runtime::plugin();
-        $viewer = \TypedPress\Wp\CoreAccess::viewer();
-        $url = (string) ($_SERVER['REQUEST_URI'] ?? '/');
-        if ($plugin === null || $viewer === null || preg_match('~\A/(?![/\\\\])[^\x00-\x20\x7f#]*\z~', $url) !== 1) {
-            return null;
-        }
-        // A form's flash marker is this visitor's alone: the subscription names the page without it.
-        $url = preg_replace('~([?&])_flash=[0-9a-f]+(&|$)~', '$1', $url) ?? $url;
-        $url = rtrim($url, '?&');
+        $previous = self::$page;
+        self::$page = $viewer === null ? null : ['regions' => [], 'notices' => []];
         try {
-            [$result] = \TypedPress\Live\Module::evaluate($plugin->app()->db, $viewer, [['op' => 'page', 'args' => ['url' => $url, 'region' => $id]]]);
-        } catch (\Throwable) {
-            return null;
-        }
-        if (!isset($result['token'], $result['data']['kinds'])) {
-            return null;
-        }
+            [$head, $body] = Reads::during($render, $reads, $also);
+            if ($viewer === null || self::$page['regions'] === []) {
+                return [$head, $body];
+            }
+            $url = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+            $url = rtrim(preg_replace('~([?&])_flash=[0-9a-f]+(&|$)~', '$1', $url) ?? $url, '?&');
+            $attrs = array_fill_keys(array_keys(self::$page['regions']), '');
+            $seeds = $attrs;
+            if (\TypedPress\Live\Module::validPageUrl($url)) {
+                $kinds = array_keys($reads);
+                $notices = array_keys(self::$page['notices']);
+                foreach (self::$page['regions'] as $attr => [$id, $html]) {
+                    // The endpoint renders nested regions without their browser seed attributes.
+                    $seed = \TypedPress\Live\Module::pageSeed($db, $viewer, $url, $id, strtr($html, $attrs), $kinds, $notices);
+                    $seeds[$attr] = ' data-tp-live-seed="' . Html::escape((string) json_encode($seed, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES)) . '"';
+                }
+            }
 
-        return ['url' => $url, 'token' => $result['token'], 'kinds' => $result['data']['kinds']];
+            return [$head, strtr($body, $seeds)];
+        } finally {
+            self::$page = $previous;
+        }
     }
 
     /**
@@ -80,6 +97,8 @@ final class Live
     {
         if (self::$capture !== null) {
             self::$capture['extra'][$key] = true;
+        } elseif (self::$page !== null) {
+            self::$page['notices'][$key] = true;
         }
     }
 

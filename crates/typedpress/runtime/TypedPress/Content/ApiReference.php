@@ -19,7 +19,7 @@ use TypedPress\Wp\Plugin;
  * is nested (a property of an object inside an array is depth 1), so a page indents it.
  *
  * The document is the app's own (`typedpress build` writes it from the schema, and the site serves it
- * at `/__tp/api/v1/openapi.json`), or a JSON file in the app's `public/` folder when a page
+ * at `/wp-json/typedpress/v1/openapi.json`), or a JSON file in the app's `public/` folder when a page
  * names one: `apiReference("partner-api.json")`. Descriptions are Markdown in OpenAPI; they come
  * back as HTML, for `<Html value>`.
  */

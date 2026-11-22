@@ -193,7 +193,7 @@ function authError(status, code, detail) {
 /** In-flight refreshes of sessionStorage-backed sessions, by storage key (shared by clients in this tab). */
 const refreshes = new Map();
 export function createClient(options = {}) {
-	const base = (options.url ?? "/__tp/api/v1").replace(/\/+$/, "");
+	const base = (options.url ?? "/wp-json/typedpress/v1").replace(/\/+$/, "");
 	const authOpts = options.auth ?? {};
 	const doFetch = (input, init) => (options.fetch ?? globalThis.fetch)(input, init);
 	// Token storage: memory by default, sessionStorage on request. The record always exists once

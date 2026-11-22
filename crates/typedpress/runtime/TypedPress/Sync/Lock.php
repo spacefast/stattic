@@ -35,6 +35,11 @@ final class Lock
         foreach (self::rowQueries($collection) as $sql) {
             $connection->run("$sql FOR UPDATE", [$pk]);
         }
+        if ($spec['taxonomy'] ?? false) {
+            $meta = $connection->wpdb()->termmeta;
+            $uid = $connection->run("SELECT meta_value FROM `$meta` WHERE term_id = ? AND meta_key = '_tp_uid' FOR UPDATE", [$pk])[0]['meta_value'] ?? null;
+            return $uid === null || $uid === '' ? null : (string) $uid;
+        }
         if (Trash::postBacked($spec)) {
             $meta = $connection->wpdb()->postmeta;
             $uid = $connection->run("SELECT meta_value FROM `$meta` WHERE post_id = ? AND meta_key = ? FOR UPDATE", [$pk, \TypedPress\Wp\WpPostStore::UID_META])[0]['meta_value'] ?? null;
@@ -51,6 +56,10 @@ final class Lock
     private static function rowQueries(string $collection): array
     {
         $spec = db()->schema()->collection($collection);
+        if ($spec['taxonomy'] ?? false) {
+            $wpdb = Plugin::instance()->connection()->wpdb();
+            return ["SELECT * FROM `{$wpdb->terms}` WHERE term_id = ?", "SELECT * FROM `{$wpdb->term_taxonomy}` WHERE term_id = ?", "SELECT * FROM `{$wpdb->termmeta}` WHERE term_id = ? ORDER BY meta_id"];
+        }
         if (Trash::postBacked($spec)) {
             $wpdb = Plugin::instance()->connection()->wpdb();
 

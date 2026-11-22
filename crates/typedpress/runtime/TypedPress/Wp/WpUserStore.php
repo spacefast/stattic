@@ -21,7 +21,7 @@ use TypedPress\Store;
  */
 final class WpUserStore implements Store
 {
-    public function readGuards(string $collection, \TypedPress\Viewer $viewer): array
+    public function readGuards(string $collection, \TypedPress\Viewer $viewer, bool $forSelect = false): array
     {
         return [];
     }

@@ -181,7 +181,7 @@ final class Runner
     }
 
     /**
-     * Housekeeping, run by Action Scheduler's daily action: give waiting jobs without an action one
+     * Housekeeping, run by Action Scheduler's hourly action: give waiting jobs without an action one
      * (recover), re-queue jobs whose runner died mid-run, sweep receipts older than 7 days.
      *
      * @return array{recovered: int, requeued: int, swept: int}

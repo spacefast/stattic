@@ -5,12 +5,11 @@ declare(strict_types=1);
 namespace TypedPress;
 
 /**
- * HTTP validators for what TypedPress serves as is (prebuilt pages, the OpenAPI document): a strong ETag
- * derived from the bytes served, and whether `If-None-Match` names it.
+ * HTTP validators for what TypedPress serves as is. The body helpers derive a strong ETag from
+ * its bytes. The request matcher also handles ETags supplied by public-file serving.
  *
  * matches() reads `If-None-Match` as RFC 9110 defines it: `*` alone, or a list of entity-tags, weak
- * `W/"…"` forms included. `Wp\PublicFiles::matches()` is an older, looser copy that splits on every
- * comma; that file belongs to the public-file serving work and is not edited here.
+ * `W/"…"` forms included.
  */
 final class Validator
 {

@@ -295,7 +295,7 @@ final class Register
         $app = self::kebab($schema->name());
         $label = self::appLabel($schema);
         $ops = [];
-        foreach ($schema->collections() as $name => $spec) {
+        foreach ($schema->kinds() as $name => $spec) {
             array_push($ops, ...self::collection($app, $label, (string) $name, $spec, $schema->locales()['all'] ?? []));
         }
         foreach ($schema->actions() as $name => $action) {
@@ -540,7 +540,9 @@ final class Register
             // A signature replaces the access check (§6.1); the action path verifies it, so nothing is judged early.
             'defer' => ($action['signature'] ?? null) !== null,
             'call' => static fn (array $in): array => ['POST', '/actions/' . rawurlencode($name), [], $in],
-            'typedpress' => ['action' => $name],
+            // `personal`: the handler's code reads orders or calls an ability that needs the grant (the
+            // compiler's Action::personal); AgentScope::withheld leaves it out of a credential's lists.
+            'typedpress' => ['action' => $name] + (($action['personal'] ?? false) ? ['personal' => true] : []),
         ];
     }
 

@@ -21,7 +21,7 @@ use TypedPress\Schema;
  * - a refusal, in wp-admin and REST, to deactivate the plugins the app runs on (TypedPress's own and the
  *   platform's): with the app stopped nothing would refuse anything;
  * - a report: the active plugins that aren't on the list, and every must-use plugin, drop-in and theme
- *   PHP file WordPress loads, in `GET /__tp/api/v1` under `runtime.wp.sealed` and `typedpress doctor`.
+ *   PHP file WordPress loads, in `GET /wp-json/typedpress/v1` under `runtime.wp.sealed` and `typedpress doctor`.
  *
  * Someone with a shell (WP-CLI with `--skip-plugins`, the database, the file system) is outside all of
  * this. Nothing is deactivated or deleted. A host that mounts TypedPress through the build store reads the same

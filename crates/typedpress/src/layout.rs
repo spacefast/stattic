@@ -5,8 +5,19 @@
 //!   declarations, the typed client and the locks.
 //! - `tp/dist/` is written by `typedpress build` and ignored by git: the deployable output.
 
-/// The config at the project root.
+/// The SpacePress config at the project root (preferred).
+pub const SPACEPRESS_CONFIG: &str = "spacepress.config.ts";
+/// Legacy config filename supported for existing workspaces.
 pub const CONFIG: &str = "typedpress.config.ts";
+
+/// Resolve the project's config entry file: prefers `spacepress.config.ts`, else `typedpress.config.ts`.
+pub fn project_config(exists: impl Fn(&std::path::Path) -> bool, project: &std::path::Path) -> std::path::PathBuf {
+    let sp = project.join(SPACEPRESS_CONFIG);
+    if exists(&sp) {
+        return sp;
+    }
+    project.join(CONFIG)
+}
 /// The TypedPress root.
 pub const ROOT: &str = "tp";
 /// Written by TypedPress, committed.

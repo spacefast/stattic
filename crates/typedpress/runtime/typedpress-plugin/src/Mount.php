@@ -38,11 +38,13 @@ final class Mount
             if ($manifest === null || !Site::complete($manifest)) {
                 throw new \RuntimeException("TypedPress build $build is not in the build store");
             }
+            Site::checkCommerce($manifest);
             $root = (string) Site::root();
             require_once $root . '/runtime/' . $manifest['runtime'] . '/typedpress-loader.php';
             \TypedPress\Loader\Loader::load($root, $build, [
                 'variables' => self::variables(),
                 'url' => Site::url(),
+                'assetsDir' => Site::assets(),
                 // The receiver's requests run none of the app's own code: a dry run's `/site` and
                 // uploads mount the live build only to report whether it mounts.
                 'inspect' => $mode === 'inspect' || ($mode === 'live' && Site::route() !== null),
@@ -105,10 +107,23 @@ final class Mount
                 // WordPress checks after plugins have loaded, and that is too late here. The build's
                 // identity plugin is not loaded yet either, so its refusal of a suspended account is
                 // read here too.
-                $allowed = Receiver::authorized(true) === true && Receiver::password() !== null && !Site::suspended(get_current_user_id());
-                // WordPress keeps the user it resolved for the rest of the request. Forget it, so the
-                // routes resolve it again with every sign-in check the mounted build adds.
-                $GLOBALS['current_user'] = null;
+                // Core accepts an application password only once it knows the request is REST, which is
+                // after plugins load: this one check accepts it now, for the holder of this deployment's
+                // token on this deployment's own route. Every other request keeps core's rule.
+                add_filter('application_password_is_api_request', '__return_true', PHP_INT_MAX);
+                if (($GLOBALS['current_user'] ?? null) instanceof \WP_User && !$GLOBALS['current_user']->exists()) {
+                    $GLOBALS['current_user'] = null; // the visitor a plugin that loaded earlier resolved
+                }
+                try {
+                    $allowed = Receiver::authorized(true) === true && Receiver::password() !== null && !Site::suspended(get_current_user_id());
+                } finally {
+                    remove_filter('application_password_is_api_request', '__return_true', PHP_INT_MAX);
+                    // WordPress keeps the user it resolved, and which password it accepted, for the rest of
+                    // the request. Forget both, so the routes resolve the user again, as REST does, with
+                    // every sign-in check the mounted build adds.
+                    $GLOBALS['current_user'] = null;
+                    rest_application_password_collect_status(null);
+                }
                 if ($allowed) {
                     return [$record['build'], $mode, $match[1]];
                 }

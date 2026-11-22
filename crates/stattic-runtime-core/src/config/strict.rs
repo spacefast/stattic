@@ -212,6 +212,10 @@ pub fn public_json_schema() -> Value {
             "crons": crons::json_schema(),
             "system": system::json_schema(),
             "sell": super::current::sell_json_schema(),
+            "app": {
+                "type": "object",
+                "description": "Inline SpacePress application configuration."
+            },
             // Validated by the control plane at finalize; described here so
             // editors offer it. Only the team sees `name`; this is what a
             // stranger with the link sees.
@@ -469,6 +473,7 @@ fn validate_keys(
         "system",
         "sell",
         "analytics",
+        "app",
         "public",
     ];
     let renamed = [
@@ -728,6 +733,18 @@ fn validate_shape(
                     );
                 }
             }
+        }
+    }
+    if let Some(app) = root.get("app") {
+        if !app.is_object() {
+            push_issue(
+                issues,
+                locations,
+                "config_invalid",
+                "$.app",
+                "app must be an object.",
+                None,
+            );
         }
     }
     if let Some(access) = root.get("access") {
@@ -1729,6 +1746,11 @@ fn project(root: &Map<String, Value>) -> Value {
     // this lane's published schema while the analytics HUD is internal.
     if let Some(analytics) = root.get("analytics") {
         out.insert("analytics".into(), analytics.clone());
+    }
+    // Inline SpacePress app config, carried through verbatim for the SpacePress
+    // compiler to validate and compile.
+    if let Some(app) = root.get("app") {
+        out.insert("app".into(), app.clone());
     }
     // The Space's public identity, for finalize to validate and freeze.
     if let Some(public) = root.get("public") {
@@ -2817,5 +2839,22 @@ mod tests {
             .issues
             .iter()
             .all(|issue| !issue.message.contains("supersecret")));
+    }
+
+    #[test]
+    fn strict_config_accepts_inline_spacepress_app_section() {
+        let output = compile_source(
+            r#"{"version":1,"serve":{"cleanUrls":true},"app":{"name":"blog","admin":false}}"#,
+        );
+        assert!(output.success, "issues: {:?}", output.issues);
+        assert!(output.issues.is_empty());
+        assert_eq!(
+            output.config.as_ref().and_then(|c| c.get("app")),
+            Some(&json!({"name": "blog", "admin": false}))
+        );
+
+        let invalid = compile_source(r#"{"version":1,"app":"bad"}"#);
+        assert!(!invalid.success);
+        assert!(invalid.issues.iter().any(|issue| issue.path == "$.app"));
     }
 }

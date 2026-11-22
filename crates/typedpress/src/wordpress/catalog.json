@@ -373,6 +373,31 @@
       "description": "Filters the message to display above the login form.",
       "source": "wp-login.php",
       "byReference": false
+    },
+    "typedpress_woo_order_stock": {
+      "kind": "action",
+      "params": [
+        {
+          "name": "product_id",
+          "type": "number"
+        },
+        {
+          "name": "order_id",
+          "type": "number"
+        },
+        {
+          "name": "change",
+          "type": "number"
+        },
+        {
+          "name": "reason",
+          "type": "\"sale\" | \"return\""
+        }
+      ],
+      "description": "Fires when WooCommerce changes a product's stock for an order: a sale lowers it, a cancelled order or a restocked refund returns it.",
+      "source": "runtime/TypedPress/Commerce/Operations.php",
+      "byReference": false,
+      "async": true
     }
   },
   "functions": {
@@ -486,6 +511,17 @@
       "params": [
         {
           "name": "path",
+          "type": "string"
+        }
+      ],
+      "returns": "string",
+      "fixed": {},
+      "wpError": false
+    },
+    "wp_login_url": {
+      "params": [
+        {
+          "name": "redirect",
           "type": "string"
         }
       ],

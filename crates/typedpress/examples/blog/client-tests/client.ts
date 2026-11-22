@@ -10,7 +10,7 @@ declare function expectType<T extends true>(): void;
 type Flat<T> = { [K in keyof T]: T[K] } & {};
 
 const first = createClient();
-createClient({ url: "https://x.test/__tp/api/v1", nonce: "abc" });
+createClient({ url: "https://x.test/wp-json/typedpress/v1", nonce: "abc" });
 createClient({ headers: { Authorization: "Basic " + btoa("admin:app pass") } });
 
 async function reads() {

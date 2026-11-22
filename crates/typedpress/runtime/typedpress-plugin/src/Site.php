@@ -110,12 +110,20 @@ final class Site
      */
     public static function assets(): string
     {
+        if (defined('SP_ASSETS_DIR') && is_string(SP_ASSETS_DIR) && SP_ASSETS_DIR !== '') {
+            return rtrim(SP_ASSETS_DIR, '/');
+        }
+
         return WP_CONTENT_DIR . '/typedpress-assets';
     }
 
     /** The URL of {@see assets()}: where a build's plugins' asset URLs point. */
     public static function url(): string
     {
+        if (defined('SP_ASSETS_URL') && is_string(SP_ASSETS_URL) && SP_ASSETS_URL !== '') {
+            return rtrim(SP_ASSETS_URL, '/');
+        }
+
         return content_url('typedpress-assets');
     }
 
@@ -127,7 +135,13 @@ final class Site
      */
     public static function route(): ?string
     {
-        $path = (string) (wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?? '/');
+        $uri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+        // WordPress reads the path as sent. One that starts `//` would be read here as a host and a
+        // path below it, and WordPress serves it as a page.
+        if (str_starts_with($uri, '//')) {
+            return null;
+        }
+        $path = (string) (wp_parse_url($uri, PHP_URL_PATH) ?? '/');
         $base = rtrim((string) (wp_parse_url(home_url('/'), PHP_URL_PATH) ?? '/'), '/');
         if ($base !== '' && str_starts_with($path, $base . '/')) {
             $path = substr($path, strlen($base));
@@ -222,6 +236,19 @@ final class Site
             && is_dir($root . '/app/' . $manifest['app'] . '/plugins/typedpress-app-' . $manifest['name']);
     }
 
+    /** This receiver has no checkout suspension or shipping-compatible selection/recovery yet. */
+    public static function checkCommerce(array $manifest): void
+    {
+        $path = self::root() . '/app/' . $manifest['app'] . '/manifest.json';
+        $hosted = json_decode((string) @file_get_contents($path), true);
+        if (!is_array($hosted) || ($hosted['format'] ?? null) !== 'typedpress.hosted.v1') {
+            throw new \RuntimeException('The build is missing its hosted manifest. Upload it again.');
+        }
+        if (array_key_exists('woocommerce', $hosted['requires'] ?? [])) {
+            throw new \RuntimeException('The TypedPress deployment receiver does not yet support commerce builds: managed shipping selection and recovery are not qualified. Use a qualified commerce host or a standalone local/plugin installation.');
+        }
+    }
+
     /** Whether the build has been initialized on this site, so it can be made live without installing. */
     public static function ready(string $build): bool
     {
@@ -307,6 +334,11 @@ final class Site
         ];
         update_option(self::HISTORY, $history, false);
         update_option(self::LIVE, $build, true);
+        // Every page may render differently now: page caches and the edge purge the whole host, once,
+        // when this request ends (nothing is announced where no page cache listens).
+        if (method_exists(\TypedPress\Wp\Purges::class, 'everything')) {
+            \TypedPress\Wp\Purges::everything();
+        }
     }
 
     /**

@@ -1,4 +1,4 @@
-//! `tp/_generated/openapi.json`: the app's HTTP API (`/__tp/api/v1`, docs/spec/spec.md §3a) as an
+//! `tp/_generated/openapi.json`: the app's HTTP API (`/wp-json/typedpress/v1`, docs/spec/spec.md §3a) as an
 //! OpenAPI 3.1 document. It is built from the evaluated [`Schema`], the data that also produces
 //! schema.php (which the runtime turns into Ability schemas) and the typed client:
 //!
@@ -10,7 +10,7 @@
 //! - an operation exists exactly when the facade serves it: a kind's `api` flags, `revisions`,
 //!   `sync`, a `readonly` action's `GET`.
 //!
-//! The running site serves the document at `/__tp/api/v1/openapi.json` (`TypedPress\OpenApi`).
+//! The running site serves the document at `/wp-json/typedpress/v1/openapi.json` (`TypedPress\OpenApi`).
 
 use crate::json_schema as js;
 use crate::schema::{Access, Action, ColType, Collection, Column, FileBucket, Global, RelKind, Schema};
@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashSet;
 
 /// Where the facade serves the API, below the site's home URL.
-pub const PREFIX: &str = "/__tp/api/v1";
+pub const PREFIX: &str = "/wp-json/typedpress/v1";
 /// The document's path below [`PREFIX`].
 pub const ROUTE: &str = "/openapi.json";
 /// A list's default and largest page (`Wp\Facade::LIMIT`, `MAX_LIMIT`).
@@ -1877,6 +1877,10 @@ pub fn document(schema: &Schema, services: Option<&Value>) -> Value {
             "kinds": { "type": "object", "description": "Each kind by name: the WordPress route behind it, its fields, relations and access rules." },
             "globals": { "type": "object" }, "actions": { "type": "object" },
         }, "required": ["name", "kinds", "globals", "actions"] }))));
+    if schema.store.is_some() {
+        b.paths.add("/store", "get", Op::new("Store", "store-get", "Store information", "Currency, precision, origin and checkout URL. No shopper state.")
+            .rule(&Access::anyone()).ok(200, envelope("Store information.", json!({"type":"object","properties":{"currency":{"type":"string"},"precision":{"type":"integer"},"country":{"type":"string"},"checkout":{"type":"string"},"cart":{"type":"string"}},"required":["currency","precision","country","checkout","cart"]}))));
+    }
     b.paths.add(ROUTE, "get", Op::new("Schema", "openapi", "This document", "The app's API as an OpenAPI 3.1 document: what `typedpress build` wrote to `tp/_generated/openapi.json`, with this site's address as its server.")
         .rule(&Access::anyone())
         .ok(200, json!({ "description": "The OpenAPI document.", "content": { "application/json": { "schema": { "type": "object" } } } })));

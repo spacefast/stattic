@@ -440,24 +440,27 @@ final class KindUrls
     /** `term_link`: a term of a TypedPress taxonomy with a `url`, at the URL its pattern gives. */
     public function termLink(string $link, mixed $term, string $taxonomy): string
     {
-        foreach ($this->terms as $kind) {
-            if ($kind['taxonomy'] !== $taxonomy || !$term instanceof \WP_Term) {
-                continue;
+        foreach ($this->terms as $name => $kind) {
+            if ($kind['taxonomy'] === $taxonomy && $term instanceof \WP_Term) {
+                return user_trailingslashit(home_url($this->termPath($name, $term)));
             }
-            $parts = [];
-            foreach ($kind['segments'] as $segment) {
-                $parts[] = match ($segment) {
-                    ':slug' => rawurlencode($term->slug),
-                    ':id' => (string) $term->term_id,
-                    ':path' => implode('/', array_map('rawurlencode', $this->termChain($term))),
-                    default => $segment,
-                };
-            }
-
-            return user_trailingslashit(home_url('/' . implode('/', $parts)));
         }
-
         return $link;
+    }
+
+    public function termPath(string $name, \WP_Term $term): ?string
+    {
+        if (!isset($this->terms[$name])) { return null; }
+        $parts = [];
+        foreach ($this->terms[$name]['segments'] as $segment) {
+            $parts[] = match ($segment) {
+                ':slug' => rawurlencode($term->slug),
+                ':id' => (string) $term->term_id,
+                ':path' => implode('/', array_map('rawurlencode', $this->termChain($term))),
+                default => $segment,
+            };
+        }
+        return '/' . implode('/', $parts);
     }
 
     /** `post_type_link`: the item's URL from its kind's pattern. */
@@ -506,6 +509,28 @@ final class KindUrls
             }
         }
         return '/' . implode('/', $parts);
+    }
+
+    /**
+     * Loads what path() reads for each of $ids in one pass, before a loop that asks for many: the
+     * posts, and their meta when the pattern holds a stored field (`:brand`). A hierarchical kind's
+     * parents are posts of the same list in nearly every tree; one that is not is read on its own,
+     * as before. A term's slug (`:topics.slug`) is read per item either way: core does not cache it.
+     *
+     * @param list<int> $ids
+     */
+    public function prime(string $name, array $ids): void
+    {
+        $columns = Plugin::instance()?->schema->collection($name)['columns'] ?? [];
+        $meta = false;
+        foreach ($this->kinds[$name]['segments'] ?? [] as $segment) {
+            if (!str_starts_with($segment, ':') || in_array($segment, [':slug', ':path', ':id', ':year', ':month', ':day'], true)) {
+                continue;
+            }
+            [$column, $through] = array_pad(explode('.', substr($segment, 1), 2), 2, null);
+            $meta = $meta || !($through === 'slug' && PostMeta::terms($columns[$column] ?? []));
+        }
+        _prime_post_caches($ids, false, $meta);
     }
 
     private function build(string $name, \WP_Post $post): ?string

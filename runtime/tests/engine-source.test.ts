@@ -200,17 +200,11 @@ test("serves and proves the chroot revision the site selected", async () => {
   );
   const selectedEngine = path.join(chrootRoot, "scripts", `sf-engine-${CHROOT_REVISION}`);
   const rest = path.join(selectedEngine, "engine/shared/wordpress-rest.php");
-  const kernel = path.join(selectedEngine, "engine/wordpress/content-kernel.php");
   const restBytes = readFileSync(rest);
-  const kernelBytes = readFileSync(kernel);
   const muPlugin = path.join(rt.root, "wp-content/mu-plugins/spacefast-content.php");
   mkdirSync(path.dirname(muPlugin), { recursive: true });
   copyFileSync(path.resolve(import.meta.dir, "../custom-redirects.php"), muPlugin);
   rmSync(rest);
-  writeFileSync(
-    kernel,
-    `<?php echo json_encode(['wordpress' => 'served', 'release' => $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'], 'source' => $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE']]);`,
-  );
   try {
     const boot = Bun.spawnSync({
       cmd: [
@@ -222,6 +216,7 @@ test("serves and proves the chroot revision the site selected", async () => {
         class Atomic_Persistent_Data { public string $SPACEFAST_RUNTIME_ENGINE_SOURCE = 'chroot/production/previous'; }
         define('SPACEFAST_RUNTIME_CHROOT_ROOT', $argv[1]);
         require $argv[2];
+        echo json_encode(['wordpress' => 'served', 'release' => $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'], 'source' => $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE']]);
       `,
         chrootRoot,
         muPlugin,
@@ -235,7 +230,6 @@ test("serves and proves the chroot revision the site selected", async () => {
     });
   } finally {
     writeFileSync(rest, restBytes);
-    writeFileSync(kernel, kernelBytes);
   }
 });
 

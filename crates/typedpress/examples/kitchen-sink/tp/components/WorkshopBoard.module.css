@@ -1,0 +1,9 @@
+.board {
+  border-block: 1px solid currentColor;
+  margin-block: 1.5rem;
+  padding-block: .75rem;
+}
+
+.count {
+  margin-block: .5rem 0;
+}

@@ -43,7 +43,7 @@ final class Module
         add_action('wp_abilities_api_categories_init', [Register::class, 'categories']);
         add_action('wp_abilities_api_init', [Register::class, 'abilities']);
         add_action('mcp_adapter_init', [Register::class, 'mcp']);
-        // TypedPress's API (`/__tp/api/v1`) dispatches to core routes but never to `/mcp`: no MCP
+        // TypedPress's API (`/wp-json/typedpress/v1`) dispatches to core routes but never to `/mcp`: no MCP
         // server is served there, so none is built (building one builds every ability of the site).
         add_filter('mcp_adapter_create_default_server', static fn (mixed $create): bool => (bool) $create && \TypedPress\Wp\Facade::path() === null);
         add_filter('wp_ability_validate_input', [Register::class, 'validate'], 10, 3);

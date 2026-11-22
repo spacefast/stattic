@@ -37,6 +37,9 @@ const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
     'database' => [
         'capabilities' => SPACEFAST_FUNCTIONS_BROKERS['database'],
     ],
+    'spacepress' => [
+        'capabilities' => SPACEFAST_FUNCTIONS_BROKERS['spacepress'] ?? ['spacepress.call', 'zero.call'],
+    ],
     'zero' => ['capabilities' => SPACEFAST_FUNCTIONS_BROKERS['zero']],
     'services' => [
         'executor' => 'service-broker',
@@ -45,6 +48,12 @@ const SPACEFAST_FUNCTIONS_RELAY_BROKERS = [
         'identity' => true,
     ],
     'assets' => ['capabilities' => SPACEFAST_FUNCTIONS_BROKERS['assets']],
+];
+
+// Request headers a SpacePress relay call (`env.SPACEPRESS` / `env.APP`) may forward.
+const STATTIC_FUNCTIONS_SPACEPRESS_REQUEST_HEADERS = [
+    'accept', 'accept-language', 'content-type', 'cookie',
+    'idempotency-key', 'x-wp-nonce', 'x-identity-csrf',
 ];
 
 // Request headers an assets-binding read may carry: the ones that choose a
@@ -218,6 +227,10 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         _stattic_functions_assets_serve($privateRoot, $spaceId, $claims, $body);
     }
 
+    if ($broker === 'spacepress') {
+        _stattic_functions_spacepress_serve($privateRoot, $spaceId, $claims, $body, $serving);
+    }
+
     if ($broker === 'database') {
         // The broker is bound to the same URL resolution every other database
         // lane uses, and to exactly the grant this credential carries; the
@@ -245,9 +258,14 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     }
 
     require_once __DIR__ . '/identity-context.php';
-    require_once __DIR__ . '/legacy-zero.php';
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $claims['version_id']);
-    $config = _stattic_zero_runtime_config($versionRoot);
+    $config = [];
+    if (is_file($versionRoot . '/zero/config.json')) {
+        $zeroConfig = _stattic_runtime_read_json($versionRoot . '/zero/config.json');
+        if (is_array($zeroConfig)) {
+            $config = $zeroConfig;
+        }
+    }
     if ($config === []) {
         $functions = _stattic_functions_config_read($versionRoot);
         $config = $functions['kind'] === 'present' ? $functions['value'] : [];
@@ -265,7 +283,8 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     ));
     $visitor = $identity['isAuthenticated'] ? ['subject' => $identity['userId']] : null;
     if ($broker === 'zero') {
-        _stattic_legacy_zero_relay_run($body, $visitor, $identity, $spaceId, $config, $versionRoot, $serving, $host);
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_relay_zero($body, $visitor, $identity, $spaceId, $config, $versionRoot, $serving, $host);
     }
 
     $result = _stattic_runtime_run_subprocess(
@@ -321,10 +340,15 @@ function _stattic_functions_assets_serve(string $privateRoot, string $spaceId, a
     // own hostname, which serves the live version.
     $requestHost = _stattic_normalize_host_authority(is_string($host) ? $host : (string) ($_SERVER['HTTP_HOST'] ?? ''));
 
+    $testIncludedFilesProbe = getenv('SPACEFAST_RUNTIME_TEST_MODE') === '1'
+        && ($_SERVER['HTTP_X_SPACEFAST_TEST_INCLUDED_FILES'] ?? '') === '1';
     foreach (array_keys($_SERVER) as $name) {
         if (is_string($name) && (str_starts_with($name, 'HTTP_') || str_starts_with($name, 'REDIRECT_HTTP_'))) {
             unset($_SERVER[$name]);
         }
+    }
+    if ($testIncludedFilesProbe) {
+        $_SERVER['HTTP_X_SPACEFAST_TEST_INCLUDED_FILES'] = '1';
     }
     unset($_SERVER['CONTENT_TYPE'], $_SERVER['CONTENT_LENGTH'], $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']);
     foreach (STATTIC_FUNCTIONS_ASSETS_REQUEST_HEADERS as $name) {
@@ -364,6 +388,237 @@ function _stattic_functions_assets_serve(string $privateRoot, string $spaceId, a
     _stattic_serve_request($privateRoot, $method, $target, $path, $requestHost);
     // Only a deferred WordPress page returns, and a Functions version has none.
     _stattic_opaque_not_found();
+}
+
+/**
+ * A CF Worker's `env.SPACEPRESS` / `env.APP` relay call: dispatches directly to
+ * this version's SpacePress WordPress REST / Abilities API in-process
+ * (`/wp-json/spacepress/v1/...`, `/wp-json/wp-abilities/v1/...`,
+ * `/wp-json/spacepress-identity/v1/...`), forwarding visitor auth cookies when
+ * present or establishing the Space service principal otherwise. Never returns.
+ */
+function _stattic_functions_spacepress_serve(
+    string $privateRoot,
+    string $spaceId,
+    array $claims,
+    string $body,
+    array $serving
+): never {
+    $frame = json_decode($body, true);
+    if (!is_array($frame)) {
+        _stattic_problem_refused(400, 'spacepress_request_invalid', 'SpacePress relay frame must be a JSON object.');
+    }
+    $method = strtoupper(is_string($frame['method'] ?? null) && $frame['method'] !== '' ? $frame['method'] : 'GET');
+    if (!in_array($method, ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+        _stattic_problem_refused(400, 'spacepress_request_invalid', 'SpacePress relay method is not supported.');
+    }
+    $target = is_string($frame['path'] ?? null) ? $frame['path'] : '';
+    $host = $frame['host'] ?? null;
+    $headers = is_array($frame['headers'] ?? null) ? array_change_key_case($frame['headers'], CASE_LOWER) : [];
+    if (
+        $target === ''
+        || !str_starts_with($target, '/')
+        || strlen($target) > 8192
+        || preg_match('/[\x00-\x20\x7f]/', $target) === 1
+        || ($host !== null && (!is_string($host) || preg_match('/^[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?$/', $host) !== 1))
+    ) {
+        _stattic_problem_refused(400, 'spacepress_request_invalid', 'SpacePress relay path or host is invalid.');
+    }
+
+    require_once __DIR__ . '/../shared/spacepress.php';
+    require_once __DIR__ . '/../shared/wordpress-scope.php';
+
+    $targetParts = explode('?', $target, 2);
+    $rawPath = $targetParts[0];
+    $query = $targetParts[1] ?? '';
+    $canonicalPath = _stattic_canonical_request_path($rawPath);
+    if ($canonicalPath === null) {
+        _stattic_problem_refused(400, 'spacepress_request_invalid', 'SpacePress relay path is invalid.');
+    }
+    if (!str_starts_with($canonicalPath, '/wp-json/')) {
+        $canonicalPath = SPACEFAST_SPACEPRESS_API_PREFIX . ($canonicalPath === '/' ? '' : $canonicalPath);
+    }
+    $allowedPrefix = $canonicalPath === SPACEFAST_SPACEPRESS_API_PREFIX
+        || str_starts_with($canonicalPath, SPACEFAST_SPACEPRESS_API_PREFIX . '/')
+        || $canonicalPath === SPACEFAST_SPACEPRESS_IDENTITY_API_PREFIX
+        || str_starts_with($canonicalPath, SPACEFAST_SPACEPRESS_IDENTITY_API_PREFIX . '/')
+        || $canonicalPath === '/wp-json/wp-abilities/v1'
+        || str_starts_with($canonicalPath, '/wp-json/wp-abilities/v1/');
+    if (!$allowedPrefix) {
+        _stattic_problem_refused(403, 'spacepress_route_forbidden', 'SpacePress relay targets only SpacePress REST and Abilities routes.');
+    }
+
+    $versionId = (string) $claims['version_id'];
+    $serving['space_id'] = $spaceId;
+    $serving['version_id'] = $versionId;
+    try {
+        $selected = _stattic_spacepress_select($privateRoot, $spaceId, $versionId, $serving);
+    } catch (RuntimeException $error) {
+        _stattic_problem_refused(503, 'spacepress_unavailable', $error->getMessage());
+    }
+    if (!$selected) {
+        _stattic_problem_refused(404, 'spacepress_not_configured', 'This version does not include a SpacePress app.');
+    }
+
+    $wpLoad = dirname($privateRoot, 2) . '/wp-load.php';
+    if (!is_file($wpLoad)) {
+        _stattic_problem_refused(503, 'spacepress_wordpress_unavailable', 'WordPress is not available on this host.');
+    }
+
+    $visitorHost = $_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['visitorHost']] ?? null;
+    $requestHost = _stattic_normalize_host_authority(
+        is_string($host) ? $host : (is_string($visitorHost) && $visitorHost !== '' ? $visitorHost : (string) ($_SERVER['HTTP_HOST'] ?? ''))
+    );
+
+    // Strip relay credentials (especially HTTP_AUTHORIZATION carrying the relay JWT)
+    // before booting WordPress so the relay token can never be read as a visitor credential.
+    $forwardedCookieHeader = is_string($headers['cookie'] ?? null) && $headers['cookie'] !== ''
+        ? $headers['cookie']
+        : (is_string($_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['visitorCookie']] ?? null)
+            ? $_SERVER[SPACEFAST_FUNCTIONS_RELAY_SERVER_VARS['visitorCookie']]
+            : '');
+    $testIncludedFilesProbe = getenv('SPACEFAST_RUNTIME_TEST_MODE') === '1'
+        && ($_SERVER['HTTP_X_SPACEFAST_TEST_INCLUDED_FILES'] ?? '') === '1';
+    foreach (array_keys($_SERVER) as $name) {
+        if (is_string($name) && (str_starts_with($name, 'HTTP_') || str_starts_with($name, 'REDIRECT_HTTP_'))) {
+            unset($_SERVER[$name]);
+        }
+    }
+    if ($testIncludedFilesProbe) {
+        $_SERVER['HTTP_X_SPACEFAST_TEST_INCLUDED_FILES'] = '1';
+    }
+    unset($_SERVER['CONTENT_TYPE'], $_SERVER['CONTENT_LENGTH'], $_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW']);
+
+    $cleanHeaders = [];
+    foreach (STATTIC_FUNCTIONS_SPACEPRESS_REQUEST_HEADERS as $name) {
+        $value = $headers[$name] ?? null;
+        if (is_string($value) && $value !== '' && strlen($value) <= 8192 && preg_match('/[\r\n\x00]/', $value) !== 1) {
+            if ($name === 'cookie') {
+                continue;
+            }
+            $cleanHeaders[$name] = $value;
+            if ($name === 'content-type') {
+                $_SERVER['CONTENT_TYPE'] = $value;
+            } else {
+                $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+            }
+        }
+    }
+
+    // Forward visitor auth cookies (excluding platform-only admin cookies), or
+    // establish the Space service principal when no visitor cookie is present.
+    $_COOKIE = [];
+    $filteredCookiePairs = [];
+    if ($forwardedCookieHeader !== '' && strlen($forwardedCookieHeader) <= 8192 && preg_match('/[\r\n\x00]/', $forwardedCookieHeader) !== 1) {
+        foreach (explode(';', $forwardedCookieHeader) as $pair) {
+            $trimmed = trim($pair);
+            if ($trimmed === '' || !str_contains($trimmed, '=')) {
+                continue;
+            }
+            [$rawName, $rawValue] = explode('=', $trimmed, 2);
+            $cookieName = trim($rawName);
+            if (
+                $cookieName === ''
+                || $cookieName === '__Host-spacefast_content_admin'
+                || $cookieName === 'spacefast_content_admin'
+            ) {
+                continue;
+            }
+            $filteredCookiePairs[] = $cookieName . '=' . $rawValue;
+            $phpName = strtr($cookieName, ['.' => '_', ' ' => '_', '[' => '_']);
+            if (!array_key_exists($phpName, $_COOKIE)) {
+                $_COOKIE[$phpName] = urldecode($rawValue);
+            }
+        }
+    }
+    if ($filteredCookiePairs !== []) {
+        $_SERVER['HTTP_COOKIE'] = implode('; ', $filteredCookiePairs);
+        unset($GLOBALS['SPACEFAST_SPACEPRESS_SERVICE_PRINCIPAL']);
+    } else {
+        $principal = [
+            'kind' => 'service',
+            'subject' => 'service:' . $spaceId,
+            'space_id' => $spaceId,
+            'version_id' => $versionId,
+            'wordpress_role' => 'editor',
+        ];
+        $GLOBALS['SPACEFAST_SPACEPRESS_SERVICE_PRINCIPAL'] = $principal;
+        $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
+    }
+
+    $requestUri = $canonicalPath . ($query === '' ? '' : '?' . $query);
+    $_SERVER['REQUEST_METHOD'] = $method;
+    $_SERVER['REQUEST_URI'] = $requestUri;
+    $_SERVER['QUERY_STRING'] = $query;
+    $_SERVER['HTTP_HOST'] = $requestHost;
+    $_SERVER['SERVER_NAME'] = $requestHost;
+    parse_str($query, $_GET);
+    $_POST = [];
+
+    $requestBody = '';
+    if (array_key_exists('body', $frame)) {
+        if (is_string($frame['body'])) {
+            $requestBody = $frame['body'];
+        } elseif (is_array($frame['body'])) {
+            $encoded = json_encode($frame['body'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $requestBody = is_string($encoded) ? $encoded : '';
+            $cleanHeaders['content-type'] ??= 'application/json';
+        }
+    }
+
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
+    if (!defined('WP_USE_THEMES')) {
+        define('WP_USE_THEMES', false);
+    }
+    if (!defined('REST_REQUEST')) {
+        define('REST_REQUEST', true);
+    }
+
+    ob_start();
+    require_once $wpLoad;
+    _stattic_wordpress_lane_refuse_page_cache();
+    ob_end_clean();
+
+    if (!class_exists('WP_REST_Request') || !function_exists('rest_get_server')) {
+        _stattic_problem_refused(503, 'spacepress_rest_unavailable', 'WordPress REST API is unavailable.');
+    }
+
+    $restRoute = substr($canonicalPath, strlen('/wp-json'));
+    $restRequest = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, $restRoute);
+    $restRequest->set_query_params($_GET);
+    foreach ($cleanHeaders as $headerName => $headerValue) {
+        $restRequest->set_header($headerName, $headerValue);
+    }
+    if ($requestBody !== '') {
+        $restRequest->set_body($requestBody);
+    }
+
+    $server = rest_get_server();
+    $response = $server->dispatch($restRequest);
+    $status = (int) $response->get_status();
+    $responseHeaders = ['Cache-Control' => 'no-store'];
+    foreach ($response->get_headers() as $headerName => $headerValue) {
+        $lower = strtolower((string) $headerName);
+        if (
+            in_array($lower, ['cache-control', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'], true)
+            || str_starts_with($lower, 'x-spacefast-')
+            || str_starts_with($lower, 'x-stattic-')
+            || str_starts_with($lower, 'x-accel-')
+        ) {
+            continue;
+        }
+        if (is_scalar($headerValue)) {
+            $responseHeaders[(string) $headerName] = (string) $headerValue;
+        }
+    }
+    $data = $server->response_to_data($response, false);
+    $encodedResponse = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    _stattic_response_send(
+        $status,
+        is_string($encodedResponse) ? $encodedResponse : 'null',
+        'application/json; charset=utf-8',
+        $responseHeaders
+    );
 }
 
 // Tail events from a dispatched worker, on the relay credential. Delivery is

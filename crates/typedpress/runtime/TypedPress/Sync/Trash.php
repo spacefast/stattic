@@ -26,7 +26,7 @@ final class Trash
 
     public static function postBacked(array $spec): bool
     {
-        return ($spec['editor'] ?? true) && ($spec['wp'] ?? null) !== null;
+        return (($spec['editor'] ?? true) || ($spec['commerce'] ?? null) === 'product') && isset($spec['wp']['postType']);
     }
 
     /** @return array<int, string> post id → uid of trashed posts with id > $after, ascending, at most $limit */
@@ -64,7 +64,11 @@ final class Trash
         $pk = (int) $row[$spec['primaryKey']];
         $connection = Plugin::instance()->connection();
         $connection->touchPost($pk);
-        if (!$connection->core(static fn () => wp_trash_post($pk))) {
+        $trashed = $connection->core(static function () use ($pk, $spec): mixed {
+            if (($spec['commerce'] ?? null) === 'product') { $product = wc_get_product($pk); if (!$product) { return false; } $product->delete(false); return get_post_status($pk) === 'trash'; }
+            return wp_trash_post($pk);
+        });
+        if (!$trashed) {
             throw new \RuntimeException("Could not move post $pk to the trash");
         }
         if (($row['status'] ?? null) === 'published') {
@@ -117,6 +121,6 @@ final class Trash
     {
         $store = db()->store();
         $run = static fn () => db()->afterEditorSave($collection, $id, $before, db()->actor());
-        $store instanceof CompositeStore ? $store->posts->withTrash($run) : $run();
+        $store instanceof CompositeStore ? $store->withTrash($collection, $run) : $run();
     }
 }

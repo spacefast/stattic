@@ -1,7 +1,5 @@
-//! Minifies the JavaScript modules the app plugin ships: the typed client (`typedpress-client.js`) and
-//! the `"use client"` store modules. The only caller of `oxc_minifier`, so a change in its API is
-//! an edit here. What is committed or shown stays readable: `tp/_generated/client/client.js`
-//! and the stores' sources are not minified, only the copies in the app plugin.
+//! Minifies the browser modules the runtime and app plugins ship. The typed client, user-authored
+//! stores and runtime source stay readable. Only the files placed in plugin artifacts are minified.
 
 /// `source`, an ES module, minified: whitespace and comments removed, local names shortened,
 /// expressions compressed. Exports, imports and top-level names a module exposes keep their names;

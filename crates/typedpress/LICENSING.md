@@ -27,7 +27,7 @@ and every plugin that `typedpress build` and `typedpress plugin` emit from them.
 | `runtime/client/` | the typed TypeScript client |
 | `types/` | the `"typedpress"` type declarations |
 | `packages/` | the npm packages, except the bundled WordPress code in `@typedpress/blocks` (below) |
-| `examples/`, `docs/`, `docs-site/`, `www/`, `skills/`, `scripts/`, `tests/` | examples, documentation, the website, agent skills, tooling and tests |
+| `examples/`, `www/`, `skills/`, `scripts/`, `tests/` | examples, the website and documentation, agent skills, tooling and tests |
 
 and everything else not listed above.
 
@@ -49,7 +49,10 @@ generates from your `typedpress.config.ts` and `tp/` (`schema.php`,
 `functions.php`, migrations, `tp/_generated/db.d.ts`,
 `tp/_generated/openapi.json`, `tp/_generated/client/types.ts` and `schema.ts`)
 are yours. The client's `index.ts`, `react.ts` and `README.md` are copied from
-`runtime/client/` and stay MIT; the copy ships with its LICENSE.
+`runtime/client/` and stay MIT; the copy ships with its LICENSE. An app that
+declares a `store()` also gets `commerce.ts`, `cart-store.ts` and
+`cart-react.ts`, copied from the same directory under the same terms; that
+LICENSE then names the Woo Store SDK they are adapted from (see below).
 
 ## npm packages
 
@@ -72,6 +75,7 @@ Third-party code keeps its own license and is not relicensed by this file:
 | `runtime/admin/build/` | the bundled admin screens |
 | `examples/emdash/` | examples adapted from EmDash (MIT, Copyright Cloudflare Inc.); each keeps its upstream license file |
 | `src/config_migrate/app/client08/preact/` | Preact (MIT), for migrated 0.8 client pages |
+| `runtime/client/commerce.ts`, `runtime/client/cart-store.ts`, `runtime/client/cart-react.ts` | the Woo cart client, its optimistic store and its React hooks, adapted from Spacefast's Woo Store SDK ([spacefast/woo-store-sdk](https://github.com/spacefast/woo-store-sdk), MIT): the cart contracts, the error handling and the optimistic quantity and removal updates follow `@woo/storefront-core` (`packages/core/src/contracts.ts`, `transport.ts` and `resources/cart.ts`). That repository has no root LICENSE file; each of its packages declares MIT in its `package.json`. |
 | `tests/fixtures/openapi-3.1.schema.json` | the OpenAPI Initiative's JSON Schema for OpenAPI 3.1 documents (Apache-2.0), unmodified; a test validates the generated `openapi.json` with it and no build ships it |
 
 Each vendored runtime directory carries a `THIRD-PARTY-LICENSES.txt` listing

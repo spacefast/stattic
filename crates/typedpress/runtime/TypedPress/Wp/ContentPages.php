@@ -277,6 +277,12 @@ final class ContentPages
         return $this->byPost[$post] ?? null;
     }
 
+    /** The real Page identity behind a content route, also needed by native block integrations. */
+    public static function pageId(string $route): ?int
+    {
+        return self::$instance?->post($route)?->ID;
+    }
+
     private function post(string $route): ?\WP_Post
     {
         $id = $this->state()['pages'][$route]['post'] ?? null;
@@ -400,8 +406,11 @@ final class ContentPages
         // serves that path, the path is that route's, whatever Page core resolved it to.
         $base = rtrim((string) wp_parse_url(home_url('/'), PHP_URL_PATH), '/');
         $path = $base !== '' && str_starts_with($have, $base) ? (substr($have, strlen($base)) ?: '/') : $have;
-        $routes = $this->plugin->schema->app()['routes'] ?? [];
-        if ($own === [] && rawurldecode($have) !== rawurldecode($want) && (AppRouter::match($routes, $path)['route']['page'] ?? null) !== null) {
+        if ($own === [] && \TypedPress\Commerce\Module::routePath($this->plugin, $path) !== $path) {
+            return;
+        }
+        $app = $this->plugin->schema->app();
+        if ($own === [] && rawurldecode($have) !== rawurldecode($want) && (AppRouter::match($app['routes'] ?? [], $path, $app['routeIndex'] ?? null)['route']['page'] ?? null) !== null) {
             return;
         }
         if (rawurldecode($have) === rawurldecode($want) && $own === []) {

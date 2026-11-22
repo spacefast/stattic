@@ -21,6 +21,7 @@ pub const KINDS: &[(&str, &str)] = &[
     ("http", "fetches from"),
     ("env", "reads the environment variable"),
     ("mail", "sends mail with"),
+    ("connectors", "calls connectors with"),
     ("jobs", "enqueues the job"),
     // `setTimeout` and `AbortSignal.timeout`: request-scoped `TypedPress\Timers` entries that wait.
     ("timers", "sets timers with"),
@@ -329,7 +330,7 @@ fn flows(uses: &[Use], plugin: usize, functions: &[(String, BTreeSet<String>)]) 
                 .map(|u| format!("{}: {}", u.kind, u.value))
                 .collect()
         };
-        let (reads, sends) = (mine(&["read", "env"]), mine(&["http", "mail"]));
+        let (reads, sends) = (mine(&["read", "env"]), mine(&["http", "mail", "connectors"]));
         if !reads.is_empty() && !sends.is_empty() {
             out.push(json!({ "handler": handler, "reads": reads, "sends": sends }));
         }

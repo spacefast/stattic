@@ -61,6 +61,15 @@ pub fn describe(schema: &Schema) -> Json {
 }
 
 fn kind(c: &Collection, snapshot: &Json) -> Json {
+    if let Some(resource) = &c.commerce {
+        let fields = c
+            .columns
+            .iter()
+            .filter(|(_, col)| !col.read_only)
+            .map(|(name, col)| (name.clone(), field(col, json!({ "woocommerce": name }))))
+            .collect::<Map<_, _>>();
+        return json!({ "in":"woocommerce", "resource":resource, "fields":fields });
+    }
     let place = if c.auth {
         "users"
     } else if c.editor {

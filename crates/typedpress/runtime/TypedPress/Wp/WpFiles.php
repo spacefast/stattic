@@ -38,7 +38,7 @@ final class WpFiles implements FileStorage
         // Sites upgraded in place (no reactivation) install protection when the runtime adds the table.
         add_action('tp_runtime_tables_installed', [self::class, 'install']);
         // The daily re-probe: on wp-admin for a plugin-installed site; a managed build writes nothing on
-        // a request, so its daily jobs maintenance (an existing schedule) runs it instead.
+        // a request, so its jobs maintenance (an existing schedule) runs it instead.
         add_action('admin_init', static fn () => Runtime::managed() ? null : self::recheck());
         add_action(Jobs\ActionSchedulerQueue::MAINTAIN, static fn () => Runtime::managed() ? self::recheck() : null);
         // Editor saves (wp-admin and core REST `acf`) bypass the API pipeline: check file ids there too.

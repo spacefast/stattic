@@ -18,7 +18,7 @@ use TypedPress\Wp\Plugin;
 /**
  * Reactive queries without a push transport (docs/decisions/2026-11-13-reactive-queries.md).
  *
- * `POST /__tp/api/v1/_live` takes the reads a page is subscribed to, each with the token of
+ * `POST /wp-json/typedpress/v1/_live` takes the reads a page is subscribed to, each with the token of
  * the answer the page last got, and answers every one with "not modified" or the fresh result:
  *
  *   { "queries": [{ "kind": "todos", "op": "list", "args": { "where": { "done": false } }, "token": "…" }] }
@@ -37,7 +37,7 @@ use TypedPress\Wp\Plugin;
  */
 final class Module
 {
-    /** The facade path segment: `/__tp/api/v1/_live`. Kind names start with a letter, so it is free. */
+    /** The facade path segment: `/wp-json/typedpress/v1/_live`. Kind names start with a letter, so it is free. */
     public const ROUTE = '_live';
     /** Reads one request may carry. */
     public const MAX_QUERIES = 20;
@@ -146,8 +146,6 @@ final class Module
             if (!$store instanceof CompositeStore) {
                 throw new \LogicException('Reactive queries need the WordPress store');
             }
-            // Who the answer is for: the user, and a post-password cookie, which changes what a visitor reads.
-            $who = [$viewer->user['id'] ?? 0, $viewer->user['role'] ?? '', defined('COOKIEHASH') ? (string) ($_COOKIE['wp-postpass_' . COOKIEHASH] ?? '') : ''];
             $plans = [];
             $pairs = [];
             foreach ($queries as $i => $query) {
@@ -159,7 +157,7 @@ final class Module
                 }
                 // Every read is bound to the build that answered it: a deploy that changes the code is
                 // a new question, never "not modified" by counter.
-                $plan['q'] = base64_encode(hash('sha256', (string) json_encode([$who, $plan['kind'], $plan['op'], $plan['id'], Js::jsonStringify($plan['args']), self::generation()]), true));
+                $plan['q'] = self::question($viewer, $plan['kind'], $plan['op'], $plan['id'], $plan['args']);
                 $claims = Token::open($plan['token']);
                 $plan['held'] = is_array($claims) && ($claims['q'] ?? null) === $plan['q'] ? $claims : null;
                 if ($plan['op'] === 'page') {
@@ -245,15 +243,7 @@ final class Module
                     $data = ['html' => $data['html'], 'kinds' => self::keys($db, array_keys($data['reads']), $data['notices'] ?? [])];
                 }
                 $json = Js::jsonStringify($data) ?? 'null';
-                // A private file's signed link carries its expiry: two reads a second apart differ
-                // there alone. The hash leaves the signature out, so an unchanged row stays unchanged;
-                // a changed answer still sends the fresh links. A page also carries per-render values
-                // that aren't content (form nonces, sealed read tokens), left out the same way.
-                $hashed = preg_replace('#(/download[^"]*?[?&]exp=)\d+&sig=[0-9a-f]{64}#', '$1', $json) ?? $json;
-                if ($plan['op'] === 'page') {
-                    $hashed = self::stable($hashed);
-                }
-                $hash = base64_encode(hash('sha256', $hashed, true));
+                $hash = self::answerHash($json, $plan['op'] === 'page');
                 $token = Token::seal(['q' => $plan['q'], 'c' => $counters, 'h' => $hash, 't' => $now] + ($kinds === null ? [] : ['k' => $kinds]));
                 $results[] = $held !== null && ($held['h'] ?? null) === $hash
                     ? ['changed' => false, 'token' => $token]
@@ -262,6 +252,47 @@ final class Module
 
             return $results;
         });
+    }
+
+    public static function validPageUrl(mixed $url): bool
+    {
+        return is_string($url) && strlen($url) <= 2048 && preg_match('~\A/(?![/\\\\])[^\x00-\x20\x7f#]*\z~', $url) === 1;
+    }
+
+    /** A GET seed has no counter snapshot from before its data was read. The first poll checks its hash. */
+    public static function pageSeed(Db $db, Viewer $viewer, string $url, string $region, string $html, array $reads, array $notices): array
+    {
+        $kinds = self::keys($db, $reads, $notices);
+        $seed = ['url' => $url, 'kinds' => $kinds];
+        try {
+            $json = Js::jsonStringify(['html' => $html, 'kinds' => $kinds]) ?? 'null';
+            $seed['token'] = Token::seal([
+                'q' => self::question($viewer, '', 'page', null, ['url' => $url, 'region' => $region]),
+                'h' => self::answerHash($json, true),
+            ]);
+        } catch (\Throwable) {
+            // Without a token the browser subscribes with a full first read.
+        }
+        return $seed;
+    }
+
+    private static function question(Viewer $viewer, string $kind, string $op, int|string|null $id, array $args): string
+    {
+        $who = [$viewer->user['id'] ?? 0, $viewer->user['role'] ?? '', defined('COOKIEHASH') ? (string) ($_COOKIE['wp-postpass_' . COOKIEHASH] ?? '') : ''];
+        return base64_encode(hash('sha256', (string) json_encode([$who, $kind, $op, $id, Js::jsonStringify($args), self::generation()]), true));
+    }
+
+    private static function answerHash(string $json, bool $page): string
+    {
+        // A private file's signed link carries its expiry: two reads a second apart differ
+        // there alone. The hash leaves the signature out, so an unchanged row stays unchanged;
+        // a changed answer still sends the fresh links. A page also carries per-render values
+        // that aren't content (form nonces, sealed read tokens), left out the same way.
+        $hashed = preg_replace('#(/download[^"]*?[?&]exp=)\d+&sig=[0-9a-f]{64}#', '$1', $json) ?? $json;
+        if ($page) {
+            $hashed = self::stable($hashed);
+        }
+        return base64_encode(hash('sha256', $hashed, true));
     }
 
     /**
@@ -367,7 +398,7 @@ final class Module
         }
         $url = $args['url'] ?? null;
         // A path and query on this site: one leading slash, no scheme, host, fragment or control characters.
-        if (!is_string($url) || strlen($url) > 2048 || preg_match('~\A/(?![/\\\\])[^\x00-\x20\x7f#]*\z~', $url) !== 1) {
+        if (!self::validPageUrl($url)) {
             throw HttpError::invalidInput('url is a path on this site, like "/notes?page=2"', "$ptr/args/url");
         }
         $region = $args['region'] ?? null;

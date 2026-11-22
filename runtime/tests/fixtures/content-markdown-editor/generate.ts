@@ -124,7 +124,7 @@ function imported(
     "  public function __construct(public readonly int $status, public readonly string $codeName, string $message) { parent::__construct($message); }",
     "}",
     `$GLOBALS['SPACEFAST_CONTENT_PHP_TOOLKIT_PHAR'] = ${JSON.stringify(path.join(repoRoot, "runtime/engine/vendor/php-toolkit.phar"))};`,
-    `require ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-markdown.php"))};`,
+    `require ${JSON.stringify(path.join(repoRoot, "runtime/engine/deprecated/content/content-markdown.php"))};`,
     `echo ${fn}(file_get_contents(${JSON.stringify(path.join(here, "document.md"))}));`,
   ].join("\n");
   return execFileSync(process.env.PHP_BINARY ?? "php", ["-r", script], { encoding: "utf8" });

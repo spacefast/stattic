@@ -103,7 +103,9 @@ add_action('rest_api_init', static function () {
     'methods' => ['GET', 'POST'], 'permission_callback' => '__return_true',
     'callback' => static function () {
       $user = wp_get_current_user();
-      $app = class_exists('\\\\TypedPress\\\\Wp\\\\WpAuth') ? \\TypedPress\\Wp\\WpAuth::current() : null;
+      $app = class_exists('\\\\SpacePress\\\\Wp\\\\WpAuth')
+        ? \\SpacePress\\Wp\\WpAuth::current()
+        : (class_exists('\\\\TypedPress\\\\Wp\\\\WpAuth') ? \\TypedPress\\Wp\\WpAuth::current() : null);
       return [
         'user' => (int) $user->ID,
         'login' => (string) $user->user_login,
@@ -129,8 +131,8 @@ add_action('rest_api_init', static function () {
       const project = path.join(work, "app");
       mkdirSync(path.join(project, "tp/app"), { recursive: true });
       writeFileSync(
-        path.join(project, "typedpress.config.ts"),
-        'import {defineConfig, userProjection, text, email} from "typedpress"; export const members = userProjection({ email: email().unique().max(191), name: text().max(80) }, { access: { read: "self", update: "self", create: "anyone", delete: "admin" } }); export const users = { members }; export default defineConfig({name:"roles",admin:false});',
+        path.join(project, "spacepress.config.ts"),
+        'import {defineConfig, userProjection, text, email} from "spacepress"; export const members = userProjection({ email: email().unique().max(191), name: text().max(80) }, { access: { read: "self", update: "self", create: "anyone", delete: "admin" } }); export const users = { members }; export default defineConfig({name:"roles",admin:false});',
       );
       writeFileSync(
         path.join(project, "tp/app/page.tsx"),
@@ -138,7 +140,7 @@ add_action('rest_api_init', static function () {
       );
       writeFileSync(
         path.join(project, "tp/actions.ts"),
-        'import {action} from "typedpress"; export const whoami = action({access:"anyone",handler(input, ctx){return {role: ctx.user === null ? null : ctx.user.role};}});',
+        'import {action} from "spacepress"; export const whoami = action({access:"anyone",handler(input, ctx){return {role: ctx.user === null ? null : ctx.user.role};}});',
       );
       const step = await prepareZeroV2SourcePublish(project);
       assert.ok(step);
@@ -152,7 +154,7 @@ add_action('rest_api_init', static function () {
               readFileSync(file.absolutePath),
             ]),
           ),
-          finalize: { zero_generation: "tp_v1" },
+          finalize: { zero_generation: "spacepress" },
         });
       } finally {
         await step.cleanup?.();
@@ -191,7 +193,7 @@ add_action('rest_api_init', static function () {
           hostnames: [HOST],
           production_hostnames: [HOST],
           config: {
-            zero_generation: "tp_v1",
+            zero_generation: "spacepress",
             projection_generation: generation,
             visitor_issuer: "spacefast-api",
             visitor_jwks: runtimeJwks(),
@@ -294,7 +296,7 @@ add_action('rest_api_init', static function () {
         return whoSchema.parse(await response.json());
       };
       const whoami = async (cookie: string) => {
-        const response = await get(runtime, HOST, "/__tp/api/v1/actions/whoami", {
+        const response = await get(runtime, HOST, "/wp-json/spacepress/v1/actions/whoami", {
           method: "POST",
           headers: { cookie, "content-type": "application/json", ...sameOrigin },
           body: "{}",

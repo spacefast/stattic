@@ -7,16 +7,13 @@ version tree plus this engine is a complete self-hosted site. Exit is real.
 
 External PRs are welcome. Supporting freedom on the web is the point.
 
-Authored native PHP Functions are disabled across HTTP, CLI invoke, and cron
-dispatch. Their routes return `503 tenant_php_unavailable` with
-`Cache-Control: no-store` before tenant code executes. PHP-FPM retains raw
-request credentials outside mutable PHP globals, so header scrubbing cannot
-make an in-process tenant handler safe. Re-enabling PHP Functions requires a
-separate execution boundary that receives no platform credentials. Static
-content, Zero, Functions workers, proxy routes, and non-PHP cron and invoke
-targets remain available. Their request maps
-remove `X-SF-Authorization` and platform cookies while preserving application
-`Authorization` and Users app cookies.
+Authored native PHP Functions have been retired and removed from the runtime.
+Any historical response table containing `t=php` returns `410 php_functions_retired`
+with `Cache-Control: no-store` inline without loading any handler file. Static
+content, SpacePress, Functions workers, proxy routes, and non-PHP cron and
+invoke targets remain available. Their request maps remove `X-SF-Authorization`
+and platform cookies while preserving application `Authorization` and Users app
+cookies.
 
 Released runtimes must keep serving existing artifacts while the control plane
 and CLI advance. Management/upload protocols, stored artifacts, and credentials
@@ -51,7 +48,7 @@ runtime cannot recheck Atomic's current primary under FPM, so a stale route can
 send from a demoted domain until its refresh lands.
 Mail needs no application database or control-plane mailbox, queue or drainer.
 
-Functions and Zero require `from`; the PHP helper defaults to
+Functions and Zero require `from`; SpacePress mail defaults to
 `noreply@<primary-domain>`. Replies can go to a different `replyTo` address.
 Email remains gated by the existing email feature and daily recipient allowance.
 See [RUNNING.md](../RUNNING.md#space-mail-on-wp-cloud) for DNS and provider limits.

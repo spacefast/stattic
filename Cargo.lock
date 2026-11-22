@@ -563,7 +563,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1031,6 +1031,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1456,6 +1462,15 @@ name = "oxc-browserslist"
 version = "5.0.1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "oxc-css-parser"
+version = "0.0.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e5e8f4fcfe5796d4e23bec581cf049823c9303cb27bbcbbaa31342bce0d48bd"
+dependencies = [
+ "oxc_allocator 0.158.0",
 ]
 
 [[package]]
@@ -2662,7 +2677,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3289,10 +3304,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3502,9 +3517,12 @@ name = "typedpress"
 version = "0.3.0"
 dependencies = [
  "boon",
+ "imagesize",
  "indexmap",
+ "oxc-css-parser",
  "oxc_allocator 0.158.0",
  "oxc_ast 0.158.0",
+ "oxc_ast_visit 0.158.0",
  "oxc_codegen 0.158.0",
  "oxc_isolated_declarations 0.158.0",
  "oxc_minifier",
@@ -3513,6 +3531,7 @@ dependencies = [
  "oxc_span 0.158.0",
  "oxc_syntax 0.158.0",
  "oxc_transformer 0.158.0",
+ "pulldown-cmark",
  "regex",
  "ryu-js",
  "serde",
@@ -3781,7 +3800,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

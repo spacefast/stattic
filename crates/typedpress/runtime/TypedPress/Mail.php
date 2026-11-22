@@ -22,6 +22,8 @@ use TypedPress\Jobs\Jobs;
 final class Mail
 {
     public const JOB = 'typedpress.mail';
+    /** The default sender of a local site whose host is no mail domain. `.localhost` never leaves the machine. */
+    public const LOCAL_SENDER = 'noreply@typedpress.localhost';
     private const RETRIES = 5;
     private const MAX_BODY = 262144;
     private const MAX_RECIPIENTS = 50;
@@ -57,6 +59,9 @@ final class Mail
         if (!is_array($message)) {
             throw HttpError::invalidInput('A message object is required.', '');
         }
+        // `replyTo?: MailAddress` invites `replyTo: settings.replyTo ?? undefined`: a field holding
+        // JavaScript's undefined is a field left out, here and inside an address.
+        $message = self::withoutUndefined($message);
         foreach (array_keys($message) as $key) {
             if (!in_array($key, ['from', 'to', 'subject', 'text', 'html', 'cc', 'bcc', 'replyTo', 'headers'], true)) {
                 throw HttpError::invalidInput("Unknown message field $key.", '/' . $key);
@@ -141,17 +146,24 @@ final class Mail
             throw new \RuntimeException('This host has not connected its mail transport (tp_mail_transport)');
         }
         $mail = self::wpMailArguments($payload);
-        $alt = $mail['alt'];
+        if (!self::sendWordPress($mail['to'], $mail['subject'], $mail['message'], $mail['headers'], $mail['alt'])) {
+            throw new \RuntimeException('Mail transport did not accept the message');
+        }
+    }
+
+    public static function sendWordPress(array|string $to, string $subject, string $body, array $headers, ?string $alt): bool
+    {
+        if ($alt === null) {
+            return (bool) wp_mail($to, $subject, $body, $headers);
+        }
         $configure = static function ($mailer) use ($alt): void {
-            if ($alt !== null && is_object($mailer)) {
+            if (is_object($mailer)) {
                 $mailer->AltBody = $alt;
             }
         };
         add_action('phpmailer_init', $configure);
         try {
-            if (!wp_mail($mail['to'], $mail['subject'], $mail['message'], $mail['headers'])) {
-                throw new \RuntimeException('Mail transport did not accept the message');
-            }
+            return (bool) wp_mail($to, $subject, $body, $headers);
         } finally {
             remove_action('phpmailer_init', $configure);
         }
@@ -225,18 +237,51 @@ final class Mail
         return array_map(fn (mixed $a, int $i): array => self::address($a, $pointer . '/' . $i), $list, array_keys($list));
     }
 
+    /** A value with every field that holds JavaScript's undefined removed, at any depth. */
+    private static function withoutUndefined(array $value): array
+    {
+        $out = [];
+        foreach ($value as $key => $item) {
+            if ($item === JsUndefined::Value) {
+                continue;
+            }
+            $out[$key] = is_array($item) ? self::withoutUndefined($item) : $item;
+        }
+
+        return array_is_list($value) ? array_values($out) : $out;
+    }
+
     /** `noreply@` the site's own host, the original runtime's default sender. */
     private static function defaultSender(): array
     {
-        $domain = Env::get('TP_MAIL_SENDER_DOMAIN');
-        if (($domain === null || $domain === '') && function_exists('home_url')) {
-            $domain = (string) parse_url(home_url('/'), PHP_URL_HOST);
-        }
-        if ($domain === null || $domain === '') {
-            throw HttpError::invalidInput('Message from is required.', '/from');
-        }
+        $configured = Env::get('TP_MAIL_SENDER_DOMAIN');
+        $host = function_exists('home_url') ? (string) parse_url(home_url('/'), PHP_URL_HOST) : '';
+        $local = function_exists('wp_get_environment_type') && in_array(wp_get_environment_type(), ['local', 'development'], true);
 
-        return self::address('noreply@' . strtolower($domain), '/from');
+        return self::sender(is_string($configured) ? $configured : '', $host, $local);
+    }
+
+    /**
+     * The default sender for a site on `$host`: `noreply@` the configured domain, else the host.
+     * A host that is no mail domain (`127.0.0.1`, `localhost`) has no sender. On a local or
+     * development site the reserved `.localhost` name stands in, so `mail.send` works in
+     * `typedpress dev` without configuration; anywhere else the refusal names what to set.
+     *
+     * @return array{email: string}
+     */
+    public static function sender(string $configured, string $host, bool $local): array
+    {
+        $domain = strtolower($configured !== '' ? $configured : $host);
+        $email = 'noreply@' . $domain;
+        if ($domain !== '' && filter_var($email, FILTER_VALIDATE_EMAIL) !== false) {
+            return ['email' => $email];
+        }
+        if ($configured === '' && $local) {
+            return ['email' => self::LOCAL_SENDER];
+        }
+        $what = $configured !== '' ? "TP_MAIL_SENDER_DOMAIN ($configured)" : ($host === '' ? 'This site' : "This site's host ($host)");
+
+        throw HttpError::invalidInput($what . ' is not a domain email can be sent from. Set `from` on the message, or set TP_MAIL_SENDER_DOMAIN to the sending domain.', '/from');
     }
 
     /** RFC 2047 encoded-words below 75 characters each, never splitting a UTF-8 sequence. */

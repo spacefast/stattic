@@ -93,7 +93,7 @@ final class Invoke
             if ($op['guard'] ?? false) {
                 // Each row an agent reads or writes carries its `_rev`, as on the API.
                 $data = $op['op'] === 'list' && is_array($data)
-                    ? array_map(static fn (mixed $row): mixed => \TypedPress\Wp\Rev::attach($collection, $row), $data)
+                    ? \TypedPress\Wp\Rev::attachAll($collection, $data)
                     : ($op['op'] === 'delete' ? $data : \TypedPress\Wp\Rev::attach($collection, $data));
             }
 

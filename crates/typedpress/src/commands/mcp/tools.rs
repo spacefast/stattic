@@ -95,7 +95,8 @@ pub(super) fn list(options: &Options) -> Vec<Value> {
             "dev_status",
             "The local dev site",
             "Whether this project has a local WordPress dev site, whether it is running, its URL and port, and \
-             whether a `typedpress dev` process is rebuilding it on save (`watching`, `pid`, `log`). `typedpress dev --detach` \
+             whether a `typedpress dev` process is rebuilding it on save (`watching`, `pid`, `log`). `error` is that \
+             process's last build when it failed, with the compiler's diagnostics; fix the source and it rebuilds. `typedpress dev --detach` \
              starts it in the background; `typedpress dev stop` stops it and keeps its data.",
             object(json!({}), &[]),
             read.clone(),

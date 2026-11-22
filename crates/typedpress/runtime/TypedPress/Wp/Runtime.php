@@ -32,19 +32,13 @@ final class Runtime
         // A guarded upgrade step, not a table: staged revisions written before they had their own
         // status get it (WpPostStore::upgradeStagedStatus), once per site with the other steps.
         \TypedPress\SystemTables::register('__tp_staged_status', [\TypedPress\SystemTables::step(1, WpPostStore::upgradeStagedStatus(...))]);
-        // TypedPress's API (/__tp/api/v1) is a REST request outside /wp-json: Polylang must set itself up
-        // as for one (every language, the API's own `locale`), not as a front-end page whose language
-        // would filter every internal query. Its context is chosen on plugins_loaded, after this file.
-        // (With no language yet Polylang sets up no context for a page request; a REST one still gets one.)
-        add_filter('pll_context', static fn (mixed $class): mixed => in_array($class, ['PLL_Frontend', ''], true) && Facade::path() !== null ? 'PLL_REST_Request' : $class);
-        // Core accepts application passwords on REST requests only; the API is one. Registered here, as
-        // the runtime loads, because a plugin (Polylang in its REST context) may resolve the current user
-        // before the app's own plugin has booted.
-        add_filter('application_password_is_api_request', static fn (bool $api): bool => $api || Facade::path() !== null);
         RouteRequest::register();
         AgentScope::trackCookie();
+        // Application passwords sign in where core accepts them and nowhere else: on a request WordPress
+        // itself has made a REST request (`REST_REQUEST`), never one a URL only appears to name.
         // A scoped application password signs in only where an active app enforces its scope.
         add_action('wp_authenticate_application_password_errors', [AgentScope::class, 'authenticating'], 10, 3);
+        add_filter('rest_authentication_errors', [AgentScope::class, 'booted'], 0);
         add_filter('rest_authentication_errors', [AgentScope::class, 'unenforced'], 95);
         register_activation_hook($runtimeFile, [self::class, 'activate']);
         PageCaches::register();
@@ -145,7 +139,7 @@ final class Runtime
     }
 
     /** Mount exactly one version after platform plugins load. Visitors never migrate managed apps. */
-    public static function mount(string $runtimeFile, string $appDir, array $variables = []): Plugin
+    public static function mount(string $runtimeFile, string $appDir, array $variables = [], ?\TypedPress\Schema $schema = null): Plugin
     {
         if (self::$booted && !self::$managed) {
             throw new \RuntimeException('A site-wide TypedPress runtime is already loaded');
@@ -153,7 +147,7 @@ final class Runtime
         self::$managed = true;
         \TypedPress\Env::isolate($variables);
         self::boot($runtimeFile);
-        $plugin = self::app($appDir, $appDir . '/' . basename($appDir) . '.php');
+        $plugin = self::app($appDir, $appDir . '/' . basename($appDir) . '.php', $schema);
         if ($plugin === null) {
             throw new \RuntimeException('Cannot mount the managed TypedPress app; check platform requirements');
         }
@@ -214,6 +208,7 @@ final class Runtime
             Jobs\ActionSchedulerQueue::install();
             Guests::install();
         }
+        \TypedPress\Commerce\Module::initialize(self::$plugin);
         ContentPages::install();
         RoutePages::install();
         \TypedPress\Search\Index::reindexChanged();
@@ -311,6 +306,7 @@ final class Runtime
     public static function installPlan(): array
     {
         $steps = [...ContentPages::plan(), ...RoutePages::plan()];
+        if (self::$plugin !== null) { $steps = [...$steps, ...\TypedPress\Commerce\Module::plan(self::$plugin)]; }
         if (class_exists(\TypedPress\Search\Index::class, false) && \TypedPress\Search\Index::shapeChanged()) {
             $steps[] = self::step('search-shape', 'search-shape');
         }
@@ -408,7 +404,7 @@ final class Runtime
     public static function applySystemTables(): void
     {
         global $wpdb;
-        $schema = new \TypedPress\Schema(['version' => 3, 'runtime' => self::SERIES]);
+        $schema = new \TypedPress\Schema(['version' => 5, 'runtime' => self::SERIES]);
         \TypedPress\SystemTables::apply(CompositeStore::create($schema, new Connection($wpdb)));
         // Features finish their own install here (private files write their deny rules and probe).
         do_action('tp_runtime_tables_installed');
@@ -422,7 +418,7 @@ final class Runtime
         return self::SERIES . '+' . \TypedPress\SystemTables::fingerprint();
     }
 
-    public static function app(string $dir, string $mainFile): ?Plugin
+    public static function app(string $dir, string $mainFile, ?\TypedPress\Schema $schema = null): ?Plugin
     {
         if (self::$appFile === $mainFile) {
             return self::$plugin;
@@ -431,7 +427,7 @@ final class Runtime
             if (self::$plugin !== null) {
                 throw new \RuntimeException('only one TypedPress app can be active; deactivate the other app first');
             }
-            $schema = \TypedPress\Schema::load($dir . '/tp/app/schema.php');
+            $schema ??= \TypedPress\Schema::load($dir . '/tp/app/schema.php');
             $problems = Platform::problems($schema->locales() !== null);
             if ($problems !== []) {
                 throw new \RuntimeException(implode('; ', $problems));
@@ -495,6 +491,6 @@ final class Runtime
 
     private static function notice(string $problem): void
     {
-        add_action('admin_notices', static fn () => printf('<div class="notice notice-error"><p>%s</p></div>', esc_html('TypedPress: ' . $problem . '. Rebuild with first ' . self::SERIES . '.x.')));
+        add_action('admin_notices', static fn () => printf('<div class="notice notice-error"><p>%s</p></div>', esc_html('TypedPress: ' . $problem . '. Rebuild with typedpress ' . self::SERIES . '.x.')));
     }
 }

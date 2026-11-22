@@ -8,8 +8,6 @@ require_once __DIR__ . '/finalizer-protocol.generated.php';
 // tenant code owns neither and only ever sees operation frames. Every caller is
 // in this process. There is no stdio lane and no broker subprocess:
 //
-//   php-functions.php:   sf_db() inside the tenant's own request, after the
-//                        jail; the credential was read before the scrub.
 //   functions-relay.php: a dispatched Cloudflare worker calls back into the
 //                        space origin over HTTPS, so every brokered call burns
 //                        a PHP-FPM worker and round-trip count is the cost that

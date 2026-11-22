@@ -295,10 +295,3 @@ class TypedPress_Admin_REST_View_Config_Controller extends WP_REST_Controller {
 		return $params;
 	}
 }
-
-add_action(
-	'rest_api_init',
-	function () {
-		( new TypedPress_Admin_REST_View_Config_Controller() )->register_routes();
-	}
-);

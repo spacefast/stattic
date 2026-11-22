@@ -17,7 +17,7 @@ use TypedPress\Wp\Comments;
  *   already read the item as the visitor, and this checks again, so a thread is never shown for
  *   an item the visitor can't see.
  * - A signed-out visitor sees the thread and a sign-in link, not a form. A signed-in visitor gets a
- *   form that posts form-encoded to `POST /__tp/api/v1/comments` ({@see Forms}), and a reply
+ *   form that posts form-encoded to `POST /wp-json/typedpress/v1/comments` ({@see Forms}), and a reply
  *   form under each comment that may take a reply. The policy itself ({@see Comments}) is enforced
  *   where comments are created, never here.
  * - The page shows a signed-in visitor's held comment and the form's flash, so it is never shared:

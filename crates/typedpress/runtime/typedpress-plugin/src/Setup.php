@@ -9,24 +9,22 @@ final class Setup
     public const PAGE = 'typedpress-setup';
     private const ACTION = 'tp_setup';
 
-    public static function register(): void
+    public static function menu(): void
     {
-        add_action('admin_menu', static function (): void {
-            add_menu_page('TypedPress', 'TypedPress', Site::CAPABILITY, self::PAGE, [self::class, 'render'], 'dashicons-cloud-upload', 3);
-        });
-        add_action('admin_post_' . self::ACTION, [self::class, 'handle']);
-        // Until the site has what TypedPress needs, say so where an administrator will see it.
-        add_action('admin_notices', static function (): void {
-            $screen = function_exists('get_current_screen') ? get_current_screen() : null;
-            if (!Site::mayDeploy() || ($screen !== null && str_contains((string) $screen->id, self::PAGE))) {
-                return;
-            }
-            if (Mount::error() !== null) {
-                printf('<div class="notice notice-error"><p><strong>TypedPress:</strong> the app is not running. %s <a href="%s">Open TypedPress</a></p></div>', esc_html(Mount::error()), esc_url(self::url()));
-            } elseif (!Requirements::ready()) {
-                printf('<div class="notice notice-warning"><p><strong>TypedPress</strong> needs a few plugins before an app can be deployed here. <a href="%s">Set up TypedPress</a></p></div>', esc_url(self::url()));
-            }
-        });
+        add_menu_page('TypedPress', 'TypedPress', Site::CAPABILITY, self::PAGE, [self::class, 'render'], 'dashicons-cloud-upload', 3);
+    }
+
+    public static function notice(): void
+    {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (!Site::mayDeploy() || ($screen !== null && str_contains((string) $screen->id, self::PAGE))) {
+            return;
+        }
+        if (Mount::error() !== null) {
+            printf('<div class="notice notice-error"><p><strong>TypedPress:</strong> the app is not running. %s <a href="%s">Open TypedPress</a></p></div>', esc_html(Mount::error()), esc_url(self::url()));
+        } elseif (!Requirements::ready()) {
+            printf('<div class="notice notice-warning"><p><strong>TypedPress</strong> needs a few plugins before an app can be deployed here. <a href="%s">Set up TypedPress</a></p></div>', esc_url(self::url()));
+        }
     }
 
     public static function url(): string

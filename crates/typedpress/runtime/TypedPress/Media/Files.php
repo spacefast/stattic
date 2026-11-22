@@ -386,6 +386,15 @@ final class Files
             unset($opts['with'][$col]);
             if ($v === true) {
                 self::$wanted[$collection][] = $col;
+                // `with` asked for the column, as it does for a relation or a media column: a
+                // `columns` selection that leaves it out still returns it.
+                if (is_array($opts['columns'] ?? null)) {
+                    if (in_array(true, $opts['columns'], true)) {
+                        $opts['columns'][$col] = true;
+                    } else {
+                        unset($opts['columns'][$col]);
+                    }
+                }
             } elseif ($v !== false && $v !== null) {
                 throw HttpError::invalidQuery('File columns take `true`', $pointer . '/with' . HttpError::seg($col));
             }

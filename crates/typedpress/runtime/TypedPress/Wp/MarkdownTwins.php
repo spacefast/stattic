@@ -32,6 +32,8 @@ final class MarkdownTwins
     public const CONTENT_SIGNAL = 'search=yes, ai-input=yes, ai-train=no';
     /** Entries per kind in /llms.txt; each kind's archive link reaches the rest. */
     public const LLMS_LIMIT = 100;
+    /** Inspect at most 300 published candidates per post type. Guards can leave a shorter listing. */
+    private const LLMS_BATCHES = 3;
 
     /** The `.md` URI this request asked for, while WordPress parses it as its HTML URL. */
     private static ?string $twin = null;
@@ -183,22 +185,34 @@ final class MarkdownTwins
         if ($tagline !== '') {
             array_push($lines, '> ' . $tagline, '');
         }
-        array_push($lines, 'Every page has a Markdown version at its URL plus `.md`; the home page is ' . self::link('/index.md', self::twin(home_url('/'))) . '.', '');
+        $intro = self::guarded(home_url('/')) ? 'Public pages have a Markdown version at their URL plus `.md`.'
+            : 'Every page has a Markdown version at its URL plus `.md`; the home page is ' . self::link('/index.md', self::twin(home_url('/'))) . '.';
+        array_push($lines, $intro, '');
         foreach (get_post_types(['public' => true], 'objects') as $type) {
             if ($type->name === 'attachment') {
                 continue;
             }
             $entries = [];
-            foreach (get_posts([
-                'post_type' => $type->name, 'post_status' => 'publish', 'numberposts' => self::LLMS_LIMIT,
-                'orderby' => $type->hierarchical ? ['menu_order' => 'ASC', 'title' => 'ASC'] : ['date' => 'DESC', 'ID' => 'DESC'],
-            ]) as $post) {
-                if (self::hasTwin($post)) {
-                    $entries[] = self::entry($post);
+            for ($page = 1; $page <= self::LLMS_BATCHES; ++$page) {
+                $posts = get_posts([
+                    'post_type' => $type->name, 'post_status' => 'publish', 'numberposts' => self::LLMS_LIMIT, 'paged' => $page,
+                    'orderby' => $type->hierarchical ? ['menu_order' => 'ASC', 'title' => 'ASC', 'ID' => 'ASC'] : ['date' => 'DESC', 'ID' => 'DESC'],
+                ]);
+                foreach ($posts as $post) {
+                    $entry = self::entry($post);
+                    if ($entry !== null) {
+                        $entries[] = $entry;
+                        if (count($entries) === self::LLMS_LIMIT) {
+                            break 2;
+                        }
+                    }
+                }
+                if (count($posts) < self::LLMS_LIMIT) {
+                    break;
                 }
             }
             $archive = $type->name === 'post' ? self::postsPage() : get_post_type_archive_link($type->name);
-            if (is_string($archive) && $archive !== '' && $entries !== []) {
+            if (is_string($archive) && $archive !== '' && $entries !== [] && !self::guarded($archive)) {
                 $entries[] = '- ' . self::link('All ' . self::plain((string) $type->labels->name), self::twin($archive));
             }
             self::section($lines, (string) $type->labels->name, (string) $type->description, $entries);
@@ -217,7 +231,7 @@ final class MarkdownTwins
             $entries = [];
             foreach (is_array($terms) ? $terms : [] as $term) {
                 $url = get_term_link($term);
-                if (is_string($url)) {
+                if (is_string($url) && !self::guarded($url)) {
                     $about = self::plain($term->description);
                     $entries[] = '- ' . self::link(self::plain($term->name), self::twin($url)) . ($about !== '' ? ': ' . $about : '');
                 }
@@ -285,7 +299,7 @@ final class MarkdownTwins
         }
         if (self::$twin !== null) {
             // A `tp/app/` page renders its own twin, from its compiled output (rendering.md §5).
-            $app = AppRouter::instance()?->twin(self::htmlUrl(), $reads);
+            $app = AppRouter::instance()?->twin(self::htmlUrl(), $reads, $also, $search);
             [$status, $body] = $app ?? self::document();
             $headers = self::headers();
             if ($status === 200) {
@@ -299,15 +313,25 @@ final class MarkdownTwins
             // A `.md` URL's twin is shared like an anonymous page (it is rendered as one): what it
             // read decides which writes purge it, as for the page (rendering.md §6.2). Recorded under
             // the twin's own URL: the page's layouts read more than the twin, and keep their record.
-            if ($app !== null && $status === 200) {
-                \TypedPress\Render\Cache::record(self::$twin, $reads);
+            // A twin URL that can't be recorded (a query parameter its page doesn't declare) can't be
+            // purged: Batcache, which keeps a response whatever its headers, is told to drop it.
+            if ($app !== null && $status === 200 && !\TypedPress\Render\Cache::record(self::$twin, $reads, $also, $search)) {
+                $headers['Cache-Control'] = \TypedPress\Render\Cache::PRIVATE;
+                $headers[\TypedPress\Render\Cache::EDGE_HEADER] = 'no-cache';
+                if (function_exists('batcache_cancel')) {
+                    batcache_cancel();
+                }
+                // Nor a prebuilt twin file, which no write would know to rebuild.
+                \TypedPress\Render\Prebuilt::unrecorded();
             }
             self::emit($status, $headers, $body);
         }
         if (headers_sent()) {
             return;
         }
-        if (self::kind() !== null || AppRouter::instance()?->serves(self::htmlUrl())) {
+        // The route table answers for a `tp/app/` page without a read; only a URL the theme renders
+        // asks whether its item has a twin, which reads the kind's rule for a signed-out visitor.
+        if (AppRouter::instance()?->serves(self::htmlUrl()) || self::kind() !== null) {
             header('Link: <' . self::twin(self::htmlUrl()) . '>; rel="alternate"; type="text/markdown"', false);
         }
         $signal = self::contentSignal();
@@ -409,7 +433,7 @@ final class MarkdownTwins
     /** wp_head: the `<link rel="alternate" type="text/markdown">` matching the `Link` header. */
     public static function linkTag(): void
     {
-        if (self::kind() === null && !AppRouter::instance()?->serves(self::htmlUrl())) {
+        if (!AppRouter::instance()?->serves(self::htmlUrl()) && self::kind() === null) {
             return;
         }
         printf('<link rel="alternate" type="text/markdown" href="%s" />' . "\n", esc_url(self::twin(self::htmlUrl())));
@@ -440,9 +464,16 @@ final class MarkdownTwins
         if (is_404() || is_feed() || is_robots() || is_favicon() || is_trackback() || is_embed() || is_preview()) {
             return null;
         }
+        $post = is_singular() ? get_queried_object() : null;
+        $router = AppRouter::instance();
+        if ($router !== null) {
+            $path = self::relative((string) wp_parse_url(self::requestUri(), PHP_URL_PATH));
+            // The home route owns the front page. WordPress still owns queries such as /?p=123 or /?s=term.
+            if (($path !== '/' || is_home() || is_front_page()) && $router->guarded($path, $post instanceof \WP_Post ? $post->post_type : '')) {
+                return null;
+            }
+        }
         if (is_singular()) {
-            $post = get_queried_object();
-
             return $post instanceof \WP_Post && self::hasTwin($post) ? 'singular' : null;
         }
 
@@ -461,8 +492,8 @@ final class MarkdownTwins
         }
         $entries = [];
         foreach ($wp_query instanceof \WP_Query ? $wp_query->posts : [] as $post) {
-            if ($post instanceof \WP_Post && self::hasTwin($post)) {
-                $entries[] = self::entry($post);
+            if ($post instanceof \WP_Post && ($entry = self::entry($post)) !== null) {
+                $entries[] = $entry;
             }
         }
         array_push($lines, ...($entries === [] ? ['Nothing is published here yet.'] : $entries));
@@ -497,9 +528,16 @@ final class MarkdownTwins
     }
 
     /** `- [Title](twin): summary`; a password-protected post shows its title only. */
-    private static function entry(\WP_Post $post): string
+    private static function entry(\WP_Post $post): ?string
     {
-        $line = '- ' . self::link(self::plain($post->post_title) ?: '(untitled)', self::twin((string) get_permalink($post)));
+        if (!self::hasTwin($post)) {
+            return null;
+        }
+        $url = (string) get_permalink($post);
+        if (self::guarded($url, $post->post_type)) {
+            return null;
+        }
+        $line = '- ' . self::link(self::plain($post->post_title) ?: '(untitled)', self::twin($url));
         if ($post->post_password !== '') {
             return $line;
         }
@@ -583,6 +621,14 @@ final class MarkdownTwins
         }
 
         return $headers;
+    }
+
+    /** Whether an app guard covers this WordPress URL, including kind items listed by /llms.txt. */
+    private static function guarded(string $url, string $postType = ''): bool
+    {
+        $router = AppRouter::instance();
+        $path = self::relative((string) wp_parse_url($url, PHP_URL_PATH));
+        return $router !== null && ($path !== '/' || !AppRouter::wordPressHomeQuery($url)) && $router->guarded($path, $postType);
     }
 
     /**

@@ -370,7 +370,9 @@ final class Sitemap
             return self::$listed[$kind] = []; // the read rule refuses signed-out visitors outright
         }
         $ids = array_map(static fn (array $row): int => (int) $row[$pk], $rows);
-        _prime_post_caches($ids, false, false);
+        // The posts, and their meta when the kind's URL holds a field: one read each, not one per item.
+        $urls = KindUrls::instance();
+        $urls === null ? _prime_post_caches($ids, false, false) : $urls->prime($kind, $ids);
         $out = [];
         foreach ($ids as $id) {
             $post = get_post($id);
@@ -379,7 +381,7 @@ final class Sitemap
                 continue;
             }
             $path = KindUrls::instance()?->path($kind, $post);
-            if ($path === null || AppRouter::instance()?->guarded($path) === true) {
+            if ($path === null || AppRouter::instance()?->guarded($path, $post->post_type) === true) {
                 continue;
             }
             $out[] = $id;

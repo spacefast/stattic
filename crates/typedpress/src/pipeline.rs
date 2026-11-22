@@ -28,6 +28,8 @@ pub struct Built {
     pub routes_ts: Option<String>,
     /// Destructive steps in the new migrations.
     pub warnings: Vec<String>,
+    /// Compile-time OXC AST lint warnings (e.g. `capital_P_dangit`), with auto-fix spans.
+    pub lint_warnings: Vec<crate::lint::Warning>,
     /// Declared WordPress plugins outside `wp_plugins/supported.json`; they still install.
     pub unsupported_plugins: Vec<String>,
     pub hints: Vec<String>,
@@ -174,6 +176,7 @@ pub fn build(
     let blocks = components(program, &mut ev, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
     app::register(program, &mut ev, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
     crate::content_page::register(program, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
+    crate::commerce::pages(&ext.schema, config_span).map_err(|d| d.phase(diag::Code::Schema))?;
     crate::runtime_schema::apply(runtime_lock.as_ref(), &mut ev, &mut ext)?;
     let mut schema = ext.schema.clone();
     let roots = std::mem::take(&mut ext.roots);
@@ -188,6 +191,7 @@ pub fn build(
     let mut hooks: HookFunctions = indexmap::IndexMap::new();
     let plugin_lock = read_plugin_lock(program, &project.join(crate::plugins::LOCK_PATH))?;
     let previous_value;
+    let mut personal_actions = Vec::new();
     let (functions, slots, settled) = {
         let mut c = compile::Compiler::new(&schema, &mut ev, &ext, program);
         c.abilities = catalog.clone();
@@ -216,19 +220,55 @@ pub fn build(
             }
         }
         // The lock settles before anything is emitted, so a refused plugin generates nothing.
-        let mut handlers = Vec::new();
-        for ((_, name), root) in slots.iter().zip(&roots) {
-            if let Some(plugin) = root.plugin {
-                let mut reached = std::collections::BTreeSet::from([name.clone()]);
-                let mut stack = vec![name.clone()];
-                while let Some(f) = stack.pop() {
-                    for callee in c.calls.get(&f).into_iter().flatten() {
-                        if reached.insert(callee.clone()) {
-                            stack.push(callee.clone());
-                        }
+        let reach = |name: &String| {
+            let mut reached = std::collections::BTreeSet::from([name.clone()]);
+            let mut stack = vec![name.clone()];
+            while let Some(f) = stack.pop() {
+                for callee in c.calls.get(&f).into_iter().flatten() {
+                    if reached.insert(callee.clone()) {
+                        stack.push(callee.clone());
                     }
                 }
-                handlers.push((plugin, name.clone(), reached));
+            }
+            reached
+        };
+        let mut handlers = Vec::new();
+        // Each action: its ability's name, and every function its handler reaches.
+        let app = crate::wordpress::abilities::kebab(&schema.name);
+        let mut actions = Vec::new();
+        for ((slot, name), root) in slots.iter().zip(&roots) {
+            if let Some(plugin) = root.plugin {
+                handlers.push((plugin, name.clone(), reach(name)));
+            }
+            if let Slot::ActionHandler { action } = slot {
+                let ability = format!("{app}/{}", crate::wordpress::abilities::kebab(action));
+                actions.push((action.clone(), ability, reach(name)));
+            }
+        }
+        // An action is personal when its code reads orders or calls an ability that needs the grant,
+        // or calls an action that is. Repeated until nothing changes, so a chain of actions calling
+        // actions is followed to its end.
+        let mut personal_abilities = std::collections::BTreeSet::new();
+        loop {
+            let found: Vec<_> = actions
+                .iter()
+                .filter(|(_, ability, reached)| {
+                    !personal_abilities.contains(ability)
+                        && reached.iter().any(|f| {
+                            c.personal.contains(f)
+                                || c.ability_calls
+                                    .get(f)
+                                    .is_some_and(|called| called.iter().any(|a| personal_abilities.contains(a)))
+                        })
+                })
+                .map(|(action, ability, _)| (action.clone(), ability.clone()))
+                .collect();
+            if found.is_empty() {
+                break;
+            }
+            for (action, ability) in found {
+                personal_abilities.insert(ability);
+                personal_actions.push(action);
             }
         }
         let prev = previous()?;
@@ -243,9 +283,8 @@ pub fn build(
                     hosts.iter().map(|h| compile::php_str(h)).collect::<Vec<_>>().join(", ")
                 ),
             };
-            c.output.push_str(&format!(
-                "function {function}(): ?array\n{{\n    return {value};\n}}\n\n"
-            ));
+            c.output
+                .push_str(&format!("/**\n * Return the plugin's permitted outbound HTTP hosts.\n *\n * @return string[]|null\n */\nfunction {function}(): ?array {{\n\treturn {value};\n}}\n\n"));
         }
         (std::mem::take(&mut c.output), slots, settled)
     };
@@ -257,6 +296,9 @@ pub fn build(
             .expect("collection")
             .hooks
             .insert(kind, name);
+    }
+    for action in personal_actions {
+        schema.actions.get_mut(&action).expect("action").personal = true;
     }
     for (slot, name) in slots {
         match slot {
@@ -271,6 +313,9 @@ pub fn build(
             Slot::WpHook { index } => schema.wp_hooks[index].handler = name,
             Slot::Component { name: component } => {
                 schema.components.insert(component, name);
+            }
+            Slot::Email { file } => {
+                schema.components.insert(file, name);
             }
             Slot::AppPage { .. }
             | Slot::AppMetadata { .. }
@@ -326,6 +371,7 @@ pub fn build(
                 source,
                 shipped,
                 actions: analysis.server_actions.iter().cloned().collect(),
+                assets: analysis.assets.clone(),
                 live: !analysis.live.is_empty(),
             },
         );
@@ -397,6 +443,17 @@ pub fn build(
                 .help("declare it with table() again: its rows stay where they are and no migration is written")
                 .phase(diag::Code::Schema));
             }
+            // A commerce kind is Woo's storage and has no table in the next snapshot, so the planner
+            // would drop the SQL table that holds this name's rows.
+            if let Some(commerce) = schema.collections.get(stored).and_then(|c| c.commerce.as_deref()) {
+                let kind = ext.collections.iter().find(|c| c.table() == stored);
+                return Err(Diag::new(
+                    kind.map_or(config_span, |c| c.span),
+                    format!("`{stored}` is stored as a SQL table, and {commerce}() is always WooCommerce storage"),
+                )
+                .help("give the commerce kind another name, or remove the table in one deploy and add the commerce kind in the next")
+                .phase(diag::Code::Schema));
+            }
             let canonical = crate::schema::physical_name(stored);
             if &canonical != stored
                 && !schema.collections.contains_key(stored)
@@ -465,6 +522,7 @@ pub fn build(
         .is_some()
         .then(|| crate::runtime_schema::references(&schema, &program.root));
     let theme_css = crate::theme::tokens(theme.as_ref().unwrap_or(&serde_json::Value::Null));
+    let lint_warnings = crate::lint::check_project(root);
     Ok(Built {
         theme,
         theme_css,
@@ -480,6 +538,7 @@ pub fn build(
         gen_ts,
         routes_ts,
         warnings,
+        lint_warnings,
         hints: ext.hints,
         plugin_lock: settled.lock,
         plugin_changes: settled.changes,
@@ -667,6 +726,34 @@ fn components(
             });
         }
     }
+    // Templates compile before the handlers that render them, so `mail.render()` finds their props.
+    let mut email_roots = Vec::new();
+    for (path, module) in &program.emails {
+        let exports = ev.run_module(*module)?;
+        let span = Span {
+            file: program.modules[*module].file,
+            start: 0,
+            end: 0,
+        };
+        let Some(Value::Closure(closure)) = exports.get("default") else {
+            return Err(Diag::new(span, format!("{path} needs a default component"))
+                .help("write `export default function Welcome(props: WelcomeProps) { ... }`"));
+        };
+        if closure.func.is_async || closure.func.params.len() > 1 {
+            return Err(Diag::new(
+                span,
+                "an email template is a synchronous server component with one props object",
+            ));
+        }
+        let stem = path.trim_end_matches(".tsx");
+        email_roots.push(extract::Root {
+            closure: closure.clone(),
+            slot: Slot::Email { file: path.clone() },
+            name: extract::slugify_name(stem).replace('-', "_"),
+            plugin: None,
+        });
+    }
+    ext.roots.splice(0..0, email_roots);
     ext.roots.extend(client_roots);
     ext.roots.extend(server_roots);
     Ok(blocks)
@@ -731,16 +818,25 @@ impl Built {
     pub fn summary(&self) -> String {
         let s = &self.schema;
         format!(
-            "{} collections, {} tables, {} user projections, {}{} globals, {} hooks, {} actions",
+            "{} collections, {} tables, {} user projections, {}{}{} globals, {} hooks, {} actions",
             s.collections.values().filter(|c| c.editor).count(),
             s.collections
                 .values()
-                .filter(|c| !c.editor && !c.auth && c.taxonomy.is_none())
+                .filter(|c| !c.editor && !c.auth && c.taxonomy.is_none() && c.commerce.is_none())
                 .count(),
             s.collections.values().filter(|c| c.auth).count(),
             match s.collections.values().filter(|c| c.taxonomy.is_some()).count() {
                 0 => String::new(),
                 n => format!("{n} taxonomies, "),
+            },
+            match s
+                .collections
+                .values()
+                .filter(|c| c.commerce.is_some() && c.taxonomy.is_none())
+                .count()
+            {
+                0 => String::new(),
+                n => format!("{n} commerce kinds, "),
             },
             s.globals.len(),
             s.collections.values().map(|c| c.hooks.len()).sum::<usize>(),

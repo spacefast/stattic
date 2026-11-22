@@ -321,8 +321,8 @@ test("invoke runs any path through the visitor lane and streams the body", async
 test("declared PHP cron targets refuse execution without a handler side effect", async () => {
   const result = await runCli("cron.php", [`--host=${HOST}`, "--key=cron-php"]);
   expect(result.exitCode).toBe(1);
-  expect(receipt(result.stderr)).toMatchObject({ method: "GET", path: "/cron/php", status: 503 });
-  expect(JSON.parse(result.stdout)).toMatchObject({ status: 503, code: "tenant_php_unavailable" });
+  // PHP Functions are hard-deleted; uploaded .php files are private and never routed as actions.
+  expect(receipt(result.stderr)).toMatchObject({ method: "GET", path: "/cron/php", status: 404 });
   const sha = createHash("sha256").update(DISABLED_PHP).digest("hex");
   expect(
     existsSync(

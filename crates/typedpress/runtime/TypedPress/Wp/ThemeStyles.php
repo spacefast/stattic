@@ -57,11 +57,15 @@ final class ThemeStyles
             'spacing--block' => [['spacing', 'blockGap'], '1.5rem'],
             'spacing--page' => [['spacing', 'padding', 'left'], '1.25rem'],
         ];
+        // Resolve the theme, plugins and Site Editor overrides once for this stylesheet.
+        $theme = \WP_Theme_JSON_Resolver::get_merged_data();
+        $data = $theme->get_raw_data();
+        $layout = $theme->get_settings()['layout'] ?? [];
         $css = '';
         foreach ($styles as $name => [$path, $fallback]) {
-            $value = wp_get_global_styles($path);
+            $value = _wp_array_get($data['styles'] ?? [], $path);
             if (is_array($value) && is_string($value['ref'] ?? null)) {
-                $value = _wp_array_get(\WP_Theme_JSON_Resolver::get_merged_data()->get_raw_data(), explode('.', $value['ref']));
+                $value = _wp_array_get($data, explode('.', $value['ref']));
             }
             // A two-axis block gap uses its vertical spacing for the app's gap scale.
             if ($name === 'spacing--block' && is_array($value)) {
@@ -70,7 +74,7 @@ final class ThemeStyles
             $css .= self::declaration('--tp--' . $name, $value, $fallback);
         }
         foreach (['content' => '40rem', 'wide' => '64rem'] as $name => $fallback) {
-            $css .= self::declaration('--tp--width--' . $name, wp_get_global_settings(['layout', $name . 'Size']), $fallback);
+            $css .= self::declaration('--tp--width--' . $name, $layout[$name . 'Size'] ?? null, $fallback);
         }
         wp_register_style(self::HANDLE, false, [], null);
         wp_enqueue_style(self::HANDLE);

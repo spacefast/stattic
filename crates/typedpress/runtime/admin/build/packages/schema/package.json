@@ -11,6 +11,8 @@
 	"dependencies": {
 		"@wordpress/api-fetch": "catalog:",
 		"@wordpress/components": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/icons": "catalog:",
 		"@wordpress/route": "catalog:",
 		"@typedpress-admin/admin-toolkit": "workspace:*",
 		"@typedpress-admin/dataviews": "workspace:*",

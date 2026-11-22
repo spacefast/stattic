@@ -558,7 +558,7 @@ pub fn allowed_exports(file: &str) -> &'static [&'static str] {
             "search",
             "prerender",
             "staticParams",
-            "access",
+            "guard",
             "signature",
             "GET",
             "POST",
@@ -568,7 +568,7 @@ pub fn allowed_exports(file: &str) -> &'static [&'static str] {
         ],
         "layout.tsx" => &["default", "metadata", "guard", "template"],
         "not-found.tsx" | "error.tsx" | "login.tsx" => &["default", "metadata"],
-        "route.ts" => &["access", "signature", "GET", "POST", "PUT", "PATCH", "DELETE"],
+        "route.ts" => &["guard", "signature", "GET", "POST", "PUT", "PATCH", "DELETE"],
         _ => &[],
     }
 }
@@ -583,6 +583,7 @@ pub const EXPORTS: &[&str] = &[
     "Comments",
     "Content",
     "Html",
+    "Image",
     "Link",
     "Live",
     "LoginForm",

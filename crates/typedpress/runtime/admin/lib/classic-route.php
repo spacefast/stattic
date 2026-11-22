@@ -30,6 +30,9 @@ function tp_admin_handle_iframe_mode() {
  * @return bool
  */
 function tp_admin_developer_mode( $user_id = null ) {
+	if ( class_exists( '\\TypedPress\\Wp\\Runtime' ) && \TypedPress\Wp\Runtime::managed() ) {
+		return false;
+	}
 	$user_id = null === $user_id ? get_current_user_id() : (int) $user_id;
 	return $user_id > 0 && (bool) get_user_meta( $user_id, TP_ADMIN_DEVELOPER_MODE_META, true );
 }

@@ -227,7 +227,7 @@ test("the shipped manifest installs executable engine bytes without owning the r
       "auto_prepend_file=",
       "-r",
       "require $argv[1]; echo spacefast_content_markdown_to_blocks('# Installed Markdown');",
-      path.join(activeRelease, "engine/wordpress/content-markdown.php"),
+      path.join(activeRelease, "engine/deprecated/content/content-markdown.php"),
     ],
     { encoding: "utf8" },
   );

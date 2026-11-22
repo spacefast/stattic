@@ -46,7 +46,8 @@ final class Navigation
      */
     public static function enqueue(string $url): void
     {
-        if (!self::$used || !function_exists('wp_register_script_module')) {
+        // The module also removes a form's one-use flash marker from the address bar.
+        if ((!self::$used && !Forms::marked()) || !function_exists('wp_register_script_module')) {
             return;
         }
         wp_register_script_module('typedpress-router', $url, [['id' => '@wordpress/interactivity', 'import' => 'static'], ['id' => '@wordpress/interactivity-router', 'import' => 'dynamic']], \TypedPress\Islands::runtimeVersion());

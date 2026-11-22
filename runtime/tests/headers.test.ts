@@ -674,7 +674,6 @@ if (isset($_GET['missing-parser'])) {
     _stattic_response_send(200, '<h1>Mixed version</h1>', 'text/html');
 }
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/context.php"))};
-require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/runtime/php-functions.php"))};
 require_once ${JSON.stringify(path.resolve(import.meta.dir, "../engine/shared/upstream-relay.php"))};
 if (isset($_GET['stream'])) _stattic_document_isolation_stream_begin();
 if (isset($_GET['replace'])) header_register_callback(static function () {
@@ -688,9 +687,7 @@ header('Permissions-Policy: microphone=(self), geolocation=("https://location.ex
 if (isset($_GET['policy'])) header('Permissions-Policy: ' . $_GET['policy'], false);
 if (isset($_GET['relay'])) _stattic_relay_send_response_headers([], []);
 if (isset($_GET['writer'])) {
-    $state = &_stattic_php_functions_state();
-    $state['active'] = true;
-    _stattic_php_functions_send(200, ['content-type' => 'text/html'], '<h1>PHP writer</h1>');
+    _stattic_response_send(200, '<h1>PHP writer</h1>', 'text/html');
 } else {
     // No explicit Content-Type, as with an ordinary PHP or WordPress page.
     echo '<h1>PHP output</h1>';

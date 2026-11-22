@@ -101,7 +101,7 @@ function watch(element) {
   };
   // The server-rendered region is the first answer: delivered now, and its token sent with the first
   // request, which the server answers "not modified" unless something changed since the render.
-  subscribe(kinds, { token: seed.token, data: { html: element.innerHTML, kinds } });
+  subscribe(kinds, seed.token ? { token: seed.token, data: { html: element.innerHTML, kinds } } : undefined);
 }
 
 document.querySelectorAll("[data-tp-live][data-tp-live-seed]").forEach(watch);

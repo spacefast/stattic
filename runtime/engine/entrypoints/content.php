@@ -205,14 +205,15 @@ require_once $engineRoot . '/shared/zero-v2.php';
 $zeroUsers = ($request['operation'] ?? null) === 'rest.request' && is_string($request['path'] ?? null)
     && preg_match('#\A/wp-abilities/v1/abilities/zero/wp-users-(?:account-list|account-get|sessions-list|sessions-revoke|suspend|deletion-complete)/run(?:\?|\z)#', $request['path']) === 1;
 $zeroOverlay = _stattic_zero_v2_space_overlay($privateRoot, $spaceId);
-$typedPress = in_array(_stattic_zero_generation($zeroOverlay), ['v2', 'tp_v1'], true);
-$zeroUsers = $zeroUsers && _stattic_zero_generation($zeroOverlay) === 'v2';
-// On a TypedPress Space, a named WordPress ability runs inside the selected
-// app (with the Spacefast plugin), so the control plane can call the app's
-// abilities and `spacefast/runtime-report`. Every other REST path keeps the
-// site's content kernel, as before: the dashboard's managed-content editor
-// and released clients still use it. The Space Users lane above keeps its own
-// account rules.
+$generation = _stattic_zero_generation($zeroOverlay);
+$typedPress = in_array($generation, ['v2', 'tp_v1', 'spacepress'], true);
+$zeroUsers = $zeroUsers && $generation === 'v2';
+// On a SpacePress / TypedPress Space, a named WordPress ability runs inside
+// the selected app (with the Spacefast plugin), so the control plane can call
+// the app's abilities and `spacefast/runtime-report`. Every other REST path
+// keeps the site's content kernel, as before: the dashboard's managed-content
+// editor and released clients still use it. The Space Users lane above keeps
+// its own account rules.
 $tpAbility = null;
 if ($typedPress && !$zeroUsers && ($request['operation'] ?? null) === 'rest.request') {
     require_once $engineRoot . '/wordpress/typedpress.php';
@@ -245,8 +246,17 @@ if ($zeroUsers || $tpAbility !== null) {
         $zeroCurrent = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
         $zeroVersion = is_array($zeroCurrent) ? ($zeroCurrent['version_id'] ?? null) : null;
     }
-    if (!is_string($zeroVersion) || !_stattic_id_valid($zeroVersion)
-        || !_stattic_zero_v2_select($privateRoot, $spaceId, $zeroVersion, $zeroOverlay)) {
+    $selectedApp = false;
+    if (is_string($zeroVersion) && _stattic_id_valid($zeroVersion)) {
+        if ($tpAbility !== null) {
+            require_once $engineRoot . '/shared/spacepress.php';
+            $selectedApp = _stattic_spacepress_select($privateRoot, $spaceId, $zeroVersion, $zeroOverlay);
+        }
+        if (!$selectedApp) {
+            $selectedApp = _stattic_zero_v2_select($privateRoot, $spaceId, $zeroVersion, $zeroOverlay);
+        }
+    }
+    if (!$selectedApp) {
         _stattic_problem_response(503, 'content_zero_version_unavailable', 'The Space content service is not ready.');
     }
     if ($zeroUsers) $GLOBALS['SPACEFAST_ZERO_V2_USERS_MANAGEMENT'] = true;

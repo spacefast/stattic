@@ -21,30 +21,6 @@ pub(crate) fn php_like(path: &str) -> bool {
     )
 }
 
-/// The route a `functions/<name>.php` handler answers, or `None` when the path
-/// is not a routable function module (so any other PHP-like file is private).
-pub(crate) fn php_function_route(path: &str) -> Option<String> {
-    let stem = path.strip_prefix("functions/")?.strip_suffix(".php")?;
-    let mut segments: Vec<&str> = stem.split('/').collect();
-    if segments.last() == Some(&"index") {
-        segments.pop();
-    }
-    if segments.iter().any(|segment| {
-        segment.is_empty()
-            || segment.contains('[')
-            || segment.contains(']')
-            || segment.starts_with(':')
-            || segment.starts_with('.')
-    }) {
-        return None;
-    }
-    Some(if segments.is_empty() {
-        "/".into()
-    } else {
-        format!("/{}", segments.join("/"))
-    })
-}
-
 /// The document a directory URL serves: `/docs/` answers `docs/index.html`.
 /// Fixed, not configurable: `index` picks the homepage, and every static
 /// generator and prerenderer writes this name for nested pages.
@@ -73,6 +49,7 @@ const SOURCE_MODULE_EXTENSIONS: &[&str] =
 /// Beyond [`CONFIG_ACCEPTED_FILES`], which are matched the same way.
 const CASE_INSENSITIVE_CONFIG_PATHS: &[&str] = &[
     CONFIG_TYPESCRIPT_FILE,
+    "spacepress.config.ts",
     ".stattic/routes.json",
     // A compile input for the generated theme stylesheet, not content.
     "theme.json",
@@ -93,12 +70,11 @@ pub(crate) fn is_private_serving_path(path: &str) -> bool {
         || CONFIG_ACCEPTED_FILES
             .iter()
             .copied()
-            .chain([CONFIG_TYPESCRIPT_FILE])
+            .chain([CONFIG_TYPESCRIPT_FILE, "spacepress.config.ts"])
             .any(|config| config.eq_ignore_ascii_case(name))
         || is_server_source(path)
-        // PHP is never served as text. A routable `functions/<name>.php` runs
-        // at its route; any other PHP-like file answers like a missing one.
-        || (php_like(path) && php_function_route(path).is_none())
+        // PHP is never served as text or executed from uploaded files.
+        || php_like(path)
         || path.starts_with("__spacefast/functions/bundles/")
         || path.starts_with("__spacefast/functions/seeds/")
         // Page templates and the layout cascade are compile inputs too: the
@@ -217,6 +193,8 @@ mod tests {
             "docs/sf.jsonc",
             "docs/SpaceFast.JSON",
             "app/spacefast.config.ts",
+            "spacepress.config.ts",
+            "app/spacepress.config.ts",
             "docs/_headers",
             "blog/_redirects",
             "nested/_routes.json",
@@ -224,6 +202,7 @@ mod tests {
             "server/lib/db.mjs",
             "functions/hello.ts",
             "functions/api/[id].js",
+            "functions/hello.php",
             "uploaded.php",
             "docs/legacy.PHTML",
             "functions/[id].php",
@@ -241,9 +220,6 @@ mod tests {
             "assets/server/index.js",
             "headers.css",
             "docs/sf.jsonc.html",
-            // A routable handler is not content either, but it executes at its
-            // route, so the serving path, not this predicate, hides its source.
-            "functions/hello.php",
         ] {
             assert!(!is_private_serving_path(path), "{path} must stay public");
         }

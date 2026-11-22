@@ -18,7 +18,7 @@ pub struct Options {
     pub check: bool,
 }
 
-/// A synced collection, as the facade's schema (`GET /__tp/api/v1`) describes it.
+/// A synced collection, as the facade's schema (`GET /wp-json/typedpress/v1`) describes it.
 struct Collection {
     name: String,
     dir: PathBuf,
@@ -26,6 +26,8 @@ struct Collection {
     slug: Option<String>,
     /// The collection designates a content column: the file's body (`body` key in JSON) is the record body.
     content: bool,
+    /// A catalog file is a definition, not an instruction to retire a native Woo product or term.
+    commerce: bool,
     /// Columns a record's `fields` carries, in schema order.
     fields: Vec<String>,
     references: Vec<String>,
@@ -39,9 +41,9 @@ struct Collection {
 
 /// Collections that sync, targets of references first (a cycle keeps config order).
 fn collections(schema: &Value, project: &Path, only: &Option<Vec<String>>) -> Result<Vec<Collection>, String> {
-    let all = schema["kinds"]
-        .as_object()
-        .ok_or("the site's schema (GET /__tp/api/v1) has no kinds; deploy this TypedPress version to the site")?;
+    let all = schema["kinds"].as_object().ok_or(
+        "the site's schema (GET /wp-json/typedpress/v1) has no kinds; deploy this TypedPress version to the site",
+    )?;
     let mut synced: IndexMap<String, Collection> = IndexMap::new();
     for (name, spec) in all {
         let Some(sync) = spec["sync"].as_object() else { continue };
@@ -66,6 +68,7 @@ fn collections(schema: &Value, project: &Path, only: &Option<Vec<String>>) -> Re
                     && *c != "uid"
                     && def.get("onUpdate").is_none()
                     && def["hidden"] != true
+                    && def["readOnly"] != true
                     && (def["derived"] != true || (*c == "translations" && spec["localized"] == true))
             })
             .map(|(c, _)| c.clone())
@@ -83,6 +86,7 @@ fn collections(schema: &Value, project: &Path, only: &Option<Vec<String>>) -> Re
                 format: sync["format"].as_str().unwrap_or("md").into(),
                 slug: spec["slug"].as_str().map(String::from),
                 content: content.is_some(),
+                commerce: spec["commerce"].is_string(),
                 fields,
                 references,
                 nested: sync.get("nested").is_some_and(|n| n == true),
@@ -458,7 +462,7 @@ fn pull(client: &Client, c: &Collection) -> Result<IndexMap<String, Remote>, Pro
             return Err(invalid("a page with more to come is empty".into()));
         }
         for item in records {
-            let (uid, remote) = entry(item).map_err(&invalid)?;
+            let (uid, remote) = entry(item).map_err(invalid)?;
             if out.insert(uid.clone(), remote).is_some() {
                 return Err(invalid(format!("{uid} is listed twice")));
             }
@@ -912,6 +916,10 @@ fn perform(
             }
         }
         Action::TrashRemote { expect } => {
+            if c.commerce {
+                report.note(format!("{name}/{uid}: missing source file leaves the native catalog item unchanged; retire it explicitly in Woo or the API"));
+                return Ok(());
+            }
             if options.check {
                 pending(report, "trash on the site (its file was deleted)");
                 return Ok(());

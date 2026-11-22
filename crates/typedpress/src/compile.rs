@@ -186,7 +186,7 @@ fn validate_captured_data(v: &Value, span: Span, seen: &mut HashSet<usize>) -> R
             "env() values can't be stored inside captured data",
             "read it where it's used: `env(\"NAME\")` inside the hook, action or job",
         ),
-        Value::Null | Value::Undef | Value::Bool(_) | Value::Num(_) | Value::Str(_) => Ok(()),
+        Value::Null | Value::Undef | Value::Bool(_) | Value::Num(_) | Value::Str(_) | Value::Asset(_) => Ok(()),
         _ => err_help(
             span,
             format!("captured data contains {}, which can't be used in PHP", v.describe()),
@@ -420,6 +420,9 @@ pub struct Compiler<'a, 'p> {
     resolving_json_types: HashSet<usize>,
     /// Compiled module-level helpers, separated by whether database access is forbidden.
     helpers: HashMap<(usize, usize, bool), String>,
+    /// Failed helper compilations for the current receiver-typing scope. These survive speculative
+    /// rollbacks so a refused helper chain is not retried exponentially.
+    failed_helpers: HashMap<(usize, usize, bool), Diag>,
     helper_values: HashMap<(usize, usize), String>,
     helper_closures: HashMap<usize, Rc<Closure>>,
     helper_types: HashMap<usize, Ty>,
@@ -445,6 +448,8 @@ pub struct Compiler<'a, 'p> {
     /// Each server component's props type (`tp/components/x.tsx#Name` → its first parameter),
     /// for the blocks Markdown pages use (`crate::content_blocks`).
     pub component_props: HashMap<String, Ty>,
+    /// Each compiled `emails/` template's function, by its closure, for `mail.render()`.
+    email_templates: HashMap<usize, String>,
     /// Set for the one callback `once()` runs in place, which may be async (lane D).
     async_callback: bool,
     /// The `this` type for the next object-literal method compiled (the literal's own type).
@@ -475,6 +480,12 @@ pub struct Compiler<'a, 'p> {
     pub uses: Vec<crate::plugins::Use>,
     /// Which compiled functions each function calls, for the read→send report.
     pub calls: HashMap<String, HashSet<String>>,
+    /// The compiled functions that read a WooCommerce order kind, or call an ability that needs the
+    /// `personal` grant ([`Catalog::personal`](crate::wordpress::abilities::Catalog)).
+    pub personal: HashSet<String>,
+    /// The app's own abilities each compiled function calls with `abilities.call`, by ability name.
+    /// The pipeline follows the ones that are actions to settle [`Action::personal`].
+    pub ability_calls: HashMap<String, HashSet<String>>,
     plugin_names: Vec<String>,
     /// Each plugin's PHP function answering its locked fetch hosts, written once the lock settles.
     pub host_functions: Vec<String>,
@@ -538,6 +549,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             named_callback: None,
             uses_jobs: false,
             helpers: HashMap::new(),
+            failed_helpers: HashMap::new(),
             helper_values: HashMap::new(),
             helper_closures: HashMap::new(),
             helper_types: HashMap::new(),
@@ -550,10 +562,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             fx: None,
             action_results: HashMap::new(),
             component_props: HashMap::new(),
+            email_templates: HashMap::new(),
             plugin: None,
             current: String::new(),
             uses: Vec::new(),
             calls: HashMap::new(),
+            personal: HashSet::new(),
+            ability_calls: HashMap::new(),
             host_functions: Vec::new(),
             plugin_names: ext.uses.iter().map(|p| p.name.clone()).collect(),
             abilities: crate::wordpress::abilities::Catalog::default(),
@@ -675,12 +690,31 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     /// Records a capability the plugin compiling now uses; app code is unrestricted.
     fn uses(&mut self, kind: &'static str, value: impl Into<String>, span: Span) {
+        let value = value.into();
+        let personal = match kind {
+            "read" => self
+                .schema
+                .collections
+                .values()
+                .any(|c| c.key == value && c.commerce.as_deref() == Some("order")),
+            "abilities" => {
+                self.ability_calls
+                    .entry(self.current.clone())
+                    .or_default()
+                    .insert(value.clone());
+                self.abilities.personal.contains(&value)
+            }
+            _ => false,
+        };
+        if personal {
+            self.personal.insert(self.current.clone());
+        }
         if let Some((plugin, _)) = &self.plugin {
             self.uses.push(crate::plugins::Use {
                 plugin: *plugin,
                 function: self.current.clone(),
                 kind,
-                value: value.into(),
+                value,
                 span,
             });
         }
@@ -950,7 +984,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
             self.root_capabilities(root);
             // A hook given by reference (`afterCreate: restock`) reuses the helper's compiled body.
             let key = closure_key(&root.closure);
-            let no_db = matches!(root.slot, Slot::Access { .. } | Slot::FieldAccess { .. });
+            let no_db = matches!(
+                root.slot,
+                Slot::Access { .. } | Slot::FieldAccess { .. } | Slot::Email { .. }
+            );
             self.compile_function(&root.closure, &name, Some(params), Some(&root.slot), no_db)?;
             if let Some(ctx) = self.client.take() {
                 if ctx.root_pending {
@@ -960,6 +997,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         "wrap what it returns in an element, e.g. `<div>…</div>`; React's fragments and components can't carry the Interactivity directives",
                     );
                 }
+                if let Some(name) = ctx.analysis.unattached_ref() {
+                    return err_help(
+                        root.closure.func.span,
+                        format!("`{name}` is a `useRef()` no element has"),
+                        format!("attach it: `<div ref={{{name}}}>`, or remove it"),
+                    );
+                }
                 self.islands.push(ctx.analysis);
             }
             if let Slot::Component { name: component } = &root.slot
@@ -967,6 +1011,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             {
                 let props = params.first().cloned().unwrap_or(Ty::Obj(IndexMap::new()));
                 self.component_props.insert(component.clone(), props);
+            }
+            if let Slot::Email { .. } = &root.slot {
+                if !matches!(self.helper_types.get(&key), Some(Ty::Fn(_, ret)) if **ret == Ty::Html) {
+                    return err(root.closure.func.span, "an email template must return JSX");
+                }
+                self.email_templates.insert(key, name.clone());
             }
             if let Slot::ActionHandler { action } = &root.slot
                 && let Some(Ty::Fn(_, ret)) = self.helper_types.get(&key)
@@ -981,12 +1031,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             if let Slot::WpHook { index } = &root.slot {
                 let hook = &self.schema.wp_hooks[*index];
-                let returns = crate::wordpress::hook(&hook.hook).expect("catalog hook").returns;
+                let catalog = crate::wordpress::hook(&hook.hook).expect("catalog hook");
+                let returns = catalog.returns;
                 let ret = match self.helper_types.get(&key) {
                     Some(Ty::Fn(_, ret)) => (**ret).clone(),
                     _ => Ty::Unknown,
                 };
-                if matches!(ret, Ty::Promise(_)) {
+                if matches!(ret, Ty::Promise(_)) && !catalog.async_handler {
                     return err_help(
                         root.closure.func.span,
                         format!("a `{}` handler can't be async", hook.hook),
@@ -1095,9 +1146,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
             // A component's own annotation types its props (see `compile_function`); a page's
             // `metadata` function takes the same props.
             Slot::Component { .. } => vec![],
+            Slot::Email { file } if file == crate::loader::INVITATION_EMAIL => vec![Ty::Obj(
+                ["siteName", "identityUrl", "invitationCode", "expiresIn"]
+                    .into_iter()
+                    .map(|name| (name.to_owned(), (Ty::Str, false)))
+                    .collect(),
+            )],
+            // Other templates type their props with their own annotation, as components do.
+            Slot::Email { .. } => vec![],
             Slot::AppPage { file } | Slot::AppMetadata { file } => vec![self.app_props(file)],
-            Slot::AppGuard { .. } => vec![types::hook_ctx()],
-            Slot::AppAccess { .. } => vec![types::access_ctx(Ty::Map(Box::new(Ty::Unknown)))],
+            Slot::AppGuard { .. } | Slot::AppAccess { .. } => vec![types::access_ctx(Ty::Map(Box::new(Ty::Unknown)))],
             Slot::AppHandler { .. } => vec![types::route_request(), ctx],
             Slot::AppStaticParams { .. } => vec![],
             Slot::ActionHandler { action } => vec![
@@ -1205,7 +1263,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 "read what you need from the handler's parameters, or from a variable it captures, instead of `this`",
             );
         }
-        if matches!(slot, Some(Slot::Component { .. })) {
+        if matches!(slot, Some(Slot::Component { .. } | Slot::Email { .. })) {
             if f.params.len() > 1 {
                 return err_help(
                     f.span,
@@ -1281,15 +1339,17 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     // search, children), so only the named ones are checked, as TypeScript does
                     // for a non-literal argument.
                     let g = match (slot, &g, &d) {
-                        (Some(Slot::AppPage { .. } | Slot::AppMetadata { .. }), Ty::Obj(given), Ty::Obj(named)) => {
-                            Ty::Obj(
-                                given
-                                    .iter()
-                                    .filter(|(k, _)| named.contains_key(*k))
-                                    .map(|(k, v)| (k.clone(), v.clone()))
-                                    .collect(),
-                            )
-                        }
+                        (
+                            Some(Slot::AppPage { .. } | Slot::AppMetadata { .. } | Slot::Email { .. }),
+                            Ty::Obj(given),
+                            Ty::Obj(named),
+                        ) => Ty::Obj(
+                            given
+                                .iter()
+                                .filter(|(k, _)| named.contains_key(*k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                        ),
                         _ => g,
                     };
                     check_parameter_argument(&g, &parameter_input_type(p, d.clone()), p.span)?;
@@ -1327,7 +1387,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if let Some(ps) = &params
             && !matches!(
                 slot,
-                Some(Slot::Component { .. } | Slot::AppPage { .. } | Slot::AppMetadata { .. })
+                Some(Slot::Component { .. } | Slot::Email { .. } | Slot::AppPage { .. } | Slot::AppMetadata { .. })
             )
             && ps.len()
                 < f.params
@@ -3012,7 +3072,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Chain(_) => {
                 if let Some((n, t)) = self.path_ty(test) {
-                    let (yes, no) = (t.non_null(), t.clone());
+                    // A truthy value is neither nullish nor `false`.
+                    let (yes, no) = (t.non_null().without_bool(false), t.clone());
                     out.push(if negate { (n, no, yes) } else { (n, yes, no) });
                 }
             }
@@ -3141,6 +3202,27 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         (Ty::union(miss), Ty::union(hit))
                     };
                     out.push((n, yes, no));
+                    return;
+                }
+                // `user === false` and `user !== false` split a union on its boolean literal, as
+                // WordPress's "or false" results need (`get_userdata`, `get_permalink`).
+                let literal = match (&l.kind, &r.kind) {
+                    (_, ExprKind::Bool(value)) => Some((l, *value)),
+                    (ExprKind::Bool(value), _) => Some((r, *value)),
+                    _ => None,
+                };
+                if let Some((subject, value)) = literal
+                    && let Some((n, t)) = self.path_ty(subject)
+                    && let Ty::Union(items) = &t
+                    && items.iter().any(|item| item.bool_literal() == Some(value))
+                {
+                    let hit = Ty::union(items.iter().filter(|item| item.bool_literal() == Some(value)).cloned());
+                    let miss = t.without_bool(value);
+                    out.push(if (*op == BinOp::Eq) != negate {
+                        (n, hit, miss)
+                    } else {
+                        (n, miss, hit)
+                    });
                     return;
                 }
                 let (subject, other) = match (&l.kind, &r.kind) {
@@ -3539,8 +3621,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         parts.push(php_str(&quasis[i + 1]));
                     }
                 }
-                if parts.is_empty() {
-                    Out::atom("''", Ty::Str)
+                if exprs.len() == 1 {
+                    if parts.len() == 1 {
+                        Out::atom(format!("((string) {})", parts[0]), Ty::Str)
+                    } else {
+                        Out::atom(format!("({})", parts.join(" . ")), Ty::Str)
+                    }
                 } else {
                     Out::atom(format!("\\implode('', [{}])", parts.join(", ")), Ty::Str)
                 }
@@ -4373,6 +4459,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             )
         };
         if (exact(&a.ty) && literal_php(a)) || (exact(&b.ty) && literal_php(b)) {
+            // WordPress's standard wants the literal first when the other side is a variable.
+            // A literal has no effect to order, and `===` is symmetric, so the swap changes nothing.
+            if is_php_variable(&a.php) && literal_php(b) && !literal_php(a) {
+                return format!("{} === {}", b.wrapped(), a.wrapped());
+            }
             return format!("{} === {}", a.wrapped(), b.wrapped());
         }
         // Two typed numbers, each a numeric literal or a plain variable (read twice without effect).
@@ -4506,17 +4597,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     )));
                 }
                 let helper_key = (self.owner(), key, self.fx().no_db);
+                if let Some(diag) = self.failed_helpers.get(&helper_key) {
+                    return Err(diag.clone());
+                }
                 let name = match self.helpers.get(&helper_key) {
                     Some(n) => n.clone(),
                     None => {
                         let name = self.unique_name(c.func.name.as_deref().unwrap_or(n));
-                        self.attempt(|this| {
+                        if let Err(diag) = self.attempt(|this| {
                             this.helpers.insert(helper_key, name.clone());
                             match &home {
                                 Some(home) => this.compile_method_now(c, home, &name, n, b, span),
                                 None => this.compile_helper_now(c, &name, None),
                             }
-                        })?;
+                        }) {
+                            self.failed_helpers.insert(helper_key, diag.clone());
+                            return Err(diag);
+                        }
                         name
                     }
                 };
@@ -4612,6 +4709,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 span,
                 "`mail` can't be used as a value",
                 "call `mail.send({ to, subject, text })` directly",
+            ),
+            Value::Builtin(Builtin::Connectors) => err_help(
+                span,
+                "`connectors` can't be used as a value",
+                "call `connectors.call(role, tool, args?)` directly",
             ),
             Value::Builtin(Builtin::WpFunction(name)) => err_help(
                 span,
@@ -4945,6 +5047,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Value::Bool(b) => b.to_string(),
                     Value::Num(n) => php_number(*n),
                     Value::Str(s) => php_str(s),
+                    Value::Asset(file) => format!("\\TypedPress\\Assets::url({})", php_str(file)),
                     _ => unreachable!("validated captured scalar"),
                 });
             }
@@ -4971,7 +5074,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             _ => "",
         };
         let mut body = format!(
-            "function {name}(): \\TypedPress\\{class} {{\n\tstatic $value;\n\tif ($value === null) {{\n\t\t$value = new \\TypedPress\\{class}({arguments});\n"
+            "/**\n * Return a value the app's configuration captured.\n *\n * @return \\TypedPress\\{class}\n */\nfunction {name}(): \\TypedPress\\{class} {{\n\tstatic $value;\n\tif (null === $value) {{\n\t\t$value = new \\TypedPress\\{class}({arguments});\n"
         );
         for (key, value) in fields {
             let value = self.captured_data(&value)?;
@@ -5131,6 +5234,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     ) -> Result<()> {
         let typing = (self.owner(), closure_key(c));
         self.typing_this.insert(typing);
+        let outer_failures = std::mem::take(&mut self.failed_helpers);
         let home_path = path.rsplit_once('.').map_or(path, |(home, _)| home);
         let binding = Binding { ann: None, ..b.clone() };
         let result = self
@@ -5140,6 +5244,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     .map_err(|d| self.this_cycle_help(d, home, path, &left_out))
             });
         self.typing_this.remove(&typing);
+        self.failed_helpers = outer_failures;
         result
     }
 
@@ -5275,17 +5380,44 @@ impl<'a, 'p> Compiler<'a, 'p> {
             map.keys().cloned().collect()
         }
         let classes = keys(&self.classes);
+        let class_ids = keys(&self.class_ids);
         let helpers = keys(&self.helpers);
         let helper_types = keys(&self.helper_types);
         let helper_values = keys(&self.helper_values);
         let data_helpers = keys(&self.data_helpers);
+        let output_len = self.output.len();
+        let uses_len = self.uses.len();
+        let wp_uses_len = self.wordpress_uses.len();
+        let uses_jobs = self.uses_jobs;
+        let used_names = self.used_names.clone();
+        // These records are read after compilation. Stage additions without copying the call graphs.
+        let calls = std::mem::take(&mut self.calls);
+        let ability_calls = std::mem::take(&mut self.ability_calls);
+        let personal = std::mem::take(&mut self.personal);
         let built = build(self);
+        for (graph, prior) in [(&mut self.calls, calls), (&mut self.ability_calls, ability_calls)] {
+            let added = std::mem::replace(graph, prior);
+            if built.is_ok() {
+                for (caller, targets) in added {
+                    graph.entry(caller).or_default().extend(targets);
+                }
+            }
+        }
         if built.is_err() {
             self.classes.retain(|k, _| classes.contains(k));
+            self.class_ids.retain(|k, _| class_ids.contains(k));
             self.helpers.retain(|k, _| helpers.contains(k));
             self.helper_types.retain(|k, _| helper_types.contains(k));
             self.helper_values.retain(|k, _| helper_values.contains(k));
             self.data_helpers.retain(|k, _| data_helpers.contains(k));
+            self.output.truncate(output_len);
+            self.uses.truncate(uses_len);
+            self.wordpress_uses.truncate(wp_uses_len);
+            self.uses_jobs = uses_jobs;
+            self.used_names = used_names;
+            self.personal = personal;
+        } else {
+            self.personal.extend(personal);
         }
         built
     }
@@ -7051,16 +7183,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             JsxKind::Fragment => {
                 let children = self.jsx_children(&jsx.children)?;
-                // A fragment of static markup is that markup.
-                if let [only] = children.as_slice()
-                    && static_markup(only).is_some()
-                {
-                    return Ok(Out::atom(only.clone(), Ty::Html));
-                }
-                Ok(Out::atom(
-                    format!("\\TypedPress\\Html::children({})", children.join(", ")),
-                    Ty::Html,
-                ))
+                Ok(Out::atom(self.fold_children(children), Ty::Html))
             }
             JsxKind::Intrinsic(tag) => self.jsx_element(tag, jsx, span),
         }
@@ -7183,6 +7306,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     // In a client component, handlers and refs exist only in the browser: the
                     // directives below carry them, and the server HTML has no attribute for them.
                     let folded = name.to_ascii_lowercase();
+                    if name == "ref" && self.client.is_none() {
+                        return err_help(
+                            *span,
+                            "`ref` in a server component",
+                            "move the element into a \"use client\" component",
+                        );
+                    }
                     if self.client.is_some()
                         && (name == "ref"
                             || (folded.starts_with("on")
@@ -7440,23 +7570,43 @@ impl<'a, 'p> Compiler<'a, 'p> {
             _ => children.to_vec(),
         };
         let mut parts = vec![format!("\\TypedPress\\Html::raw({})", php_str(&format!("{open}>")))];
-        // A folded child element's parts join this element's, so static runs span the boundary.
+        parts.extend(children);
+        parts.push(format!("\\TypedPress\\Html::raw({})", php_str(&format!("</{tag}>"))));
+        Some(self.fold_children(parts))
+    }
+
+    /// Flatten static runs across nested tags and fragments. Only compiler-escaped literals
+    /// enter the template. The other children keep their source evaluation order and render lazily.
+    fn fold_children(&mut self, children: Vec<String>) -> String {
+        let mut parts = Vec::new();
         for child in children {
             match self.folded_parts.remove(&child) {
                 Some(inner) => parts.extend(inner),
                 None => parts.push(child),
             }
         }
-        parts.push(format!("\\TypedPress\\Html::raw({})", php_str(&format!("</{tag}>"))));
         let parts = merge_static(parts);
-        Some(match parts.as_slice() {
-            [only] => only.clone(),
-            _ => {
-                let php = format!("\\TypedPress\\Html::children({})", parts.join(", "));
-                self.folded_parts.insert(php.clone(), parts);
-                php
+        let mut literals = vec![String::new()];
+        let mut slots = Vec::new();
+        for part in &parts {
+            if let Some(markup) = static_markup(part) {
+                literals.last_mut().unwrap().push_str(&markup);
+            } else {
+                slots.push(part.as_str());
+                literals.push(String::new());
             }
-        })
+        }
+        if slots.is_empty() {
+            return format!("\\TypedPress\\Html::raw({})", php_str(&literals[0]));
+        }
+        let php = if literals.iter().all(String::is_empty) {
+            format!("\\TypedPress\\Html::children({})", slots.join(", "))
+        } else {
+            let literals = literals.iter().map(|s| php_str(s)).collect::<Vec<_>>().join(", ");
+            format!("\\TypedPress\\Html::template([{literals}], {})", slots.join(", "))
+        };
+        self.folded_parts.insert(php.clone(), parts);
+        php
     }
 
     /// One attribute of an intrinsic element, named in the source or set by a closed spread,
@@ -7510,6 +7660,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if is_url_attribute(&folded)
             && let Some(url) = literal
             && !safe_url(url)
+            && !safe_data_media_url(tag, &folded, url)
         {
             return err_help(
                 value.span,
@@ -8441,6 +8592,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         | Builtin::Jobs
                         | Builtin::Env
                         | Builtin::Mail
+                        | Builtin::Connectors
                         | Builtin::Abilities
                         | Builtin::WpFunction(_)),
                     ),
@@ -8468,6 +8620,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             ExprKind::Member { obj, prop, .. }
                 if matches!(&obj.kind, ExprKind::Ident(n) if n != "super")
+                    && builtin(self, obj).ok().flatten() == Some(Builtin::Connectors) =>
+            {
+                self.connectors_call(prop, args, span).map(Some)
+            }
+            ExprKind::Member { obj, prop, .. }
+                if matches!(&obj.kind, ExprKind::Ident(n) if n != "super")
                     && builtin(self, obj).ok().flatten() == Some(Builtin::Abilities) =>
             {
                 self.abilities_call(prop, args, span).map(Some)
@@ -8485,11 +8643,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn mail_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        if name == "render" {
+            return self.mail_render(args, span);
+        }
         if name != "send" {
             return err_help(
                 span,
                 format!("`mail` has no function `{name}`"),
-                "use `mail.send(message)`",
+                "use `mail.send(message)` or `mail.render(Template, props)`",
             );
         }
         if self.fx().no_db {
@@ -8556,6 +8717,132 @@ impl<'a, 'p> Compiler<'a, 'p> {
         Ok(Out::atom(
             format!("\\TypedPress\\Mail::send({})", v.php),
             Ty::Promise(Box::new(types::obj_pub(&[("id", Ty::Str)]))),
+        ))
+    }
+
+    /// `connectors.call(role, tool, args?)` from "spacepress" / "typedpress": invokes a host connector.
+    fn connectors_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        if name != "call" {
+            return err_help(
+                span,
+                format!("`connectors` has no function `{name}`"),
+                "use `connectors.call(role, tool, args?)`",
+            );
+        }
+        if self.fx().no_db {
+            return err_help(
+                span,
+                "access rules can't call connectors",
+                "move the call into a hook, action, route or job",
+            );
+        }
+        if args.len() < 2 || args.len() > 3 {
+            return err_help(
+                span,
+                "connectors.call() takes a connector role, a tool name, and optional args",
+                "write connectors.call(\"slack\", \"post_message\", { channel, text })",
+            );
+        }
+        let role_expr = self.arg(args, 0, span, "a connector role")?;
+        let role = self.expr(role_expr)?;
+        let role = self.finish_value(role, role_expr.span)?;
+        if !role.ty.is_str() || role.ty.is_nullable() {
+            return err_help(
+                role_expr.span,
+                format!("connectors.call() role must be a string, not {}", role.ty.describe()),
+                "pass the connector role name as a string, e.g. \"slack\"",
+            );
+        }
+        let tool_expr = self.arg(args, 1, span, "a connector tool name")?;
+        let tool = self.expr(tool_expr)?;
+        let tool = self.finish_value(tool, tool_expr.span)?;
+        if !tool.ty.is_str() || tool.ty.is_nullable() {
+            return err_help(
+                tool_expr.span,
+                format!("connectors.call() tool must be a string, not {}", tool.ty.describe()),
+                "pass the connector tool name as a string",
+            );
+        }
+        let args_php = match args.get(2) {
+            None => "null".to_string(),
+            Some(_) => {
+                let e = self.arg(args, 2, span, "connector arguments")?;
+                let v = self.expr(e)?;
+                let v = self.finish_value(v, e.span)?;
+                v.php
+            }
+        };
+        let cap = match (&role_expr.kind, &tool_expr.kind) {
+            (ExprKind::Str(r), ExprKind::Str(t)) => format!("{r}:{t}"),
+            (ExprKind::Str(r), _) => format!("{r}:*"),
+            _ => "*".to_string(),
+        };
+        self.uses("connectors", &cap, span);
+        Ok(Out::atom(
+            format!(
+                "\\TypedPress\\Connectors::call({}, {}, {})",
+                role.php, tool.php, args_php
+            ),
+            Ty::Promise(Box::new(Ty::Unknown)),
+        ))
+    }
+
+    /// `mail.render(Template, props)`: an `emails/` template's HTML and plain text for `mail.send()`.
+    fn mail_render(&mut self, args: &[ArrEl], span: Span) -> Result<Out> {
+        let help = "import the template from emails/ and write mail.render(Welcome, { name })";
+        if args.len() != 2 {
+            return err_help(span, "mail.render() takes a template and its props", help);
+        }
+        let template = self.arg(args, 0, span, "a template")?;
+        let closure = match &template.kind {
+            ExprKind::Ident(n) => match self.resolve(n, template.span)? {
+                Resolved::Value(Value::Closure(c), _) => Some(c),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((function, Some(Ty::Fn(params, _)))) = closure
+            .map(|c| {
+                let key = closure_key(&c);
+                (
+                    self.email_templates.get(&key).cloned(),
+                    self.helper_types.get(&key).cloned(),
+                )
+            })
+            .and_then(|(f, t)| f.map(|f| (f, t)))
+        else {
+            return err_help(
+                template.span,
+                "mail.render() renders the default export of an emails/ template",
+                help,
+            );
+        };
+        let e = self.arg(args, 1, span, "props")?;
+        let props = self.expr(e)?;
+        let props = self.finish_value(props, e.span)?;
+        let declared = params.first().cloned().unwrap_or(Ty::Obj(IndexMap::new()));
+        // The check an ordinary call makes, so `{ kind: "welcome" }` meets `kind: "welcome" | "reminder"`.
+        if !assignable(&props.ty, &declared)
+            && (props.ty.is_nullable() && !declared.is_nullable()
+                || !self.argument_constraint(e).is_some_and(|t| assignable(&t, &declared)))
+        {
+            return err(
+                e.span,
+                format!(
+                    "these props are {}, but the template expects {}",
+                    props.ty.describe(),
+                    declared.describe()
+                ),
+            );
+        }
+        self.uses("mail", "render", span);
+        Ok(Out::atom(
+            format!(
+                "\\TypedPress\\Render\\Email::message({}, {})",
+                php_str(&format!("\\TypedPressApp\\{function}")),
+                props.php
+            ),
+            types::obj_pub(&[("html", Ty::Str), ("text", Ty::Str)]),
         ))
     }
 
@@ -10678,17 +10965,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 return err(e.span, "`with` keys must be relation names");
             };
             if let Some(col) = self.schema.collections[table].columns.get(rel)
-                && matches!(col.ty, ColType::Media | ColType::MediaList)
+                && matches!(col.ty, ColType::Media | ColType::MediaList | ColType::File)
             {
                 if !matches!(v.kind, ExprKind::Bool(true)) {
-                    return err(v.span, format!("`with.{rel}` loads the media row; use `true`"));
+                    return err(v.span, format!("`with.{rel}` loads the media or file row; use `true`"));
                 }
                 parts.push(format!("{} => true", php_str(rel)));
                 let m = types::media_row();
-                let t = if col.ty == ColType::MediaList {
-                    Ty::Array(Box::new(m))
-                } else {
-                    m
+                let t = match col.ty {
+                    ColType::MediaList => Ty::Array(Box::new(m)),
+                    // The id stays an id for a visitor the bucket's read rule refuses.
+                    ColType::File => Ty::union([types::file_row(), Ty::Num]),
+                    _ => m,
                 };
                 rels.push((format!("\u{0}{rel}"), if col.not_null { t } else { t.nullable() }));
                 continue;
@@ -11291,8 +11579,8 @@ pub(super) fn static_host(e: &Expr) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::static_host;
-    use crate::diag::Span;
+    use super::{Compiler, static_host};
+    use crate::diag::{Diag, Span};
     use crate::ir::{Expr, ExprKind};
 
     #[test]
@@ -11317,6 +11605,54 @@ mod tests {
         );
         assert_eq!(host("https://api.example.com").as_deref(), Some("api.example.com"));
         assert_eq!(host("https://user@api.example.com/"), None);
+    }
+
+    #[test]
+    fn refused_speculative_build_discards_nested_usage_records() {
+        let project = tempfile::tempdir().unwrap();
+        let entry = project.path().join("typedpress.config.ts");
+        std::fs::write(
+            &entry,
+            r#"import { defineConfig } from "typedpress"; export default defineConfig({ name: "usage-test" });"#,
+        )
+        .unwrap();
+        let program = crate::loader::load(&entry).unwrap();
+        let mut evaluator = crate::eval::Evaluator::new(&program);
+        let config = evaluator.run().unwrap();
+        let extracted = crate::extract::extract(&config, &mut evaluator, Span::NONE, "usage-test").unwrap();
+        let mut compiler = Compiler::new(&extracted.schema, &mut evaluator, &extracted, &program);
+        compiler.abilities.personal.insert("app/private".into());
+        compiler.current = "root".into();
+        compiler.uses("abilities", "app/kept", Span::NONE);
+        compiler.calls.entry("root".into()).or_default().insert("kept".into());
+
+        let refused = compiler.attempt::<()>(|this| {
+            this.attempt(|nested| {
+                nested.uses("abilities", "app/private", Span::NONE);
+                nested
+                    .calls
+                    .entry("root".into())
+                    .or_default()
+                    .insert("discarded".into());
+                Ok(())
+            })?;
+            Err(Diag::new(Span::NONE, "speculative build refused"))
+        });
+        assert!(refused.is_err());
+
+        compiler
+            .attempt(|this| {
+                this.uses("abilities", "app/accepted", Span::NONE);
+                this.calls.entry("root".into()).or_default().insert("accepted".into());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(compiler.calls["root"], ["kept".into(), "accepted".into()].into());
+        assert_eq!(
+            compiler.ability_calls["root"],
+            ["app/kept".into(), "app/accepted".into()].into()
+        );
+        assert!(!compiler.personal.contains("root"));
     }
 }
 
@@ -11536,6 +11872,7 @@ fn ty_of_data(value: &Value) -> Ty {
         Value::Bool(b) => Ty::FreshBoolLit(*b),
         Value::Num(n) => Ty::FreshNumLit(*n),
         Value::Str(s) => Ty::FreshStrLit(s.to_string()),
+        Value::Asset(_) => Ty::Str,
         Value::Array(a) => Ty::Array(Box::new(Ty::union(a.borrow().iter().map(ty_of_data)))),
         Value::Object(o) => Ty::Obj(
             o.borrow()
@@ -12500,6 +12837,67 @@ fn safe_url(url: &str) -> bool {
             matches!(url[..colon].to_ascii_lowercase().as_str(), "http" | "https" | "mailto")
         }
         _ => true,
+    }
+}
+
+/// `\TypedPress\Html::safeDataMediaUrl` at build time: allows base64 media `data:` URIs
+/// (such as `?inline` asset imports) strictly on `src` of `img`/`audio`/`video`/`source`.
+fn safe_data_media_url(tag: &str, attr: &str, url: &str) -> bool {
+    if attr != "src" {
+        return false;
+    }
+    let clean: String = url
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let rest = if clean
+        .as_bytes()
+        .get(..5)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"data:"))
+    {
+        &clean[5..]
+    } else {
+        return false;
+    };
+    let Some((header, payload)) = rest.split_once(',') else {
+        return false;
+    };
+    if payload.is_empty()
+        || !payload
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    let lower = header.to_ascii_lowercase();
+    let Some(mime) = lower.strip_suffix(";base64") else {
+        return false;
+    };
+    let is_image = matches!(
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
+            | "image/svg+xml"
+            | "image/x-icon"
+            | "image/vnd.microsoft.icon"
+            | "image/bmp"
+    );
+    let is_audio = matches!(
+        mime,
+        "audio/mpeg" | "audio/ogg" | "audio/wav" | "audio/webm" | "audio/aac" | "audio/flac"
+    );
+    let is_video = matches!(mime, "video/mp4" | "video/webm" | "video/ogg");
+    match tag {
+        "img" => is_image,
+        "audio" => is_audio,
+        "video" => is_video,
+        "source" => is_image || is_audio || is_video,
+        _ => false,
     }
 }
 

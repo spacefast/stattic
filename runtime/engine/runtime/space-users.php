@@ -43,13 +43,13 @@ function _stattic_space_users_prepare(
     $control = STATTIC_ZERO_AUTH_CONTROL_ROUTES[trim($path, '/')] ?? null;
     $start = is_array($control) && in_array($control['operation'], ['auth_start', 'auth_sign_out'], true);
     if (!$route && !$start) return false;
-    require_once __DIR__ . '/../shared/zero-v2.php';
+    require_once __DIR__ . '/../deprecated/zero-v2/zero-v2.php';
     $hasSession = _stattic_space_users_session_cookie($serving) !== null;
     if (($serving['users']['enabled'] ?? false) !== true) {
         if ($route) _stattic_problem_refused(404, 'space_users_disabled', 'Users is not enabled for this Space.');
         return false;
     }
-    require_once __DIR__ . '/content-page.php';
+    require_once __DIR__ . '/../shared/wordpress-scope.php';
     require_once __DIR__ . '/identity-context.php';
     $spaceId = (string) ($serving['space_id'] ?? '');
     // A Zero v2 Space keeps its users in its own tables, under the identity code
@@ -331,8 +331,8 @@ function _stattic_space_users_verify_session(string $privateRoot, string $spaceI
         _stattic_problem_refused(503, 'space_users_verifier_unavailable', 'Account verification is temporarily unavailable.');
     }
     // The broker is the engine's one mysqli owner. Its binding is request state
-    // another lane may already hold (sf_db() binds the application database
-    // after this verify), so the identity lookup borrows it and hands it back.
+    // another lane may already hold (such as the Functions database broker), so
+    // the identity lookup borrows it and hands it back.
     $state = &_stattic_db_broker_state();
     [$previousUrl, $previousSource] = [$state['url'], $state['source']];
     _stattic_db_broker_bind($url, 'provider');
@@ -472,7 +472,7 @@ function _stattic_space_users_request_auth(array $serving, string $host, bool $a
     if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
     require_once __DIR__ . '/../shared/admission.php';
-    require_once __DIR__ . '/../shared/zero-v2.php';
+    require_once __DIR__ . '/../deprecated/zero-v2/zero-v2.php';
     if ($admitOrigin) _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
     _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
     _stattic_access_private_cache_flag(true);

@@ -40,6 +40,9 @@ final class TableController extends \WP_REST_Controller
             }
             (new self((string) $name, (string) $spec['table']))->register_routes();
         }
+        foreach ($plugin->schema->taxonomies() as $name => $spec) {
+            if (isset($spec['commerce'])) { (new self((string) $name, 'tp_' . $name))->register_routes(); }
+        }
     }
 
     public function register_routes(): void

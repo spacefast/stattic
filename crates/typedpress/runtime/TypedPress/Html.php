@@ -176,6 +176,24 @@ final class Html
     }
 
     /**
+     * Compiler-escaped literal markup around each child, with one more literal than children.
+     * As with children(), only placement renders the evaluated child values.
+     *
+     * @param list<string> $literals
+     */
+    public static function template(array $literals, mixed ...$children): self
+    {
+        return new self(static function () use ($literals, $children): string {
+            $out = $literals[0];
+            foreach ($children as $i => $child) {
+                $out .= self::child($child);
+                $out .= $literals[$i + 1];
+            }
+            return $out;
+        });
+    }
+
+    /**
      * An intrinsic element: `$attributes` are the props in source order (spreads already applied
      * by the caller), `$children` the rendered children. Tags with React's own rules (input,
      * textarea, select, option, pre) are handled here; anything React would hoist or preload
@@ -236,6 +254,22 @@ final class Html
             unset($attributes['selected']);
             $tail = Js::truthy($selected) ? ' selected=""' : '';
         }
+        if ($tag === 'img' && is_string($attributes['src'] ?? null) && class_exists(Assets::class, false)) {
+            $src = $attributes['src'];
+            if (!array_key_exists('width', $attributes) && !array_key_exists('height', $attributes)) {
+                $meta = Assets::metaForUrl($src);
+                if ($meta !== null) {
+                    $attributes['width'] = $meta['width'];
+                    $attributes['height'] = $meta['height'];
+                }
+            }
+            $fp = $attributes['fetchPriority'] ?? $attributes['fetchpriority'] ?? null;
+            if (is_string($fp) && strtolower($fp) === 'high') {
+                $srcSet = is_string($attributes['srcSet'] ?? $attributes['srcset'] ?? null) ? ($attributes['srcSet'] ?? $attributes['srcset']) : null;
+                $sizes = is_string($attributes['sizes'] ?? null) ? $attributes['sizes'] : null;
+                Assets::preloadImage($src, $srcSet, $sizes);
+            }
+        }
         $open .= self::attributes($attributes, $custom, $tag) . $tail;
         if (isset(self::VOID[$tag])) {
             return new self($open . '/>');
@@ -276,8 +310,11 @@ final class Html
                 continue;
             }
             $url = isset(self::URL[$folded]) || isset(self::URL[preg_replace('/^xlink/', '', $folded)]);
-            if ($url && !self::nullish($value) && !is_bool($value) && !$value instanceof \Closure && !self::safeUrl(Js::str($value))) {
-                continue;
+            if ($url && !self::nullish($value) && !is_bool($value) && !$value instanceof \Closure) {
+                $urlStr = Js::str($value);
+                if (!self::safeUrl($urlStr) && !self::safeDataMediaUrl($tag, $folded, $urlStr)) {
+                    continue;
+                }
             }
             $out .= $custom ? self::customAttribute($name, $value) : self::attribute($name, $value, $tag);
         }
@@ -454,5 +491,25 @@ final class Html
             return true;
         }
         return in_array(strtolower(substr($url, 0, $colon)), ['http', 'https', 'mailto'], true);
+    }
+
+    /**
+     * Strictly base64-encoded media `data:` URIs (from `?inline` asset imports) on `src` of media
+     * elements only. Never allowed on navigation/frame/script attributes or with non-media MIME types.
+     */
+    private static function safeDataMediaUrl(string $tag, string $attr, string $url): bool
+    {
+        if ($attr !== 'src') {
+            return false;
+        }
+        $clean = (string) preg_replace('/[\t\n\r]/', '', trim($url, "\x00..\x20"));
+        $pattern = match ($tag) {
+            'img' => '#^data:image/(?:png|jpe?g|gif|webp|avif|svg\+xml|x-icon|vnd\.microsoft\.icon|bmp);base64,[A-Za-z0-9+/=]+\z#i',
+            'audio' => '#^data:audio/(?:mpeg|ogg|wav|webm|aac|flac);base64,[A-Za-z0-9+/=]+\z#i',
+            'video' => '#^data:video/(?:mp4|webm|ogg);base64,[A-Za-z0-9+/=]+\z#i',
+            'source' => '#^data:(?:image/(?:png|jpe?g|gif|webp|avif|svg\+xml|x-icon|vnd\.microsoft\.icon|bmp)|audio/(?:mpeg|ogg|wav|webm|aac|flac)|video/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+\z#i',
+            default => null,
+        };
+        return $pattern !== null && preg_match($pattern, $clean) === 1;
     }
 }

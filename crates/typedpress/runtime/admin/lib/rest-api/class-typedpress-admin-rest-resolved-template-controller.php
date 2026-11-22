@@ -786,11 +786,3 @@ class TypedPress_Admin_REST_Resolved_Template_Controller extends WP_REST_Control
 		return $groups;
 	}
 }
-
-// Register the resolved template REST controller.
-add_action(
-	'rest_api_init',
-	function () {
-		( new TypedPress_Admin_REST_Resolved_Template_Controller() )->register_routes();
-	}
-);

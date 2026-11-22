@@ -69,6 +69,7 @@ pub(super) fn open_tag(tag: &str, attrs: &[(&str, Lit)]) -> Option<String> {
         if url
             && let Lit::Str(text) = value
             && !super::safe_url(text)
+            && !super::safe_data_media_url(tag, &folded, text)
         {
             continue;
         }

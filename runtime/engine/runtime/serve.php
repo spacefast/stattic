@@ -1,8 +1,6 @@
 <?php
 declare(strict_types=1);
 
-require_once __DIR__ . '/legacy-zero.php';
-
 // The visitor serve path (contracts §6, §15, §16): pointer -> host shard ->
 // overlay -> access -> version root -> response table -> entry -> send.
 //
@@ -339,8 +337,30 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_render_platform_action(_stattic_version_pending_action());
     }
     $versionDir = _stattic_version_root($privateRoot, $spaceId, $versionId);
-    require_once __DIR__ . '/../shared/zero-v2.php';
-    _stattic_zero_generation_serve($versionDir, $serving);
+    $generation = is_string($serving['zero_generation'] ?? null) ? $serving['zero_generation'] : 'none';
+    $hasSpacepressCompiled = is_file($versionDir . '/.spacepress-compiled/manifest.json');
+    $hasZeroCompiled = is_file($versionDir . '/.zero-compiled/manifest.json');
+    $isSpacepressVersion = false;
+    if ($hasSpacepressCompiled || $hasZeroCompiled) {
+        require_once __DIR__ . '/../shared/spacepress.php';
+        $isSpacepressVersion = _stattic_spacepress_version_manifest($versionDir) !== null;
+        if ($isSpacepressVersion && in_array($generation, ['legacy_0_8', 'v2'], true)) {
+            _stattic_problem_response(409, 'zero_generation_locked', 'This version belongs to a different runtime.');
+        }
+    }
+    $hasLegacyZeroArtifacts = !$isSpacepressVersion && (
+        $hasZeroCompiled
+        || is_file($versionDir . '/zero/config.json')
+        || is_file($versionDir . '/zero/routes.php')
+        || is_file($versionDir . '/zero/capsule.json')
+        || is_dir($versionDir . '/zero/actions')
+        || is_file($versionDir . '/zero/endpoints-index.json')
+        || is_file($versionDir . '/zero/runs-index.json')
+    );
+    if ($hasLegacyZeroArtifacts || in_array($generation, ['legacy_0_8', 'v2'], true)) {
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_cordon($versionDir, $serving);
+    }
     if (_stattic_released_cli_reads_version('root', $originalRequestPath)) {
         _stattic_emit_runtime_identity($versionId);
     }
@@ -447,10 +467,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         require_once __DIR__ . '/../shared/page-routes.php';
     }
     $entry = _stattic_v4_entry($versionDir, $root, $requestPath);
-    if ($entry === null) {
+    if ($entry === null && str_starts_with(strtolower($requestPath), STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/')) {
         // Tables frozen before the /__zero cutover only know the legacy
         // spellings; a canonical control request folds onto them.
-        $zeroLegacyPath = _stattic_zero_legacy_control_path($requestPath);
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        $zeroLegacyPath = _stattic_legacy_serve_zero_table_key($requestPath);
         if ($zeroLegacyPath !== null) {
             $entry = _stattic_v4_entry($versionDir, $root, $zeroLegacyPath);
         }
@@ -551,19 +572,33 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         && _stattic_released_cli_reads_version('admitted', $originalRequestPath)) {
         _stattic_emit_runtime_identity($versionId);
     }
-    if ($requestPath === STATTIC_ZERO_V2_REALTIME_PATH) {
-        require_once __DIR__ . '/zero-v2-realtime.php';
-        _stattic_zero_v2_realtime_script($versionDir, $requestMethod);
+    $lowerRequestPath = strtolower($requestPath);
+    if (
+        $requestPath === STATTIC_ZERO_V2_REALTIME_PATH
+        || $requestPath === STATTIC_ZERO_V2_CLIENT_PATH
+        || $requestPath === STATTIC_ZERO_V2_CLIENT_TYPES_PATH
+    ) {
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_control_request($versionDir, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
     }
-    if ($requestPath === STATTIC_ZERO_V2_CLIENT_PATH || $requestPath === STATTIC_ZERO_V2_CLIENT_TYPES_PATH) {
-        require_once __DIR__ . '/../shared/zero-v2.php';
-        _stattic_zero_v2_client($versionDir, $requestPath, $requestMethod);
+    if (
+        $requestPath === '/identity'
+        || str_starts_with($requestPath, '/identity/')
+        || str_starts_with($lowerRequestPath, '/__zero/auth/')
+        || str_starts_with($lowerRequestPath, '/__spacefast/zero/auth/')
+    ) {
+        require_once __DIR__ . '/space-users.php';
+        if (_stattic_space_users_prepare($privateRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod, $overlay['usersProviderConfig'] ?? null)) {
+            return;
+        }
     }
-    require_once __DIR__ . '/space-users.php';
-    if (_stattic_space_users_prepare($privateRoot, $serving, $requestHost, $requestPath, $requestUri, $requestMethod, $overlay['usersProviderConfig'] ?? null)) {
-        return;
+    if (
+        str_starts_with($lowerRequestPath, STATTIC_ZERO_CANONICAL_NAMESPACE_PATH . '/')
+        || str_starts_with($lowerRequestPath, STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/')
+    ) {
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_control_request($versionDir, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
     }
-    _stattic_legacy_zero_control_request($versionDir, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
 
     // The enforcement verdict, not the overlay flag: a Space that HAS grants but
     // admits this URL anonymously and unconditionally is still URL-stable and
@@ -784,76 +819,45 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         }
     }
 
-    if (_stattic_typedpress_try_serve($sendContext, $requestPath, $requestMethod)) {
-        $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
-            'private_root' => $privateRoot, 'method' => $requestMethod, 'uri' => $requestUri,
-            'path' => $requestPath, 'host' => $requestHost,
-        ];
-        return;
+    // SpacePress claimed paths (`/wp-json/spacepress/v1/*`, `/wp-json/spacepress-identity/v1/*`,
+    // `/__spacefast/auth/*`, `/wp-admin/new/*`, `SP_ASSETS_URL`) + declared pages/routes.
+    if ($isSpacepressVersion) {
+        require_once __DIR__ . '/../shared/spacepress.php';
+        if (_stattic_spacepress_try_serve($sendContext, $requestPath, $requestMethod)) {
+            $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
+                'private_root' => $privateRoot, 'method' => $requestMethod, 'uri' => $requestUri,
+                'path' => $requestPath, 'host' => $requestHost,
+            ];
+            return;
+        }
     }
 
-    // Pattern-matched Zero endpoints and Function routes cannot be table keys;
-    // their exact forms already were, so a committed file still wins.
-    _stattic_v4_dispatch_pattern_routes($sendContext, $requestPath, $requestMethod, $requestUri);
+    // Cloudflare Functions worker routes (after static assets and SpacePress).
+    _stattic_v4_dispatch_functions_routes($sendContext, $requestPath, $requestMethod);
+
+    // Lazy fallback for deployed legacy Zero 0.8 and `content.managed` Spaces.
+    // Normal static, CF-Worker, and SpacePress requests never require anything under `deprecated/`.
+    $needsLegacyFallback = $page !== null
+        || is_file($versionDir . '/zero/routes.php')
+        || (empty($serving['immutable']) && !_stattic_path_is_reserved($requestPath) && (
+            is_file($privateRoot . '/spaces/' . $spaceId . '/content-redirects.json')
+            || is_file($privateRoot . '/spaces/' . $spaceId . '/wordpress-routes.json')
+        ));
+    if ($needsLegacyFallback) {
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        if (_stattic_legacy_serve_fallback($sendContext, $requestPath, $requestMethod, $requestUri, $page, $hasPages)) {
+            $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
+                'private_root' => $privateRoot,
+                'method' => $requestMethod,
+                'uri' => $requestUri,
+                'path' => $requestPath,
+                'host' => $requestHost,
+            ];
+            return;
+        }
+    }
 
     _stattic_render_method_declined_405_if_any();
-
-    // WordPress redirects are scoped to the space and follow deployed route claims.
-    if ($page === null && !_stattic_path_is_reserved($requestPath) && empty($serving['immutable'])) {
-        $contentRedirectFile = $privateRoot . '/spaces/' . $spaceId . '/content-redirects.json';
-        if (is_file($contentRedirectFile)) {
-            $contentRedirects = json_decode((string) file_get_contents($contentRedirectFile), true);
-            if (is_array($contentRedirects)) {
-                // Only this path's exact rules can match, so only they need the
-                // published-destination probe. Probe the key the redirect walk
-                // reads: it trims trailing slashes, so `/old/` matches `/old`.
-                require_once __DIR__ . '/redirects.php';
-                $redirectKey = _stattic_redirect_match_path($requestPath);
-                if (is_array($contentRedirects['exact'][$redirectKey] ?? null)) {
-                    $contentRedirects['exact'][$redirectKey] = array_values(array_filter($contentRedirects['exact'][$redirectKey], static fn (array $rule): bool =>
-                        empty($rule['requiresPublishedDestination'])
-                        || _stattic_v4_entry($versionDir, $root, $rule['destination']) !== null
-                        || ($hasPages && _stattic_page_resolve($versionDir, $rule['destination']) !== null)
-                    ));
-                }
-                _stattic_apply_redirects($contentRedirects, $serving, static fn (): bool => false, $requestHost, $requestPath, $requestMethod, false, true);
-            }
-        }
-    }
-
-    if ($page !== null) {
-        if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
-            _stattic_method_decline(['GET', 'HEAD']);
-            _stattic_render_method_declined_405_if_any();
-        }
-        if (($page['render'] ?? null) === 'document') {
-            require_once __DIR__ . '/content-page.php';
-            if (_stattic_wordpress_page_try_serve($sendContext, $requestPath, $requestMethod, $page)) {
-                $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
-                    'private_root' => $privateRoot,
-                    'method' => $requestMethod,
-                    'uri' => $requestUri,
-                    'path' => $requestPath,
-                    'host' => $requestHost,
-                ];
-                return;
-            }
-        } elseif (($page['render'] ?? null) === 'client' && is_string($page['shell'] ?? null)) {
-            $shell = _stattic_v4_entry($versionDir, $root, '/' . ltrim($page['shell'], '/'));
-            if (is_array($shell)) {
-                _stattic_v4_send_entry($sendContext, $shell, $requestPath);
-            }
-        }
-    }
-
-    require_once __DIR__ . '/content-page.php';
-    if ($page === null && _stattic_wordpress_fallback_try_serve($sendContext, $requestPath, $requestMethod)) {
-        $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] = [
-            'private_root' => $privateRoot, 'method' => $requestMethod, 'uri' => $requestUri,
-            'path' => $requestPath, 'host' => $requestHost,
-        ];
-        return;
-    }
 
     $lookup = ltrim($requestPath, '/');
     if ($page === null && !_stattic_lookup_not_found_is_terminal($lookup)
@@ -1097,7 +1101,15 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         return;
     }
 
-    _stattic_zero_prime_anonymous_document_session($context, $headers, $status, $method);
+    if (
+        $status === 200
+        && in_array($method, ['GET', 'HEAD'], true)
+        && str_starts_with(strtolower((string) ($headers['content-type'] ?? '')), 'text/html')
+        && is_file((string) $context['version_dir'] . '/zero/config.json')
+    ) {
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_prime_zero_document_session($context, $headers, $status, $method);
+    }
     if (!empty($context['share_preview_public'])
         && $status === 200
         && str_starts_with(strtolower($headers['content-type'] ?? ''), 'text/html')) {
@@ -1444,16 +1456,23 @@ function _stattic_v4_dispatch_action(array $context, array $action, array $entry
         }
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_ZERO) {
-        if (in_array($serving['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) {
+        if (in_array($serving['zero_generation'] ?? null, ['v2', 'spacepress', 'sp_v1', 'tp_v1'], true)) {
             _stattic_problem_response(410, 'zero_legacy_retired', 'This Zero 0.8 version is retired. Open the Space live hostname.', ['details' => ['live_hostname' => $serving['live_hostname'] ?? null]]);
         }
-        _stattic_legacy_zero_dispatch_action($context, $action, $requestPath);
+        require_once __DIR__ . '/../deprecated/legacy-serve.php';
+        _stattic_legacy_serve_zero_action($context, $action, $requestPath);
     }
-    if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_PHP) {
-        // Authored PHP is unavailable for HTTP and every CLI caller, including
-        // cron. The shared refusal never loads the handler.
-        require_once __DIR__ . '/php-functions.php';
-        _stattic_php_functions_serve($context);
+    if ($type === 'php') {
+        if (in_array((string) $context['method'], ['TRACE', 'CONNECT'], true)) {
+            _stattic_render_method_not_allowed_lazy();
+        }
+        _stattic_problem_response(
+            410,
+            'php_functions_retired',
+            'PHP Functions have been retired.',
+            [],
+            ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE]
+        );
     }
     if ($type === STATTIC_RUNTIME_RESPONSE_ACTION_LISTING) {
         _stattic_v4_serve_listing($context, $action, $entry, $requestPath);
@@ -1635,16 +1654,11 @@ function _stattic_v4_rule_headers(array $context): array
     return $memo = [$lowered, $removed];
 }
 
-// Pattern routes (`/api/:id`) cannot be table keys, so their artifacts are
-// consulted directly. Both probes are file-existence gated.
-function _stattic_v4_dispatch_pattern_routes(array $context, string $requestPath, string $requestMethod, string $requestUri): void
+// Cloudflare Functions dynamic route dispatch (runs after static assets and SpacePress).
+function _stattic_v4_dispatch_functions_routes(array $context, string $requestPath, string $requestMethod): void
 {
     $versionDir = (string) $context['version_dir'];
     $lookup = ltrim($requestPath, '/');
-
-    // The gate is the pattern artifact, not `zero/config.json`: the latter only
-    // exists when the finalize body also carried a `zero` block.
-    _stattic_legacy_zero_dispatch_patterns($context, $requestPath, $requestMethod, $requestUri);
 
     // An assets-binding read never re-enters the worker that made it: a miss
     // takes the version's not-found handling (SPA document, 404 page, 404).

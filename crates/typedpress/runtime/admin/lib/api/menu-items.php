@@ -35,13 +35,15 @@ function tp_admin_register_menu_item( $id, $args, $is_meta = false ) {
 	global $tp_admin_menu_items, $tp_admin_meta_menu_items;
 
 	$defaults = array(
-		'to'          => '',
-		'label'       => '',
-		'icon'        => null,
-		'badge'       => null,
-		'parent'      => null,
-		'parent_type' => null,
-		'position'    => null,
+		'to'            => '',
+		'label'         => '',
+		'icon'          => null,
+		'badge'         => null,
+		'parent'        => null,
+		'parent_type'   => null,
+		'position'      => null,
+		'section'       => null,
+		'section_label' => null,
 	);
 
 	$args = wp_parse_args( $args, $defaults );
@@ -69,6 +71,14 @@ function tp_admin_register_menu_item( $id, $args, $is_meta = false ) {
 
 	if ( ! empty( $args['parent'] ) ) {
 		$menu_item['parent'] = $args['parent'];
+	}
+
+	if ( ! empty( $args['section'] ) ) {
+		$menu_item['section'] = $args['section'];
+	}
+
+	if ( ! empty( $args['section_label'] ) ) {
+		$menu_item['sectionLabel'] = $args['section_label'];
 	}
 
 	if ( $is_meta ) {

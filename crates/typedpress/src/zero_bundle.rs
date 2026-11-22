@@ -117,27 +117,36 @@ fn current(path: &str) -> Result<String, Diag> {
 const CAPTURES: &[&str] = &[
     ".zero-source",
     ".typedpress-source",
+    ".spacepress-source",
     APP_FILE,
     VENDOR_FILE,
     bundle::APP_FILE,
     bundle::VENDOR_FILE,
+    bundle::SPACEPRESS_APP_FILE,
+    bundle::SPACEPRESS_VENDOR_FILE,
 ];
 
 /// Whether `project` is a raw 0.3.0 project (`zero.config.ts` at its root) for [`write_raw`]. A tree
-/// that also holds `typedpress.config.ts`, or a capture, is refused: which one the owner meant to publish
-/// is not the host's to guess.
+/// that also holds `spacepress.config.ts`, `typedpress.config.ts`, or a capture is refused: which one
+/// the owner meant to publish is not the host's to guess.
 pub(crate) fn is_raw(project: &Path) -> Result<bool, Diag> {
     if std::fs::symlink_metadata(project.join(OLD_CONFIG)).is_err() {
         return Ok(false);
     }
-    if std::fs::symlink_metadata(project.join(crate::layout::CONFIG)).is_ok() {
-        return Err(failure(format!(
-            "this upload has both {OLD_CONFIG} (from before the rename to TypedPress) and {}",
-            crate::layout::CONFIG
-        ))
-        .help(format!(
-            "keep one: delete {OLD_CONFIG} to publish the TypedPress project, or publish from a copy that holds only the 0.3 project"
-        )));
+    for modern in [crate::layout::SPACEPRESS_CONFIG, crate::layout::CONFIG] {
+        if std::fs::symlink_metadata(project.join(modern)).is_ok() {
+            let label = if modern == crate::layout::SPACEPRESS_CONFIG {
+                "SpacePress"
+            } else {
+                "TypedPress"
+            };
+            return Err(failure(format!(
+                "this upload has both {OLD_CONFIG} (from before the rename to {label}) and {modern}"
+            ))
+            .help(format!(
+                "keep one: delete {OLD_CONFIG} to publish the {label} project, or publish from a copy that holds only the 0.3 project"
+            )));
+        }
     }
     if let Some(capture) = CAPTURES
         .iter()
@@ -335,6 +344,12 @@ impl Fs for Raw {
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         match self.disk(path) {
             Some(disk) => std::fs::read_to_string(disk),
+            None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not in the project")),
+        }
+    }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        match self.disk(path) {
+            Some(disk) => std::fs::read(disk),
             None => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not in the project")),
         }
     }

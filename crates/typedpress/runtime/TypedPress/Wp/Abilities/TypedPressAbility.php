@@ -9,7 +9,7 @@ use TypedPress\Wp\Facade;
 /**
  * A TypedPress ability. Core's run route serves only abilities that are `show_in_rest`; an `agents: false`
  * one is hidden from REST discovery and MCP, but it is still the app's own operation, so for the
- * facade's own dispatches (`/__tp/api/v1/actions/<name>`, spec §3a) it reports itself shown and
+ * facade's own dispatches (`/wp-json/typedpress/v1/actions/<name>`, spec §3a) it reports itself shown and
  * the run route serves it with core's checks: input, permission, execution, output.
  */
 final class TypedPressAbility extends \WP_Ability

@@ -23,6 +23,12 @@ final class Connection
     private int $depth = 0;
     /** The database handle the outermost transaction began on: a reconnect replaces it and ends the transaction. */
     private mixed $handle = null;
+    /**
+     * The outermost transaction is open here but the server has not been told yet ({@see reading()}):
+     * START TRANSACTION goes out before the first statement that is not a plain SELECT, wherever it
+     * comes from. A request that only reads then sends neither it nor COMMIT.
+     */
+    private bool $deferred = false;
     private bool $rollbackOnly = false;
     /** Core writes in flight: editor-save hooks ignore posts TypedPress itself is writing (§4.9). */
     private int $busy = 0;
@@ -30,6 +36,10 @@ final class Connection
     private array $touchedPosts = [];
     /** @var array<string, true> */
     private array $touchedOptions = [];
+    /** A post's caches were cleaned inside the open transaction ({@see wrotePost()}). */
+    private bool $wrotePost = false;
+    /** The `clean_post_cache` listener is registered ({@see watchPostWrites()}). */
+    private bool $watchingPosts = false;
     /** @var list<callable> */
     private array $beforeCommit = [];
     /** @var list<callable> */
@@ -94,6 +104,9 @@ final class Connection
             // what follows would commit on its own. Refuse it, and the commit.
             $this->rollbackOnly = true;
             throw new DbError('the database connection was lost and replaced during the transaction', 2006);
+        }
+        if ($this->deferred && !self::plainRead($sql)) {
+            $this->start();
         }
         if (self::$observer !== null) {
             (self::$observer)($sql);
@@ -502,6 +515,69 @@ final class Connection
     }
 
     /**
+     * {@see transaction()} for work that usually only reads (a GET handler): the same nesting,
+     * rollback and afterCommit behaviour, but the server's transaction starts at the first statement
+     * that is not a plain SELECT, on this connection or on `$wpdb` (core's and other plugins'
+     * writes). Reads before that point are not in it, so they see committed data and hold no locks;
+     * a locking read (`FOR UPDATE`) starts it like a write. Joins an open transaction as it is.
+     */
+    public function reading(callable $fn): mixed
+    {
+        if ($this->depth > 0) {
+            return $this->transaction($fn);
+        }
+        $this->depth = 1;
+        $this->deferred = true;
+        add_filter('query', $watch = function (mixed $sql): mixed {
+            if ($this->deferred && is_string($sql) && trim($sql) !== '' && !self::plainRead($sql)) {
+                $this->start();
+            }
+
+            return $sql;
+        }, PHP_INT_MAX);
+        try {
+            try {
+                $result = $fn();
+            } catch (\Throwable $e) {
+                $this->rollback();
+                throw $e;
+            }
+            $this->commit();
+
+            return $result;
+        } finally {
+            remove_filter('query', $watch, PHP_INT_MAX);
+        }
+    }
+
+    /** A SELECT that takes no lock and writes nothing; anything else belongs inside the transaction. */
+    private static function plainRead(string $sql): bool
+    {
+        return preg_match('/^\s*SELECT\b/i', $sql) === 1 && preg_match('/\bFOR\s+(UPDATE|SHARE)\b|\bLOCK\s+IN\s+SHARE\s+MODE\b|\bINTO\s+(OUTFILE|DUMPFILE|@)|:=|\b(GET_LOCK|RELEASE_LOCK|NEXTVAL|SETVAL|LAST_INSERT_ID)\s*\(/i', $sql) !== 1;
+    }
+
+    /**
+     * Tell the server about the deferred transaction. On the handle itself: this can run inside
+     * `$wpdb->query()` (its `query` filter), where a second `$wpdb->query()` would change what wpdb
+     * remembers about the statement it is about to run.
+     */
+    private function start(): void
+    {
+        $dbh = $this->wpdb->dbh;
+        try {
+            $started = $dbh instanceof \PDO ? $dbh->query('START TRANSACTION') : $this->mysqli()->query('START TRANSACTION');
+        } catch (\Throwable $e) {
+            throw new DbError('START TRANSACTION failed: ' . $e->getMessage(), 0);
+        }
+        if ($started === false) {
+            throw new DbError('START TRANSACTION failed: ' . ($dbh instanceof \mysqli ? $dbh->error : ''), $dbh instanceof \mysqli ? $dbh->errno : 0);
+        }
+        $this->wpdb->num_queries++; // counted where `$wpdb->query()` would have counted it
+        $this->deferred = false;
+        $this->handle = $dbh;
+    }
+
+    /**
      * Open the outermost transaction by hand, for a save that WordPress drives through hooks (§4.9):
      * TypedPress's own transactions join it until commit() or rollback() ends it. Throws if one is open.
      */
@@ -530,16 +606,19 @@ final class Connection
             if ($this->rollbackOnly) {
                 throw new \RuntimeException('Cannot commit: a joined transaction failed');
             }
-            // wpdb reconnects and retries a query after a lost connection: the server rolled the transaction
-            // back, and what ran after it (Action Scheduler's writes) committed on its own. Don't commit the rest.
-            if ($this->wpdb->dbh !== $this->handle) {
-                throw new \RuntimeException('Cannot commit: the database connection was lost and replaced during the transaction');
-            }
-            $this->query('COMMIT');
-            // wpdb may have reconnected for the COMMIT itself: the server rolled the transaction back and
-            // the new connection committed nothing. Report it as the failure it is.
-            if ($this->wpdb->dbh !== $this->handle) {
-                throw new \RuntimeException('Commit failed: the database connection was lost and replaced while committing');
+            // A deferred transaction that only read never reached the server: there is nothing to commit.
+            if (!$this->deferred) {
+                // wpdb reconnects and retries a query after a lost connection: the server rolled the transaction
+                // back, and what ran after it (Action Scheduler's writes) committed on its own. Don't commit the rest.
+                if ($this->wpdb->dbh !== $this->handle) {
+                    throw new \RuntimeException('Cannot commit: the database connection was lost and replaced during the transaction');
+                }
+                $this->query('COMMIT');
+                // wpdb may have reconnected for the COMMIT itself: the server rolled the transaction back and
+                // the new connection committed nothing. Report it as the failure it is.
+                if ($this->wpdb->dbh !== $this->handle) {
+                    throw new \RuntimeException('Commit failed: the database connection was lost and replaced while committing');
+                }
             }
         } catch (\Throwable $e) {
             $this->rollback();
@@ -547,7 +626,12 @@ final class Connection
         }
         $this->depth = 0;
         $after = $this->afterCommit;
+        $wrotePost = $this->wrotePost;
         $this->reset();
+        // First, and not as an afterCommit callback: one of those throwing must not skip it.
+        if ($wrotePost) {
+            wp_cache_set_posts_last_changed();
+        }
         foreach ($after as $cb) {
             $cb();
         }
@@ -559,7 +643,9 @@ final class Connection
         $this->depth = 0;
         $undo = $this->onRollback;
         try {
-            $this->query('ROLLBACK');
+            if (!$this->deferred) {
+                $this->query('ROLLBACK');
+            }
         } finally {
             $this->cleanCaches();
             $this->reset();
@@ -606,6 +692,31 @@ final class Connection
         $this->touchedOptions[$name] = true;
     }
 
+    /**
+     * A post was written inside the open transaction, by the stores or by core (`clean_post_cache`).
+     * WordPress moved its `posts` change stamp then, before the write was committed, so another
+     * request may have cached something it read from before the write under the new stamp:
+     * commit() moves the stamp once more as soon as the write is visible.
+     */
+    public function wrotePost(): void
+    {
+        if ($this->depth > 0) {
+            $this->wrotePost = true;
+        }
+    }
+
+    /**
+     * Calls wrotePost() on core's `clean_post_cache`, registered once per connection: stores are
+     * built per editor save (Plugin::fillEditorDefaults), and each must not add another listener.
+     */
+    public function watchPostWrites(): void
+    {
+        if (!$this->watchingPosts) {
+            $this->watchingPosts = true;
+            add_action('clean_post_cache', fn () => $this->wrotePost());
+        }
+    }
+
     /** Run a core write (wp_insert_post, update_field, ...) with the editor hooks muted. */
     public function core(callable $fn): mixed
     {
@@ -649,8 +760,10 @@ final class Connection
     private function reset(): void
     {
         $this->rollbackOnly = false;
+        $this->deferred = false;
         $this->handle = null;
         $this->touchedPosts = $this->touchedOptions = [];
+        $this->wrotePost = false;
         $this->beforeCommit = $this->afterCommit = $this->onRollback = [];
     }
 }

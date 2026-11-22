@@ -5,6 +5,7 @@
 //! ([`pipeline`]). The `cli` feature adds the commands, which read and write the project, download
 //! plugin dependencies and carry the embedded PHP runtime. [`wasm`] exports the core to a browser.
 
+pub mod admin_dashboard;
 pub mod admin_screen;
 pub mod app;
 mod app_plugin;
@@ -13,6 +14,7 @@ pub mod astro_content;
 pub mod builtins;
 pub mod client;
 pub mod client_component;
+pub mod commerce;
 pub mod compile;
 pub mod content_blocks;
 pub mod content_page;
@@ -24,6 +26,7 @@ pub mod ir;
 pub mod json_schema;
 pub mod kind_url;
 pub mod layout;
+pub mod lint;
 pub mod loader;
 pub mod lower;
 pub mod migrate;
@@ -55,6 +58,8 @@ mod commands;
 pub mod config_migrate;
 #[cfg(feature = "host")]
 mod emit;
+#[cfg(feature = "cli")]
+mod frontend;
 #[cfg(feature = "host")]
 pub mod host;
 pub mod host_contract;

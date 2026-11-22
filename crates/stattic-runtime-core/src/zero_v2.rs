@@ -1,3 +1,12 @@
+//! Quarantined legacy Zero v2 compiler integration, source-form classification,
+//! and privacy rules.
+//!
+//! Legacy `zero.config.ts` and `.zero-source/` Spaces keep compiling through
+//! `crates/zero` so released CLI/MCP callers, Space Users v2, and existing v2
+//! Spaces remain compatible. SpacePress (`spacepress.config.ts`,
+//! `.spacepress-source/`, and inline `spacefast.config.ts` `app`) compiles
+//! through `crate::spacepress`.
+
 use crate::{
     finalize::{invalid, invalid_error, validate_id, FileMeta, Result},
     model::SiteFinalizeInput,
@@ -27,9 +36,6 @@ pub(crate) fn compile(
                 "The compiled Zero directory is reserved for the engine.",
             );
         }
-    }
-    if files.keys().any(|p| crate::typedpress::declared(p)) {
-        return crate::typedpress::compile(input, private, stage, files);
     }
     let declared: Vec<String> = input
         .session
@@ -155,9 +161,6 @@ pub(crate) fn compile(
                     format!("public/{name} would overwrite a directory the engine owns."),
                 );
             }
-            // A nested public/public/x would replace public/x before x is
-            // copied from it, so x would serve bytes its catalog entry
-            // doesn't describe.
             if name.starts_with("public/") {
                 return invalid(
                     "zero_v2_source_layout",
@@ -166,12 +169,6 @@ pub(crate) fn compile(
             }
             let destination = stage.join("files").join(&name);
             if files.contains_key(&name) {
-                // In a First project the root is private source, so the
-                // public asset wins. That covers both a static page the base
-                // version served and the copy an earlier First version made.
-                // The staged file is a hardlink into the CAS, which earlier
-                // versions still serve. Unlink it; copying over it would
-                // rewrite their bytes.
                 std::fs::remove_file(&destination).map_err(|error| {
                     invalid_error("zero_v2_asset_write_failed", error.to_string())
                 })?;
@@ -189,6 +186,48 @@ pub(crate) fn compile(
         manifest,
         private_paths: private_source_paths(files, &proven_public(input)),
     }))
+}
+
+fn app_summary(compiled: &Path, manifest: &Value) -> Value {
+    let descriptor = std::fs::read_to_string(compiled.join("client/schema.ts"))
+        .ok()
+        .and_then(|text| {
+            let start = text.find("export const SCHEMA = ")? + "export const SCHEMA = ".len();
+            let end = text[start..].find(" as const;")? + start;
+            serde_json::from_str::<Value>(&text[start..end]).ok()
+        })
+        .unwrap_or(Value::Null);
+    let tables: BTreeMap<String, Value> = std::fs::read(compiled.join("snapshot.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|snapshot| snapshot.get("tables").and_then(Value::as_object).cloned())
+        .map(|tables| tables.into_iter().collect())
+        .unwrap_or_default();
+    let mut collections: Vec<&String> = descriptor
+        .get("collections")
+        .and_then(Value::as_object)
+        .map(|map| map.keys().collect())
+        .unwrap_or_default();
+    collections.sort();
+    let mut actions: Vec<String> = descriptor
+        .get("actions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    actions.sort();
+    serde_json::json!({
+        "name": manifest.get("app").cloned().unwrap_or(Value::Null),
+        "collections": collections,
+        "tables": tables.keys().collect::<Vec<_>>(),
+        "actions": actions,
+        "clientPath": "/__zero/client.js",
+    })
 }
 
 /// The form a v2 version's source takes. The control plane applies the same
@@ -298,51 +337,6 @@ pub(crate) fn private_source_paths(
         })
         .map(|(path, _)| path.clone())
         .collect()
-}
-
-/// What the control plane shows for a v2 app: its collections and their
-/// tables, its actions, and its generated client. Read from the compiled
-/// `client/schema.ts` descriptor and `snapshot.json`, never from source.
-fn app_summary(compiled: &Path, manifest: &Value) -> Value {
-    let descriptor = std::fs::read_to_string(compiled.join("client/schema.ts"))
-        .ok()
-        .and_then(|text| {
-            let start = text.find("export const SCHEMA = ")? + "export const SCHEMA = ".len();
-            let end = text[start..].find(" as const;")? + start;
-            serde_json::from_str::<Value>(&text[start..end]).ok()
-        })
-        .unwrap_or(Value::Null);
-    let tables: BTreeMap<String, Value> = std::fs::read(compiled.join("snapshot.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|snapshot| snapshot.get("tables").and_then(Value::as_object).cloned())
-        .map(|tables| tables.into_iter().collect())
-        .unwrap_or_default();
-    let mut collections: Vec<&String> = descriptor
-        .get("collections")
-        .and_then(Value::as_object)
-        .map(|map| map.keys().collect())
-        .unwrap_or_default();
-    collections.sort();
-    let mut actions: Vec<String> = descriptor
-        .get("actions")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    actions.sort();
-    serde_json::json!({
-        "name": manifest.get("app").cloned().unwrap_or(Value::Null),
-        "collections": collections,
-        "tables": tables.keys().collect::<Vec<_>>(),
-        "actions": actions,
-        "clientPath": "/__zero/client.js",
-    })
 }
 
 #[cfg(test)]

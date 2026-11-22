@@ -43,8 +43,7 @@ else
   # Serving files every public request traverses. They are not entrypoints, but
   # they are just as load-bearing.
   for source in "${entrypoint_sources[@]}" \
-    runtime/engine/runtime/spacefast-sdk.php \
-    runtime/engine/runtime/zero-routes.php; do
+    runtime/engine/runtime/spacefast-sdk.php; do
     grep -Fqx "SF:$repo_root/$source" "$php_source_index"
   done
 fi

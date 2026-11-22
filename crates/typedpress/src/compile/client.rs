@@ -163,9 +163,33 @@ impl Compiler<'_, '_> {
                 ));
                 continue;
             }
+            // `ref={box}` names the element to its `useRef()`: the store finds it by this
+            // attribute, inside the component's own root.
+            if name == "ref" {
+                let attached = match &value.kind {
+                    ExprKind::Ident(n) if ctx.analysis.bindings.get(n) == Some(&Binding::Ref) => n.clone(),
+                    _ => {
+                        return Err(refuse(
+                            *span,
+                            "`ref` takes a `useRef()` of this component",
+                            "write `const box = useRef()` and `<div ref={box}>`",
+                        ));
+                    }
+                };
+                let place = (span.start, span.end);
+                if *ctx.analysis.refs.entry(attached.clone()).or_insert(place) != place {
+                    return Err(refuse(
+                        *span,
+                        format!("`{attached}` is already attached to an element"),
+                        "give each element its own `useRef()`",
+                    ));
+                }
+                extra.push(format!("'data-tp-ref' => {}", php_str(&attached)));
+                continue;
+            }
             // `key` keys React's reconciliation and never reaches the HTML; a list's key goes to
             // its template's `data-wp-each-key`.
-            if name == "ref" || name == "key" {
+            if name == "key" {
                 continue;
             }
             if !ctx.analysis.reactive(value) {

@@ -28,7 +28,7 @@
     // register this page once with
     // `typedpress identity app add --name=Blog --id=app_blog --redirect=<this page's URL> --origin=<its origin>`.
     const first = createClient({
-      url: "/__tp/api/v1",
+      url: "/wp-json/typedpress/v1",
       auth: { storage: "session", clientId: "app_blog", redirectUri: location.origin + location.pathname },
     });
     const $ = (id) => document.getElementById(id);

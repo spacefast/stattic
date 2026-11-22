@@ -3,10 +3,10 @@
   "info": {
     "title": "Pantry API",
     "version": "v1",
-    "description": "The HTTP API of the `pantry` app, built with TypedPress and served under `/__tp/api/v1` on its WordPress site.\n\nEach request is dispatched to the WordPress REST route behind it, which enforces the app's access rules, field rules, validation and hooks; this API gives the requests and answers one plain shape.\n\nA successful answer is JSON with the result under `data`; a list also has `cursor`, the next page's cursor or null. An error is an RFC 9457 problem document, `application/problem+json`, with `type`, `title`, `status`, `code` and `detail`, and `pointer` when one field is at fault.\n\nRequests sign in as WordPress core accepts: the logged-in cookie with an `X-WP-Nonce` header, an application password, or a TypedPress Identity access token. Each operation says who may call it. A field the caller may not read is left out of rows, and can't be filtered or sorted on.\n\n`typedpress build` writes this document from the app's schema, with the typed client in `tp/_generated/client/` and the app's WordPress Abilities; a component here has the name of the client's type for the same value."
+    "description": "The HTTP API of the `pantry` app, built with TypedPress and served under `/wp-json/typedpress/v1` on its WordPress site.\n\nEach request is dispatched to the WordPress REST route behind it, which enforces the app's access rules, field rules, validation and hooks; this API gives the requests and answers one plain shape.\n\nA successful answer is JSON with the result under `data`; a list also has `cursor`, the next page's cursor or null. An error is an RFC 9457 problem document, `application/problem+json`, with `type`, `title`, `status`, `code` and `detail`, and `pointer` when one field is at fault.\n\nRequests sign in as WordPress core accepts: the logged-in cookie with an `X-WP-Nonce` header, an application password, or a TypedPress Identity access token. Each operation says who may call it. A field the caller may not read is left out of rows, and can't be filtered or sorted on.\n\n`typedpress build` writes this document from the app's schema, with the typed client in `tp/_generated/client/` and the app's WordPress Abilities; a component here has the name of the client's type for the same value."
   },
   "servers": [
-    { "url": "/__tp/api/v1", "description": "The app's WordPress site." }
+    { "url": "/wp-json/typedpress/v1", "description": "The app's WordPress site." }
   ],
   "security": [
     { "cookie": [], "nonce": [] },

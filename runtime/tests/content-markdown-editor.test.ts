@@ -32,7 +32,7 @@ final class Spacefast_Content_Error extends RuntimeException {
         parent::__construct($message);
     }
 }
-require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-markdown.php"))};
+require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/deprecated/content/content-markdown.php"))};
 ${body}
 `;
   const dir = mkdtempSync(path.join(os.tmpdir(), "spacefast-markdown-editor-"));

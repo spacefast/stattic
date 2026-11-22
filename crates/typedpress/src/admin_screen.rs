@@ -148,7 +148,7 @@ impl Screen<'_, '_, '_> {
         decl.insert("capability".into(), json!(self.capability(cfg, &o, span)?));
         for (key, keys) in [
             ("classic", &["parent", "icon", "position"][..]),
-            ("menu", &["parent", "icon"][..]),
+            ("menu", &["parent", "icon", "section"][..]),
         ] {
             let kspan = self.at(cfg, key, span);
             match o.get(key) {

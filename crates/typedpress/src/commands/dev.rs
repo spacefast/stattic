@@ -4,8 +4,11 @@ use std::process::{Command, ExitCode};
 
 const STUDIO: &str = "wp-studio@2.2.0";
 const TOOLS: &[(&str, &str)] = &[
+    ("frontend.mjs", include_str!("../../scripts/dev/frontend.mjs")),
     ("studio.mjs", include_str!("../../scripts/dev/studio.mjs")),
     ("setup.php", include_str!("../../scripts/dev/setup.php")),
+    ("live.mjs", include_str!("../../scripts/dev/live.mjs")),
+    ("live-client.js", include_str!("../../scripts/dev/live-client.js")),
 ];
 
 fn runner() -> Result<PathBuf, String> {
@@ -94,7 +97,9 @@ fn alive(pid: u64, state: &Path) -> bool {
 
 /// The project's dev site as data, for `typedpress dev status --json` and `typedpress mcp`'s `dev_status`.
 /// `state` is `none` (never created), `stopped` or `running`; `watching` says whether a `typedpress dev`
-/// process is rebuilding it on save, and `pid` is that process. `project` is canonical.
+/// process is rebuilding it on save, and `pid` is that process. `error` is that process's last build
+/// when it failed (`message`, and the compiler's `diagnostics`), so a running site that does not
+/// serve the current source says so; it is null after a build that succeeded. `project` is canonical.
 ///
 /// It reads `.tp/dev/state.json`, which `typedpress dev` writes when the site is up, and checks the
 /// port and the process itself, so it does not start Studio. A site started by a compiler from
@@ -125,36 +130,39 @@ pub(super) fn status_with(
     if !created(project) {
         return Ok(json!({ "state": "none", "start": "typedpress dev" }));
     }
-    let report = |url: &str, port: u16, running: bool, pid: Option<u64>, log: Value, versions: [&Value; 2]| {
-        json!({
-            "state": if running { "running" } else { "stopped" },
-            "url": url,
-            "port": port,
-            "admin": format!("{url}/wp-admin/"),
-            "site": dir.join("wordpress"),
-            "watching": running && pid.is_some(),
-            "pid": pid,
-            "log": log,
-            "wordpress": versions[0],
-            "php": versions[1],
-        })
-    };
+    let report =
+        |url: &str, port: u16, running: bool, pid: Option<u64>, [log, error]: [Value; 2], versions: [&Value; 2]| {
+            json!({
+                "state": if running { "running" } else { "stopped" },
+                "url": url,
+                "port": port,
+                "admin": format!("{url}/wp-admin/"),
+                "site": dir.join("wordpress"),
+                "watching": running && pid.is_some(),
+                "pid": pid,
+                "log": log,
+                "error": error,
+                "wordpress": versions[0],
+                "php": versions[1],
+            })
+        };
     if let Some(state) = read("state.json").filter(|state| state["version"] == 1)
         && let (Some(url), Some(port)) = (state["url"].as_str(), state["port"].as_u64())
         && let Ok(port) = u16::try_from(port)
     {
         let pid = state["pid"].as_u64().filter(|pid| alive(*pid, &dir));
-        let log = if pid.is_some() {
-            state["log"].clone()
+        // The log and the build error are the recorded process's: nothing is said of one that is gone.
+        let of_process = if pid.is_some() {
+            [state["log"].clone(), state["error"].clone()]
         } else {
-            Value::Null
+            [Value::Null, Value::Null]
         };
         return Ok(report(
             url,
             port,
             accepts(port),
             pid,
-            log,
+            of_process,
             [&state["wordpress"], &state["php"]],
         ));
     }
@@ -177,7 +185,7 @@ pub(super) fn status_with(
         port,
         studio["isOnline"] == true,
         None,
-        Value::Null,
+        [Value::Null, Value::Null],
         [&studio["wpVersion"], &studio["phpVersion"]],
     ))
 }
@@ -220,6 +228,9 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
         }
         let mut command = command(&project, mode)?;
         if mode == "start" {
+            // The watcher is a grandchild (npx, a shell, node) that a signal to this process never
+            // reaches. It checks that this process still exists, and stops WordPress when it is gone.
+            command.env("TP_DEV_PARENT", std::process::id().to_string());
             command
                 .arg(std::env::current_exe().map_err(|e| e.to_string())?)
                 .arg(args.out.clone().unwrap_or_else(|| project.join("tp/dist/wp-content")))

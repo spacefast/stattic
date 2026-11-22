@@ -67,6 +67,7 @@ const SPACEFAST_FUNCTIONS_RELAY_FREE_CAPABILITIES = ['log', 'next.cache'];
 const SPACEFAST_FUNCTIONS_BROKERS = [
     'database' => ['db.read', 'db.write'],
     'zero' => ['zero.call'],
+    'spacepress' => ['spacepress.call'],
     'services' => ['gravatar.profile', 'spam.check', 'email.send', 'connectors.call'],
     'storage' => ['storage.read', 'storage.write'],
     'next-cache' => ['next.cache'],

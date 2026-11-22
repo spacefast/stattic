@@ -30,7 +30,7 @@ final class OAuth
 
     public static function issuer(): string
     {
-        return untrailingslashit(home_url("/identity"));
+        return untrailingslashit(home_url(Plugin::basePath()));
     }
 
     public static function discovery(): array
@@ -426,7 +426,7 @@ final class OAuth
             }
         }
         if ($target === "") {
-            $target = home_url("/identity");
+            $target = home_url(Plugin::basePath());
         } elseif (isset($query["state"]) && is_string($query["state"])) {
             $target = self::withQuery($target, ["state" => $query["state"]]);
         }

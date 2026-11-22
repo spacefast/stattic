@@ -19,6 +19,7 @@ register_activation_hook(__FILE__, static function (): void {
 register_deactivation_hook(__FILE__, static function (): void {
     class_exists(\TypedPress\Wp\Hardening::class) && \TypedPress\Wp\Hardening::deactivate();
     class_exists(\TypedPress\Wp\InstallMarker::class) && \TypedPress\Wp\InstallMarker::forget();
+    class_exists(\TypedPress\Wp\PublicFiles::class) && \TypedPress\Wp\PublicFiles::removeSymlinks();
 });
 add_action('plugins_loaded', static function (): void {
     if (!class_exists(\TypedPress\Wp\Runtime::class)) {

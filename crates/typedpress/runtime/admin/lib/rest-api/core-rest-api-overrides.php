@@ -25,14 +25,20 @@ add_filter(
 add_filter(
 	'rest_prepare_post_type',
 	function ( $response, $post_type ) {
-		$response->data['default_view']    = $post_type->default_view;
-		$response->data['default_layouts'] = $post_type->default_layouts;
-		$response->data['quick_edit_form'] = $post_type->quick_edit_form;
-		if ( isset( $post_type->views ) ) {
-			$response->data['views'] = $post_type->views;
+		// The registered post type, as tp_admin_register_default_view_arg_for_post_type() reads its
+		// arguments: its built capabilities stand in for the `capabilities` argument registration drops.
+		$args = tp_admin_register_default_view_arg_for_post_type(
+			array( 'capabilities' => (array) $post_type->cap ) + get_object_vars( $post_type ),
+			$post_type->name
+		);
+		$response->data['default_view']    = $args['default_view'] ?? null;
+		$response->data['default_layouts'] = $args['default_layouts'] ?? null;
+		$response->data['quick_edit_form'] = $args['quick_edit_form'] ?? null;
+		if ( isset( $args['views'] ) ) {
+			$response->data['views'] = $args['views'];
 		}
-		if ( isset( $post_type->import_handler ) ) {
-			$response->data['import_handler'] = $post_type->import_handler;
+		if ( isset( $args['import_handler'] ) ) {
+			$response->data['import_handler'] = $args['import_handler'];
 		}
 		return $response;
 	},

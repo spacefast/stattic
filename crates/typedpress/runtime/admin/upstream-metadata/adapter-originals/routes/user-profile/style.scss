@@ -1,0 +1,61 @@
+@use "@wordpress/base-styles/variables";
+@use "@wordpress/base-styles/colors";
+
+.woocommerce-user-profile-page {
+	// Target only nested wrappers (field groups), not the main wrapper.
+	// !important is needed to override the inline flex-direction set by the Stack component.
+	.dataforms-layouts__wrapper > .dataforms-layouts__wrapper {
+		flex-direction: row !important;
+		gap: variables.$grid-unit-20 !important;
+		align-items: flex-start;
+
+		// Each field in the group takes equal space
+		> .dataforms-layouts-regular__field {
+			flex: 1;
+			min-width: 0; // Prevent overflow
+		}
+	}
+}
+
+/**
+* Temporary solution until the dividers are implemented in the DataForms.
+*/
+.ciab-next .woocommerce-user-profile-page {
+	// Match WPDS uppercase field labels on panel-layout fields.
+	// The upstream panel layout uses text-transform: capitalize.
+	.dataforms-layouts-panel__field-label {
+		text-transform: uppercase;
+	}
+
+	// Add full-width dividers to each field
+	.dataforms-layouts-regular__field {
+		position: relative;
+		padding-bottom: variables.$grid-unit-20;
+
+		&::after {
+			content: "";
+			position: absolute;
+			bottom: 0;
+			left: calc( -1 * variables.$grid-unit-30 );
+			right: calc( -1 * variables.$grid-unit-30 );
+			height: variables.$border-width;
+			background-color: colors.$gray-200;
+		}
+	}
+
+	// Hide border on the last child of the main wrapper.
+	.components-card-body > .dataforms-layouts__wrapper > :last-child,
+	.dataforms-layouts-regular__field:has( .user-edit-description ) {
+		padding-bottom: 0;
+
+		&::after {
+			display: none;
+		}
+	}
+
+	// Style user edit description as helper text.
+	.user-edit-description {
+		color: colors.$gray-700;
+		font-size: 13px;
+	}
+}

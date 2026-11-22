@@ -90,10 +90,10 @@ const SPACEFAST_SPACE_CONTROLLED_HEADERS = [
     'clear-site-data' => true,
 ];
 
-// Akismet's recognised content types, as sf_spam() validates a submission
-// against them. The classifier is trained on this exact vocabulary, so every
-// runtime that offers a spam verdict — the Zero/Functions service client and
-// this engine — has to accept the same words, and neither may invent synonyms.
+// Akismet's recognised content types for spam submissions. The classifier is
+// trained on this exact vocabulary, so every runtime that offers a spam
+// verdict — the Zero/Functions service client and this engine — has to accept
+// the same words, and neither may invent synonyms.
 const SPACEFAST_SPAM_CONTENT_TYPES = ['comment', 'reply', 'forum-post', 'contact-form', 'signup', 'message'];
 
 function _stattic_platform_managed_header(string $name): bool

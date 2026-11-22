@@ -106,3 +106,31 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     $uploads['url'] = $uploads['baseurl'] . $subdir;
     return $uploads;
 }
+
+/** Resume a WordPress-backed request after the provider has supplied WordPress's environment. */
+function _stattic_wordpress_page_resume_deferred_request(): void
+{
+    $deferred = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] ?? null;
+    if (!is_array($deferred) || !function_exists('_sf_serve_fast')) {
+        return;
+    }
+    unset($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST']);
+    $GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'] = false;
+    _sf_serve_fast(
+        $deferred['private_root'],
+        $deferred['method'],
+        $deferred['uri'],
+        $deferred['path'],
+        $deferred['host']
+    );
+    _stattic_enforce_document_isolation();
+    exit;
+}
+
+/** Keep WordPress-backed visitor responses out of the provider's Batcache page cache. */
+function _stattic_wordpress_lane_refuse_page_cache(): void
+{
+    if (function_exists('batcache_cancel')) {
+        batcache_cancel();
+    }
+}

@@ -81,7 +81,7 @@ function tp_admin_remove_qsa_flag( $rules ) {
  */
 function tp_admin_persist_rewrite_rule() {
 	// A build mounted from the store writes the rule when the host initializes it, never on a request.
-	if ( get_option( TP_ADMIN_REWRITE_OPTION ) === TP_ADMIN_VERSION || ( defined( 'WP_CLI' ) && WP_CLI ) || \TypedPress\Wp\Runtime::managed() ) {
+	if ( ( defined( 'WP_CLI' ) && WP_CLI ) || \TypedPress\Wp\Runtime::managed() || get_option( TP_ADMIN_REWRITE_OPTION ) === TP_ADMIN_VERSION ) {
 		return;
 	}
 	require_once ABSPATH . 'wp-admin/includes/file.php';

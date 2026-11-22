@@ -4,7 +4,7 @@
 //! - `default`: the page, layout, not-found or error component, compiled like any component;
 //! - `metadata`: a literal object (title, description, robots, canonical) or a function of the
 //!   page's props returning one;
-//! - `guard` (layouts): a role name, `false`, or a function of `{ user }` returning a boolean;
+//! - `guard`: page and layout read access, and the default authorization for HTTP handlers;
 //! - `search` (pages): an object of field builders, parsed from the query string and passed to the
 //!   page as `search`;
 //! - `GET`/`POST`/... (pages and `route.ts`): HTTP handlers, `(req, ctx) => { status, headers, body }`,
@@ -15,7 +15,7 @@
 use crate::app::{self, RouteKind};
 use crate::diag::{Diag, Span};
 use crate::extract::{self, Root, Slot};
-use crate::schema::{AppFile, AppRoute, AppSearch, Output, Schema};
+use crate::schema::{Access, AppFile, AppRoute, AppSearch, Output, Schema};
 use crate::value::Value;
 use crate::{eval, loader};
 
@@ -178,6 +178,98 @@ fn stem(file: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+fn access_role(role: &str) -> bool {
+    matches!(role, "anyone" | "authenticated") || crate::schema::ROLES.contains(&role)
+}
+
+fn guard_rule(
+    rule: &Value,
+    span: Span,
+    path: &str,
+    label: &str,
+    handler: bool,
+    roots: &mut Vec<Root>,
+) -> Result<Access, Diag> {
+    Ok(match rule {
+        Value::Str(s) if access_role(s) => Access::Role(s.to_string()),
+        Value::Bool(b) => Access::Allow(*b),
+        Value::Closure(c) => {
+            let file = path.to_string();
+            let (slot, suffix) = if handler {
+                (Slot::AppAccess { file }, "handler_guard")
+            } else {
+                (Slot::AppGuard { file }, "guard")
+            };
+            roots.push(Root {
+                closure: c.clone(),
+                slot,
+                name: format!("{}__{suffix}", stem(path)),
+                plugin: None,
+            });
+            Access::Fn(String::new())
+        }
+        other => {
+            return Err(Diag::new(
+                span,
+                format!("`{label}` is {}, not a role, boolean or function", other.describe()),
+            )
+            .help("use \"anyone\", \"authenticated\", a role, a boolean, or `({ user }) => boolean`"));
+        }
+    })
+}
+
+fn register_guard(
+    path: &str,
+    span: Span,
+    value: &Value,
+    handler: bool,
+    file: &mut AppFile,
+    roots: &mut Vec<Root>,
+) -> Result<(), Diag> {
+    if handler && file.signature.is_some() {
+        return Err(Diag::new(span, format!("{path} exports both `guard` and `signature`"))
+            .help("choose one authorization rule for the HTTP handlers"));
+    }
+    if let Value::Object(rules) = value {
+        if handler || file.methods.is_empty() || file.signature.is_some() {
+            return Err(Diag::new(
+                span,
+                "`guard = { page, handlers }` requires a page with unsigned HTTP handlers",
+            )
+            .help("use a single `guard` on this file"));
+        }
+        let rules = rules.borrow();
+        if let Some((key, _)) = rules
+            .iter()
+            .find(|(key, _)| !matches!(key.as_str(), "page" | "handlers"))
+        {
+            return Err(
+                Diag::new(span, format!("`guard` has an unknown field `{key}`")).help("use `page` and `handlers`")
+            );
+        }
+        let methods = rules.get("handlers").ok_or_else(|| {
+            Diag::new(span, "`guard = { page, handlers }` needs a `handlers` rule")
+                .help("set `handlers` for the HTTP methods; omit `page` if the page is public")
+        })?;
+        if let Some(page) = rules.get("page").filter(|page| !matches!(page, Value::Undef)) {
+            file.guard = Some(guard_rule(page, span, path, "guard.page", false, roots)?);
+        }
+        file.handler_guard = Some(guard_rule(methods, span, path, "guard.handlers", true, roots)?);
+    } else {
+        let rule = guard_rule(value, span, path, "guard", handler, roots)?;
+        if handler {
+            file.handler_guard = Some(rule);
+        } else {
+            // A shared function fills its handler name along with its page name (see fill).
+            if !file.methods.is_empty() && file.signature.is_none() && !matches!(rule, Access::Fn(_)) {
+                file.handler_guard = Some(rule.clone());
+            }
+            file.guard = Some(rule);
+        }
+    }
+    Ok(())
+}
+
 pub fn register(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut extract::Extracted) -> Result<(), Diag> {
     if program.app.routes.is_empty() && program.app.not_found.is_none() && program.app.login.is_none() {
         return Ok(());
@@ -191,7 +283,11 @@ pub fn register(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut e
         let allowed = app::allowed_exports(path);
         for name in exports.keys() {
             if !allowed.contains(&name.as_str()) {
-                let help = if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                let help = if name == "access" && path.ends_with("/page.tsx") {
+                    "use `export const guard`; on a page with HTTP methods, use `guard = { handlers: rule }` to authorize only those methods".to_string()
+                } else if name == "access" {
+                    "use `export const guard` to authorize pages and HTTP handlers".to_string()
+                } else if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                     "move components into tp/components/ (or a `_private` folder) and import them".to_string()
                 } else {
                     format!(
@@ -256,31 +352,6 @@ pub fn register(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut e
                     );
                 }
             }
-        }
-        if let Some(guard) = exports.get("guard") {
-            file.guard = Some(match guard {
-                Value::Str(s)
-                    if s.as_ref() == "anyone"
-                        || s.as_ref() == "authenticated"
-                        || crate::schema::ROLES.contains(&s.as_ref()) =>
-                {
-                    crate::schema::Access::Role(s.to_string())
-                }
-                Value::Bool(b) => crate::schema::Access::Allow(*b),
-                Value::Closure(c) => {
-                    ext.roots.push(Root {
-                        closure: c.clone(),
-                        slot: Slot::AppGuard { file: path.clone() },
-                        name: format!("{stem}__guard"),
-                        plugin: None,
-                    });
-                    crate::schema::Access::Fn(String::new())
-                }
-                other => {
-                    return Err(Diag::new(span, format!("`guard` is {}, not a role or a function", other.describe()))
-                        .help("use a role (\"subscriber\", \"author\", \"editor\", \"admin\", \"authenticated\") or `({ user }) => boolean`"));
-                }
-            });
         }
         if let Some(search) = exports.get("search") {
             file.search = Some(search_fields(search, span, ev, ext)?);
@@ -354,51 +425,30 @@ pub fn register(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut e
             return Err(Diag::new(span, format!("{path} exports no HTTP handler"))
                 .help("export `GET`, `POST`, `PUT`, `PATCH` or `DELETE`"));
         }
-        // Who may call the handlers: said explicitly, as a route is public only when it says so.
         // A signed webhook proves its sender with an HMAC over the raw body and runs as the system.
-        match (exports.get("access"), exports.get("signature")) {
-            (Some(_), Some(_)) => {
-                return Err(Diag::new(span, format!("{path} exports both `access` and `signature`"))
-                    .help("keep `signature` for a signed webhook (it authenticates the caller), or `access` for everyone else"));
+        if let Some(signature) = exports.get("signature") {
+            let span = export_at(program, *module, "signature");
+            if file.methods.is_empty() {
+                return Err(
+                    Diag::new(span, format!("{path} exports `signature` but no HTTP handler")).help(
+                        "a signature authenticates HTTP handlers such as `POST`; use `guard` for the page itself",
+                    ),
+                );
             }
-            (None, Some(s)) => file.signature = Some(extract::signature_config(s, span, ev.legacy())?),
-            (Some(a), None) => {
-                file.access = Some(match a {
-                    Value::Str(s)
-                        if s.as_ref() == "anyone"
-                            || s.as_ref() == "authenticated"
-                            || crate::schema::ROLES.contains(&s.as_ref()) =>
-                    {
-                        crate::schema::Access::Role(s.to_string())
-                    }
-                    Value::Bool(b) => crate::schema::Access::Allow(*b),
-                    Value::Closure(c) => {
-                        ext.roots.push(Root {
-                            closure: c.clone(),
-                            slot: Slot::AppAccess { file: path.clone() },
-                            name: format!("{stem}__access"),
-                            plugin: None,
-                        });
-                        crate::schema::Access::Fn(String::new())
-                    }
-                    other => {
-                        return Err(Diag::new(
-                            span,
-                            format!("`access` is {}, not a role or a function", other.describe()),
-                        )
-                        .help("use \"anyone\", \"authenticated\", a role, or `({ user }) => boolean`"));
-                    }
-                });
-            }
-            (None, None) if !file.methods.is_empty() => {
-                return Err(Diag::new(span, format!("{path} has HTTP handlers but no `access`"))
-                    .help("say who may call them: `export const access = \"anyone\"` (or a role), or `export const signature = { secret: env(\"…\"), header, scheme }` for a signed webhook"));
-            }
-            (None, None) => {}
+            file.signature = Some(extract::signature_config(signature, span, ev.legacy())?);
         }
-        if (exports.contains_key("access") || exports.contains_key("signature")) && file.methods.is_empty() {
-            return Err(Diag::new(span, format!("{path} exports `access` or `signature` but no HTTP handler"))
-                .help("they govern `GET`/`POST`/… handlers; a page's own readers are decided by its reads and its layouts' `guard`"));
+        if let Some(value) = exports.get("guard") {
+            register_guard(
+                path,
+                export_at(program, *module, "guard"),
+                value,
+                handler,
+                &mut file,
+                &mut ext.roots,
+            )?;
+        } else if !file.methods.is_empty() && file.signature.is_none() {
+            return Err(Diag::new(span, format!("{path} has HTTP handlers but no `guard`"))
+                .help("say who may call them: `export const guard = \"anyone\"` (or a role), or `export const signature = { secret: env(\"…\"), header, scheme }` for a signed webhook"));
         }
         files.insert(path.clone(), file);
     }
@@ -412,36 +462,43 @@ pub fn register(program: &loader::Program, ev: &mut eval::Evaluator, ext: &mut e
     let module_of = |file: &str| program.app_files.iter().find(|(p, _)| p == file).map(|(_, m)| *m);
     prebuilt(program, &files, &kinds, ext.schema.output)?;
     let output = ext.schema.output;
-    let route = |r: &app::Route| AppRoute {
-        prerender: r.kind == RouteKind::Page
-            && files.get(&r.file).map_or(output == Output::Static, |f| {
-                f.prerender.unwrap_or(output == Output::Static)
-            }),
-        styles: crate::assets::stylesheets(
-            program,
-            &r.layouts
-                .iter()
-                .chain((r.kind == RouteKind::Page).then_some(&r.file))
-                .filter_map(|f| module_of(f))
-                .collect::<Vec<_>>(),
-        ),
-        id: ids.get(&r.file).map(|(id, _)| id.clone()).unwrap_or_else(|| r.id()),
-        explicit_id: ids.get(&r.file).map(|(_, span)| *span),
-        pattern: r.pattern(),
-        page: (r.kind == RouteKind::Page).then(|| r.file.clone()),
-        handler: (r.kind == RouteKind::Handler).then(|| r.file.clone()),
-        layouts: r.layouts.clone(),
-        error: r.error.clone(),
-        kind: (r.kind == RouteKind::Page)
-            .then(|| {
-                kinds
-                    .iter()
-                    .find_map(|(k, u)| app::serves_kind_url(r, u).map(|b| (k.clone(), b)))
-            })
-            .flatten(),
+    let route = |r: &app::Route| {
+        let roots: Vec<usize> = r
+            .layouts
+            .iter()
+            .chain((r.kind == RouteKind::Page).then_some(&r.file))
+            .filter_map(|f| module_of(f))
+            .collect();
+        AppRoute {
+            prerender: r.kind == RouteKind::Page
+                && files.get(&r.file).map_or(output == Output::Static, |f| {
+                    f.prerender.unwrap_or(output == Output::Static)
+                }),
+            styles: crate::assets::stylesheets(program, &roots),
+            preloads: crate::assets::preloads(program, &roots),
+            id: ids.get(&r.file).map(|(id, _)| id.clone()).unwrap_or_else(|| r.id()),
+            explicit_id: ids.get(&r.file).map(|(_, span)| *span),
+            pattern: r.pattern(),
+            page: (r.kind == RouteKind::Page).then(|| r.file.clone()),
+            handler: (r.kind == RouteKind::Handler).then(|| r.file.clone()),
+            layouts: r.layouts.clone(),
+            error: r.error.clone(),
+            kind: (r.kind == RouteKind::Page)
+                .then(|| {
+                    kinds
+                        .iter()
+                        .find_map(|(k, u)| app::serves_kind_url(r, u).map(|b| (k.clone(), b)))
+                })
+                .flatten(),
+        }
     };
     for asset in program.assets.values() {
-        ext.schema.assets.insert(asset.file.clone(), asset.bytes.clone());
+        if asset.emits_file() && !asset.file.starts_with('/') {
+            ext.schema.assets.insert(asset.file.clone(), asset.bytes.clone());
+            if let Some(meta) = &asset.meta {
+                ext.schema.assets_meta.insert(asset.file.clone(), meta.clone());
+            }
+        }
     }
     ext.schema.app = Some(crate::schema::App {
         routes: program.app.routes.iter().map(route).collect(),
@@ -580,6 +637,12 @@ fn prebuilt(
                 format!("{path} has HTTP handlers, and a static site has no server to answer them"),
             )
             .help("move the handler into an action the page's client component calls, or set `output: \"server\"`"));
+        }
+        if file.guard.is_some() {
+            return Err(
+                Diag::new(at, format!("{path} is prebuilt ({why}), and it has a read access rule"))
+                    .help(format!("a prebuilt page is the same file for every visitor; {fix}")),
+            );
         }
         if let Some(layout) = route
             .layouts
@@ -752,11 +815,16 @@ pub fn fill(schema: &mut Schema, slot: &Slot, name: &str) -> bool {
             true
         }
         Slot::AppAccess { file } => {
-            app.files.get_mut(file).expect("app file").access = Some(crate::schema::Access::Fn(name.to_string()));
+            app.files.get_mut(file).expect("app file").handler_guard = Some(Access::Fn(name.to_string()));
             true
         }
         Slot::AppGuard { file } => {
-            app.files.get_mut(file).expect("app file").guard = Some(crate::schema::Access::Fn(name.to_string()));
+            let file = app.files.get_mut(file).expect("app file");
+            let guard = Access::Fn(name.to_string());
+            if !file.methods.is_empty() && file.handler_guard.is_none() && file.signature.is_none() {
+                file.handler_guard = Some(guard.clone());
+            }
+            file.guard = Some(guard);
             true
         }
         Slot::AppStaticParams { file } => {

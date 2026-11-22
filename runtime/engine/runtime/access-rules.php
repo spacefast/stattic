@@ -2613,12 +2613,12 @@ function _stattic_access_wordpress_principal(
     if ($actorId === null) {
         $account = _stattic_access_account_identity(_stattic_access_identity_record($identity) ?? []);
         if ($account === null) return null;
-        // A TypedPress app sees a signed-in browser account as itself and as
-        // its subscriber, on every hostname, whatever its Grants on this path
-        // give: the Space's access decides whether the person may open it, and
-        // the app never runs them with an elevated WordPress role. Service
-        // actors and the dashboard's editor lane keep their own roles.
-        if (in_array($serving['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) {
+        // A SpacePress / TypedPress app sees a signed-in browser account as
+        // itself and as its subscriber, on every hostname, whatever its Grants
+        // on this path give: the Space's access decides whether the person may
+        // open it, and the app never runs them with an elevated WordPress role.
+        // Service actors and the dashboard's editor lane keep their own roles.
+        if (in_array($serving['zero_generation'] ?? null, ['v2', 'tp_v1', 'spacepress'], true)) {
             $role = 'subscriber';
         }
         $profile = is_array($identity['profile'] ?? null) ? $identity['profile'] : [];

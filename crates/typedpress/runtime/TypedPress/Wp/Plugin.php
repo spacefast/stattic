@@ -39,14 +39,17 @@ final class Plugin
     /** @var array<string, int> `--drop` confirmations for this process's migration (SchemaCheck) */
     private array $drops = [];
 
-    /** The hash of the `schema.php` this request loaded, taken when it booted. */
-    private string $loadedHash = '';
+    /** A standalone deploy can replace schema.php mid-request. A managed build's files are immutable. */
+    private ?string $loadedHash = null;
 
     public function __construct(public readonly string $dir, string $mainFile, public readonly Schema $schema)
     {
-        $this->loadedHash = (string) @hash_file('sha256', $dir . '/tp/app/schema.php');
+        if (!Runtime::managed()) {
+            $this->buildHash();
+        }
         self::$instance = $this;
         $this->mainFile = $mainFile;
+        if ($this->schema->commerce() !== null) { \TypedPress\Commerce\Module::register($this); }
         Hardening::apply($schema);
         Sealed::apply($schema);
         if (!Runtime::managed()) {
@@ -55,24 +58,24 @@ final class Plugin
         add_action('init', [$this, 'registerPostTypes'], 0);
         NativePosts::register($schema);
         add_action('acf/init', [$this, 'registerFields'], 5);
-        add_action('acf/init', fn () => WpUserStore::registerFields($this->schema), 5);
         if (($this->schema->auth()['collection'] ?? null) !== null) {
+            add_action('acf/init', fn () => WpUserStore::registerFields($this->schema), 5);
             WpUserStore::trackRoles();
+            // Users created outside TypedPress become members with the collection's defaults.
+            add_action('user_register', function (int $userId): void {
+                if (!$this->connection()->busy()) {
+                    WpUserStore::fillDefaults($this->schema, $userId);
+                }
+            });
         }
-        // Users created outside TypedPress (identity's hosted sign-up, wp-admin) become members with defaults.
-        add_action('user_register', function (int $userId): void {
-            if (!$this->connection()->busy()) {
-                WpUserStore::fillDefaults($this->schema, $userId);
-            }
-        });
         CoreAccess::register();
         AgentScope::register();
-        EditorSave::register();
-        ProfileForm::register();
+        $this->registerEditorSave();
         if (($this->schema->auth()['collection'] ?? null) !== null) {
+            ProfileForm::register();
             UserMeta::register();
         }
-        IdentityBridge::hook($this->connection());
+        IdentityBridge::hook($this);
         add_action('rest_api_init', fn () => TableController::registerAll($this));
         // While storage is behind, TypedPress collections' posts can't be written by any path (core REST,
         // wp-admin, other plugins): their hooks would run against tables the build doesn't match.
@@ -141,9 +144,14 @@ final class Plugin
         }
         add_action('admin_menu', [$this, 'adminMenu'], 9);
         add_action('tp_admin_screens', [$this, 'registerScreens']);
+        add_action('tp_admin_dashboards', [$this, 'registerDashboards']);
         // A plugin updated by copying files in has no activation; the first request of any kind
         // (REST, front end, cron, CLI, admin) applies its pending migrations before TypedPress serves it.
         add_action('init', [$this, 'maybeMigrate'], 1);
+        if (!Runtime::managed() && is_file($this->dir . '/tp/app/seed-version.php')) {
+            // Commerce finishes setting up its kinds at init 20.
+            add_action('init', [$this, 'installSeed'], 21);
+        }
 
         // Editor saves (wp-admin, core /wp/v2/<type>): hooks run after the post and its fields are saved.
         // Generated values are filled before core snapshots its revision (wp_after_insert_post, 9).
@@ -158,6 +166,27 @@ final class Plugin
         add_action('_wp_put_post_revision', [$this, 'snapshotRevision'], 10, 2);
         add_action('before_delete_post', [$this, 'beforeEditorDelete'], 10, 2);
         add_action('deleted_post', [$this, 'afterEditorDelete'], 10, 2);
+    }
+
+    private function registerEditorSave(): void
+    {
+        add_filter('pre_wp_unique_post_slug', [EditorSave::class, 'uniqueSlug'], PHP_INT_MAX, 5);
+        add_filter('wp_insert_post_data', [EditorSave::class, 'begin'], PHP_INT_MAX, 4);
+        add_action('wp_insert_post', [EditorSave::class, 'inserted'], 0, 1);
+        // After fillEditorDefaults (8) and core's revision (9), before TypedPress's after hooks (20).
+        add_action('wp_after_insert_post', [EditorSave::class, 'check'], 9, 1);
+        add_action('wp_after_insert_post', [EditorSave::class, 'end'], PHP_INT_MAX, 1);
+        add_action('check_admin_referer', [EditorSave::class, 'beginRestore'], 10, 2);
+        // A permanent delete: beforeDelete, FK actions, core's delete and afterDelete, all or nothing.
+        add_action('before_delete_post', [EditorSave::class, 'beginDelete'], 0, 1);
+        add_action('deleted_post', [EditorSave::class, 'endDelete'], PHP_INT_MAX, 1);
+        add_action('wp_restore_post_revision', [EditorSave::class, 'endRestore'], PHP_INT_MAX, 1);
+        // Keep the rollback in its original shutdown order without autoloading the editor on reads.
+        register_shutdown_function(static function (): void {
+            if (class_exists(EditorSave::class, false)) {
+                EditorSave::shutdown();
+            }
+        });
     }
 
     /**
@@ -308,6 +337,7 @@ final class Plugin
     public function activate(): void
     {
         InstallMarker::forget();
+        \TypedPress\Sync\Seed::retry($this);
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         try {
             $this->migrateLocked();
@@ -322,6 +352,7 @@ final class Plugin
             wp_die(esc_html($error->getMessage()), 'TypedPress', ['back_link' => true]);
         }
         // migrateLocked() already provisioned identity and backfilled members.
+        PublicFiles::syncSymlinks($this);
     }
 
     /** Existing WordPress users are members too (§6.2): give them the member columns' defaults. */
@@ -363,6 +394,26 @@ final class Plugin
                 throw new \RuntimeException($this->remember($refused), 0, $refused);
             }
         });
+    }
+
+    public function installSeed(): void
+    {
+        if ($this->unavailable() !== null) {
+            return;
+        }
+        try {
+            // A refusal an earlier request found for this build: reported, not run again.
+            $problem = \TypedPress\Sync\Seed::install($this, $this->dir . '/tp/app/seed-version.php');
+            if ($problem === null) {
+                return;
+            }
+        } catch (\Throwable $error) {
+            $problem = $error->getMessage();
+            InstallMarker::forget();
+            error_log('[typedpress] ' . $problem);
+        }
+        $this->refuse($problem);
+        $this->notice($problem);
     }
 
     /** Keeps a refusal for this build and ledger, with the command that confirms it; returns the report. */
@@ -552,7 +603,8 @@ final class Plugin
         wp_cache_delete($this->schemaOption(), 'options');
         clearstatcache(true, $this->dir . '/tp/app/schema.php');
 
-        return get_option($this->schemaOption()) === $this->loadedHash && $this->schemaHash() === $this->loadedHash;
+        $loaded = $this->buildHash();
+        return get_option($this->schemaOption()) === $loaded && $this->schemaHash() === $loaded;
     }
 
     private function schemaOption(): string
@@ -568,7 +620,22 @@ final class Plugin
     /** Identifies the compiled schema this request runs: what a runtime schema version was validated on. */
     public function buildHash(): string
     {
-        return $this->loadedHash;
+        return $this->loadedHash ??= (string) @hash_file('sha256', $this->dir . '/tp/app/schema.php');
+    }
+
+    /** The manifest for this exact immutable app tree, when the build loader mounted it. */
+    public function mountedManifest(): ?array
+    {
+        if (!Runtime::managed() || !class_exists(\TypedPress\Loader\Loader::class, false)) {
+            return null;
+        }
+        $build = \TypedPress\Loader\Loader::loaded();
+        if ($build === null) {
+            return null;
+        }
+        $manifest = $build['manifest'];
+        $app = $build['root'] . '/app/' . $manifest['app'] . '/plugins/typedpress-app-' . $manifest['name'];
+        return $this->dir === $app ? $manifest : null;
     }
 
     // ================================================================ registration
@@ -634,6 +701,7 @@ final class Plugin
     private function registerTaxonomies(): void
     {
         foreach ($this->schema->taxonomies() as $name => $spec) {
+            if (isset($spec['commerce'])) { continue; }
             $label = (string) ($spec['label'] ?? $name);
             $taxonomy = (string) $spec['wp']['taxonomy'];
             $types = array_values(array_map(fn (string $kind): string => (string) $this->schema->collection($kind)['wp']['postType'], $spec['wp']['on'] ?? []));
@@ -724,6 +792,23 @@ final class Plugin
         }
         foreach ($this->schema->screens() as $id => $screen) {
             tp_admin_register_screen((string) $id, $screen);
+        }
+    }
+
+    /**
+     * The app's `adminWidget()` and `adminDashboard()` exports, compiled into schema.php.
+     */
+    public function registerDashboards(): void
+    {
+        if (function_exists('tp_admin_register_declarative_widget')) {
+            foreach ($this->schema->widgets() as $id => $widget) {
+                tp_admin_register_declarative_widget((string) $id, $widget);
+            }
+        }
+        if (function_exists('tp_admin_register_dashboard')) {
+            foreach ($this->schema->dashboards() as $id => $dashboard) {
+                tp_admin_register_dashboard((string) $id, $dashboard);
+            }
         }
     }
 

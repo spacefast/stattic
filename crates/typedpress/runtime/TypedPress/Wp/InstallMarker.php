@@ -8,7 +8,8 @@ namespace TypedPress\Wp;
  * One autoloaded option saying that a plugin-installed site already holds everything this build and
  * this runtime install on requests: the stored-name upgrade, the shared system tables, the app's
  * migrations, Action Scheduler's groups and recurring actions, route and content Pages, Polylang's
- * languages, the search index shape, the runtime-schema capability. While it matches, a request runs
+ * languages, the search index shape, the runtime-schema capability, a store's order storage. While
+ * it matches, a request runs
  * none of those checks ({@see Runtime::installs()}), as a managed build never does on a request.
  *
  * Its value is a digest of the build (the loaded `schema.php`), the runtime tables version, the
@@ -30,6 +31,8 @@ final class InstallMarker
     private const WATCHED = [
         'tp_runtime_tables', ZeroNames::DONE, Jobs\ActionSchedulerQueue::PREPARED, 'tp_search_shape', 'tp_kind_urls',
         'tp_polylang_languages', 'tp_schema_apply_granted', 'tp_upload_namespace', 'active_plugins', 'active_sitewide_plugins',
+        // A store's order storage (Commerce\Module::checkOrderStorage).
+        'woocommerce_custom_orders_table_enabled', 'woocommerce_custom_orders_table_data_sync_enabled',
     ];
 
     /** @var array<int, bool> blog id => whether the marker matched, read once per site per request */
@@ -150,6 +153,14 @@ final class InstallMarker
         $locales = $plugin->schema->locales();
         if ($locales !== null && !Polylang::installed($locales)) {
             return false;
+        }
+
+        if ($plugin->schema->commerce() !== null) {
+            try {
+                \TypedPress\Commerce\Module::checkOrderStorage();
+            } catch (\RuntimeException) {
+                return false;
+            }
         }
 
         return KindUrls::recorded() && ContentPages::plan() === [] && RoutePages::plan() === []

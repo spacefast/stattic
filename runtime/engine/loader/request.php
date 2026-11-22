@@ -262,6 +262,8 @@ return static function (array $loader): void {
         if (
             !isset($entrypointPaths[$path])
             && !$isFpmReadinessProbe
+            && $path !== '/wp-admin/new'
+            && !str_starts_with($path, '/wp-admin/new/')
             && is_file($releaseRoot . '/engine/shared/content-admin.php')
         ) {
             require_once $releaseRoot . '/engine/shared/content-admin.php';
@@ -457,13 +459,13 @@ return static function (array $loader): void {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
                     $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];
                 }
-                if (in_array($accessTarget['serving']['zero_generation'] ?? null, ['v2', 'tp_v1'], true)) {
+                if (in_array($accessTarget['serving']['zero_generation'] ?? null, ['v2', 'tp_v1', 'spacepress'], true)) {
                     // The Space role the session holds, for the Spacefast
-                    // TypedPress plugin to lend on this request; the same
-                    // resolver the page lane runs (shared/typedpress.php).
+                    // SpacePress plugin to lend on this request; the same
+                    // resolver the page lane runs (shared/spacepress.php).
                     if ($principal !== null && !$nativeUnsafeForeign) {
-                        require_once $releaseRoot . '/engine/shared/typedpress.php';
-                        _stattic_typedpress_resolve_visitor($accessTarget['serving'], $host, $restAccessPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')));
+                        require_once $releaseRoot . '/engine/shared/spacepress.php';
+                        _stattic_spacepress_resolve_visitor($accessTarget['serving'], $host, $restAccessPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')));
                     }
                     // A response that needed a Grant or runs as a platform
                     // principal leaves PHP private and out of the edge cache,
@@ -485,14 +487,45 @@ return static function (array $loader): void {
                 );
             }
             if ($accessTarget['kind'] === 'present') {
-                $zeroHost = $releaseRoot . '/engine/shared/zero-v2.php';
-                if (is_file($zeroHost)) {
-                    require_once $zeroHost;
-                    _stattic_zero_generation_serve(_stattic_version_root($privateRoot, $accessTarget['space_id'], $accessTarget['version_id']), $accessTarget['serving']);
-                    // A content-admin session has no page serving yet; the binding's
-                    // Users settings come from the same route entry.
-                    if (_stattic_zero_v2_select($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'], $accessTarget['serving'])) {
-                        $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $accessTarget['serving'];
+                require_once $releaseRoot . '/engine/shared/context.php';
+                $targetVersionRoot = function_exists('_stattic_version_root')
+                    ? _stattic_version_root($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'])
+                    : $privateRoot . '/spaces/' . $accessTarget['space_id'] . '/versions/' . $accessTarget['version_id'];
+                $targetGeneration = is_string($accessTarget['serving']['zero_generation'] ?? null)
+                    ? $accessTarget['serving']['zero_generation']
+                    : 'none';
+                $hasSpacepress = is_file($targetVersionRoot . '/.spacepress-compiled/manifest.json');
+                $hasZeroCompiled = is_file($targetVersionRoot . '/.zero-compiled/manifest.json');
+                $selectedSpacepress = false;
+                if ($hasSpacepress || $hasZeroCompiled) {
+                    $spacepressHost = $releaseRoot . '/engine/shared/spacepress.php';
+                    if (is_file($spacepressHost)) {
+                        require_once $spacepressHost;
+                        if (_stattic_spacepress_version_manifest($targetVersionRoot) !== null) {
+                            if (in_array($targetGeneration, ['legacy_0_8', 'v2'], true)) {
+                                _stattic_problem_response(409, 'zero_generation_locked', 'This version belongs to a different runtime.');
+                            }
+                            if (_stattic_spacepress_select($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'], $accessTarget['serving'])) {
+                                $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $accessTarget['serving'];
+                                $selectedSpacepress = true;
+                            }
+                        }
+                    }
+                }
+                if (
+                    !$selectedSpacepress
+                    && ($hasZeroCompiled || in_array($targetGeneration, ['legacy_0_8', 'v2'], true)
+                        || is_file($targetVersionRoot . '/zero/config.json'))
+                ) {
+                    $zeroHost = $releaseRoot . '/engine/deprecated/zero-v2/zero-v2.php';
+                    if (is_file($zeroHost)) {
+                        require_once $zeroHost;
+                        _stattic_zero_generation_serve($targetVersionRoot, $accessTarget['serving']);
+                        // A content-admin session has no page serving yet; the binding's
+                        // Users settings come from the same route entry.
+                        if (_stattic_zero_v2_select($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'], $accessTarget['serving'])) {
+                            $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $accessTarget['serving'];
+                        }
                     }
                 }
             }
@@ -557,6 +590,7 @@ return static function (array $loader): void {
     // itself repeats — re-requiring init.php would redeclare its functions.
     $deferred = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REQUEST'] ?? null;
     if (is_array($deferred) && function_exists('_sf_serve_fast')) {
+        require_once $releaseRoot . '/engine/shared/wordpress-scope.php';
         _stattic_wordpress_page_resume_deferred_request();
     }
 

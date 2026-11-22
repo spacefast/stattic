@@ -60,6 +60,8 @@ final class Nav
             'columns' => [$spec['primaryKey'] => true, $spec['title'] => true, 'parent' => true, 'order' => true],
         ], $viewer);
         $urls = KindUrls::instance();
+        // One read for every item's post (and what its URL is built from), not one per item.
+        $urls?->prime($kind, array_map(static fn (array $row): int => (int) $row[$spec['primaryKey']], $rows));
         $out = [];
         foreach ($rows as $row) {
             $id = (int) $row[$spec['primaryKey']];

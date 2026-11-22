@@ -44,7 +44,7 @@ pub enum Binding {
     Derived,
     /// A handler function: `actions.<name>`.
     Action,
-    /// A `useRef()`: the element it is attached to.
+    /// A `useRef()`: the element whose `ref={name}` names it.
     Ref,
     /// A server action the file imports (its registered name): called through `fetch`.
     ServerAction(String),
@@ -77,6 +77,8 @@ pub struct Analysis {
     pub events: Vec<(String, String, String)>,
     /// Server actions called from handlers.
     pub server_actions: BTreeSet<String>,
+    /// Static assets imported by this client component (resolved through `getConfig(ns).assets`).
+    pub assets: BTreeMap<String, crate::schema::IslandAsset>,
     /// Module-level `export const x = sharedState({...})`: (name, initial object).
     pub shared: Vec<(String, Expr)>,
     /// The props the component destructures, in order.
@@ -84,6 +86,9 @@ pub struct Analysis {
     /// `const todos = useLive("todos", { where, limit })`: (field, kind, args, enabled). The field is
     /// a context value `{ data, error, loading }` the server seeds and the browser keeps current.
     pub live: Vec<(String, String, Expr, Expr)>,
+    /// Each `useRef()` an element's `ref={name}` attached, with that attribute's place in the
+    /// source (generator A records them; a conditional's element compiles twice).
+    pub refs: BTreeMap<String, (u32, u32)>,
 }
 
 pub(crate) fn refuse(span: Span, message: impl Into<String>, help: impl Into<String>) -> Diag {
@@ -138,7 +143,7 @@ pub fn analyse(
         namespace,
         ..Default::default()
     };
-    // Default imports of stylesheets and images, by local name.
+    // Default imports of stylesheets and static assets, by local name.
     for (local, asset) in assets {
         match asset.kind {
             crate::assets::Kind::CssModule => {
@@ -150,12 +155,35 @@ pub fn analyse(
                 a.bindings
                     .insert(local.clone(), Binding::Static(format!("{{ {} }}", fields.join(", "))));
             }
-            crate::assets::Kind::Image => {
-                return Err(refuse(
-                    f.span,
-                    format!("a \"use client\" component can't import {}", asset.source),
-                    "import the image in the server component that renders this one and pass its URL as a prop",
-                ));
+            crate::assets::Kind::Raw | crate::assets::Kind::Inline => {
+                if let Some(text) = &asset.text {
+                    a.bindings.insert(local.clone(), Binding::Static(js_str(text)));
+                }
+            }
+            crate::assets::Kind::File => {
+                a.assets
+                    .insert(local.clone(), crate::schema::IslandAsset::Url(asset.file.clone()));
+                a.bindings.insert(
+                    local.clone(),
+                    Binding::Static(format!("getConfig(ns).assets[{}]", js_str(local))),
+                );
+            }
+            crate::assets::Kind::Meta => {
+                if let Some(meta) = &asset.meta {
+                    a.assets.insert(
+                        local.clone(),
+                        crate::schema::IslandAsset::Meta {
+                            file: asset.file.clone(),
+                            width: meta.width,
+                            height: meta.height,
+                            format: meta.format.clone(),
+                        },
+                    );
+                    a.bindings.insert(
+                        local.clone(),
+                        Binding::Static(format!("getConfig(ns).assets[{}]", js_str(local))),
+                    );
+                }
             }
             crate::assets::Kind::Css => {}
         }
@@ -593,6 +621,14 @@ fn capitalize(s: &str) -> String {
 }
 
 impl Analysis {
+    /// A `useRef()` no element's `ref` names: its `current` could only ever be null.
+    pub fn unattached_ref(&self) -> Option<&str> {
+        self.bindings
+            .iter()
+            .find(|(name, binding)| **binding == Binding::Ref && !self.refs.contains_key(*name))
+            .map(|(name, _)| name.as_str())
+    }
+
     /// The directive reference for an identifier used in markup: `context.count`, `state.label`.
     pub fn reference(&self, name: &str) -> Option<String> {
         match self.bindings.get(name)? {
@@ -658,6 +694,12 @@ impl Analysis {
             out.push_str("import { live } from \"@typedpress/live\";\n");
         }
         let _ = writeln!(out, "const ns = {};", js_str(&self.namespace));
+        if !self.refs.is_empty() {
+            // `ref={name}` rendered `data-tp-ref="name"`. The running directive's element is in
+            // this component, so its nearest interactive root is the component's; an element of a
+            // nested client component (its own root) is never this component's ref.
+            out.push_str("const attached = (name) => {\n  const root = getElement().ref?.closest(\"[data-wp-interactive]\");\n  if (!root) return null;\n  const selector = `[data-tp-ref=\"${name}\"]`;\n  if (root.matches(selector)) return root;\n  for (const element of root.querySelectorAll(selector)) {\n    if (element.closest(\"[data-wp-interactive]\") === root) return element;\n  }\n  return null;\n};\n");
+        }
         out.push_str("const call = async (name, input) => {\n  const config = getConfig(ns);\n  const response = await fetch(config.actions[name], { method: \"POST\", credentials: \"same-origin\", headers: config.nonce ? { \"content-type\": \"application/json\", \"x-wp-nonce\": config.nonce } : { \"content-type\": \"application/json\" }, body: JSON.stringify(input ?? {}) });\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.detail ?? result?.error?.message ?? `action ${name} failed`);\n  return result.data;\n};\n\n");
         let _ = writeln!(out, "const {{ state, actions }} = store(ns, {{");
         out.push_str("  state: {\n");
@@ -856,7 +898,7 @@ impl Analysis {
                 Some(Binding::State { .. } | Binding::Prop | Binding::Item) => format!("context.{n}"),
                 Some(Binding::Derived) => format!("state.{n}"),
                 Some(Binding::Shared) => format!("state.{n}"),
-                Some(Binding::Ref) => "getElement().ref".to_string(),
+                Some(Binding::Ref) => format!("({{ current: attached({}) }})", js_str(n)),
                 Some(Binding::Static(js)) => format!("({js})"),
                 Some(Binding::Action) => format!(
                     "(() => {{ throw new Error({}) }})()",

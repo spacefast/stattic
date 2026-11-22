@@ -1,11 +1,11 @@
-//! TypedPress's own documentation, embedded at build time (`build.rs`): the guides in `docs/*.md` and the
-//! docs site's pages in `docs-site/docs/`. Searching and reading it here answers from the same
-//! revision as the binary, which a web search cannot promise.
+//! TypedPress's own documentation, embedded at build time (`build.rs`) from `www/content/docs/`.
+//! Searching and reading it here answers from the same revision as the binary, which a web search
+//! cannot promise.
 
 use crate::docs_files::DOCS;
 use serde_json::{Value, json};
 
-/// The scheme of a page's resource URI: `typedpress-docs:///docs/agents.md`.
+/// The scheme of a page's resource URI: `typedpress-docs:///www/content/docs/operations/mcp-and-agents.md`.
 const SCHEME: &str = "typedpress-docs:///";
 /// A page longer than this is answered as its outline; a section is read by name.
 const WHOLE_PAGE: usize = 24_000;

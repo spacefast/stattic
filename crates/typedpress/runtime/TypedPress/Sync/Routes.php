@@ -129,7 +129,7 @@ final class Routes
                 if (Canon::json($normalized) !== Canon::json($current['row'][$field] ?? null)) { $same = false; }
             }
             if ($same) { return 'unchanged'; }
-            if ($spec['editor'] ?? true) { return 'skipped_existing'; }
+            if (($spec['editor'] ?? true) || isset($spec['commerce']) || ($spec['taxonomy'] ?? false)) { return 'skipped_existing'; }
         }
         $decoded = ['record' => $record, 'expect' => $current['digest'] ?? 'absent'];
         $result = self::apply($collection, $spec, \TypedPress\Seam::sync($collection, $decoded), $decoded, null);

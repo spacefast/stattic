@@ -358,6 +358,9 @@ impl Compiler<'_, '_> {
             }
         }
         let allowed: &[&str] = match name {
+            "EmailHtml" => &["lang", "children"],
+            "EmailBody" | "EmailText" => &["children"],
+            "EmailButton" => &["href", "children"],
             "Content" | "Html" => &["value"],
             "Comments" => &["for", "className"],
             "Live" => &["id", "children"],
@@ -366,11 +369,25 @@ impl Compiler<'_, '_> {
             "Search" => &["action", "label", "placeholder", "className"],
             "TemplatePart" => &["slug", "tagName", "className"],
             "SearchResults" => &["kind", "q", "page", "perPage", "className"],
+            "Image" => &[
+                "src",
+                "alt",
+                "width",
+                "height",
+                "sizes",
+                "priority",
+                "loading",
+                "decoding",
+                "className",
+                "id",
+                "style",
+            ],
             "Link" => &[
                 "href",
                 "children",
                 "className",
                 "prefetch",
+                "requireAuth",
                 "id",
                 "title",
                 "rel",
@@ -390,6 +407,39 @@ impl Compiler<'_, '_> {
         }
         let get = |k: &str| named.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
         match name {
+            "EmailHtml" | "EmailBody" | "EmailText" | "EmailButton" => {
+                let attr = match name {
+                    "EmailHtml" => Some("lang"),
+                    "EmailButton" => Some("href"),
+                    _ => None,
+                };
+                let attr = match attr.and_then(get) {
+                    Some(value) => {
+                        let out = self.expr(value)?;
+                        let out = self.finish_value(out, value.span)?;
+                        if !assignable(&out.ty, &Ty::Str) {
+                            return err(value.span, "this email attribute must be a string");
+                        }
+                        out.php
+                    }
+                    None => "null".into(),
+                };
+                let children = if let Some(value) = get("children") {
+                    let out = self.expr(value)?;
+                    let out = self.finish_value(out, value.span)?;
+                    self.jsx_child_type(&out.ty, value.span)?;
+                    out.php
+                } else {
+                    "null".into()
+                };
+                Ok(Out::atom(
+                    format!(
+                        "\\TypedPress\\Render\\Email::component({}, {attr}, {children})",
+                        php_str(name)
+                    ),
+                    Ty::Html,
+                ))
+            }
             "Comments" => self.comments_component(get("for"), get("className"), span),
             "Live" => {
                 // The id names the region to the subscription endpoint, so it is written in the
@@ -573,6 +623,56 @@ impl Compiler<'_, '_> {
                     Ty::Html,
                 ))
             }
+            "Image" => {
+                let Some(src) = get("src") else {
+                    return err_help(span, "`<Image>` needs `src`", "write `<Image src={hero} alt=\"…\" />`");
+                };
+                if get("alt").is_none() {
+                    return err_help(
+                        span,
+                        "`<Image>` needs `alt`",
+                        "pass a description (`alt=\"…\"`), or `alt=\"\"` for a decorative image",
+                    );
+                }
+                if let ExprKind::Str(literal) = &src.kind
+                    && !safe_url(literal)
+                {
+                    return err_help(
+                        src.span,
+                        format!("\"{literal}\" isn't a URL an image can load"),
+                        "use an imported image, a path like \"/hero.png\", or an http(s) URL",
+                    );
+                }
+                let mut attrs = Vec::new();
+                for (k, v) in &named {
+                    let out = self.expr(v)?;
+                    let out = self.finish_value(out, v.span)?;
+                    if *k == "priority" && !assignable(&out.ty, &Ty::union([Ty::Bool, Ty::Undefined])) {
+                        return err(
+                            v.span,
+                            format!("`<Image priority>` takes boolean, not {}", out.ty.describe()),
+                        );
+                    }
+                    if matches!(*k, "width" | "height")
+                        && !assignable(&out.ty, &Ty::union([Ty::Num, Ty::Str, Ty::Undefined]))
+                    {
+                        return err(
+                            v.span,
+                            format!("`<Image {k}>` takes number or string, not {}", out.ty.describe()),
+                        );
+                    }
+                    if matches!(*k, "alt" | "sizes" | "loading" | "decoding" | "className" | "id")
+                        && !assignable(&out.ty, &Ty::union([Ty::Str, Ty::Null, Ty::Undefined]))
+                    {
+                        return err(v.span, format!("`<Image {k}>` takes string, not {}", out.ty.describe()));
+                    }
+                    attrs.push(format!("{} => {}", php_str(k), out.php));
+                }
+                Ok(Out::atom(
+                    format!("\\TypedPress\\Render\\Markup::image([{}])", attrs.join(", ")),
+                    Ty::Html,
+                ))
+            }
             "Link" => {
                 let Some(href) = get("href") else {
                     return err_help(
@@ -597,8 +697,8 @@ impl Compiler<'_, '_> {
                     }
                     let out = self.expr(v)?;
                     let out = self.finish_value(out, v.span)?;
-                    let want = if *k == "prefetch" {
-                        Ty::Bool
+                    let want = if matches!(*k, "prefetch" | "requireAuth") {
+                        Ty::union([Ty::Bool, Ty::Undefined])
                     } else {
                         Ty::union([Ty::Str, Ty::Null, Ty::Undefined])
                     };

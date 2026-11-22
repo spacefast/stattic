@@ -13,6 +13,17 @@ pub(super) fn compile(project: &Path) -> Result<crate::schema::Schema, Diag> {
 
 /// Runs the whole pipeline in memory.
 pub(super) fn build(project: &Path, frozen: bool) -> Result<Built, Diag> {
+    build_with(project, frozen, false)
+}
+
+/// [`build`] for a command that writes the site (`build`, `export`): every stylesheet
+/// `@typedpress/frontend` builds must be in `public/`. `check`, `init` and `add` compile without
+/// them, so a fresh clone checks before its first frontend build.
+pub(super) fn build_site(project: &Path, frozen: bool) -> Result<Built, Diag> {
+    build_with(project, frozen, true)
+}
+
+fn build_with(project: &Path, frozen: bool, site: bool) -> Result<Built, Diag> {
     let entry = project.join("typedpress.config.ts");
     if !entry.is_file() {
         return Err(Diag::new(
@@ -21,12 +32,15 @@ pub(super) fn build(project: &Path, frozen: bool) -> Result<Built, Diag> {
         ));
     }
     let program = loader::load(&entry)?;
+    if site {
+        crate::assets::require_frontend_styles(&program, |file| project.join("public").join(file).is_file())?;
+    }
     build_program(project, &program, frozen)
 }
 
 /// The in-memory pipeline over this project's last snapshot, migration numbering and plugin lock.
 fn build_program(project: &Path, program: &loader::Program, frozen: bool) -> Result<Built, Diag> {
-    pipeline::build(
+    let built = pipeline::build(
         project,
         program,
         || {
@@ -35,7 +49,18 @@ fn build_program(project: &Path, program: &loader::Program, frozen: bool) -> Res
             Ok(previous)
         },
         runtime_file,
-    )
+    )?;
+    Ok(built)
+}
+
+/// A build that ships its synced files as the seed checks them, so a file the seed would refuse
+/// on the site is a diagnostic at that file. Only `build` and `check` run it: commands that compile
+/// for another reason (`add`, `pull`, `styles`, `init`) aren't blocked by a content typo.
+fn check_seed(project: &Path, built: &Built) -> Result<(), Diag> {
+    if built.schema.ships_seed() {
+        crate::bundle::seed_records(&loader::Disk, project, &built.schema, true)?;
+    }
+    Ok(())
 }
 
 fn migrations_dir(project: &Path) -> PathBuf {
@@ -186,7 +211,10 @@ fn zip_plugin(directory: &Path) -> std::io::Result<()> {
 pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std::io::Result<PathBuf> {
     let empty = wp_plugins::Config { plugins: Vec::new() };
     let config = built.plugins.as_ref().unwrap_or(&empty);
-    let plan = wp_plugins::resolve(config, &platform::plugins(built.schema.locales.is_some()))?;
+    let plan = wp_plugins::resolve(
+        config,
+        &platform::app_plugins(built.schema.locales.is_some(), built.schema.store.is_some()),
+    )?;
     let parent = root
         .parent()
         .ok_or_else(|| std::io::Error::other("output needs a parent directory"))?;
@@ -246,6 +274,15 @@ pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std
         std::fs::create_dir(&stage)?;
     }
     prepared.install_into(&stage.join("plugins"))?;
+    let commerce_bootstrap = stage.join("mu-plugins/typedpress-commerce.php");
+    if built.schema.store.is_some() {
+        write(
+            &commerce_bootstrap,
+            runtime_file("wp-plugin/typedpress-commerce.php").expect("embedded commerce bootstrap"),
+        )?;
+    } else if commerce_bootstrap.is_file() {
+        std::fs::remove_file(commerce_bootstrap)?;
+    }
     let plugins = stage.join("plugins");
     let generated = crate::app_plugin::tp_plugins(&built.schema);
     let revision = crate::store::runtime_revision();
@@ -292,11 +329,15 @@ pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std
     for dependency in prepared.dependencies() {
         versions.insert(dependency.slug.clone(), dependency.version.clone().into());
     }
-    let requires: serde_json::Map<String, serde_json::Value> = platform::plugins(built.schema.locales.is_some())
-        .into_iter()
-        .map(|plugin| (plugin.slug, format!(">={}", plugin.version).into()))
-        .collect();
+    let requires: serde_json::Map<String, serde_json::Value> =
+        platform::app_plugins(built.schema.locales.is_some(), built.schema.store.is_some())
+            .into_iter()
+            .map(|plugin| (plugin.slug, format!(">={}", plugin.version).into()))
+            .collect();
     let mut manifest = serde_json::json!({"typedpress":env!("CARGO_PKG_VERSION"),"runtime":platform::SERIES,"runtimeRevision":revision,"app":built.schema.name,"plugins":versions,"requires":requires,"dependencies":prepared.dependencies().collect::<Vec<_>>(),"locales":built.schema.locales});
+    if built.schema.store.is_some() {
+        manifest["maxTablePrefix"] = serde_json::json!(20);
+    }
     // Sealed mode (docs/sealed.md): the plugin slugs this site runs, for a host to enforce. No key
     // when the app isn't sealed.
     if let Some(sealed) = crate::bundle::sealed_plugins(&built.schema, crate::app_plugin::tp_plugins(&built.schema)) {
@@ -490,7 +531,9 @@ fn remove_empty_dirs(dir: &Path) -> std::io::Result<bool> {
 pub(crate) fn check(project: &Path, frozen: bool) -> (serde_json::Value, Option<Built>) {
     let built = match loader::load_all(&project.join("typedpress.config.ts")) {
         Err(diagnostics) => Err(diagnostics),
-        Ok(program) => build_program(project, &program, frozen).map_err(|d| vec![d]),
+        Ok(program) => build_program(project, &program, frozen)
+            .and_then(|built| check_seed(project, &built).map(|()| built))
+            .map_err(|d| vec![d]),
     };
     let mut envelope = diag::envelope(built.as_ref().err().map_or(&[], Vec::as_slice), project);
     if let Ok(built) = &built {
@@ -503,7 +546,21 @@ pub(crate) fn check(project: &Path, frozen: bool) -> (serde_json::Value, Option<
     {
         envelope["plugins"] = built.plugin_report.clone();
     }
+    if let Ok(built) = &built
+        && !built.lint_warnings.is_empty()
+    {
+        envelope["warnings"] = serde_json::to_value(&built.lint_warnings).expect("lint warnings serialize");
+    }
     (envelope, built.ok())
+}
+
+fn emit_lint_warnings(warnings: &[crate::lint::Warning]) {
+    for w in warnings {
+        eprintln!("warning[{}]: {}:{}:{}: {}", w.rule, w.file, w.line, w.column, w.message);
+    }
+    if !warnings.is_empty() {
+        eprintln!("  = help: run `typedpress check --fix` to auto-fix");
+    }
 }
 
 /// CI never approves a plugin grant: the committed lock is the only one.
@@ -528,18 +585,83 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
         };
     }
     let started = std::time::Instant::now();
-    let built = match build(&project, frozen) {
+    // `--diagnostics-file` (typedpress dev's): the compile's envelope, written whether it compiled or
+    // not. A failure after the compile (a refused migration, a file that can't be written) is no
+    // compiler diagnostic and stays on stderr alone.
+    let report = |diagnostics: &[diag::Diag]| {
+        if let Some(path) = &args.diagnostics_file {
+            let bytes =
+                serde_json::to_vec(&diag::envelope(diagnostics, &project)).expect("diagnostic envelope serializes");
+            if let Err(error) = write(path, bytes) {
+                eprintln!("error: couldn't write diagnostics: {error}");
+            }
+        }
+    };
+    let _frontend = if args.command == "build" {
+        match crate::frontend::prepare_styles(&project) {
+            Ok(guard) => guard,
+            Err(d) => {
+                report(std::slice::from_ref(&d));
+                eprint!("{}", diag::render(&d, &project));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+    let compile = if args.command == "build" { build_site } else { build };
+    let mut built = match compile(&project, frozen).and_then(|built| check_seed(&project, &built).map(|()| built)) {
         Ok(b) => b,
         Err(d) => {
-            eprint!("{}", diag::render(&d, &project));
+            report(std::slice::from_ref(&d));
+            // `build` names the code in the heading; `check` keeps the plain `error:` others match on.
+            let render = if args.command == "build" {
+                diag::render_with_code
+            } else {
+                diag::render
+            };
+            eprint!("{}", render(&d, &project));
             return ExitCode::from(1);
         }
     };
+    if args.command == "check" && args.fix && !built.lint_warnings.is_empty() {
+        match crate::lint::apply_fixes(&built.lint_warnings) {
+            Ok((fixes, files)) if fixes > 0 => {
+                eprintln!(
+                    "fixed {fixes} lint warning{} in {files} file{}",
+                    if fixes == 1 { "" } else { "s" },
+                    if files == 1 { "" } else { "s" }
+                );
+                built = match diag::isolated(|| {
+                    build(&project, frozen).and_then(|built| check_seed(&project, &built).map(|()| built))
+                }) {
+                    Ok(b) => b,
+                    Err(d) => {
+                        report(std::slice::from_ref(&d));
+                        eprint!("{}", diag::render(&d, &project));
+                        return ExitCode::from(1);
+                    }
+                };
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("error: couldn't apply lint fixes: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    report(&[]);
     for line in &built.plugin_changes {
         eprintln!("{line}");
     }
     for w in &built.unsupported_plugins {
         eprintln!("warning: {w}");
+    }
+    emit_lint_warnings(&built.lint_warnings);
+    if built.schema.seed && built.schema.collections.values().all(|c| c.sync.is_none()) {
+        eprintln!(
+            "warning: `seed: true` imports the files of synced kinds, and no kind has `sync`: nothing is seeded. Add `sync: \"content/<kind>/*.md\"` to a kind, or remove `seed`."
+        );
     }
     // A project that ran `typedpress init`: its agent files follow the config and the compiler.
     let agent_files = (!args.quiet)

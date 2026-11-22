@@ -5,7 +5,7 @@
 declare(strict_types=1);
 
 return [
-    'version' => 3,
+    'version' => 5,
     'runtime' => '0.3',
     'name' => 'rtschema',
     'admin' => true,

@@ -13,9 +13,12 @@ repository = "https://github.com/spacefast/zero"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+imagesize = "0.15.0"
 indexmap = "2.14.2"
+oxc-css-parser = "0.0.22"
 oxc_allocator = "=0.158.0"
 oxc_ast = "=0.158.0"
+oxc_ast_visit = "=0.158.0"
 oxc_parser = "=0.158.0"
 oxc_span = "=0.158.0"
 oxc_syntax = "=0.158.0"
@@ -27,6 +30,7 @@ oxc_semantic = "=0.158.0"
 oxc_transformer = "=0.158.0"
 # Minifies the client modules the app plugin ships (src/minify.rs). Pinned with the other oxc crates.
 oxc_minifier = "=0.158.0"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 regex = "1.13.1"
 ryu-js = "1.0.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -62,6 +66,13 @@ oxc-browserslist = { path = "crates/oxc-browserslist" }
 name = "typedpress"
 required-features = ["cli"]
 
+# Tests and dev builds keep line tables only (file and line in panics and backtraces, no variable
+# info for a debugger). Each test target links the whole crate, and with full debuginfo the `rest`
+# CI shard's target/ reached 7.4 GB, filling the runner's disk before its last steps. For a debugger
+# session: CARGO_PROFILE_DEV_DEBUG=true cargo build.
+[profile.dev]
+debug = "line-tables-only"
+
 # `strip` drops debug symbols from the release binary: 51.3 MB -> 47.4 MB. Thin LTO and one codegen
 # unit were measured too (typedpress check and typedpress build on three examples, median of five): neither
 # changed the times beyond run-to-run noise, and one codegen unit saved 1.8 MB for a release build
@@ -69,7 +80,7 @@ required-features = ["cli"]
 [profile.release]
 strip = true
 
-# The browser build of the compiler core (src/wasm.rs; docs-site/scripts/build-wasm.mjs runs this):
+# The browser build of the compiler core (src/wasm.rs; www/scripts/build-wasm.mjs runs this):
 # `cargo build --lib --no-default-features --profile wasm --target wasm32-unknown-unknown`
 [profile.wasm]
 inherits = "release"

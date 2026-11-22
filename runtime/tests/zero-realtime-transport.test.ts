@@ -10,7 +10,7 @@ import { z } from "zod";
 import { castRoomTopic } from "../../packages/common/src/utils/cast-transport.ts";
 import { buildZeroRealtime } from "../../scripts/build-zero-realtime.mjs";
 
-const BUNDLE = new URL("../engine/runtime/zero-realtime.js", import.meta.url);
+const BUNDLE = new URL("../engine/deprecated/zero-v2/zero-realtime.js", import.meta.url);
 
 const frameSchema = z.tuple([
   z.string().nullable(),

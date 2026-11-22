@@ -8,12 +8,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::finalize::{invalid_with_details, FileMeta, Result};
+use crate::finalize::{invalid_with_details, Result};
 use crate::hash::stable_json_sha256;
 use crate::model::{PhpActionRecord, ZeroExecutionMode};
-use crate::responses::php_function_route;
 use crate::routing::{normalize_hostname, strip_trailing_slash, RedirectRule};
-use crate::serving_paths::is_private_serving_path;
 
 pub(crate) const ROUTE_INVENTORY_FORMAT: &str = "stattic.route-inventory.v1";
 
@@ -27,7 +25,6 @@ pub(crate) enum RouteKind {
     Proxy,
     NotFound,
     Functions,
-    PhpFunction,
     ZeroControl,
     ZeroEndpoint,
     Page,
@@ -123,7 +120,6 @@ impl RouteRecord {
         matches!(
             self.kind,
             RouteKind::Functions
-                | RouteKind::PhpFunction
                 | RouteKind::ZeroControl
                 | RouteKind::ZeroEndpoint
                 | RouteKind::Page
@@ -132,8 +128,6 @@ impl RouteRecord {
 }
 
 pub(crate) struct RouteInventoryInput<'a> {
-    pub files: &'a BTreeMap<String, FileMeta>,
-    pub private: &'a BTreeSet<String>,
     pub redirects: &'a [RedirectRule],
     pub config_path: Option<&'a str>,
     pub functions: Option<&'a Value>,
@@ -146,8 +140,6 @@ pub(crate) struct RouteInventoryInput<'a> {
 
 pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<RouteInventory> {
     let RouteInventoryInput {
-        files,
-        private,
         redirects,
         config_path,
         functions,
@@ -224,27 +216,6 @@ pub(crate) fn compile_route_inventory(input: RouteInventoryInput<'_>) -> Result<
                 push_functions_route(&mut routes, source, &pattern, methods);
             }
         }
-    }
-
-    for path in files.keys() {
-        if private.contains(path) || is_private_serving_path(path) {
-            continue;
-        }
-        let Some(route_path) = php_function_route(path) else {
-            continue;
-        };
-        routes.push(RouteRecord::from_input(RouteRecordInput {
-            kind: RouteKind::PhpFunction,
-            source: path.clone(),
-            runtime: RouteRuntime::Php,
-            host: "*".to_string(),
-            path: route_path,
-            methods: all_methods(),
-            execution_mode: None,
-            cache: None,
-            destination: None,
-            status: None,
-        }));
     }
 
     crate::legacy_zero::append_routes(&mut routes, has_zero, zero_routes);
@@ -633,9 +604,9 @@ mod tests {
 
     fn function_record() -> RouteRecord {
         RouteRecord::from_input(RouteRecordInput {
-            kind: RouteKind::PhpFunction,
-            source: "functions/ping.php".to_string(),
-            runtime: RouteRuntime::Php,
+            kind: RouteKind::Functions,
+            source: "functions/ping.ts".to_string(),
+            runtime: RouteRuntime::CloudflareWorker,
             host: "*".to_string(),
             path: "/ping".to_string(),
             methods: vec!["*".to_string()],
@@ -667,8 +638,6 @@ mod tests {
             json!({"id":"page.docs", "path":"/docs/*rest", "render":"client", "shell":"_spacefast/pages/client.html", "params":["rest"]}),
         ];
         let inventory = compile_route_inventory(RouteInventoryInput {
-            files: &BTreeMap::new(),
-            private: &BTreeSet::new(),
             redirects: &[],
             config_path: None,
             functions: None,
@@ -706,8 +675,6 @@ mod tests {
             }
         });
         let inventory = compile_route_inventory(RouteInventoryInput {
-            files: &BTreeMap::new(),
-            private: &BTreeSet::new(),
             redirects: &[],
             config_path: None,
             functions: Some(&functions),

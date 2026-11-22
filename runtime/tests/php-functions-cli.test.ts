@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { z } from "zod";
@@ -32,7 +32,7 @@ beforeAll(async () => {
   await deploy(rt, {
     spaceId: SPACE,
     versionId: "ver_phpfx_cli_1",
-    files: { "index.html": "<h1>static home</h1>\n", "functions/hello.php": HANDLER },
+    files: { "index.html": "<h1>static home</h1>\n" },
     activate: {
       route_name: "production",
       config: publicAccessConfig({ mode: "website", site_title: "PHP Functions" }),
@@ -41,6 +41,26 @@ beforeAll(async () => {
       version_hostnames: [],
     },
   });
+  // Simulate a historical response table compiled before PHP Functions retirement.
+  const versionDir = path.join(rt.storageRoot, "spaces", SPACE, "versions", "ver_phpfx_cli_1");
+  const rootPtr = z
+    .object({ root: z.string() })
+    .parse(JSON.parse(readFileSync(path.join(versionDir, "root.json"), "utf8")));
+  const tableRel = spawnSync(
+    process.env.SPACEFAST_REAL_PHP ?? PHP_BINARY,
+    [
+      "-r",
+      `$r = require $argv[1]; echo $r['tables']['*'] ?? '';`,
+      path.join(versionDir, rootPtr.root),
+    ],
+    { encoding: "utf8" },
+  ).stdout.trim();
+  const tablePath = path.join(versionDir, tableRel);
+  const tablePhp = readFileSync(tablePath, "utf8");
+  writeFileSync(
+    tablePath,
+    tablePhp.replace(/return \[/, "return [\n  '/hello' => ['a' => ['t' => 'php']],\n"),
+  );
 });
 
 afterAll(() => rt?.stop());
@@ -82,14 +102,14 @@ test("CLI invoke refuses PHP before authored code can run or read credentials", 
     const receipt = z
       .object({ method: z.string(), path: z.string(), status: z.number() })
       .parse(JSON.parse(line.slice("spacefast-invoke-result: ".length)));
-    const status = method === "TRACE" || method === "CONNECT" ? 405 : 503;
+    const status = method === "TRACE" || method === "CONNECT" ? 405 : 410;
     expect(receipt).toEqual({ method, path: "/hello", status });
     if (method === "HEAD") {
       expect(result.stdout).toBe("");
-    } else if (status === 503) {
+    } else if (status === 410) {
       expect(JSON.parse(result.stdout)).toMatchObject({
-        status: 503,
-        code: "tenant_php_unavailable",
+        status: 410,
+        code: "php_functions_retired",
       });
     }
     const sha = createHash("sha256").update(HANDLER).digest("hex");

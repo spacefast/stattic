@@ -18,8 +18,16 @@ final class Trees
     private const FILES = 20000;
     private const BYTES = 512 * 1048576;
 
-    /** What a browser may fetch from a stored tree. Everything else stays in the private store only. */
-    private const PUBLIC = ['js', 'mjs', 'css', 'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'woff', 'woff2', 'ttf', 'otf', 'wasm'];
+    /** What a browser may fetch from a stored tree outside the app's `public/` folder. */
+    private const PUBLIC = [
+        'js', 'mjs', 'css',
+        'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'ico', 'bmp', 'tif', 'tiff', 'apng',
+        'woff', 'woff2', 'ttf', 'otf', 'eot',
+        'mp4', 'webm', 'ogv', 'ogg', 'mp3', 'wav', 'flac', 'aac', 'm4a', 'opus', 'mov',
+        'pdf', 'wasm', 'txt', 'csv', 'xml', 'webmanifest', 'glb', 'gltf', 'zip', 'vtt',
+    ];
+    /** Never mirrored into `typedpress-assets`, even inside `public/`: PHP and server config. */
+    private const REFUSED = ['php', 'phtml', 'phar', 'php3', 'php4', 'php5', 'php7', 'php8', 'phps', 'htaccess', 'htpasswd', 'ini', 'user.ini'];
 
     /** Create the store's directories. Where `.htaccess` is read, nothing in the store is served at all. */
     public static function prepare(string $root): void
@@ -60,7 +68,17 @@ final class Trees
         // Every file here sits under the hash of the tree it came from, so its URL never changes
         // meaning: browsers may keep it. (The build's own rule for this is not copied: no file an
         // upload supplies configures the public directory.)
-        $rules = "# TypedPress: each path here carries the hash of its tree.\n<IfModule mod_headers.c>\n  Header set Cache-Control \"public, max-age=31536000, immutable\"\n</IfModule>\n";
+        $rules = "# TypedPress: each path here carries the hash of its tree.\n"
+            . "<IfModule mod_headers.c>\n"
+            . "  Header set Cache-Control \"public, max-age=31536000, immutable\"\n"
+            . "  Header set X-Content-Type-Options \"nosniff\"\n"
+            . "  Header set Access-Control-Allow-Origin \"*\"\n"
+            . "</IfModule>\n"
+            . "<FilesMatch \"\\.(?i:svg|xml)$\">\n"
+            . "  <IfModule mod_headers.c>\n"
+            . "    Header set Content-Security-Policy \"default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox\"\n"
+            . "  </IfModule>\n"
+            . "</FilesMatch>\n";
         if (@file_get_contents("$public/.htaccess") !== $rules) {
             @file_put_contents("$public/.htaccess", $rules);
         }
@@ -68,7 +86,7 @@ final class Trees
         $to = $staged . ($kind === 'app' ? '/plugins' : '');
         wp_mkdir_p($to);
         foreach ($files as $relative) {
-            if (in_array(strtolower(pathinfo($relative, PATHINFO_EXTENSION)), self::PUBLIC, true)) {
+            if (self::mirrorable($kind, $relative)) {
                 wp_mkdir_p(dirname("$to/$relative"));
                 if (!copy("$from/$relative", "$to/$relative")) {
                     self::remove($staged);
@@ -80,6 +98,38 @@ final class Trees
         if (is_dir($target) || !rename($staged, $target)) {
             self::remove($staged);
         }
+    }
+
+    /**
+     * Outside `typedpress-app-<name>/public/`, only {@see PUBLIC} asset extensions are mirrored
+     * (never PHP, SQL, manifests or app metadata JSON). Inside `public/`, every non-dotfile static
+     * file except {@see REFUSED} code/config extensions is mirrored so public files (including JSON,
+     * ZIPs, text, PDFs, HTML) serve directly from `wp-content/typedpress-assets/`.
+     */
+    private static function mirrorable(string $kind, string $relative): bool
+    {
+        $ext = strtolower(pathinfo($relative, PATHINFO_EXTENSION));
+        if ($kind === 'app' && preg_match('#\Atypedpress-app-[a-z0-9-]+/public/(.+)\z#', $relative, $m) === 1) {
+            $sub = $m[1];
+            foreach (explode('/', $sub) as $segment) {
+                if ($segment === '' || str_starts_with($segment, '.') || str_contains($segment, ':') || str_ends_with($segment, '.') || str_ends_with($segment, ' ')) {
+                    return false;
+                }
+            }
+            $base = strtolower(basename($sub));
+            if (in_array($base, self::REFUSED, true)) {
+                return false;
+            }
+            foreach (explode('.', $base) as $part) {
+                if (in_array($part, self::REFUSED, true)) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return in_array($ext, self::PUBLIC, true);
     }
 
     public static function staging(string $root, string $purpose): string

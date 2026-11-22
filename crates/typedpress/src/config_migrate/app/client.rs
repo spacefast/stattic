@@ -9,7 +9,7 @@
 //!   under `public/app/`, with JSX on Preact's automatic runtime;
 //! - `@spacefast/zero/client` (and its `lakebed` aliases) resolve to `public/tp/client.js`, a
 //!   compatibility module that runs each 0.8 query, mutation and action as the v2 action the
-//!   converter generated for it, at `/__tp/api/v1/actions/<name>`;
+//!   converter generated for it, at `/wp-json/typedpress/v1/actions/<name>`;
 //! - `preact`, `react` and `react-dom` resolve to a vendored Preact under `public/tp/preact/`;
 //! - `public/index.html` and `public/tp/main.js` mount `App` as 0.8 did.
 //!
@@ -553,7 +553,7 @@ pub(super) fn convert(
             &at,
             "mapped",
             format!(
-                "the 0.8 client app becomes static files in public/ ({} module(s) compiled); public/tp/client.js answers @spacefast/zero/client by calling each query, mutation and action at /__tp/api/v1/actions/<name>",
+                "the 0.8 client app becomes static files in public/ ({} module(s) compiled); public/tp/client.js answers @spacefast/zero/client by calling each query, mutation and action at /wp-json/typedpress/v1/actions/<name>",
                 walk.seen.len()
             ),
         ));

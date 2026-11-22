@@ -98,10 +98,10 @@ test("the MU loader follows the engine pointer and selects one Space's immutable
       ),
     ]);
     // A Space with nothing compiled, and a request carrying no Space at all
-    // (wp-cron): the engine still loads, no compiled release does.
-    expect(load("release-b", "spc_gamma")).toEqual(["release-b", null, null]);
-    expect(load("release-b", null)).toEqual(["release-b", null, null]);
-    expect(load("release-b", "../spc_alpha")).toEqual(["release-b", null, null]);
+    // (wp-cron): no deprecated content kernel or compiled release loads.
+    expect(load("release-b", "spc_gamma")).toEqual([null, null, null]);
+    expect(load("release-b", null)).toEqual([null, null, null]);
+    expect(load("release-b", "../spc_alpha")).toEqual([null, null, null]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

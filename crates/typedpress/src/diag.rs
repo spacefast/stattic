@@ -206,8 +206,20 @@ fn line_col(src: &str, offset: usize) -> (usize, usize) {
 
 /// Renders a diagnostic with a code frame, rustc-style.
 pub fn render(diag: &Diag, root: &Path) -> String {
+    render_headed(diag, root, "error")
+}
+
+/// [`render`] with the diagnostic's code in the heading (`error[F1001]: …`), the form `typedpress build`
+/// prints and the dev overlay links to the reference. Everything else that renders a diagnostic
+/// keeps the plain `error: …` heading other tools match on.
+pub fn render_with_code(diag: &Diag, root: &Path) -> String {
+    let code = serde_json::to_string(&diag.code).expect("code serializes");
+    render_headed(diag, root, &format!("error[{}]", code.trim_matches('"')))
+}
+
+fn render_headed(diag: &Diag, root: &Path, heading: &str) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "error: {}", diag.message);
+    let _ = writeln!(out, "{heading}: {}", diag.message);
     FILES.with(|files| {
         let files = files.borrow();
         if let Some((path, src)) = files.get(diag.span.file as usize) {
@@ -326,7 +338,8 @@ impl Envelope<'_> {
     }
 }
 
-/// Both successful and failing checks write exactly one versioned envelope.
+/// Both successful and failing checks write exactly one versioned envelope, and so does
+/// `typedpress build --diagnostics-file` for the compile it ran.
 /// Offsets are UTF-8 bytes; lines/UTF-16 columns are one-based, ends exclusive.
 pub fn envelope<'a>(diagnostics: &'a [Diag], root: &Path) -> Envelope<'a> {
     let mut groups = indexmap::IndexMap::<String, DiagnosticGroup<'a>>::new();
@@ -418,4 +431,9 @@ pub fn sources(keep: impl Fn(&Path) -> bool) -> Vec<String> {
             .map(|(_, source)| source.clone())
             .collect()
     })
+}
+
+/// Every `(path, source)` registered in this run, in load order.
+pub fn registered_files() -> Vec<(PathBuf, String)> {
+    FILES.with(|files| files.borrow().clone())
 }

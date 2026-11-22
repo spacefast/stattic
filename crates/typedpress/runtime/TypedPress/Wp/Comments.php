@@ -7,7 +7,7 @@ namespace TypedPress\Wp;
 /**
  * The comment policy of every kind with `comments` on (spec §2.3), enforced in one place on core's
  * public hooks, so the three ways a comment arrives get the same answer: `<Comments>`'s form, the
- * facade's `POST /__tp/api/v1/comments` (core's `/wp/v2/comments` under it), and core's
+ * facade's `POST /wp-json/typedpress/v1/comments` (core's `/wp/v2/comments` under it), and core's
  * `wp-comments-post.php` behind the comment blocks of a WordPress-rendered site. Each one creates
  * through core's own path (`wp_new_comment` or the REST controller, both through
  * `wp_allow_comment`), so duplicate and flood checks, Akismet when the site has it, and

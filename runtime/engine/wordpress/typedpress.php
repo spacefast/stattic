@@ -57,12 +57,13 @@ function spacefast_tp_install(): void
     // WordPress user, after WordPress's own resolvers, so an account the app
     // signed in itself stays that account. A person who signs in through the
     // Spacefast provider below lands on the same row.
-    remove_filter('determine_current_user', 'spacefast_content_principal_current_user', 1);
-    remove_action('plugins_loaded', 'spacefast_content_principal_establish_user', 1);
-    // Capabilities: a person's come only from the Space role lent on this
-    // request (space-role.php), never from their Grants on this path. A
-    // service actor and the dashboard editor keep their own mapping.
-    remove_filter('user_has_cap', 'spacefast_content_principal_capabilities', 10);
+    if (function_exists('remove_filter')) {
+        remove_filter('determine_current_user', 'spacefast_content_principal_current_user', 1);
+        remove_filter('user_has_cap', 'spacefast_content_principal_capabilities', 10);
+    }
+    if (function_exists('remove_action')) {
+        remove_action('plugins_loaded', 'spacefast_content_principal_establish_user', 1);
+    }
     $principal = $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null;
     if (is_array($principal) && in_array($principal['kind'] ?? null, ['user', 'service'], true)) {
         add_filter('determine_current_user', 'spacefast_tp_current_user', 30);
@@ -79,7 +80,9 @@ function spacefast_tp_install(): void
     // runs again from wp_loaded (loader/wordpress.php) and reads them.
     add_filter('do_parse_request', 'spacefast_tp_scrub_platform_credentials', PHP_INT_MIN);
     add_action('admin_init', 'spacefast_tp_scrub_platform_credentials', PHP_INT_MIN);
-    // Sign in with Spacefast, through TypedPress Identity's provider hook.
+    // Sign in with Spacefast, through SpacePress / TypedPress Identity's provider hook.
+    add_filter('sp_identity_providers', 'spacefast_tp_identity_providers');
+    add_filter('sp_identity_provider_account', 'spacefast_tp_identity_provider_account', 10, 3);
     add_filter('tp_identity_providers', 'spacefast_tp_identity_providers');
     add_filter('tp_identity_provider_account', 'spacefast_tp_identity_provider_account', 10, 3);
     add_filter('home_url', 'spacefast_tp_provider_callback_url', 20, 2);
@@ -210,7 +213,7 @@ function spacefast_tp_principal_capabilities(array $capabilities, array $require
 function spacefast_tp_scrub_platform_credentials(mixed $passthrough = null): mixed
 {
     if (function_exists('wp_get_current_user')) wp_get_current_user();
-    if (function_exists('_stattic_typedpress_scrub_platform_credentials')) _stattic_typedpress_scrub_platform_credentials();
+    if (function_exists('_stattic_spacepress_scrub_platform_credentials')) _stattic_spacepress_scrub_platform_credentials();
     return $passthrough;
 }
 
@@ -446,7 +449,8 @@ function spacefast_tp_report_permitted(): bool
 /** Build identity and readiness, read from the selected immutable version. */
 function spacefast_tp_report(): array
 {
-    $root = (string) ($GLOBALS['SPACEFAST_ZERO_V2_ROOT'] ?? '');
+    require_once __DIR__ . '/../shared/spacepress.php';
+    $root = (string) ($GLOBALS['SPACEFAST_SPACEPRESS_ROOT'] ?? ($GLOBALS['SPACEFAST_ZERO_V2_ROOT'] ?? ''));
     $manifest = is_file($root . '/manifest.json') ? json_decode((string) file_get_contents($root . '/manifest.json'), true) : null;
     $ready = is_file($root . '/ready.json') ? json_decode((string) file_get_contents($root . '/ready.json'), true) : null;
     $metadata = is_file(dirname($root) . '/metadata.json') ? json_decode((string) file_get_contents(dirname($root) . '/metadata.json'), true) : null;
@@ -457,9 +461,9 @@ function spacefast_tp_report(): array
         'compiler' => is_array($metadata) && is_string($metadata['zeroV2']['compiler'] ?? null) ? $metadata['zeroV2']['compiler'] : null,
         'ready' => is_array($ready),
         'engine_revision' => defined('SPACEFAST_RUNTIME_ENGINE_REVISION') ? (string) SPACEFAST_RUNTIME_ENGINE_REVISION : 'unknown',
-        // A `tp_v1` build registers no change publisher, and the control plane
-        // fans out only `v2` notices, so its pages poll.
-        'realtime' => _stattic_typedpress_manifest($root) === null && spacefast_tp_realtime_named($root),
+        // A SpacePress / TypedPress build registers no Zero realtime publisher,
+        // and the control plane fans out only `v2` notices, so its pages poll.
+        'realtime' => _stattic_spacepress_manifest($root) === null && spacefast_tp_realtime_named($root),
     ];
 }
 

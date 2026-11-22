@@ -275,8 +275,12 @@ function tp_admin_register_default_view_arg_for_post_type( $args, $post_type ) {
 			);
 		}
 	} elseif (
-		( isset( $args['show_ui'] ) && true === $args['show_ui'] ) ||
-		( ! isset( $args['show_ui'] ) && isset( $args['public'] ) && true === $args['public'] )
+		// wp_template is registered without a UI (tp_admin_enable_template_show_ui() adds it after this
+		// ran at registration); it keeps its own settings below.
+		'wp_template' !== $post_type && (
+			( isset( $args['show_ui'] ) && true === $args['show_ui'] ) ||
+			( ! isset( $args['show_ui'] ) && isset( $args['public'] ) && true === $args['public'] )
+		)
 	) {
 		if ( ! isset( $args['default_view'] ) ) {
 			$args['default_view'] = $default_view;
@@ -406,7 +410,8 @@ function tp_admin_register_default_view_arg_for_post_type( $args, $post_type ) {
 
 	return $args;
 }
-add_filter( 'register_post_type_args', 'tp_admin_register_default_view_arg_for_post_type', 10, 2 );
+// Only the REST post type response reads these settings (rest-api/core-rest-api-overrides.php), so they
+// are built there, for the post types it returns, instead of for every post type on every request.
 
 /**
  * Enable show_ui for wp_template so that the templates route is available..

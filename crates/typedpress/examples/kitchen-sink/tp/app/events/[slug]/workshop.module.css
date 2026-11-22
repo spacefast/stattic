@@ -1,0 +1,22 @@
+.workshop {
+  line-height: 1.5;
+}
+
+.poster {
+  border-radius: .5rem;
+  height: auto;
+  max-width: 100%;
+}
+
+.tip {
+  border-inline-start: .25rem solid currentColor;
+  padding-inline-start: 1rem;
+}
+
+.gallery {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+  list-style: none;
+  padding: 0;
+}

@@ -2,7 +2,6 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/context.php';
-require_once __DIR__ . '/legacy-zero.php';
 require_once __DIR__ . '/pointers.php';
 require_once __DIR__ . '/finalizer-protocol.generated.php';
 
@@ -156,6 +155,10 @@ function _stattic_connectors_token(string $versionRoot): string
         // old-engine-compat: a Zero 0.8 version finalized before S12 shipped
         // may keep its credential only in `zero/config.json`. Delete under the
         // fallback's own condition in S12, apps/control-plane/src/compat/old-engine.ts.
+        if (!is_file($versionRoot . '/zero/config.json')) {
+            return '';
+        }
+        require_once __DIR__ . '/../deprecated/zero-0.8/connectors.php';
         return _stattic_legacy_zero_connectors_token($versionRoot);
     }
     $token = file_get_contents($path);
@@ -886,6 +889,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'ownership_revision' => $overlay['ownership_revision'] ?? null,
         'zero_generation' => $overlay['zero_generation'] ?? 'none',
         'zero_generation_set_at' => $overlay['zero_generation_set_at'] ?? null,
+        'legacy_prefix' => ($overlay['legacy_prefix'] ?? false) === true,
         'live_hostname' => $overlay['live_hostname'] ?? null,
         // When the Space last went from public to private (unix seconds), or null.
         'private_since' => is_int($overlay['private_since'] ?? null) ? $overlay['private_since'] : null,

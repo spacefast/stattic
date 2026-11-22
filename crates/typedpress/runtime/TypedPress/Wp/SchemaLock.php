@@ -76,7 +76,6 @@ final class SchemaLock
         foreach ($users === null ? [] : array_keys($schema->collection($users)['columns']) as $col) {
             self::$userMeta[self::norm(WpUserStore::META . $col)] = true;
         }
-        self::$userMeta[self::norm(WpUserStore::ROLE_META)] = true;
         add_filter('wp_insert_post_empty_content', [self::class, 'saving'], PHP_INT_MAX, 2);
         add_filter('wp_pre_execute_ability', [self::class, 'ability'], 10, 3);
         add_action('wp_before_execute_ability', static function (string $name): void {
@@ -316,12 +315,19 @@ final class SchemaLock
         $target = acf_decode_post_id($postId);
         $first = match ($target['type']) {
             'post' => self::tpType(get_post_type((int) $target['id'])),
-            'user' => isset(self::$userMeta[self::norm($field['name'] ?? null)]),
+            'user' => self::protectedUserMeta($field['name'] ?? null),
             'option' => isset(self::$optionsPages[self::norm($target['id'])]) || isset(self::$options[self::norm($target['id'] . '_' . ($field['name'] ?? ''))]),
             default => false,
         };
 
         return $first ? false : $check;
+    }
+
+    private static function protectedUserMeta(mixed $name): bool
+    {
+        $name = self::norm($name);
+
+        return isset(self::$userMeta[$name]) || $name === self::norm(WpUserStore::ROLE_META);
     }
 
     // ================================================================ options and roles

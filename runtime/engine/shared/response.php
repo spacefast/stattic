@@ -129,6 +129,19 @@ function _stattic_send_document_isolation_headers(): void
     foreach (_stattic_document_publisher_policies($policies) as $policy) {
         header('Permissions-Policy: ' . $policy, false);
     }
+    if (
+        getenv('SPACEFAST_RUNTIME_TEST_MODE') === '1'
+        && ($_SERVER['HTTP_X_SPACEFAST_TEST_INCLUDED_FILES'] ?? '') === '1'
+    ) {
+        $deprecated = [];
+        foreach (get_included_files() as $includedFile) {
+            $normalized = str_replace('\\', '/', $includedFile);
+            if (str_contains($normalized, '/engine/deprecated/')) {
+                $deprecated[] = substr($normalized, (int) strpos($normalized, '/engine/deprecated/') + 1);
+            }
+        }
+        header('X-Spacefast-Test-Deprecated-Includes: ' . ($deprecated === [] ? 'none' : implode(',', $deprecated)), true);
+    }
 }
 
 // The ONE response writer for every runtime lane that answers with a body it

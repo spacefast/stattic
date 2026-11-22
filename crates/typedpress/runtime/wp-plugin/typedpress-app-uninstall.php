@@ -22,6 +22,7 @@ if ($app === '') {
 
 delete_option('tp_' . $app . '_schema');
 delete_option('tp_' . $app . '_refused');
+delete_option('tp_' . $app . '_seed_refused');
 delete_option('tp_rewrite_rules');
 
 // Exactly the capability names WordPress derives from this app's `capability_type` ([<type>_item,

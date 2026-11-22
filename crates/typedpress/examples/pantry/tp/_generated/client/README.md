@@ -6,7 +6,7 @@ any frontend or import it by path. Don't edit it: `typedpress build` rewrites it
 ```ts
 import { createClient, TypedPressError } from "./tp/_generated/client/index.ts";
 
-const client = createClient({ url: "https://example.test/__tp/api/v1" });
+const client = createClient({ url: "https://example.test/wp-json/typedpress/v1" });
 
 const posts = await client.posts.list({ where: { tags: { has: "news" } }, orderBy: { createdAt: "desc" }, with: { author: true } });
 const post = await client.posts.create({ title: "Hello" });

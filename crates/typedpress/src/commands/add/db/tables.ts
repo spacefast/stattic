@@ -6,7 +6,7 @@
 // collection() for what people write and publish in the WordPress editor.
 //
 // - Every exported table() registers under its export name: the typed client gets `first.tasks`,
-//   and the API gets `/__tp/api/v1/tasks`.
+//   and the API gets `/wp-json/typedpress/v1/tasks`.
 // - `typedpress build` writes the SQL for each change here to tp/_generated/migrations/. Commit that
 //   folder and never edit it.
 // - A deploy checks every change against the live rows before it runs any of them. Removing a table

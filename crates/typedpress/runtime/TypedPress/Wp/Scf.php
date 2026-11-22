@@ -68,6 +68,7 @@ final class Scf
         }
         // A taxonomy's term fields (ruling 25): `group_tp_<name>` on its term screens.
         foreach ($schema->taxonomies() as $name => $spec) {
+            if (isset($spec['commerce'])) { continue; }
             $fields = [];
             foreach (TermMeta::fields($spec) as $col => $def) {
                 $fields[] = ['tp_top' => true] + self::field($schema, $spec['wp']['fieldKeyPrefix'] . $col, $spec['wp']['metaPrefix'] . $col, (string) $col, $def, $spec);

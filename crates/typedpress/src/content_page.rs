@@ -316,11 +316,11 @@ pub fn functions_php(schema: &crate::schema::Schema) -> String {
     for (route, page) in schema.app.iter().flat_map(|app| &app.content) {
         let route = php_str(route);
         out.push_str(&format!(
-            "function {}(): \\TypedPress\\Html\n{{\n    return \\TypedPress\\Wp\\ContentPages::html({route});\n}}\n\n",
+            "/**\n * Render the WordPress Page for this Markdown route.\n *\n * @return \\TypedPress\\Html\n */\nfunction {}(): \\TypedPress\\Html {{\n\treturn \\TypedPress\\Wp\\ContentPages::html({route});\n}}\n\n",
             page.component
         ));
         out.push_str(&format!(
-            "function {}(): \\TypedPress\\JsObject\n{{\n    return \\TypedPress\\Wp\\ContentPages::metadata({route}, {});\n}}\n\n",
+            "/**\n * Read the WordPress Page metadata for this Markdown route.\n *\n * @return \\TypedPress\\JsObject\n */\nfunction {}(): \\TypedPress\\JsObject {{\n\treturn \\TypedPress\\Wp\\ContentPages::metadata({route}, {});\n}}\n\n",
             page.metadata,
             php_json(&Value::Object(page.fixed.clone()))
         ));

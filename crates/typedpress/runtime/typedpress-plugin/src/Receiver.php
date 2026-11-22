@@ -25,39 +25,33 @@ final class Receiver
     /** A tree's ZIP, all parts together. TypedPress's own runtime tree is about 60 MB unpacked. */
     private const ZIP_LIMIT = 256 * 1048576;
 
-    public static function register(): void
+    public static function routes(): void
     {
-        // Core accepts an application password only on a request it already knows is REST. A plugin that
-        // asks for the current user earlier would otherwise leave the deploy routes signed out.
-        add_filter('application_password_is_api_request', static fn (bool $api): bool => $api || Site::route() !== null);
-        self::cli();
-        add_action('rest_api_init', static function (): void {
-            $read = static fn (): bool|\WP_Error => self::authorized(false);
-            $write = static fn (): bool|\WP_Error => self::authorized(true);
-            $route = static function (string $path, string $method, callable $handler, callable $permission): void {
-                register_rest_route(Site::REST, $path, ['methods' => $method, 'permission_callback' => $permission,
-                    'callback' => static function (\WP_REST_Request $request) use ($handler) {
-                        try {
-                            return rest_ensure_response($handler($request));
-                        } catch (Refusal $refusal) {
-                            return new \WP_Error($refusal->problem, $refusal->getMessage(), ['status' => $refusal->status] + $refusal->detail);
-                        } catch (\Throwable $error) {
-                            return new \WP_Error('tp_failed', $error->getMessage(), ['status' => 500]);
-                        }
-                    }]);
-            };
-            $build = '(?P<build>[0-9a-f]{64})';
-            $id = '(?P<id>[0-9a-f]{32})';
-            $route('/site', 'GET', [self::class, 'site'], $read);
-            $route("/builds/$build/baseline", 'GET', [self::class, 'baseline'], $read);
-            $route('/requirements', 'POST', [self::class, 'requirements'], $write);
-            $route('/plugin', 'POST', [self::class, 'plugin'], $write);
-            $route('/deployments', 'POST', [self::class, 'create'], $write);
-            $route("/deployments/$id/trees/(?P<kind>runtime|app)", 'POST', [self::class, 'part'], $write);
-            $route("/deployments/$id/plan", 'GET', [self::class, 'plan'], $write);
-            $route("/deployments/$id/activate", 'POST', [self::class, 'activate'], $write);
-            $route('/live', 'POST', [self::class, 'live'], $write);
-        });
+        $read = static fn (): bool|\WP_Error => self::authorized(false);
+        $write = static fn (): bool|\WP_Error => self::authorized(true);
+        $route = static function (string $path, string $method, callable $handler, callable $permission): void {
+            register_rest_route(Site::REST, $path, ['methods' => $method, 'permission_callback' => $permission,
+                'callback' => static function (\WP_REST_Request $request) use ($handler) {
+                    try {
+                        return rest_ensure_response($handler($request));
+                    } catch (Refusal $refusal) {
+                        return new \WP_Error($refusal->problem, $refusal->getMessage(), ['status' => $refusal->status] + $refusal->detail);
+                    } catch (\Throwable $error) {
+                        return new \WP_Error('tp_failed', $error->getMessage(), ['status' => 500]);
+                    }
+                }]);
+        };
+        $build = '(?P<build>[0-9a-f]{64})';
+        $id = '(?P<id>[0-9a-f]{32})';
+        $route('/site', 'GET', [self::class, 'site'], $read);
+        $route("/builds/$build/baseline", 'GET', [self::class, 'baseline'], $read);
+        $route('/requirements', 'POST', [self::class, 'requirements'], $write);
+        $route('/plugin', 'POST', [self::class, 'plugin'], $write);
+        $route('/deployments', 'POST', [self::class, 'create'], $write);
+        $route("/deployments/$id/trees/(?P<kind>runtime|app)", 'POST', [self::class, 'part'], $write);
+        $route("/deployments/$id/plan", 'GET', [self::class, 'plan'], $write);
+        $route("/deployments/$id/activate", 'POST', [self::class, 'activate'], $write);
+        $route('/live', 'POST', [self::class, 'live'], $write);
     }
 
     /**
@@ -67,37 +61,36 @@ final class Receiver
      * this one `app_id` the form gets no scope choices, and the credential is left as WordPress makes
      * it: everything its user can do. The screen says so.
      */
-    private static function cli(): void
+    public static function authorizeCli(): void
     {
-        add_action('admin_init', static function (): void {
-            // Only for someone who may deploy: anyone else approving this link gets the scoped
-            // credential every other approval gets, and the receiver turns it away.
-            $callback = wp_parse_url((string) wp_unslash($_REQUEST['success_url'] ?? ''));
-            if (($GLOBALS['pagenow'] ?? '') !== 'authorize-application.php' || ($_REQUEST['app_id'] ?? null) !== Site::CLI || !Site::mayDeploy()
-                // The command line listens on this machine. A link that names it and sends the
-                // credential anywhere else keeps the scope form.
-                || ($callback['scheme'] ?? '') !== 'http' || ($callback['host'] ?? '') !== '127.0.0.1') {
-                return;
+        // Only for someone who may deploy: anyone else approving this link gets the scoped
+        // credential every other approval gets, and the receiver turns it away.
+        $callback = wp_parse_url((string) wp_unslash($_REQUEST['success_url'] ?? ''));
+        if (($GLOBALS['pagenow'] ?? '') !== 'authorize-application.php' || ($_REQUEST['app_id'] ?? null) !== Site::CLI || !Site::mayDeploy()
+            // The command line listens on this machine. A link that names it and sends the
+            // credential anywhere else keeps the scope form.
+            || ($callback['scheme'] ?? '') !== 'http' || ($callback['host'] ?? '') !== '127.0.0.1') {
+            return;
+        }
+        remove_all_actions('wp_authorize_application_password_form');
+        add_action('wp_authorize_application_password_form', static function (): void {
+            echo '<div class="notice notice-info inline"><p>', esc_html('This is the TypedPress command line (typedpress login). The application password it gets is not scoped: it can do everything your account can, and it is what typedpress push deploys with. Revoke it under Users, Profile, Application Passwords.'), '</p></div>';
+        });
+    }
+
+    /** The CLI approval runs after the app has scoped a newly created credential. */
+    public static function createdPassword(mixed $user, mixed $item, mixed $password, mixed $args): void
+    {
+        if (!is_array($item) || !is_array($args) || ($args['app_id'] ?? null) !== Site::CLI || array_key_exists('tp_scope', $args) || !Site::deployer((int) $user)) {
+            return;
+        }
+        $passwords = \WP_Application_Passwords::get_user_application_passwords((int) $user);
+        foreach ($passwords as $i => $stored) {
+            if (($stored['uuid'] ?? null) === ($item['uuid'] ?? '') && array_key_exists('tp_scope', $stored)) {
+                unset($passwords[$i]['tp_scope']);
+                update_user_meta((int) $user, \WP_Application_Passwords::USERMETA_KEY_APPLICATION_PASSWORDS, $passwords);
             }
-            remove_all_actions('wp_authorize_application_password_form');
-            add_action('wp_authorize_application_password_form', static function (): void {
-                echo '<div class="notice notice-info inline"><p>', esc_html('This is the TypedPress command line (typedpress login). The application password it gets is not scoped: it can do everything your account can, and it is what typedpress push deploys with. Revoke it under Users, Profile, Application Passwords.'), '</p></div>';
-            });
-        }, PHP_INT_MAX);
-        // The approval itself, from the screen's script (REST, with the browser's cookie) or its plain
-        // form. After the app's own handler, which is the one that scopes it.
-        add_action('wp_create_application_password', static function (mixed $user, mixed $item, mixed $password, mixed $args): void {
-            if (!is_array($item) || !is_array($args) || ($args['app_id'] ?? null) !== Site::CLI || array_key_exists('tp_scope', $args) || !Site::deployer((int) $user)) {
-                return;
-            }
-            $passwords = \WP_Application_Passwords::get_user_application_passwords((int) $user);
-            foreach ($passwords as $i => $stored) {
-                if (($stored['uuid'] ?? null) === ($item['uuid'] ?? '') && array_key_exists('tp_scope', $stored)) {
-                    unset($passwords[$i]['tp_scope']);
-                    update_user_meta((int) $user, \WP_Application_Passwords::USERMETA_KEY_APPLICATION_PASSWORDS, $passwords);
-                }
-            }
-        }, PHP_INT_MAX, 4);
+        }
     }
 
     /**
@@ -457,6 +450,7 @@ final class Receiver
     {
         $deployment = self::deployment($request['id']);
         self::mounted($request['id'], $deployment, 'activate');
+        Site::checkCommerce($deployment['manifest']);
         if (function_exists('set_time_limit')) {
             @set_time_limit(300);
         }
@@ -474,7 +468,14 @@ final class Receiver
             $receipt = Site::locked(static function () use ($root, $build, $deployment, $id): array {
                 self::current($deployment['manifest']);
                 $receipt = \TypedPress\Loader\Loader::initialize($root, $build);
+                $canSyncPublic = class_exists(\TypedPress\Wp\PublicFiles::class) && \TypedPress\Wp\Runtime::plugin() !== null;
+                if ($canSyncPublic && !method_exists(\TypedPress\Wp\PublicFiles::class, 'syncSymlinks')) {
+                    throw new \RuntimeException('Active runtime cannot synchronize public files during activation.');
+                }
                 Site::makeLive($build, $deployment['manifest'], 'deploy');
+                if ($canSyncPublic) {
+                    \TypedPress\Wp\PublicFiles::syncSymlinks(\TypedPress\Wp\Runtime::plugin());
+                }
                 $pending = Site::pending();
                 unset($pending[$id]);
                 update_option(Site::PENDING, $pending, false);
@@ -511,7 +512,24 @@ final class Receiver
             if ($manifest === null || !Site::complete($manifest) || !Site::ready($build)) {
                 throw new \RuntimeException('Only a build that was live on this site before can be made live again.');
             }
+            Site::checkCommerce($manifest);
+            $root = (string) Site::root();
+            foreach (['runtime', 'app'] as $kind) {
+                Trees::mirror($root, Site::assets(), $kind, $manifest[$kind]);
+            }
+            $canSyncPublic = class_exists(\TypedPress\Wp\PublicFiles::class) && class_exists(\TypedPress\Schema::class);
+            if ($canSyncPublic && !method_exists(\TypedPress\Wp\PublicFiles::class, 'syncSymlinksForDir')) {
+                throw new \RuntimeException('Active runtime cannot synchronize public files during rollback.');
+            }
             Site::makeLive($build, $manifest, 'rollback');
+            if ($canSyncPublic) {
+                $appDir = $root . '/app/' . $manifest['app'] . '/plugins/typedpress-app-' . $manifest['name'];
+                $schemaFile = $appDir . '/tp/app/schema.php';
+                if (is_file($schemaFile)) {
+                    $assetsPublic = Site::assets() . '/app/' . $manifest['app'] . '/plugins/typedpress-app-' . $manifest['name'] . '/public';
+                    \TypedPress\Wp\PublicFiles::syncSymlinksForDir($appDir, $assetsPublic, \TypedPress\Schema::load($schemaFile));
+                }
+            }
         });
     }
 }

@@ -3,7 +3,7 @@
 // from your schema, so a renamed field is a type error here.
 import { createClient } from "./tp/_generated/client/index.ts";
 
-const first = createClient({ url: "/__tp/api/v1" });
+const first = createClient({ url: "/wp-json/typedpress/v1" });
 
 /** The open tasks of one project by due date; tasks with no date come first. At most 50 unless you pass `limit`. */
 export function openTasks(project: number) {

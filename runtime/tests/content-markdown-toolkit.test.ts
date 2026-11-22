@@ -8,7 +8,10 @@ import { z } from "zod";
 import { fetchToolkitPhar } from "../../scripts/fetch-wp-php-toolkit.mjs";
 
 const repoRoot = path.resolve(import.meta.dir, "../..");
-const contentMarkdown = path.join(repoRoot, "runtime/engine/wordpress/content-markdown.php");
+const contentMarkdown = path.join(
+  repoRoot,
+  "runtime/engine/deprecated/content/content-markdown.php",
+);
 const toolkitPhar = await fetchToolkitPhar();
 
 test("loading the toolkit inside WordPress leaves core's admin includes loadable", () => {

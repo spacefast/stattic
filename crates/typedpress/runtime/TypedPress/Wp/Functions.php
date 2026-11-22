@@ -40,8 +40,9 @@ final class Functions
     /**
      * Inside a TypedPress transaction, a core write rolls back with the handler, but WordPress's object
      * cache does not: record every option and post the call writes so a rollback cleans them.
+     * Native plugin CRUD (such as shipping reconciliation) uses the same tracking as TS calls.
      */
-    private static function tracked(\Closure $call): mixed
+    public static function tracked(\Closure $call): mixed
     {
         $connection = Runtime::plugin()?->connection();
         if ($connection === null || !$connection->inTransaction()) {

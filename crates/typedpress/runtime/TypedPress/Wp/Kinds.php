@@ -49,7 +49,9 @@ final class Kinds
         $auth = $plugin->schema->auth()['collection'] ?? null;
         foreach ($plugin->schema->collections() as $name => $spec) {
             $name = (string) $name;
-            if ($name === $auth || ($spec['builtin'] ?? null) === 'users') {
+            if (isset($spec['commerce'])) {
+                $out[$name] = ['name' => $name, 'type' => 'table', 'route' => '/wp/v2/' . $spec['table'], 'spec' => $spec];
+            } elseif ($name === $auth || ($spec['builtin'] ?? null) === 'users') {
                 $out[$name] = ['name' => $name, 'type' => 'users', 'route' => '/wp/v2/users', 'spec' => $spec];
             } elseif (($spec['editor'] ?? true) && ($spec['wp'] ?? null) !== null) {
                 $out[$name] = ['name' => $name, 'type' => 'post', 'route' => self::postRoute($spec['wp']['postType']), 'spec' => $spec]
@@ -60,7 +62,7 @@ final class Kinds
         }
         // A `taxonomy()` kind: its core term route, answered through TypedPress's pipeline (TermsController).
         foreach ($plugin->schema->taxonomies() as $name => $spec) {
-            $out[(string) $name] = ['name' => (string) $name, 'type' => 'taxonomy', 'route' => '/wp/v2/' . $spec['wp']['taxonomy'], 'spec' => $spec];
+            $out[(string) $name] = ['name' => (string) $name, 'type' => isset($spec['commerce']) ? 'table' : 'taxonomy', 'route' => '/wp/v2/' . (isset($spec['commerce']) ? 'tp_' . $name : $spec['wp']['taxonomy']), 'spec' => $spec];
         }
         if ($auth !== null) {
             $out['users'] ??= $out[$auth]; // the spec's name for the users kind
@@ -467,7 +469,7 @@ final class Kinds
         return $post instanceof \WP_Post ? MarkdownTwins::post($post) : null;
     }
 
-    /** `GET /__tp/api/v1`: the app's kinds (with their routes), fields, globals and actions. */
+    /** `GET /wp-json/typedpress/v1`: the app's kinds (with their routes), fields, globals and actions. */
     public static function describe(Plugin $plugin): array
     {
         $described = \TypedPress\Extensions::describe($plugin->schema->describe());

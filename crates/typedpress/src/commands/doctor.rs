@@ -162,7 +162,7 @@ fn remote(
             "site must be the site's URL without a query (https://example.test or https://example.test/blog)".into(),
         );
     }
-    // The facade's schema (spec §3a): `GET /__tp/api/v1`, below the site's path.
+    // The facade's schema (spec §3a): `GET /wp-json/typedpress/v1`, below the site's path.
     let path = url.path().trim_end_matches('/').to_string();
     let api = crate::sync::client::API;
     url.set_path(&if path.ends_with(api) {

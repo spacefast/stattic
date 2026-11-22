@@ -1325,11 +1325,14 @@ impl Lowerer {
                     // `key` identifies list items for React's reconciler. It stays in the IR so its
                     // expression evaluates in source order, as in React; it never reaches the HTML
                     // (`\TypedPress\Html` skips it) or a component's props (below).
-                    if name == "ref" {
+                    // On an element, the compiler decides: a "use client" component attaches the
+                    // ref, a server component refuses it (compile.rs). A component has no element
+                    // to hand its caller.
+                    if name == "ref" && !matches!(kind, JsxKind::Intrinsic(_)) {
                         return self.unsupported(
                             attr.span,
-                            "`ref` in a server component",
-                            "move the element into a \"use client\" component",
+                            "`ref` on a component",
+                            "put `ref` on an element inside a \"use client\" component",
                         );
                     }
                     attrs.push(JsxAttr::Named {

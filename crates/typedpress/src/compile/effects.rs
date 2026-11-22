@@ -405,11 +405,17 @@ fn restore(ty: &Ty, constraint: &Ty, path: &[Step]) -> Ty {
         }
         (Ty::Union(ts), _) => Ty::union(ts.iter().map(|t| restore(t, constraint, path))),
         (_, Step::Descendants) => {
-            // A member write can replace descendants, never the receiver binding.
+            // A member write can replace descendants, never the receiver binding: a receiver
+            // narrowed away from null, or from an "or false" result's `false`, stays narrowed.
             let constraint = if ty.is_nullable() {
                 constraint.clone()
             } else {
                 constraint.non_null()
+            };
+            let constraint = match ty {
+                Ty::Union(items) if items.iter().any(|item| item.bool_literal() == Some(false)) => constraint,
+                _ if ty.is_bool() => constraint,
+                _ => constraint.without_bool(false),
             };
             restore_constraint(ty, &constraint)
         }

@@ -1,4 +1,4 @@
-//! The site side of sync: the facade's schema (`GET /__tp/api/v1`) and `/sync/*` over HTTP (design §5.3), blocking.
+//! The site side of sync: the facade's schema (`GET /wp-json/typedpress/v1`) and `/sync/*` over HTTP (design §5.3), blocking.
 
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -52,11 +52,11 @@ impl Problem {
 }
 
 /// The facade's path below the site's URL (spec §3a).
-pub const API: &str = "/__tp/api/v1";
+pub const API: &str = "/wp-json/typedpress/v1";
 
 impl Client {
     /// `site` is the site's URL (scheme, host and an optional path prefix); the facade's prefix
-    /// `/__tp/api/v1` (spec §3a) is appended to its path unless the path already ends in it. A query or fragment is refused: the
+    /// `/wp-json/typedpress/v1` (spec §3a) is appended to its path unless the path already ends in it. A query or fragment is refused: the
     /// endpoint paths are appended to the URL's path, so neither has a place to go.
     pub fn new(site: &str, credential: Credential) -> Result<Client, String> {
         let url = url::Url::parse(site).map_err(|e| format!("--site: {e}"))?;
@@ -157,11 +157,14 @@ mod tests {
 
     #[test]
     fn the_facade_prefix_joins_the_sites_path_and_is_never_doubled() {
-        assert_eq!(base("https://x.test").unwrap(), "https://x.test/__tp/api/v1");
-        assert_eq!(base("https://x.test/blog/").unwrap(), "https://x.test/blog/__tp/api/v1");
+        assert_eq!(base("https://x.test").unwrap(), "https://x.test/wp-json/typedpress/v1");
         assert_eq!(
-            base("https://x.test/blog/__tp/api/v1/").unwrap(),
-            "https://x.test/blog/__tp/api/v1"
+            base("https://x.test/blog/").unwrap(),
+            "https://x.test/blog/wp-json/typedpress/v1"
+        );
+        assert_eq!(
+            base("https://x.test/blog/wp-json/typedpress/v1/").unwrap(),
+            "https://x.test/blog/wp-json/typedpress/v1"
         );
     }
 

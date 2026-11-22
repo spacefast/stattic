@@ -49,7 +49,7 @@ function _stattic_wordpress_cookie_allowed(): bool
 
 function _stattic_wordpress_identity_rest_route(string $route): bool
 {
-    return preg_match('~^/(?:spacefast-identity|zero-identity)/v1(?:/|$)~i', $route) === 1;
+    return preg_match('~^/(?:spacepress-identity|spacefast-identity|zero-identity)/v1(?:/|$)~i', $route) === 1;
 }
 
 /** Registered application origins opt in only to this plugin's non-admin API. */

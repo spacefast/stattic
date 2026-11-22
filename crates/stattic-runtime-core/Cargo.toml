@@ -33,8 +33,9 @@ tree-sitter-typescript = "=0.23.2"
 oxc_span = "=0.152.0"
 brotli = "8"
 flate2 = "1"
-zero = { path = "../zero", default-features = false, features = ["host"] }
+# Flip `typedpress` -> `spacepress` (and `../typedpress` -> `../spacepress`) once Track 0's spacepress-source.zip lands.
 typedpress = { path = "../typedpress", default-features = false, features = ["host"] }
+zero = { path = "../zero", default-features = false, features = ["host"] }
 stattic-zero-runner = { path = "../stattic-zero-runner" }
 
 # utimensat(2), to stamp a placed file's mtime by path. std can only set times

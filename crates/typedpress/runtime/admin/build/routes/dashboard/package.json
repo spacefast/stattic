@@ -18,6 +18,7 @@
 		"@typedpress-admin/dashboard": "workspace:*",
 		"@typedpress-admin/design-system": "workspace:*",
 		"@typedpress-admin/telemetry": "workspace:*",
+		"@typedpress-admin/widgets": "workspace:*",
 		"@wordpress/components": "catalog:",
 		"@wordpress/core-data": "catalog:",
 		"@wordpress/data": "catalog:",

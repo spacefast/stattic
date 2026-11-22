@@ -235,7 +235,7 @@ final class SchemaVersions
 
     /**
      * Why the stored versions don't check out, or null when they do: what the schema description
-     * (`GET /__tp/api/v1`, `typedpress doctor`) reports without waiting for something to list them.
+     * (`GET /wp-json/typedpress/v1`, `typedpress doctor`) reports without waiting for something to list them.
      */
     public function problem(): ?string
     {

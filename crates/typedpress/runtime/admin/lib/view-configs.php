@@ -114,7 +114,9 @@ add_filter(
 					array(
 						'id'       => 'admin_preferences',
 						'label'    => __( 'Admin', 'typedpress-admin' ),
-						'children' => array( 'tp_admin_developer_mode' ),
+						'children' => ( class_exists( '\\TypedPress\\Wp\\Runtime' ) && \TypedPress\Wp\Runtime::managed() )
+							? array()
+							: array( 'tp_admin_developer_mode' ),
 					),
 				),
 			),

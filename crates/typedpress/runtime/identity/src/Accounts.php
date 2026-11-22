@@ -34,10 +34,16 @@ final class Accounts
             time(),
         );
     }
+    /** SQLite's MySQL adapter stores VARBINARY as bytes and compares a string literal as text. */
+    private function emailColumn(): string
+    {
+        return defined('DB_ENGINE') && DB_ENGINE === 'sqlite' ? 'CAST(normalized AS CHAR)' : 'normalized';
+    }
+
     public function owner(string $email): int
     {
         $row = $this->db->row(
-            "SELECT wp_user_id FROM {$this->db->prefix}emails WHERE normalized=%s",
+            "SELECT wp_user_id FROM {$this->db->prefix}emails WHERE {$this->emailColumn()}=%s",
             self::email($email),
         );
         return (int) ($row["wp_user_id"] ?? 0);
@@ -83,7 +89,7 @@ final class Accounts
         $email = self::email($email);
         $account = $this->db->lock($uid);
         $existing = $this->db->row(
-            "SELECT * FROM {$this->db->prefix}emails WHERE normalized=%s",
+            "SELECT * FROM {$this->db->prefix}emails WHERE {$this->emailColumn()}=%s",
             $email,
         );
         if ($existing) {
@@ -179,6 +185,8 @@ final class Accounts
     }
     private const DUMMY_PASSWORD_HASH = "tp_identity_dummy_password_hash";
     private const PASSWORD_PROFILES = "tp_identity_password_profiles";
+    /** The options provisionPasswordHash() reads on every request of a plugin-installed site. */
+    public const INSTALL_OPTIONS = [self::DUMMY_PASSWORD_HASH, self::PASSWORD_PROFILES, self::PASSWORD_INVENTORY];
 
     private const UNSUPPORTED_PASSWORD_PROFILE = 'unsupported';
     private const PASSWORD_INVENTORY = "tp_identity_password_inventory";

@@ -70,17 +70,20 @@ final class AgentScope
 
     public static function register(): void
     {
-        add_action('do_parse_request', [self::class, 'facade'], -1);
         add_filter('rest_pre_dispatch', [self::class, 'route'], 0, 3);
         add_filter('wp_pre_execute_ability', [self::class, 'ability'], 0, 4);
         add_filter('map_meta_cap', [self::class, 'capability'], PHP_INT_MAX, 2);
+        add_filter('wp_get_abilities_item_include', [self::class, 'included'], PHP_INT_MAX, 2);
         add_filter('mcp_adapter_tools_list', [self::class, 'tools'], PHP_INT_MAX);
         add_filter('rest_prepare_user', [self::class, 'user'], PHP_INT_MAX);
         add_filter('rest_prepare_comment', [self::class, 'comment'], PHP_INT_MAX);
         add_filter('rest_user_query', [self::class, 'userQuery'], PHP_INT_MAX);
         // Personal fields are hidden from a credential without `personal` wherever a field rule hides one:
         // rows, filters, sorts, searches, relations, uniqueness checks, core's routes and wp-admin.
-        \TypedPress\FieldAccess::withhold(static fn (array $def): bool => self::restricted($def) && !self::may('personal'));
+        \TypedPress\FieldAccess::withhold(
+            static fn (array $def): bool => self::restricted($def) && !self::may('personal'),
+            static fn (): HttpError => self::refusal('personal'),
+        );
         // A create has no stored row for the field rules to compare with: a credential without
         // `personal` sets no personal field on a new row either.
         \TypedPress\Extensions::onWrite(static function (string $op, string $collection, array &$data, ?array $existing, ?Viewer $viewer, array $provided): void {
@@ -213,6 +216,24 @@ final class AgentScope
     }
 
     /**
+     * rest_authentication_errors, first: the refusal above can be from before the app booted, when
+     * other code makes WordPress check application passwords while plugins are still loading. The
+     * app is active now and enforces the scope, so that refusal is dropped and core resolves the
+     * user again, this time as a REST request.
+     */
+    public static function booted(mixed $result): mixed
+    {
+        $user = $GLOBALS['current_user'] ?? null;
+        if (self::$unenforced !== null && defined('REST_REQUEST') && REST_REQUEST && Runtime::plugin() !== null && !($user instanceof \WP_User && $user->exists())) {
+            self::$unenforced = null;
+            $GLOBALS['current_user'] = null;
+            rest_application_password_collect_status(null);
+        }
+
+        return $result;
+    }
+
+    /**
      * rest_authentication_errors: the refusal above, as the request's answer. Core can resolve the user
      * more than once in a request and keeps only its last answer, so the refusal is kept here; without
      * this the request would go on as a visitor, which is narrower but says nothing about why.
@@ -236,39 +257,25 @@ final class AgentScope
     // ================================================================ routes
 
     /**
-     * do_parse_request, before the facade serves `/__tp/api/v1`: its own features with no core
-     * route (sign-in, sync, files, services) never reach {@see route()}, so the facade's method and
-     * path are judged here. Kinds are judged again on the core route each one dispatches to.
+     * TypedPress's API, as core dispatches to it: its own features with no core route (sign-in,
+     * sync, files, services) never reach another route, so the API's method and path are judged
+     * here. Kinds are judged again on the core route each one dispatches to.
      */
-    public static function facade(mixed $parse): mixed
+    private static function facade(array $scope, string $path, bool $read): ?string
     {
-        $path = Facade::path();
-        $scope = $path === null ? null : self::current();
-        if ($scope === null) {
-            return $parse;
-        }
-        $segments = array_map('rawurldecode', array_values(array_filter(explode('/', $path), static fn (string $s): bool => $s !== '')));
+        // The route is already decoded (Facade::decoded()): decoding again would read a different path than the API does.
+        $segments = array_values(array_filter(explode('/', $path), static fn (string $s): bool => $s !== ''));
         $name = $segments[0] ?? '';
         // An action or a global is an ability: its own annotations say whether it writes.
         $ability = ($name === 'actions' && count($segments) === 2) || (count($segments) === 1 && isset(Plugin::instance()?->schema->globals()[$name]));
-        $read = in_array(strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')), self::READS, true);
-        $refused = match (true) {
+
+        return match (true) {
             $ability => null,
             $scope['abilities'] !== null && $name !== '' => 'abilities',
             !$scope['write'] && !$read => 'write',
             !$scope['personal'] && $name === 'auth' => 'personal',
             default => null,
         };
-        if ($refused !== null) {
-            $problem = \TypedPress\App::problem(self::refusal($refused));
-            status_header($problem['status']);
-            header('Content-Type: application/problem+json');
-            header('Cache-Control: private, no-store');
-            echo \TypedPress\Js::jsonStringify($problem);
-            exit;
-        }
-
-        return $parse;
     }
 
     /**
@@ -283,7 +290,22 @@ final class AgentScope
             return $result;
         }
         $route = $request->get_route();
+        if (preg_match('#^/(wc/v[1-4]|wc-admin|wc-analytics|wc-push-notifications|wc-telemetry)(/|$)#i', $route)) { return self::refused('administration'); }
+        // Woo also registers core REST controllers for its post types and taxonomies. These
+        // must not bypass the app's native-store projection and whole-kind scope checks.
+        if (preg_match('#^/wp/v2/(product|product_variation|product_cat|product_tag|product_shipping_class|shop_order|shop_order_refund)(/|$)#i', $route)) { return self::refused('administration'); }
+        if (preg_match('#^/wp-abilities/v1/abilities/woocommerce/#i', $route)) { return self::refused('administration'); }
+        // One ability's description: answered as its place in the lists is, with the grant it needs.
+        if (preg_match('#^/wp-abilities/v1/abilities/(.+?)/?$#i', $route, $m) && wp_has_ability($m[1])
+            && ($grant = self::withheld($scope, wp_get_ability($m[1]))) !== null) {
+            return self::refused($grant);
+        }
         $read = in_array(strtoupper($request->get_method()), self::READS, true);
+        if (!Facade::dispatching() && ($path = Facade::below($route)) !== null) {
+            $refused = self::facade($scope, $path, $read);
+
+            return $refused === null ? $result : self::refused($refused);
+        }
         if (preg_match(self::PASSWORDS, $route) && !($read && preg_match('#/application-passwords/introspect/?$#i', $route))) {
             return self::refused('passwords');
         }
@@ -357,13 +379,21 @@ final class AgentScope
         if ($scope === null || !is_string($name) || !$ability instanceof \WP_Ability) {
             return $pre;
         }
+        if (str_starts_with($name, 'woocommerce/')) { return self::error('administration'); }
+        if (!$scope['personal'] && self::orders($ability)) { return self::error('personal'); }
         if (str_starts_with($name, 'mcp-adapter/')) {
+            // The adapter describes any ability by name: one this credential isn't shown is not described.
+            $described = $name === 'mcp-adapter/get-ability-info' && is_array($input) && is_string($input['ability_name'] ?? null) ? $input['ability_name'] : null;
+            if ($described !== null && wp_has_ability($described) && ($grant = self::withheld($scope, wp_get_ability($described))) !== null) {
+                return self::error($grant);
+            }
             // The adapter's execute tool carries another ability's name, judged when that one runs. Its
             // discovery tools list every ability, which a credential limited to named ones doesn't see.
             return $scope['abilities'] !== null && $name !== 'mcp-adapter/execute-ability' ? self::error('abilities') : $pre;
         }
         if ($scope['abilities'] !== null && !self::listed($name, $scope['abilities'])) {
-            return self::error('abilities');
+            // An action's abilities.call() is judged here too, so the refusal names what to add.
+            return new \WP_Error('tp_scope', "This application password is limited to a set of abilities, and `$name` isn't one of them.", ['status' => 403]);
         }
         if (!$scope['write'] && empty(((array) $ability->get_meta_item('annotations', []))['readonly'])) {
             return self::error('write');
@@ -375,24 +405,86 @@ final class AgentScope
         return $pre;
     }
 
-    /** mcp_adapter_tools_list: a credential limited to named abilities is shown those tools only. */
+    /** Whether $ability is an operation of an `order()` kind: orders are personal data as a whole. */
+    private static function orders(\WP_Ability $ability): bool
+    {
+        $kind = ((array) $ability->get_meta_item('typedpress', []))['collection'] ?? null;
+        $schema = Plugin::instance()?->schema;
+
+        return is_string($kind) && $schema !== null && $schema->hasCollection($kind) && ($schema->collection($kind)['commerce'] ?? '') === 'order';
+    }
+
+    /**
+     * The grant a scoped credential lacks to be shown $ability, or null when it is shown. The one
+     * rule behind every place abilities are listed or described: core's list and single-ability
+     * routes, the MCP adapter's `discover-abilities` and `get-ability-info`, and each server's
+     * `tools/list`.
+     *
+     * WooCommerce's own abilities and the abilities of an order kind are refused when called
+     * ({@see ability()}), so for them the listing and the call agree exactly.
+     *
+     * An action marked `personal` is different. The compiler marks it from the action's code, not
+     * from what one call does: the handler, or a helper or action it calls, reads an order kind or
+     * calls an ability that needs the grant, on any branch. The action is left out of the lists as a
+     * whole, but a call to it is not refused as a whole: it runs until it reaches that read or that
+     * ability, which is refused there. A call that takes a branch with neither still succeeds.
+     *
+     * @param array{write: bool, personal: bool, abilities: ?list<string>} $scope
+     */
+    private static function withheld(array $scope, \WP_Ability $ability): ?string
+    {
+        if (str_starts_with($ability->get_name(), 'woocommerce/')) {
+            return 'administration';
+        }
+        $marked = ((array) $ability->get_meta_item('typedpress', []))['personal'] ?? false;
+
+        return !$scope['personal'] && ($marked === true || self::orders($ability)) ? 'personal' : null;
+    }
+
+    /**
+     * wp_get_abilities_item_include: every list core and the MCP adapter build from the registry
+     * (`GET /wp-abilities/v1/abilities`, `discover-abilities`) leaves out what {@see withheld()} names,
+     * before core pages the list.
+     */
+    public static function included(mixed $include, mixed $ability): mixed
+    {
+        $scope = $include && $ability instanceof \WP_Ability ? self::current() : null;
+
+        return $scope === null ? $include : self::withheld($scope, $ability) === null;
+    }
+
+    /**
+     * mcp_adapter_tools_list: a server's tools are named when it is built, not read from the filtered
+     * registry, so the same rule is applied to them here. A credential limited to named abilities is
+     * shown those tools only.
+     */
     public static function tools(mixed $tools): mixed
     {
-        $allowed = self::current()['abilities'] ?? null;
-        if ($allowed === null || !is_array($tools)) {
+        $scope = self::current();
+        if ($scope === null || !is_array($tools)) {
             return $tools;
         }
+        // The adapter names a tool after its ability, with the slash as a hyphen. Read from the registry
+        // itself: wp_get_abilities() has already left out what this credential isn't shown.
+        $abilities = [];
+        foreach (\WP_Abilities_Registry::get_instance()?->get_all_registered() ?? [] as $ability) {
+            $abilities[str_replace('/', '-', $ability->get_name())][] = $ability;
+        }
 
-        return array_values(array_filter($tools, static function (mixed $tool) use ($allowed): bool {
+        return array_values(array_filter($tools, static function (mixed $tool) use ($scope, $abilities): bool {
             $name = is_object($tool) && method_exists($tool, 'getName') ? (string) $tool->getName() : (is_array($tool) ? (string) ($tool['name'] ?? '') : '');
-            foreach (wp_get_abilities() as $ability) {
-                // The adapter names a tool after its ability, with the slash as a hyphen.
-                if (str_replace('/', '-', $ability->get_name()) === $name) {
-                    return self::listed($ability->get_name(), $allowed);
+            if (!isset($abilities[$name])) {
+                // No ability behind it: nothing to judge it by, so a limited credential isn't shown it.
+                return $scope['abilities'] === null && !str_starts_with($name, 'woocommerce-');
+            }
+            // Two ability names can spell one tool name: the tool is shown when every one of them is.
+            foreach ($abilities[$name] as $ability) {
+                if (self::withheld($scope, $ability) !== null || ($scope['abilities'] !== null && !self::listed($ability->get_name(), $scope['abilities']))) {
+                    return false;
                 }
             }
 
-            return false; // the adapter's own discovery and execute tools
+            return true;
         }));
     }
 

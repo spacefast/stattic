@@ -384,10 +384,3 @@ class TypedPress_Admin_REST_Themes_Controller extends WP_REST_Themes_Controller 
 		return $this->prepare_item_for_response( $theme, $request );
 	}
 }
-
-add_action(
-	'rest_api_init',
-	function () {
-		( new TypedPress_Admin_REST_Themes_Controller() )->register_routes();
-	}
-);

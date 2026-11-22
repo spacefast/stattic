@@ -535,11 +535,3 @@ class TypedPress_Admin_REST_Editor_Controller extends WP_REST_Controller {
 		return $this->add_additional_fields_schema( $schema );
 	}
 }
-
-// Register the editor REST controller.
-add_action(
-	'rest_api_init',
-	function () {
-		( new TypedPress_Admin_REST_Editor_Controller() )->register_routes();
-	}
-);

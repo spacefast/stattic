@@ -44,9 +44,9 @@ final class Spacefast_Content_Error extends RuntimeException {
         parent::__construct($message);
     }
 }
-require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-markdown.php"))};
-require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-source-sync.php"))};
-require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/wordpress/content-html.php"))};
+require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/deprecated/content/content-markdown.php"))};
+require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/deprecated/content/content-source-sync.php"))};
+require_once ${JSON.stringify(path.join(repoRoot, "runtime/engine/deprecated/content/content-html.php"))};
 $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_alpha';
 function spacefast_content_space_id(): string { return $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''; }
 function serialize_source_blocks(string $blocks): string { return spacefast_content_sync_from_blocks('html', $blocks); }

@@ -11,7 +11,7 @@ the URLs as you like.
 
 Both pages read `apiReference()` from `"typedpress/content"`. It returns the OpenAPI document
 `typedpress build` writes for this app (`tp/_generated/openapi.json`), as the site serves it at
-`/__tp/api/v1/openapi.json`, so the reference follows the schema on every build.
+`/wp-json/typedpress/v1/openapi.json`, so the reference follows the schema on every build.
 
 - Each operation has `method`, `path`, `summary`, `description` and `access`, `params`, `body`
   and `responses` as field lists, and `curl` and `fetch` samples.

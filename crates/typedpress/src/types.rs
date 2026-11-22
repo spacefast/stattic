@@ -229,6 +229,16 @@ impl Ty {
         }
     }
 
+    /// The type without the boolean literal `value`: what `x !== false` leaves of
+    /// `WP_User | false` (WordPress's "or false" results). A plain `boolean` is left as it is.
+    pub fn without_bool(&self, value: bool) -> Ty {
+        match self {
+            Ty::Union(items) => Ty::union(items.iter().filter(|t| t.bool_literal() != Some(value)).cloned()),
+            t if t.bool_literal() == Some(value) => Ty::Never,
+            other => other.clone(),
+        }
+    }
+
     pub fn nullish(&self) -> Ty {
         match self {
             Ty::Union(items) => Ty::union(items.iter().map(Ty::nullish)),
@@ -835,6 +845,28 @@ pub fn media_row() -> Ty {
         ("alt", Ty::Str.nullable()),
         ("filename", Ty::Str),
         ("createdAt", Ty::Str),
+        (
+            "sizes",
+            Ty::Map(Box::new(obj(&[
+                ("url", Ty::Str),
+                ("width", Ty::Num),
+                ("height", Ty::Num),
+            ]))),
+        ),
+    ])
+}
+
+/// A private file row a `file()` column holds once `with` loads it: `url` is signed and short-lived.
+pub fn file_row() -> Ty {
+    obj(&[
+        ("id", Ty::Num),
+        ("bucket", Ty::Str),
+        ("filename", Ty::Str),
+        ("mime", Ty::Str),
+        ("size", Ty::Num),
+        ("ownerId", Ty::Num.nullable()),
+        ("createdAt", Ty::Str),
+        ("url", Ty::Str),
     ])
 }
 

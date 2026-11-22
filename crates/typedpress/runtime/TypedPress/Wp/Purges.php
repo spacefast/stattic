@@ -112,6 +112,46 @@ final class Purges
         add_action('edit_terms', $term, 10, 2);
         add_action('edited_term', static fn (int $termId, int $ttId, string $taxonomy) => $term($termId, $taxonomy), 10, 3);
         add_action('pre_delete_term', $term, 10, 2);
+        // A global's fields are options named `<postId>_<field>` (`tp_global_shop_currency`, SCF's
+        // options page layout; a repeater's or group's values are further options below its field's
+        // name): `db.globals.<name>.update()`, the API and the options page in wp-admin all save them
+        // through update_option(), so the option hooks see every write. The pages that read the
+        // global are purged with the write's other URLs.
+        $prefixes = [];
+        foreach ($plugin->schema->globals() as $name => $global) {
+            $prefixes[$global['wp']['postId'] . '_'] = (string) $name;
+        }
+        if ($prefixes !== []) {
+            $busy = false;
+            $global = static function (mixed $option) use ($plugin, $prefixes, &$busy): void {
+                if (!is_string($option) || $busy) {
+                    return;
+                }
+                // Every global whose prefix the option has: `shop` and `shop_hours` share one, and
+                // purging the pages of both is correct for either.
+                $names = [];
+                foreach ($prefixes as $prefix => $name) {
+                    if (str_starts_with($option, $prefix)) {
+                        $names[] = $name;
+                    }
+                }
+                if ($names === [] || !self::listening() || $plugin->unavailable() !== null) {
+                    return;
+                }
+                $busy = true;
+                try {
+                    $plugin->app(); // the read index is read through the app's store
+                    foreach ($names as $name) {
+                        \TypedPress\Render\Cache::globalWritten($name);
+                    }
+                } finally {
+                    $busy = false;
+                }
+            };
+            foreach (['added_option', 'updated_option', 'deleted_option'] as $hook) {
+                add_action($hook, $global, 10, 1);
+            }
+        }
     }
 
     /**

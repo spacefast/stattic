@@ -67,7 +67,11 @@ pub fn snapshot(schema: &Schema) -> Json {
 pub fn snapshot_with(schema: &Schema, queried: &std::collections::BTreeSet<(String, String)>) -> Json {
     let mut tables = serde_json::Map::new();
     // A taxonomy lives in core's term tables: nothing about it enters the snapshot (ruling 34).
-    for c in schema.collections.values().filter(|c| c.taxonomy.is_none()) {
+    for c in schema
+        .collections
+        .values()
+        .filter(|c| c.taxonomy.is_none() && c.commerce.is_none())
+    {
         let mut t = table_snapshot(c, schema);
         let cols: Vec<String> = queried
             .iter()

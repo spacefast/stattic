@@ -27,6 +27,10 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     // plane validates it in TypeScript at finalize, and the serving engine
     // never reads it.
     "analytics",
+    // Inline SpacePress application config declared in `spacefast.config.ts`
+    // (or evaluated into `sf.jsonc`). Accepted here without unknown-key
+    // diagnostics; the SpacePress compiler owns its schema.
+    "app",
     "build",
     "cache",
     "cleanUrls",
@@ -373,6 +377,9 @@ fn validate_config_shape(
             .is_none_or(|date| !compatibility_date_pattern().is_match(date))
     }) {
         push_shape_error(diagnostics, "compatibilityDate", "a YYYY-MM-DD date");
+    }
+    if object.get("app").is_some_and(|value| !value.is_object()) {
+        invalid(diagnostics, "app", "an object");
     }
     validate_crons_config(object, diagnostics);
     validate_traffic_rules_config(object, diagnostics);
@@ -1539,6 +1546,10 @@ pub fn public_json_schema() -> Value {
             "crons": crons,
             "system": super::system::json_schema(),
             "sell": sell_json_schema(),
+            "app": {
+                "type": "object",
+                "description": "Inline SpacePress application configuration."
+            },
             "superpowers": superpowers,
             "theme": theme,
             "build": build,
@@ -1621,11 +1632,24 @@ export type SpaceRuntimeFunctionsConfig = {
 
 export type SpaceRuntimeConfig = SpaceRuntimeZeroConfig | SpaceRuntimeFunctionsConfig;
 
+export type SpaceConfigJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | SpaceConfigJsonObject
+  | SpaceConfigJsonValue[];
+
+export type SpaceConfigJsonObject = {
+  [key: string]: SpaceConfigJsonValue;
+};
+
 export type SpaceConfigFile = SpaceConfig & {
   $schema?: string;
   space?: string;
   name?: string;
   compatibilityDate?: string;
+  app?: SpaceConfigJsonObject;
   runtime?: SpaceRuntimeConfig;
   sell?: { mode?: "test" | "live"; products: string };
   access?: { public: string[] };
@@ -2280,5 +2304,27 @@ mod tests {
                 .iter()
                 .any(|item| item.severity == DiagnosticSeverity::Error));
         }
+    }
+
+    #[test]
+    fn inline_spacepress_app_section_is_accepted_without_unknown_key_diagnostics() {
+        let mut diagnostics = Vec::new();
+        let config = parse_config(
+            r#"{"cleanUrls":true,"app":{"name":"blog","collections":{"posts":{}}}}"#,
+            "sf.jsonc",
+            &mut diagnostics,
+        );
+        assert_eq!(diagnostics, Vec::new());
+        assert_eq!(
+            config.as_ref().and_then(|value| value.get("app")),
+            Some(&json!({"name": "blog", "collections": {"posts": {}}}))
+        );
+
+        let mut bad = Vec::new();
+        assert_eq!(
+            parse_config(r#"{"app":"invalid"}"#, "sf.jsonc", &mut bad),
+            None
+        );
+        assert!(bad.iter().any(|item| item.path.as_deref() == Some("app")));
     }
 }

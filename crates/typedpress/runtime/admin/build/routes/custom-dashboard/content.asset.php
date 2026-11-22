@@ -1,0 +1,1 @@
+<?php return array('name' => 'custom-dashboard', 'dependencies' => array('react', 'wp-components', 'wp-data', 'wp-i18n', 'wp-preferences'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/boot', '@typedpress-admin/dashboard', '@typedpress-admin/widgets', '@wordpress/route'), 'version' => 'c125038b92e783c79de1');

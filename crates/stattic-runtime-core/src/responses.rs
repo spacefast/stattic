@@ -22,8 +22,8 @@ use crate::protocol::{
     ACCEL_SURVIVING_HEADERS, ARTIFACT_HASH_PREFIX_LEN, ARTIFACT_SCHEMA_VERSION, CACHE_CLASS_HTML,
     CACHE_CLASS_IMMUTABLE, CACHE_CLASS_REVALIDATE, PHP_LANE_BODY_MAX_BYTES,
     PROVIDER_ASSET_EXTENSIONS, RESPONSE_ACTION_LISTING, RESPONSE_ACTION_NOT_FOUND,
-    RESPONSE_ACTION_PHP, RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT,
-    RESPONSE_ENTRY_BLOB, RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_CANONICAL, RESPONSE_ENTRY_ETAG,
+    RESPONSE_ENTRY_ACTION, RESPONSE_ENTRY_ALLOWLISTED_EXT, RESPONSE_ENTRY_BLOB,
+    RESPONSE_ENTRY_CACHE_CLASS, RESPONSE_ENTRY_CANONICAL, RESPONSE_ENTRY_ETAG,
     RESPONSE_ENTRY_HEADERS, RESPONSE_ENTRY_LANE, RESPONSE_ENTRY_LENGTH,
     RESPONSE_ENTRY_PLACED_HOSTNAMES, RESPONSE_ENTRY_PREVIEW_IMAGE,
     RESPONSE_ENTRY_PREVIEW_IMAGE_HOSTS, RESPONSE_ENTRY_RULES_FIRST, RESPONSE_ENTRY_STATUS,
@@ -407,12 +407,8 @@ pub(crate) fn compile_response_table(
     // only ever points at a URL that answers with that same page.
     let mut served_by = BTreeMap::<String, &str>::new();
     for (path, meta) in input.files {
-        // Private paths and functions-route handlers alike exist but never
-        // serve their own bytes: a handler is code, not content.
-        if input.private.contains(path)
-            || is_private_serving_path(path)
-            || php_function_route(path).is_some()
-        {
+        // Private paths exist in the catalog but never serve their own bytes.
+        if input.private.contains(path) || is_private_serving_path(path) {
             table.insert(request_key(path), ResponseEntry::not_found());
             continue;
         }
@@ -486,28 +482,6 @@ pub(crate) fn compile_response_table(
                 .entry(canonical)
                 .or_insert_with(|| redirect_entry(308, &key));
         }
-    }
-
-    // PHP function routes execute at their derived key (`t=php`, dispatched to
-    // runtime/php-functions.php). Inserted after the file entries so an
-    // explicitly committed handler outranks a clean-URL alias at the same key,
-    // and before exact redirects and Zero actions so both of those still win —
-    // the same precedence the JS Functions lane gets by running last.
-    for (path, meta) in input.files {
-        if input.private.contains(path) || is_private_serving_path(path) {
-            continue;
-        }
-        let Some(route) = php_function_route(path) else {
-            continue;
-        };
-        table.insert(
-            route,
-            ResponseEntry::action_only(json!({
-                "t": RESPONSE_ACTION_PHP,
-                "src": path,
-                "sha": meta.sha256,
-            })),
-        );
     }
 
     for (path, action) in input.zero_actions {
@@ -658,16 +632,6 @@ pub(crate) fn compile_response_table(
 fn request_key(path: &str) -> String {
     format!("/{}", path.trim_start_matches('/'))
 }
-
-/// The exact route a committed `functions/<name>.php` executes at, mirroring
-/// the file-router convention of the JS Functions lane
-/// (packages/cli/src/functions-routes.ts `fileRouteFromRelativePath`):
-/// `functions/hello.php` → `/hello`, `functions/api/index.php` → `/api`,
-/// `functions/index.php` → `/`. Exact segments only — a bracketed pattern
-/// segment (`[id]`, `[...rest]`) cannot be a table key and is NOT routed in
-/// this slice, so such a file keeps the inert-attachment entry like any other
-/// stray `.php`.
-pub(crate) use crate::serving_paths::php_function_route;
 
 fn listing_key(directory: &str) -> String {
     if directory.is_empty() {
@@ -1555,22 +1519,18 @@ mod tests {
         assert_eq!(table["/styles.css"].status, 200);
     }
 
-    /// PHP never serves as text, at the compile seam: a routable
-    /// `functions/<name>.php` becomes a `t=php` action at its derived key with
-    /// its source hidden, and every other PHP-like file — a pattern-named
-    /// handler, a stray upload — answers 404 instead of a source download.
+    /// Uploaded PHP files never serve as text and never compile to executable
+    /// actions: every PHP-like path answers 404 instead of serving source or
+    /// mounting a route.
     #[test]
-    fn functions_route_php_compiles_to_a_php_action_and_hides_its_source() {
-        let handler: &[u8] = b"<?php sf_json(['ok' => true]);\n";
+    fn php_files_never_serve_as_text_or_actions() {
+        let handler: &[u8] = b"<?php echo 'no';\n";
         let table = compile(
             &[
                 ("index.html", b"<h1>home</h1>"),
                 ("functions/hello.php", handler),
-                ("functions/api/index.php", b"<?php sf_json([]);\n"),
-                (
-                    "functions/[id].php",
-                    b"<?php // pattern: not routable here\n",
-                ),
+                ("functions/api/index.php", b"<?php echo 'no';\n"),
+                ("functions/[id].php", b"<?php // not routable\n"),
                 ("uploaded.php", b"<?php echo 'stray';\n"),
             ],
             json!({"index": "index.html", "clean_urls": false}),
@@ -1580,29 +1540,15 @@ mod tests {
             json!([]),
         );
 
-        let hello = &table["/hello"];
-        let action = hello.action.as_ref().expect("php action");
-        assert_eq!(action["t"], json!(RESPONSE_ACTION_PHP));
-        assert_eq!(action["src"], json!("functions/hello.php"));
-        assert_eq!(action["sha"], json!(sha256(handler)));
-        assert_eq!(hello.blob, None);
-        assert_eq!(hello.status, 200);
-        // `index` drops out of the route exactly as in the JS file router.
-        assert_eq!(
-            table["/api"].action.as_ref().expect("index route")["t"],
-            json!(RESPONSE_ACTION_PHP)
-        );
+        assert!(!table.contains_key("/hello"));
+        assert!(!table.contains_key("/api"));
 
-        // The handler source never serves — same 404 action as a private path.
-        let source = &table["/functions/hello.php"];
-        assert_eq!(source.status, 404);
-        assert_eq!(
-            source.action.as_ref().expect("hidden source")["t"],
-            json!(RESPONSE_ACTION_NOT_FOUND)
-        );
-
-        // Everything that is NOT a routable handler is hidden the same way.
-        for key in ["/functions/[id].php", "/uploaded.php"] {
+        for key in [
+            "/functions/hello.php",
+            "/functions/api/index.php",
+            "/functions/[id].php",
+            "/uploaded.php",
+        ] {
             let hidden = &table[key];
             assert_eq!(hidden.status, 404, "{key} must not serve its source");
             assert_eq!(hidden.blob, None, "{key} must carry no bytes");

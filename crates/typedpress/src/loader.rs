@@ -12,6 +12,22 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub const TP_MODULE: &str = "typedpress";
+/// SpacePress canonical module specifiers (normalized to internal compiler module names on parse).
+pub const SP_MODULE: &str = "spacepress";
+pub const SP_APP_MODULE: &str = "spacepress/app";
+pub const SP_CONTENT_MODULE: &str = "spacepress/content";
+pub const SP_CLIENT_MODULE: &str = "spacepress/client";
+pub const SP_DB_MODULE: &str = "spacepress:db";
+pub const SPACEFAST_APP_MODULE: &str = "spacefast/app";
+/// Email templates (docs/design-react-email.md), beside `typedpress.config.ts`.
+pub const EMAILS_DIR: &str = "emails";
+/// The template that replaces Identity's built-in organization invitation.
+pub const INVITATION_EMAIL: &str = "emails/identity/organization-invite.tsx";
+
+pub(crate) fn email_module(root: &Path, path: &Path) -> bool {
+    path.starts_with(root.join(EMAILS_DIR))
+}
+
 /// Page and layout helpers for `tp/app/` and components (docs/spec/rendering.md §2–§4).
 pub const APP_MODULE: &str = "typedpress/app";
 /// Navigation for a hierarchical kind's pages: `nav`, `pager`, `headings` (src/compile/content.rs).
@@ -64,6 +80,9 @@ pub trait Fs {
         false
     }
     fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.read_to_string(path).map(String::into_bytes)
+    }
     fn is_file(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
     /// Whether anything at all (a file, a directory, a dangling link) is at `path`.
@@ -104,6 +123,13 @@ impl Fs for Generated<'_> {
             self.inner.read_to_string(path)
         }
     }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if path == self.path {
+            Ok(self.source.as_bytes().to_vec())
+        } else {
+            self.inner.read(path)
+        }
+    }
     fn is_file(&self, path: &Path) -> bool {
         path == self.path || self.inner.is_file(path)
     }
@@ -134,6 +160,9 @@ impl Fs for Disk {
     }
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
+    }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
     }
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
@@ -168,9 +197,17 @@ pub struct Program {
     /// `tp/app/`: the route table, and each route file's module by its path relative to `tp/`.
     pub app: crate::app::Table,
     pub app_files: Vec<(String, usize)>,
+    /// `emails/` templates by their app-relative path (`emails/welcome.tsx`), outside
+    /// underscore-prefixed folders, which hold shared parts.
+    pub emails: Vec<(String, usize)>,
     /// Files components and pages import that are not code (`.css`, `.module.css`, images), by
     /// module id: the evaluator binds their import to a URL or a class map (`crate::assets`).
     pub assets: HashMap<usize, crate::assets::Asset>,
+    frontend_styles: HashMap<String, String>,
+    /// `@typedpress/frontend` builds the authored plain stylesheets (Tailwind's `@import
+    /// "tailwindcss"`), so the compiler never reads them as CSS it copies.
+    frontend: bool,
+    discover_styles: bool,
 }
 
 /// One `tp/wp-hooks/` file: `tp/wp-hooks/<hook>.ts`, or `tp/wp-hooks/<hook>/<file>.ts`.
@@ -191,11 +228,74 @@ pub fn load_all(entry: &Path) -> std::result::Result<Program, Vec<Diag>> {
 }
 
 pub fn load_from(fs: Rc<dyn Fs>, entry: &Path) -> std::result::Result<Program, Vec<Diag>> {
+    load_with_styles(fs, entry, false)
+}
+
+#[cfg(feature = "cli")]
+pub(crate) fn stylesheet_inputs(project: &Path) -> Result<Vec<String>> {
+    let entry = crate::layout::project_config(|p| p.is_file(), project);
+    let program = load_with_styles(Rc::new(Disk), &entry, true)
+        .map_err(|diagnostics| diagnostics.into_iter().next().expect("failed load has diagnostics"))?;
+    let mut styles: Vec<_> = program
+        .assets
+        .into_values()
+        .filter(|asset| asset.kind == crate::assets::Kind::Css && authored_stylesheet(&asset.source))
+        .map(|asset| asset.source)
+        .collect();
+    styles.sort_unstable();
+    Ok(styles)
+}
+
+fn authored_stylesheet(source: &str) -> bool {
+    source.starts_with("tp/") && !source.split('/').any(|part| part == "node_modules")
+}
+
+pub(crate) const FRONTEND_STYLES: &str = "tp/_generated/frontend-styles.json";
+
+pub(crate) fn frontend_enabled(fs: &dyn Fs, root: &Path) -> Result<bool> {
+    let package = match fs.read_to_string(&root.join("package.json")) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text).map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => Err(error),
+    }
+    .map_err(|error| Diag::new(Span::NONE, format!("can't read package.json: {error}")).code(diag::Code::Import))?;
+    Ok(["dependencies", "devDependencies"].iter().any(|key| {
+        package[*key]["@spacepress/frontend"].is_string() || package[*key]["@typedpress/frontend"].is_string()
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct StylesManifest {
+    styles: HashMap<String, String>,
+}
+
+fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std::result::Result<Program, Vec<Diag>> {
     let entry = fs
         .canonicalize(entry)
         .map_err(|e| vec![Diag::new(Span::NONE, format!("{}: {e}", entry.display())).code(diag::Code::Import)])?;
+    let root = entry.parent().expect("entry has a directory").to_path_buf();
+    let manifest = root.join(FRONTEND_STYLES);
+    // A live project that names the package builds its plain stylesheets with it, and has no
+    // manifest before its first build (a fresh clone). A stored capture took its manifest along.
+    let frontend = !fs.frozen_capture() && frontend_enabled(&*fs, &root).map_err(|diag| vec![diag])?;
+    let frontend_styles = if !discover_styles && fs.is_file(&manifest) && (fs.frozen_capture() || frontend) {
+        fs.read_to_string(&manifest)
+            .and_then(|text| {
+                serde_json::from_str::<StylesManifest>(&text)
+                    .map(|manifest| manifest.styles)
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|error| {
+                vec![Diag::new(Span::NONE, format!("can't read {FRONTEND_STYLES}: {error}")).code(diag::Code::Import)]
+            })?
+    } else {
+        HashMap::new()
+    };
     let mut program = Program {
-        root: entry.parent().expect("entry has a directory").to_path_buf(),
+        root,
+        frontend_styles,
+        frontend,
+        discover_styles,
         modules: Vec::new(),
         resolved: HashMap::new(),
         entry: 0,
@@ -205,6 +305,7 @@ pub fn load_from(fs: Rc<dyn Fs>, entry: &Path) -> std::result::Result<Program, V
         components: Vec::new(),
         app: crate::app::Table::default(),
         app_files: Vec::new(),
+        emails: Vec::new(),
         assets: HashMap::new(),
     };
     let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
@@ -316,6 +417,34 @@ pub fn load_from(fs: Rc<dyn Fs>, entry: &Path) -> std::result::Result<Program, V
         }
         Err(d) => diagnostics.extend(d.into_iter().map(|d| d.phase(diag::Code::Import))),
     }
+    match component_files(&*fs, &program.root.join(EMAILS_DIR)) {
+        Ok(files) => {
+            for path in files {
+                let relative = path.strip_prefix(&program.root).unwrap_or(&path);
+                if relative
+                    .components()
+                    .any(|c| c.as_os_str().to_string_lossy().starts_with('_'))
+                {
+                    continue;
+                }
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                let module = fs
+                    .canonicalize(&path)
+                    .map_err(|e| Diag::new(Span::NONE, format!("{}: {e}", path.display())))
+                    .and_then(|path| {
+                        if !email_module(&program.root, &path) {
+                            return Err(Diag::new(Span::NONE, format!("{relative} must resolve inside emails/")));
+                        }
+                        load_module(&*fs, &path, &mut program, &mut by_path, &mut diagnostics)
+                    });
+                match module {
+                    Ok(module) => program.emails.push((relative, module)),
+                    Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
+                }
+            }
+        }
+        Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
+    }
     if diagnostics.is_empty() {
         diagnostics.extend(jsx_reachability(&program));
     }
@@ -357,6 +486,10 @@ fn jsx_reachability(program: &Program) -> Vec<Diag> {
             continue;
         }
         let module = &program.modules[id];
+        // Handlers reference email templates for `mail.render()`; their imports stay inside emails/.
+        if email_module(&program.root, &module.path) {
+            continue;
+        }
         if module.jsx {
             out.push(
                 Diag::new(
@@ -573,6 +706,27 @@ fn load_module(
         type_names,
         use_client,
     } = parse(fs, &source, path, &program.root, file, id, diagnostics)?;
+    if email_module(&program.root, path) {
+        if use_client {
+            return Err(Diag::new(
+                Span { file, start: 0, end: 0 },
+                "email templates run on the server",
+            ));
+        }
+        // React Email reads this assignment in its preview. The WordPress sender supplies props.
+        body.retain(|stmt| {
+            let Stmt::Expr(Expr {
+                kind: ExprKind::Assign { op: None, target, .. },
+                ..
+            }) = stmt
+            else {
+                return true;
+            };
+            !matches!(&target.kind, ExprKind::Member { obj, prop, optional: false, .. }
+                if prop == "PreviewProps" && matches!(obj.kind, ExprKind::Ident(_)))
+        });
+    }
+    normalize_spacepress_modules(&mut body, commonjs.as_mut());
     if let Some(alias) = fs.module_alias() {
         rename_module(&mut body, commonjs.as_mut(), alias);
     }
@@ -613,6 +767,7 @@ fn load_module(
             );
         }
     }
+    let is_email = email_module(&program.root, path);
     let mut imports: Vec<(String, Span)> = body.iter().filter_map(import_source).collect();
     let first_require = imports.len();
     let commonjs = commonjs.map(|CommonJs { names, requires }| {
@@ -631,6 +786,18 @@ fn load_module(
         use_client,
     }));
     for (index, (spec, span)) in imports.into_iter().enumerate() {
+        if is_email {
+            if spec == "react-email" {
+                continue;
+            }
+            if !spec.starts_with('.') {
+                diagnostics.push(
+                    Diag::new(span, "email templates can import react-email and local email modules")
+                        .code(diag::Code::Import),
+                );
+                continue;
+            }
+        }
         if builtin_module(&spec) {
             continue;
         }
@@ -652,19 +819,50 @@ fn load_module(
             continue;
         }
         let required = index >= first_require;
-        let target = if required {
-            resolve_require(fs, path, &spec, span)
+        let query = if !required && spec.starts_with('.') {
+            match crate::assets::Query::split(&spec) {
+                Ok((_, q)) => q,
+                Err(bad) => {
+                    diagnostics.push(
+                        Diag::new(span, format!("unsupported import query \"?{bad}\" in \"{spec}\""))
+                            .help("supported asset import queries are ?url, ?raw, ?inline, and ?meta")
+                            .code(diag::Code::Import),
+                    );
+                    continue;
+                }
+            }
         } else {
-            resolve(fs, path, &spec, span)
-        }
-        .and_then(|target| match fs.frozen_capture() {
-            true => Ok(target),
-            false => fence(&program.root, path, &spec, target, span),
-        });
-        let target = target.and_then(|target| match crate::assets::kind(&target) {
-            Some(kind) => load_asset(fs, &target, kind, program, by_path, span),
-            None => load_module(fs, &target, program, by_path, diagnostics),
-        });
+            crate::assets::Query::Default
+        };
+        let target = if query != crate::assets::Query::Default {
+            let (bare, _) = crate::assets::Query::split(&spec).expect("validated query");
+            resolve_query_asset(fs, path, bare, span)
+                .and_then(|target| {
+                    if fs.frozen_capture() && !is_email {
+                        Ok(target)
+                    } else {
+                        fence(&program.root, path, bare, target, span)
+                    }
+                })
+                .and_then(|target| load_query_asset(fs, &target, query, program, by_path, span))
+        } else {
+            let resolved = if required {
+                resolve_require(fs, path, &spec, span)
+            } else {
+                resolve(fs, path, &spec, span)
+            }
+            .and_then(|target| {
+                if fs.frozen_capture() && !is_email {
+                    Ok(target)
+                } else {
+                    fence(&program.root, path, &spec, target, span)
+                }
+            });
+            resolved.and_then(|target| match crate::assets::kind(&target) {
+                Some(kind) => load_asset(fs, &target, kind, program, by_path, span),
+                None => load_module(fs, &target, program, by_path, diagnostics),
+            })
+        };
         match target {
             Ok(target_id) => {
                 program.resolved.insert((id, spec), target_id);
@@ -675,11 +873,149 @@ fn load_module(
     Ok(id)
 }
 
-/// A stylesheet or image import: no code, so its module has an empty body, and the file itself is
-/// read into `program.assets`. Sources travel to a host as text (the source bundle), so an image is
-/// imported only when it is text (SVG); a binary image belongs in public/. Only components, pages and
-/// `"use client"` files import assets: they render HTML that links the file. The config, hooks and
-/// actions run on the server, where a stylesheet means nothing.
+fn resolve_query_asset(fs: &dyn Fs, from: &Path, bare: &str, span: Span) -> Result<PathBuf> {
+    let candidate = from.parent().expect("file has a directory").join(bare);
+    if !fs.is_file(&candidate) {
+        return Err(Diag::new(span, format!("can't find \"{bare}\"")).code(diag::Code::Import));
+    }
+    let canonical = fs
+        .canonicalize(&candidate)
+        .map_err(|e| Diag::new(span, e.to_string()).code(diag::Code::Import))?;
+    let name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
+    if name.starts_with('.')
+        || matches!(
+            ext,
+            "php"
+                | "phtml"
+                | "phar"
+                | "php3"
+                | "php4"
+                | "php5"
+                | "php7"
+                | "php8"
+                | "phps"
+                | "htaccess"
+                | "htpasswd"
+                | "ini"
+        )
+    {
+        return Err(Diag::new(span, format!("can't import \"{bare}\" as an asset")).code(diag::Code::Import));
+    }
+    Ok(canonical)
+}
+
+fn load_query_asset(
+    fs: &dyn Fs,
+    path: &Path,
+    query: crate::assets::Query,
+    program: &mut Program,
+    by_path: &mut HashMap<PathBuf, usize>,
+    span: Span,
+) -> Result<usize> {
+    let relative = path
+        .strip_prefix(&program.root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let kind = match query {
+        crate::assets::Query::Default => unreachable!(),
+        crate::assets::Query::Raw => crate::assets::Kind::Raw,
+        crate::assets::Query::Inline => {
+            if crate::assets::kind(path).is_none() {
+                return Err(Diag::new(span, format!("can't inline \"{relative}\" as a data URI"))
+                    .help("`?inline` supports static assets (images, fonts, CSS, media, etc.)")
+                    .code(diag::Code::Import));
+            }
+            crate::assets::Kind::Inline
+        }
+        crate::assets::Query::Url => match crate::assets::kind(path) {
+            Some(crate::assets::Kind::File) => {
+                return load_asset(fs, path, crate::assets::Kind::File, program, by_path, span);
+            }
+            Some(crate::assets::Kind::Css | crate::assets::Kind::CssModule) => {
+                // Bundle & minify the stylesheet, then expose its hashed URL without auto-enqueuing it.
+                let mut stack = Vec::new();
+                let (file, rewritten, preloads, _) = bundle_css(fs, path, false, program, by_path, &mut stack, span)?;
+                let minified = crate::css::minify(&rewritten).into_bytes();
+                let mut asset = crate::assets::Asset::with_preloads(
+                    &relative,
+                    crate::assets::Kind::File,
+                    minified,
+                    file,
+                    preloads,
+                )?;
+                // Preserve `.css` extension (stem/hash already uses `.css` from `relative`).
+                asset.kind = crate::assets::Kind::File;
+                let id = program.modules.len();
+                program.modules.push(Rc::new(Module {
+                    id,
+                    file,
+                    path: path.to_path_buf(),
+                    body: Vec::new(),
+                    commonjs: None,
+                    dynamic: false,
+                    type_names: Default::default(),
+                    jsx: false,
+                    use_client: false,
+                }));
+                program.assets.insert(id, asset);
+                return Ok(id);
+            }
+            _ => {
+                return Err(Diag::new(span, format!("can't import \"{relative}?url\""))
+                    .help("`?url` supports static assets and CSS files")
+                    .code(diag::Code::Import));
+            }
+        },
+        crate::assets::Query::Meta => {
+            if crate::assets::kind(path) != Some(crate::assets::Kind::File) {
+                return Err(
+                    Diag::new(span, format!("can't read image metadata for \"{relative}?meta\""))
+                        .help("`?meta` supports image files (.png, .jpg, .webp, .avif, .gif, .svg, etc.)")
+                        .code(diag::Code::Import),
+                );
+            }
+            crate::assets::Kind::Meta
+        }
+    };
+    let bytes = fs
+        .read(path)
+        .map_err(|e| Diag::new(span, format!("can't import {relative}: {e}")).code(diag::Code::Import))?;
+    let file = diag::register_file(path, "");
+    let asset = crate::assets::Asset::new(&relative, kind, bytes, file)?;
+    if kind == crate::assets::Kind::Meta && asset.meta.is_none() {
+        return Err(Diag::new(
+            span,
+            format!("couldn't read image dimensions for \"{relative}?meta\""),
+        )
+        .help("ensure the file is a valid image (PNG, JPEG, WebP, AVIF, GIF, ICO, BMP, TIFF, or SVG with viewBox/width/height)")
+        .code(diag::Code::Import));
+    }
+    let id = program.modules.len();
+    program.modules.push(Rc::new(Module {
+        id,
+        file,
+        path: path.to_path_buf(),
+        body: Vec::new(),
+        commonjs: None,
+        dynamic: false,
+        type_names: Default::default(),
+        jsx: false,
+        use_client: false,
+    }));
+    program.assets.insert(id, asset);
+    Ok(id)
+}
+
+/// A stylesheet or static asset import: no code, so its module has an empty body, and the file
+/// itself is read into `program.assets` (copied to `tp/app/assets/<stem>-<hash>.<ext>`). For
+/// stylesheets, local relative `@import` rules and relative `url(...)` references are bundled and
+/// rewritten to `./<hashed-file>` so every asset serves from `wp-content/` with an immutable URL.
 fn load_asset(
     fs: &dyn Fs,
     path: &Path,
@@ -696,18 +1032,62 @@ fn load_asset(
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let text = fs.read_to_string(path).map_err(|e| {
-        let d = Diag::new(span, format!("can't import {relative}: {e}")).code(diag::Code::Import);
-        if e.kind() == std::io::ErrorKind::InvalidData {
-            d.help("components import text files only (CSS, SVG): put a binary image in public/ and write its URL, e.g. `<img src=\"/photo.png\">`")
-        } else {
-            d
+    let authored_css = kind == crate::assets::Kind::Css && authored_stylesheet(&relative);
+    let bundled_url = authored_css
+        .then(|| program.frontend_styles.get(&relative).cloned())
+        .flatten();
+    // `@typedpress/frontend` builds this stylesheet (Tailwind's `@import "tailwindcss"`): it is
+    // never read as CSS the compiler copies.
+    let built = authored_css && (program.frontend || program.discover_styles || bundled_url.is_some());
+    let (file, bytes, preloads) = match kind {
+        crate::assets::Kind::File => {
+            let bytes = fs
+                .read(path)
+                .map_err(|e| Diag::new(span, format!("can't import {relative}: {e}")).code(diag::Code::Import))?;
+            (diag::register_file(path, ""), bytes, Vec::new())
         }
-    })?;
-    let file = diag::register_file(path, &text);
+        crate::assets::Kind::Css if built => {
+            let text = fs
+                .read_to_string(path)
+                .map_err(|e| Diag::new(span, format!("can't import {relative}: {e}")).code(diag::Code::Import))?;
+            (diag::register_file(path, &text), Vec::new(), Vec::new())
+        }
+        crate::assets::Kind::Css | crate::assets::Kind::CssModule => {
+            let mut stack = Vec::new();
+            let (file, rewritten, preloads, _) = bundle_css(
+                fs,
+                path,
+                kind == crate::assets::Kind::CssModule,
+                program,
+                by_path,
+                &mut stack,
+                span,
+            )?;
+            (file, rewritten.into_bytes(), preloads)
+        }
+        crate::assets::Kind::Raw | crate::assets::Kind::Inline | crate::assets::Kind::Meta => unreachable!(),
+    };
+    let mut asset = crate::assets::Asset::with_preloads(&relative, kind, bytes, file, preloads)?;
+    if built && bundled_url.is_none() && !program.discover_styles {
+        // Not built yet (a fresh clone, or a stylesheet added since the last build). The program
+        // still compiles for `check`; a command that writes the site refuses the missing file.
+        asset.file = format!("{}{relative}", crate::assets::UNBUILT_STYLE);
+    }
+    if let Some(url) = bundled_url {
+        if !url.strip_prefix("/typedpress-styles/assets/").is_some_and(|file| {
+            file.ends_with(".css")
+                && file
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        }) {
+            return Err(
+                Diag::new(span, format!("invalid bundled stylesheet URL for {relative}")).code(diag::Code::Import),
+            );
+        }
+        asset.file = url;
+    }
     let id = program.modules.len();
     by_path.insert(path.to_path_buf(), id);
-    let asset = crate::assets::Asset::new(&relative, kind, text.into_bytes(), file)?;
     program.modules.push(Rc::new(Module {
         id,
         file,
@@ -721,6 +1101,319 @@ fn load_asset(
     }));
     program.assets.insert(id, asset);
     Ok(id)
+}
+
+/// Recursively bundles local relative `@import` rules and relative `url(...)` references inside a
+/// stylesheet, returning `(diag_file_id, rewritten_css, font_preloads, has_external_import)`.
+fn bundle_css(
+    fs: &dyn Fs,
+    path: &Path,
+    is_module: bool,
+    program: &mut Program,
+    by_path: &mut HashMap<PathBuf, usize>,
+    css_stack: &mut Vec<PathBuf>,
+    span: Span,
+) -> Result<(u32, String, Vec<crate::assets::FontPreload>, bool)> {
+    let relative = path
+        .strip_prefix(&program.root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if css_stack.iter().any(|p| p == path) {
+        return Err(Diag::new(span, format!("circular CSS `@import` involving {relative}"))
+            .help("remove the cycle between the imported stylesheets")
+            .code(diag::Code::Import));
+    }
+    css_stack.push(path.to_path_buf());
+    let text = fs
+        .read_to_string(path)
+        .map_err(|e| Diag::new(span, format!("can't import {relative}: {e}")).code(diag::Code::Import))?;
+    let file = diag::register_file(path, &text);
+    let scanned = crate::css::scan(&text, is_module).map_err(|r| {
+        Diag::new(
+            Span {
+                file,
+                start: r.at as u32,
+                end: r.at as u32 + 1,
+            },
+            r.message,
+        )
+        .help(r.help)
+        .code(diag::Code::Import)
+    })?;
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut preloads: Vec<crate::assets::FontPreload> = Vec::new();
+    let mut seen_preloads: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // First resolve all local `@import` targets so we know whether any nested stylesheet contains
+    // an external (`http(s)://`/`//`) `@import`. Per CSS Cascade, `@import` rules must precede all
+    // style rules; if any local `@import` precedes an external `@import` (direct or nested), emit
+    // the local sheet as a sibling hashed `.css` asset kept as `@import "./<hashed>.css"` so later
+    // external `@import` rules remain valid while preserving exact cascade order.
+    enum ResolvedImport<'a> {
+        External,
+        Local {
+            imp: &'a crate::css::CssImport,
+            target: PathBuf,
+            inner_file: u32,
+            inner: String,
+            has_external: bool,
+        },
+    }
+    let mut resolved_imports: Vec<ResolvedImport<'_>> = Vec::with_capacity(scanned.imports.len());
+    let mut last_external_idx: Option<usize> = None;
+    for (idx, imp) in scanned.imports.iter().enumerate() {
+        let lower_href = imp.href.to_ascii_lowercase();
+        if lower_href.starts_with("http://") || lower_href.starts_with("https://") || imp.href.starts_with("//") {
+            last_external_idx = Some(idx);
+            resolved_imports.push(ResolvedImport::External);
+            continue;
+        }
+        let imp_span = Span {
+            file,
+            start: imp.at as u32,
+            end: (imp.at + "@import".len()) as u32,
+        };
+        if !imp.href.starts_with("./") && !imp.href.starts_with("../") {
+            css_stack.pop();
+            return Err(Diag::new(
+                imp_span,
+                format!("`@import \"{}\"` isn't a local relative stylesheet", imp.href),
+            )
+            .help("use a relative path (`@import \"./theme.css\";`) or import the stylesheet from TSX")
+            .code(diag::Code::Import));
+        }
+        let candidate = path.parent().expect("stylesheet has a directory").join(&imp.href);
+        if !fs.is_file(&candidate) {
+            css_stack.pop();
+            return Err(Diag::new(
+                imp_span,
+                format!("can't find \"{}\" imported from {relative}", imp.href),
+            )
+            .help("check the path relative to this stylesheet")
+            .code(diag::Code::Import));
+        }
+        let canonical = fs
+            .canonicalize(&candidate)
+            .map_err(|e| Diag::new(imp_span, e.to_string()).code(diag::Code::Import))?;
+        let target = if fs.frozen_capture() {
+            canonical
+        } else {
+            fence(&program.root, path, &imp.href, canonical, imp_span)?
+        };
+        if !matches!(
+            crate::assets::kind(&target),
+            Some(crate::assets::Kind::Css | crate::assets::Kind::CssModule)
+        ) {
+            css_stack.pop();
+            return Err(
+                Diag::new(imp_span, format!("`@import \"{}\"` must name a .css file", imp.href))
+                    .code(diag::Code::Import),
+            );
+        }
+        let (inner_file, inner, inner_preloads, child_has_external) =
+            bundle_css(fs, &target, false, program, by_path, css_stack, imp_span)?;
+        for p in inner_preloads {
+            if seen_preloads.insert(p.file.clone()) {
+                preloads.push(p);
+            }
+        }
+        if child_has_external {
+            last_external_idx = Some(idx);
+        }
+        resolved_imports.push(ResolvedImport::Local {
+            imp,
+            target,
+            inner_file,
+            inner,
+            has_external: child_has_external,
+        });
+    }
+
+    let mut has_external_import = last_external_idx.is_some();
+    for (idx, item) in resolved_imports.into_iter().enumerate() {
+        let ResolvedImport::Local {
+            imp,
+            target,
+            inner_file,
+            mut inner,
+            has_external: child_has_external,
+        } = item
+        else {
+            continue;
+        };
+        let keep_as_import = last_external_idx.is_some_and(|last| idx < last || (child_has_external && idx > 0));
+        if keep_as_import {
+            has_external_import = true;
+            let target_rel = target
+                .strip_prefix(&program.root)
+                .unwrap_or(&target)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let child = crate::assets::Asset::with_preloads(
+                &target_rel,
+                crate::assets::Kind::File,
+                inner.into_bytes(),
+                inner_file,
+                Vec::new(),
+            )?;
+            let child_file = child.file.clone();
+            let child_id = program.modules.len();
+            program.modules.push(Rc::new(Module {
+                id: child_id,
+                file: inner_file,
+                path: target,
+                body: Vec::new(),
+                commonjs: None,
+                dynamic: false,
+                type_names: Default::default(),
+                jsx: false,
+                use_client: false,
+            }));
+            program.assets.insert(child_id, child);
+            let mut rule = format!("@import \"./{child_file}\"");
+            if let Some(layer) = &imp.layer {
+                if layer.is_empty() {
+                    rule.push_str(" layer");
+                } else {
+                    rule.push_str(&format!(" layer({layer})"));
+                }
+            }
+            if let Some(supports) = &imp.supports {
+                rule.push_str(&format!(" supports({supports})"));
+            }
+            if let Some(media) = &imp.media {
+                rule.push(' ');
+                rule.push_str(media);
+            }
+            rule.push(';');
+            edits.push((imp.start, imp.end, rule));
+            continue;
+        }
+        if let Some(media) = &imp.media {
+            inner = format!("@media {media} {{\n{inner}\n}}");
+        }
+        if let Some(supports) = &imp.supports {
+            let cond = if supports.starts_with('(') || supports.to_ascii_lowercase().starts_with("not ") {
+                supports.clone()
+            } else {
+                format!("({supports})")
+            };
+            inner = format!("@supports {cond} {{\n{inner}\n}}");
+        }
+        if let Some(layer) = &imp.layer {
+            inner = if layer.is_empty() {
+                format!("@layer {{\n{inner}\n}}")
+            } else {
+                format!("@layer {layer} {{\n{inner}\n}}")
+            };
+        }
+        edits.push((imp.start, imp.end, inner));
+    }
+
+    // Bundle relative `url(...)` assets and track `@font-face` preloads (preferring woff2 per block).
+    let mut font_face_candidates: std::collections::BTreeMap<usize, Vec<crate::assets::FontPreload>> =
+        std::collections::BTreeMap::new();
+    for rel in &scanned.urls {
+        let url_span = Span {
+            file,
+            start: rel.at as u32,
+            end: (rel.at + 4) as u32,
+        };
+        let split = rel.target.find(['?', '#']).unwrap_or(rel.target.len());
+        let (raw_path, suffix) = (&rel.target[..split], &rel.target[split..]);
+        let decoded = percent_decode_url(raw_path).ok_or_else(|| {
+            Diag::new(url_span, format!("invalid percent-encoding in `url({})`", rel.target)).code(diag::Code::Import)
+        })?;
+        let candidate = path.parent().expect("stylesheet has a directory").join(&decoded);
+        if !fs.is_file(&candidate) {
+            css_stack.pop();
+            return Err(Diag::new(
+                url_span,
+                format!("can't find \"{raw_path}\" referenced by `url({})`", rel.target),
+            )
+            .help("check the path relative to this stylesheet, or put the file in public/ and write `url(/name)`")
+            .code(diag::Code::Import));
+        }
+        let canonical = fs
+            .canonicalize(&candidate)
+            .map_err(|e| Diag::new(url_span, e.to_string()).code(diag::Code::Import))?;
+        let target = if fs.frozen_capture() {
+            canonical
+        } else {
+            let spec = if decoded.starts_with('.') {
+                decoded.clone()
+            } else {
+                format!("./{decoded}")
+            };
+            fence(&program.root, path, &spec, canonical, url_span)?
+        };
+        if crate::assets::kind(&target) != Some(crate::assets::Kind::File) {
+            css_stack.pop();
+            return Err(Diag::new(
+                url_span,
+                format!("can't bundle \"{raw_path}\" from `url({})`", rel.target),
+            )
+            .help("relative CSS `url(...)` supports static assets (images, fonts, media, etc.)")
+            .code(diag::Code::Import));
+        }
+        let target_id = load_asset(fs, &target, crate::assets::Kind::File, program, by_path, url_span)?;
+        let target_file = program.assets[&target_id].file.clone();
+        if let Some(ff) = rel.font_face
+            && let Some(mime) = crate::assets::font_mime(&target_file)
+        {
+            font_face_candidates
+                .entry(ff)
+                .or_default()
+                .push(crate::assets::FontPreload {
+                    file: target_file.clone(),
+                    mime,
+                });
+        }
+        edits.push((rel.start, rel.end, format!("./{target_file}{suffix}")));
+    }
+
+    for (_, candidates) in font_face_candidates {
+        let best = candidates
+            .iter()
+            .find(|c| c.mime == "font/woff2")
+            .or_else(|| candidates.first());
+        if let Some(chosen) = best
+            && seen_preloads.insert(chosen.file.clone())
+        {
+            preloads.push(chosen.clone());
+        }
+    }
+
+    edits.sort_by_key(|(s, _, _)| *s);
+    let rewritten = crate::css::rewrite_ranges(&text, &edits);
+    css_stack.pop();
+    Ok((file, rewritten, preloads, has_external_import))
+}
+
+fn percent_decode_url(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            };
+            let hi = hex(*bytes.get(i + 1)?)?;
+            let lo = hex(*bytes.get(i + 2)?)?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// App source loads code only from `tp/` (docs/spec/spec.md §1, `F1210`): a relative import from
@@ -737,7 +1430,19 @@ fn fence(root: &Path, from: &Path, spec: &str, target: PathBuf, span: Span) -> R
         p.strip_prefix(root)
             .map_or_else(|_| in_node_modules(p), in_node_modules)
     };
-    if !spec.starts_with('.') || installed(from) || target.starts_with(root.join(crate::layout::ROOT)) {
+    if email_module(root, from) {
+        return if email_module(root, &target) {
+            Ok(target)
+        } else {
+            Err(
+                Diag::new(span, "an email template's local imports must stay inside emails/")
+                    .code(diag::Code::ImportFence),
+            )
+        };
+    }
+    // App code imports email templates to render them with `mail.render()`.
+    let template = email_module(root, &target) && target.extension().is_some_and(|e| e == "tsx");
+    if !spec.starts_with('.') || installed(from) || template || target.starts_with(root.join(crate::layout::ROOT)) {
         return Ok(target);
     }
     let importer = from.strip_prefix(root).unwrap_or(from).display().to_string();
@@ -753,6 +1458,39 @@ fn fence(root: &Path, from: &Path, spec: &str, target: PathBuf, span: Span) -> R
     .help(format!(
         "TypedPress loads app code only from tp/: move {shown} to {destination} and import it from there, or install it as an npm package"
     )))
+}
+
+/// Maps `"spacepress"`, `"spacefast/app"`, and `"spacepress/*"` specifiers onto the compiler's
+/// canonical internal module names on parsed AST statements.
+fn normalize_spacepress_spec(spec: &str) -> Option<&'static str> {
+    match spec {
+        SP_MODULE | SPACEFAST_APP_MODULE => Some(TP_MODULE),
+        SP_APP_MODULE => Some(APP_MODULE),
+        SP_CONTENT_MODULE => Some(CONTENT_MODULE),
+        SP_CLIENT_MODULE => Some(CLIENT_MODULE),
+        SP_DB_MODULE => Some(DB_MODULE),
+        _ => None,
+    }
+}
+
+fn normalize_spacepress_modules(body: &mut [Stmt], commonjs: Option<&mut CommonJs>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Import { source, .. }
+            | Stmt::ExportNames { from: Some(source), .. }
+            | Stmt::ExportAll { from: source, .. } => {
+                if let Some(mapped) = normalize_spacepress_spec(source) {
+                    *source = mapped.to_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+    for (spec, _) in commonjs.into_iter().flat_map(|c| c.requires.iter_mut()) {
+        if let Some(mapped) = normalize_spacepress_spec(spec) {
+            *spec = mapped.to_owned();
+        }
+    }
 }
 
 /// Reads every import, re-export and `require` of `alias` as one of `"first"`.
@@ -892,7 +1630,7 @@ fn jsx_admitted(path: &Path, use_client: bool) -> bool {
     let in_folder = path
         .components()
         .any(|part| matches!(part.as_os_str().to_str(), Some("components" | "pages" | "app")));
-    in_folder || use_client
+    in_folder || path.starts_with("emails") || use_client
 }
 
 /// Whether a source can be CommonJS before it's lowered: `.cjs`, or `.js` with no import/export
@@ -1597,6 +2335,13 @@ fn resolve_with(fs: &dyn Fs, from: &Path, spec: &str, span: Span, conditions: Co
 }
 
 fn resolve_source(fs: &dyn Fs, base: &Path, spec: &str, span: Span) -> Result<PathBuf> {
+    // An explicit asset never names same-stem TypeScript (shop.css beside shop.ts).
+    if crate::assets::kind(base).is_some() {
+        if !fs.is_file(base) {
+            return Err(Diag::new(span, format!("can't find \"{spec}\"")));
+        }
+        return fs.canonicalize(base).map_err(|e| Diag::new(span, e.to_string()));
+    }
     let stripped = base.with_extension("");
     // `./util.js` conventionally names `./util.ts` in TypeScript ESM.
     let mut candidates = Vec::new();
@@ -1631,15 +2376,12 @@ fn resolve_source(fs: &dyn Fs, base: &Path, spec: &str, span: Span) -> Result<Pa
         }
     }
     if fs.is_file(base) {
-        if crate::assets::kind(base).is_some() {
-            return fs.canonicalize(base).map_err(|e| Diag::new(span, e.to_string()));
-        }
         return Err(Diag::new(
             span,
             format!("can't import \"{spec}\": expected TypeScript or JavaScript source"),
         )
         .help(format!(
-            "components and pages import {}; other files (a binary image, a font) belong in public/, by their URL",
+            "components and pages import {}; other files belong in public/ at their root URL",
             crate::assets::EXTENSIONS.join(", ")
         )));
     }

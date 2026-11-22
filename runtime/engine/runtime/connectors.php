@@ -221,7 +221,11 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
     if ($path === STATTIC_SPACE_CLIENT_TYPES_URL_PATH) {
         _stattic_space_client_serve_types($versionRoot, $method);
     }
-    $route = _stattic_connectors_route($path) ?? _stattic_legacy_zero_connectors_route($path);
+    $route = _stattic_connectors_route($path);
+    if ($route === null && str_starts_with($path, STATTIC_RUNTIME_NAMESPACE_PATH . '/zero/connectors/')) {
+        require_once __DIR__ . '/../deprecated/zero-0.8/connectors.php';
+        $route = _stattic_legacy_zero_connectors_route($path);
+    }
     if ($route === null) {
         _stattic_connectors_refuse(404, 'connector_role_unknown', 'This Space has no such connector role.');
     }

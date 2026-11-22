@@ -370,19 +370,29 @@ function tp_admin_render_classic_screen( $id ) {
 add_action(
 	'tp_admin_init',
 	static function () {
+		$pos = 280;
 		foreach ( tp_admin_screens() as $id => $screen ) {
 			if ( false === $screen['menu'] || ! current_user_can( $screen['capability'] ) ) {
 				continue;
 			}
-			$menu = (array) $screen['menu'];
+			$menu    = (array) $screen['menu'];
+			$parent  = $menu['parent'] ?? null;
+			// Put built-in system screens (`schema-versions`, `deployments`) cleanly inside Settings
+			// unless the caller explicitly placed them elsewhere.
+			if ( null === $parent && in_array( $id, array( 'schema-versions', 'deployments' ), true ) ) {
+				$parent = 'settings';
+			}
+			$section = null === $parent ? ( $menu['section'] ?? 'content' ) : null;
 			tp_admin_register_menu_item(
 				'screen-' . $id,
 				array_filter(
 					array(
-						'to'     => '/screens/' . $id,
-						'label'  => $screen['title'],
-						'parent' => $menu['parent'] ?? null,
-						'icon'   => $menu['icon'] ?? null,
+						'to'       => '/screens/' . $id,
+						'label'    => $screen['title'],
+						'parent'   => $parent,
+						'icon'     => $menu['icon'] ?? ( null === $parent ? 'layout' : null ),
+						'section'  => $section,
+						'position' => null === $parent ? $pos++ : 90,
 					)
 				)
 			);

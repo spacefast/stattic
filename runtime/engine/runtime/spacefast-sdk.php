@@ -191,10 +191,10 @@ function _stattic_comments_handle_exchange(
     // mints a ticket Cast will not accept.
     $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH
         || $requestPath === STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH;
-    // A TypedPress (`tp_v1`) build publishes no change notices, so it has no
-    // room to join: its pages poll (zero-v2-realtime.php serves them no
+    // A SpacePress / TypedPress build publishes no Zero realtime notices, so it
+    // has no room to join: its pages poll (zero-v2-realtime.php serves them no
     // transport). Zero 0.8's per-version rooms and v2's shared room stay.
-    if ($isZeroRealtimeTicket && ($serving['zero_generation'] ?? null) === 'tp_v1') {
+    if ($isZeroRealtimeTicket && in_array($serving['zero_generation'] ?? null, ['tp_v1', 'spacepress'], true)) {
         _stattic_render_json_unauthenticated('zero_realtime_unavailable');
     }
     $exchange = _stattic_access_page_exchange($serving);

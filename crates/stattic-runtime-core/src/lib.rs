@@ -57,4 +57,4 @@ pub use site_finalize::finalize_site;
 mod zero_v2;
 
 #[cfg(not(target_family = "wasm"))]
-mod typedpress;
+mod spacepress;

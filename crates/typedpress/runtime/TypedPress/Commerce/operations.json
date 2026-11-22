@@ -1,0 +1,20 @@
+{
+  "increase-product-stock": {
+    "input": {
+      "type": "object",
+      "properties": { "id": { "type": "integer", "minimum": 1 }, "quantity": { "type": "integer", "minimum": 1 } },
+      "required": ["id", "quantity"],
+      "additionalProperties": false
+    },
+    "output": { "type": "integer" }
+  },
+  "complete-order": {
+    "input": {
+      "type": "object",
+      "properties": { "id": { "type": "integer", "minimum": 1 } },
+      "required": ["id"],
+      "additionalProperties": false
+    },
+    "output": { "type": "integer" }
+  }
+}

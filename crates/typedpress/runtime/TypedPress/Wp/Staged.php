@@ -276,7 +276,7 @@ final class Staged
             return [
                 'token' => $token,
                 'expiresAt' => gmdate('Y-m-d\TH:i:s.000\Z', $expires),
-                'api' => Facade::url('/' . rawurlencode($collection) . "/$id/staged") . '?preview=' . $token,
+                'api' => add_query_arg('preview', $token, Facade::url('/' . rawurlencode($collection) . "/$id/staged")),
                 'url' => is_string($public) && $public !== '' ? add_query_arg(self::PREVIEW_PARAM, $token, $public) : null,
             ];
         });

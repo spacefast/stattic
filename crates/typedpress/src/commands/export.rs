@@ -8,7 +8,7 @@
 //! - with `--site`, the hosted site, which must run this checkout's build, signed in as an editor
 //!   (`remote::sign_in`: the credential `typedpress login` stored, or `TP_APP_PASSWORD` / `TP_TOKEN`).
 //!
-//! Each URL the site lists (`GET /__tp/api/v1/prerender`) is fetched as a signed-out visitor with
+//! Each URL the site lists (`GET /wp-json/typedpress/v1/prerender`) is fetched as a signed-out visitor with
 //! its prerender token, with its Markdown twin. The export writes `<path>.html` and `<path>.md`,
 //! `404.html`, `sitemap.xml`, `llms.txt`, `robots.txt`, `_redirects` with a refresh page at each old
 //! URL, and every same-site file the pages reference (stylesheets, images, script modules including
@@ -52,9 +52,7 @@ static MODULE_DATA: LazyLock<regex::Regex> = LazyLock::new(|| {
     pattern(r#"(?s)(<script id="wp-script-module-data-([^"]+)" type="application/json">)(.*?)(</script>)"#)
 });
 static CSS_REFERENCE: LazyLock<regex::Regex> =
-    LazyLock::new(|| pattern(r#"url\(\s*['"]?([^'")]+)['"]?\s*\)|@import\s+['"]([^'"]+)['"]()"#));
-static JS_IMPORT: LazyLock<regex::Regex> =
-    LazyLock::new(|| pattern(r#"()()(?:\bimport\s*\(\s*|\bfrom\s*|\bimport\s+)['"]((?:\./|\.\./|/)[^'"]+)['"]"#));
+    LazyLock::new(|| pattern(r#"url\(\s*['"]?([^'")]+)['"]?\s*\)|@import\s+['"]([^'"]+)['"]"#));
 static NOINDEX: LazyLock<regex::Regex> =
     LazyLock::new(|| pattern(r#"(?i)<meta name=['"]robots['"] content=['"][^'"]*noindex"#));
 
@@ -142,7 +140,9 @@ fn run(flags: Flags) -> Result<(), String> {
         .project
         .canonicalize()
         .map_err(|e| format!("{}: {e}", flags.project.display()))?;
-    let built = super::build::build(&project, super::build::frozen(false))
+    let _frontend = crate::frontend::prepare_styles(&project)
+        .map_err(|d| crate::diag::render(&d, &project).trim_end().to_string())?;
+    let built = super::build::build_site(&project, super::build::frozen(false))
         .map_err(|d| crate::diag::render(&d, &project).trim_end().to_string())?;
     if built.schema.output != crate::schema::Output::Static {
         return Err(
@@ -167,7 +167,7 @@ fn run(flags: Flags) -> Result<(), String> {
             super::build::emit_project(&project, &built).map_err(|e| format!("couldn't write tp/_generated: {e}"))?;
             let content = super::build::emit_wp_content(&project, &project.join(crate::layout::WP_CONTENT), &built)
                 .map_err(|e| format!("couldn't write wp-content: {e}"))?;
-            let seeds = crate::bundle::seed_records(&crate::loader::Disk, &project, &built.schema)
+            let seeds = crate::bundle::seed_records(&crate::loader::Disk, &project, &built.schema, true)
                 .map_err(|d| crate::diag::render(&d, &project).trim_end().to_string())?;
             let local = Local::start(&content, &seeds)?;
             let site = local.url.clone();
@@ -187,8 +187,9 @@ fn run(flags: Flags) -> Result<(), String> {
     if flags.site.is_some() {
         // The checkout's compiled app plugin, hashed as the site hashes its own (Prebuilt::appHash):
         // every file below tp/app/, so a change to any page, component or action counts.
-        let schema_php = crate::schema_php::render(&built.schema);
-        let mut files: Vec<(String, Vec<u8>)> = crate::app_plugin::files(&built, &schema_php, Vec::new(), Vec::new())
+        let public = crate::emit::public_files(&project).map_err(|e| format!("couldn't read public/: {e}"))?;
+        let (_, packaged) = crate::app_plugin::package(&built, Vec::new(), public);
+        let mut files: Vec<(String, Vec<u8>)> = packaged
             .into_iter()
             .filter_map(|(path, bytes)| {
                 let rest = path.split_once('/')?.1.strip_prefix("tp/app/")?;
@@ -310,6 +311,10 @@ struct Report {
     files: usize,
     redirects: usize,
 }
+
+/// The exported file paths and optional queries used to fetch their contents.
+type Assets = BTreeMap<String, String>;
+type AssetRequests = BTreeSet<(String, String)>;
 
 struct Export<'a> {
     agent: ureq::Agent,
@@ -466,7 +471,7 @@ impl<'a> Export<'a> {
             .prefix(".typedpress-export-")
             .tempdir_in(parent)
             .map_err(|e| e.to_string())?;
-        let mut assets: BTreeSet<String> = BTreeSet::new();
+        let mut assets = Assets::new();
         let mut refusals = Vec::new();
         for page in &pages {
             let mut html = self.rewrite(&page.html, &page.path, &exported, &moved, &mut assets, &mut refusals);
@@ -498,27 +503,45 @@ impl<'a> Export<'a> {
         }
         // Assets, and what they reference in turn (a stylesheet's fonts and images, a module's imports).
         let mut files = 0;
-        let mut queue: Vec<String> = assets.into_iter().collect();
-        let mut seen: BTreeSet<String> = queue.iter().cloned().collect();
-        while let Some(path) = queue.pop() {
-            let (status, _, body) = self.get(&format!("{}{path}", self.home), None)?;
+        let mut queue: Vec<_> = assets.into_iter().collect();
+        let mut seen: AssetRequests = queue.iter().cloned().collect();
+        let mut written = BTreeSet::new();
+        while let Some((path, query)) = queue.pop() {
+            let (status, _, body) = self.get(&format!("{}{path}{query}", self.home), None)?;
             if status != 200 {
                 return Err(format!(
-                    "{path} answered {status}; the pages reference it, so the export needs it"
+                    "{path}{query} answered {status}; the pages reference it, so the export needs it"
                 ));
             }
+            let output = stage.path().join(asset_file(&path)?);
             let mut body = body;
-            if path.ends_with(".css") || path.ends_with(".js") {
-                let text = String::from_utf8_lossy(&body).into_owned();
-                for found in self.referenced(&text, &path) {
-                    if seen.insert(found.clone()) {
-                        queue.push(found);
+            if path.ends_with(".css") || crate::assets::is_javascript(&path) {
+                let text = String::from_utf8_lossy(&body);
+                let (rewritten, references) = if path.ends_with(".css") {
+                    let references = self
+                        .referenced_styles(&text, &path)
+                        .into_iter()
+                        .map(|path| (path, String::new()))
+                        .collect();
+                    (self.relink(&text), references)
+                } else {
+                    self.rewrite_module(&text, &path)?
+                };
+                for dependency in references {
+                    if seen.insert(dependency.clone()) {
+                        queue.push(dependency);
                     }
                 }
-                body = self.relink(&text).into_bytes();
+                body = rewritten.into_bytes();
             }
-            write(&stage.path().join(asset_file(&path)?), &body)?;
-            files += 1;
+            if written.insert(output.clone()) {
+                write(&output, &body)?;
+                files += 1;
+            } else if std::fs::read(&output).map_err(|e| format!("{}: {e}", output.display()))? != body {
+                return Err(format!(
+                    "{path}: different asset queries return different content; use distinct paths for static export"
+                ));
+            }
         }
         // Redirects: a `_redirects` file, and a refresh page at each old URL for hosts without rules.
         let mut rules = String::new();
@@ -647,7 +670,7 @@ impl<'a> Export<'a> {
         page: &str,
         exported: &BTreeSet<String>,
         moved: &BTreeSet<String>,
-        assets: &mut BTreeSet<String>,
+        assets: &mut Assets,
         refusals: &mut Vec<String>,
     ) -> String {
         let html = &self.srcsets(html, assets);
@@ -674,13 +697,12 @@ impl<'a> Export<'a> {
                 && !path.ends_with(".md")
                 && !path.ends_with(".php");
             let new = if file {
-                let clean = path.to_string();
                 if name == "action" {
                     out.push_str(whole.as_str());
                     continue;
                 }
-                assets.insert(clean.clone());
-                format!("{}{clean}{}", self.flags.base, version_suffix(suffix))
+                record_asset(assets, path, suffix);
+                format!("{}{path}{}", self.flags.base, version_suffix(suffix))
             } else {
                 let target = path.trim_end_matches('/');
                 let target = if target.is_empty() { "/" } else { target };
@@ -724,7 +746,7 @@ impl<'a> Export<'a> {
     }
 
     /// `srcset` and `imagesrcset`: each candidate's same-site URL is a file of the export.
-    fn srcsets(&self, html: &str, assets: &mut BTreeSet<String>) -> String {
+    fn srcsets(&self, html: &str, assets: &mut Assets) -> String {
         SRCSET
             .replace_all(html, |c: &regex::Captures| {
                 let quote = if c.get(3).is_some() { '"' } else { '\'' };
@@ -737,7 +759,7 @@ impl<'a> Export<'a> {
                         match self.local_path(&url.replace("&#038;", "&").replace("&amp;", "&")) {
                             Some(local) => {
                                 let (path, suffix) = split_suffix(&local);
-                                assets.insert(path.to_string());
+                                record_asset(assets, path, suffix);
                                 format!("{}{path}{} {descriptor}", self.flags.base, version_suffix(suffix))
                                     .trim_end()
                                     .to_string()
@@ -791,11 +813,11 @@ impl<'a> Export<'a> {
     }
 
     /// `<style>` blocks (core's font faces, block styles): their `url(...)` files are exported too.
-    fn inline_styles(&self, html: &str, assets: &mut BTreeSet<String>) -> String {
+    fn inline_styles(&self, html: &str, assets: &mut Assets) -> String {
         STYLE
             .replace_all(html, |c: &regex::Captures| {
-                for found in self.referenced(&c[2], "/inline.css") {
-                    assets.insert(found);
+                for found in self.referenced_styles(&c[2], "/inline.css") {
+                    assets.entry(found).or_default();
                 }
                 format!("{}{}{}", &c[1], self.relink(&c[2]), &c[3])
             })
@@ -803,7 +825,7 @@ impl<'a> Export<'a> {
     }
 
     /// The Interactivity API's import map: its module URLs are files of the export.
-    fn import_map(&self, html: &str, assets: &mut BTreeSet<String>) -> String {
+    fn import_map(&self, html: &str, assets: &mut Assets) -> String {
         IMPORT_MAP
             .replace_all(html, |c: &regex::Captures| {
                 let Ok(mut map) = serde_json::from_str::<Value>(&c[2]) else {
@@ -813,7 +835,7 @@ impl<'a> Export<'a> {
                     for value in imports.values_mut() {
                         if let Some(local) = value.as_str().and_then(|u| self.local_path(u)) {
                             let (path, suffix) = split_suffix(&local);
-                            assets.insert(path.to_string());
+                            record_asset(assets, path, suffix);
                             *value = Value::String(format!("{}{path}{}", self.flags.base, version_suffix(suffix)));
                         }
                     }
@@ -882,19 +904,12 @@ impl<'a> Export<'a> {
         )
     }
 
-    /// URLs a stylesheet or script module references: `url(...)`, `@import`, and module imports.
-    fn referenced(&self, text: &str, from: &str) -> Vec<String> {
-        // A stylesheet's `url(...)` and `@import`; a module's static and dynamic imports of a path
-        // (`./x.js`, `/wp-includes/…`). Bare specifiers resolve through the import map.
-        let re = if from.ends_with(".css") {
-            &*CSS_REFERENCE
-        } else {
-            &*JS_IMPORT
-        };
+    /// URLs a stylesheet references with `url(...)` or `@import`.
+    fn referenced_styles(&self, text: &str, from: &str) -> Vec<String> {
         let dir = from.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         let mut out = Vec::new();
-        for c in re.captures_iter(text) {
-            let raw = c.get(1).or(c.get(2)).or(c.get(3)).expect("group").as_str();
+        for c in CSS_REFERENCE.captures_iter(text) {
+            let raw = c.get(1).or(c.get(2)).expect("reference").as_str();
             if raw.starts_with("data:") || raw.starts_with('#') || raw.starts_with("@wordpress/") || raw.contains("${")
             {
                 continue;
@@ -913,6 +928,92 @@ impl<'a> Export<'a> {
             out.push(path.to_string());
         }
         out
+    }
+
+    /// Discover actual module specifiers and rewrite the ones anchored to the rendering site.
+    fn rewrite_module(&self, text: &str, from: &str) -> Result<(String, AssetRequests), String> {
+        use oxc_ast::{AstKind, ast::Expression};
+        use oxc_span::{GetSpan, SourceType};
+
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(&allocator, text, SourceType::unambiguous()).parse();
+        if let Some(error) = parsed.diagnostics.first() {
+            return Err(format!("could not read module dependencies in {from}: {error}"));
+        }
+        let semantic = oxc_semantic::SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program);
+        let location = url::Url::parse(&format!("{}{}{from}", self.origin, self.home))
+            .map_err(|error| format!("invalid module URL {from}: {error}"))?;
+        let mut references = AssetRequests::new();
+        let mut edits = Vec::new();
+        for node in semantic.semantic.nodes().iter() {
+            let literal = match node.kind() {
+                AstKind::ImportDeclaration(decl) => Some(&decl.source),
+                AstKind::ExportFromDeclaration(decl) => Some(&decl.source),
+                AstKind::ExportAllDeclaration(decl) => Some(&decl.source),
+                AstKind::ImportExpression(expr) => match &expr.source {
+                    Expression::StringLiteral(literal) => Some(&**literal),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let reference = if let Some(literal) = literal {
+                literal.value.as_str().map(|value| (value, literal.span()))
+            } else if let AstKind::ImportExpression(expr) = node.kind()
+                && let Expression::TemplateLiteral(template) = &expr.source
+                && template.expressions.is_empty()
+            {
+                template.quasis[0]
+                    .value
+                    .cooked
+                    .and_then(|value| value.as_str())
+                    .map(|value| (value, template.span()))
+            } else {
+                None
+            };
+            if let Some((value, span)) = reference {
+                self.module_reference(&location, value, span, &mut references, &mut edits);
+            }
+        }
+
+        // Splice only the parsed literals; keep comments and the rest of the published module intact.
+        edits.sort_unstable_by_key(|(span, _)| std::cmp::Reverse(span.start));
+        let mut rewritten = text.to_owned();
+        for (span, value) in edits {
+            rewritten.replace_range(span.start as usize..span.end as usize, &value);
+        }
+        Ok((self.relink(&rewritten), references))
+    }
+
+    fn module_reference(
+        &self,
+        location: &url::Url,
+        specifier: &str,
+        span: oxc_span::Span,
+        references: &mut AssetRequests,
+        edits: &mut Vec<(oxc_span::Span, String)>,
+    ) {
+        let relative = specifier.starts_with("./") || specifier.starts_with("../");
+        if !relative && !specifier.starts_with('/') && url::Url::parse(specifier).is_err() {
+            return; // Bare specifiers are handled by the import map.
+        }
+        let Some(local) = location
+            .join(specifier)
+            .ok()
+            .and_then(|url| self.local_path(url.as_str()))
+        else {
+            return;
+        };
+        let (path, suffix) = split_suffix(&local);
+        let query = suffix.split('#').next().unwrap_or_default();
+        references.insert((path.to_string(), query.to_string()));
+        if !relative {
+            let output = format!("{}{local}", self.flags.base);
+            if output != specifier {
+                edits.push((span, Value::String(output).to_string()));
+            }
+        }
     }
 
     /// Absolute same-site URLs inside a file become root-relative under `--base`.
@@ -985,12 +1086,28 @@ fn split_suffix(path: &str) -> (&str, &str) {
     }
 }
 
-/// A file's `?ver=…` stays (it names the version for caches); other query strings and fragments go.
+/// Preserve WordPress versions and the full suffix of versioned public modules.
 fn version_suffix(suffix: &str) -> &str {
-    if suffix.starts_with("?ver=") && !suffix.contains('&') {
+    if (suffix.starts_with("?ver=") && !suffix.contains('&')) || public_module_query(suffix).is_some() {
         suffix
     } else {
         ""
+    }
+}
+
+fn public_module_query(suffix: &str) -> Option<&str> {
+    let query = suffix.split('#').next()?;
+    query
+        .strip_prefix('?')?
+        .split('&')
+        .any(|part| part.starts_with("ver=") || part.starts_with("tpv="))
+        .then_some(query)
+}
+
+fn record_asset(assets: &mut Assets, path: &str, suffix: &str) {
+    let versioned = assets.entry(path.to_string()).or_default();
+    if let Some(query) = public_module_query(suffix) {
+        *versioned = query.to_string();
     }
 }
 
@@ -1201,5 +1318,163 @@ mod tests {
         assert_eq!(split_suffix("/x.js?ver=1#y"), ("/x.js", "?ver=1#y"));
         assert_eq!(version_suffix("?ver=6a43"), "?ver=6a43");
         assert_eq!(version_suffix("?a=1"), "");
+        assert_eq!(
+            version_suffix("?mode=one&mode=two&tpv=6a43#ready"),
+            "?mode=one&mode=two&tpv=6a43#ready"
+        );
+        assert_eq!(version_suffix("?mode=one#tpv=6a43"), "");
+    }
+
+    #[test]
+    fn the_export_fetches_the_versioned_public_module() {
+        let flags = parse(&["--base".into(), "/docs".into()]).unwrap();
+        let listing = serde_json::json!({});
+        let export = Export::new(
+            "https://render.example.test",
+            &flags,
+            &crate::schema::Schema::default(),
+            &listing,
+        )
+        .unwrap();
+        let html = concat!(
+            r#"<script type="module" src="https://render.example.test/module.mjs?mode=one&#038;tpv=6a43#ready"></script>"#,
+            r#"<link rel="modulepreload" href="https://render.example.test/module.mjs">"#,
+        );
+        let mut assets = Assets::new();
+        let mut refusals = Vec::new();
+        let output = export.rewrite(
+            html,
+            "/",
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &mut assets,
+            &mut refusals,
+        );
+        assert!(
+            output.contains(r#"src="/docs/module.mjs?mode=one&amp;tpv=6a43#ready""#),
+            "{output}"
+        );
+        assert!(refusals.is_empty());
+        assert_eq!(assets["/module.mjs"], "?mode=one&tpv=6a43");
+        assert_eq!(
+            export
+                .rewrite_module(r#"import { name } from "./other.mjs";"#, "/scripts/module.mjs")
+                .unwrap()
+                .1,
+            AssetRequests::from([("/scripts/other.mjs".to_string(), String::new())])
+        );
+    }
+
+    #[test]
+    fn static_export_copies_and_rewrites_only_real_module_dependencies() {
+        for conflicting in [false, true] {
+            check_module_dependency_export(conflicting);
+        }
+    }
+
+    fn check_module_dependency_export(conflicting: bool) {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let source = format!(
+            r#"
+            // import "/site/comment-only.mjs";
+            const example = 'from "/site/string-only.mjs"';
+            import "/site/scripts/root.mjs";
+            export {{ default as config }} from "./config.mjs?build=blue#ready";
+            export {{ default as alternate }} from "./config.mjs?build=green";
+            const chunk = () => import(`./chunk.mjs`);
+            const logo = () => fetch("{origin}/site/logo.svg");
+            "#
+        );
+        let serve = source.clone();
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut received = BTreeSet::new();
+            loop {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(client) => client,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stopped.recv_timeout(Duration::from_millis(5)).is_ok() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(error) => panic!("local asset fixture: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+
+                stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let target = first.split_whitespace().nth(1).unwrap().to_string();
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                drop(reader);
+                let (status, body) = match target.as_str() {
+                    "/site/" => (
+                        "200 OK",
+                        r#"<script src="/site/scripts/main.mjs" type="module"></script>"#,
+                    ),
+                    "/site/scripts/main.mjs" => ("200 OK", serve.as_str()),
+                    "/site/scripts/config.mjs?build=blue" => ("200 OK", "export default 1;"),
+                    "/site/scripts/config.mjs?build=green" if conflicting => ("200 OK", "export default 2;"),
+                    "/site/scripts/config.mjs?build=green" => ("200 OK", "export default 1;"),
+                    "/site/scripts/root.mjs" | "/site/scripts/chunk.mjs" => ("200 OK", "export {};"),
+                    "/__tp-not-found" => ("404 Not Found", "<p>Missing</p>"),
+                    _ => ("404 Not Found", ""),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nX-TypedPress-Prerendered: 1\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                assert!(received.insert(target));
+            }
+            received
+        });
+        let flags = parse(&["--base".into(), "/docs".into()]).unwrap();
+        let listing = serde_json::json!({"home": format!("{origin}/site"), "urls": [{"path": "/"}]});
+        let export = Export::new(&origin, &flags, &crate::schema::Schema::default(), &listing).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let out = temp.path().join("out");
+        let result = export.write(&out);
+        stop.send(()).unwrap();
+        let received = worker.join().unwrap();
+        assert!(received.contains("/site/scripts/config.mjs?build=blue"));
+        assert!(received.contains("/site/scripts/config.mjs?build=green"));
+        if conflicting {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .contains("different asset queries return different content")
+            );
+            assert!(!out.exists());
+            return;
+        }
+        result.unwrap();
+
+        let main = std::fs::read_to_string(out.join("scripts/main.mjs")).unwrap();
+        assert!(main.contains(r#"import "/docs/scripts/root.mjs";"#), "{main}");
+        assert!(main.contains(r#"from "./config.mjs?build=blue#ready";"#), "{main}");
+        assert!(main.contains(r#"fetch("/docs/logo.svg")"#), "{main}");
+        assert!(main.contains(r#"// import "/site/comment-only.mjs";"#), "{main}");
+        assert_eq!(
+            std::fs::read_to_string(out.join("scripts/config.mjs")).unwrap(),
+            "export default 1;"
+        );
+        assert!(out.join("scripts/root.mjs").is_file());
+        assert!(out.join("scripts/chunk.mjs").is_file());
     }
 }

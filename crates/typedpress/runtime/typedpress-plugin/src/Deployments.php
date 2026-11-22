@@ -20,16 +20,12 @@ final class Deployments
     public const LIST = 'tp/deployments';
     public const LIVE = 'tp/deployments-live';
 
-    public static function register(): void
+    public static function category(): void
     {
-        add_action('wp_abilities_api_categories_init', static function (): void {
-            wp_register_ability_category('typedpress', [
-                'label' => 'TypedPress',
-                'description' => 'The TypedPress app this site runs: its deployments.',
-            ]);
-        });
-        add_action('wp_abilities_api_init', [self::class, 'abilities']);
-        add_action('tp_admin_screens', [self::class, 'screen']);
+        wp_register_ability_category('typedpress', [
+            'label' => 'TypedPress',
+            'description' => 'The TypedPress app this site runs: its deployments.',
+        ]);
     }
 
     public static function abilities(): void

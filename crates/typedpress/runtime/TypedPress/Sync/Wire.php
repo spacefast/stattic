@@ -30,7 +30,7 @@ final class Wire
         foreach ($spec['columns'] as $name => $col) {
             $name = (string) $name;
             if ($name === $spec['primaryKey'] || $name === ($spec['content'] ?? null) || $name === 'uid'
-                || isset($col['onUpdate']) || ($col['hidden'] ?? false) || (($col['derived'] ?? false) && !self::isTranslations($spec, $name))) {
+                || ($col['readOnly'] ?? false) || isset($col['onUpdate']) || ($col['hidden'] ?? false) || (($col['derived'] ?? false) && !self::isTranslations($spec, $name))) {
                 continue;
             }
             $names[] = $name;
@@ -67,6 +67,7 @@ final class Wire
                 $value = $row[$name];
                 $fields[$name] = match (true) {
                     self::isTranslations($spec, $name) && is_array($value) => array_map(static fn ($id) => $uids[$name][self::key($id)] ?? null, $value),
+                    $ref !== null && ($spec['columns'][$name]['type'] ?? '') === 'refList' => array_map(static fn ($id) => $uids[$name][self::key($id)] ?? null, is_array($value) ? $value : []),
                     $ref === null || $value === null => $value,
                     default => $uids[$name][self::key($value)] ?? null,
                 };
@@ -145,11 +146,22 @@ final class Wire
                 continue;
             }
             $ref = $spec['columns'][$name]['references'] ?? null;
-            if ($ref !== null && $value === null && ($current[$name] ?? null) !== null && !isset($named[$name][self::key($current[$name])])) {
+            if ($ref !== null && ($spec['columns'][$name]['type'] ?? '') !== 'refList' && $value === null && ($current[$name] ?? null) !== null && !isset($named[$name][self::key($current[$name])])) {
                 continue;
             }
             try {
-                $data[$name] = $ref === null || $value === null ? $value : self::resolve($ref, $name, $value, $viewer);
+                if ($ref !== null && ($spec['columns'][$name]['type'] ?? '') === 'refList') {
+                    $list = \TypedPress\Seam::container($value);
+                    if (!is_array($list) || !array_is_list($list)) { throw HttpError::invalidInput('Term references must be a list of UIDs', '/fields/' . $name); }
+                    // Null placeholders stand for links this pull could not name. Keep those
+                    // identities from the stored list; their positions may move when named links change.
+                    $unnamed = array_values(array_filter($current[$name] ?? [], static fn ($id) => !isset($named[$name][self::key($id)])));
+                    $data[$name] = [];
+                    foreach ($list as $uid) {
+                        if ($uid === null && $unnamed !== []) { $data[$name][] = array_shift($unnamed); }
+                        else { $data[$name][] = self::resolve($ref, $name, $uid, $viewer); }
+                    }
+                } else { $data[$name] = $ref === null || $value === null ? $value : self::resolve($ref, $name, $value, $viewer); }
             } catch (HttpError $e) {
                 if ($missing === null || !in_array($e->errorCode, ['sync_missing_reference', 'reference_violation'], true)) {
                     throw $e;
@@ -234,7 +246,12 @@ final class Wire
 
     private static function bodyIn(array $spec, string $body): string
     {
-        return self::markdown($spec) ? Markdown::toBlocks($body) : $body;
+        if (!self::markdown($spec)) { return $body; }
+        $blocks = Markdown::toBlocks($body);
+        // A Markdown sync record must be readable again before any write or hook runs.
+        // Native page.md blocks use toBlocks directly; nonrepresentable sync content uses *.html.
+        Markdown::fromBlocks($blocks);
+        return $blocks;
     }
 
     /** uid of each referenced row, per reference column; rows without one get one now. */
@@ -251,6 +268,8 @@ final class Wire
                     array_push($values, ...array_values(is_array($row[$name] ?? null) ? $row[$name] : []));
                 }
                 $values = array_values(array_unique($values, SORT_REGULAR));
+            } elseif ($ref !== null && ($col['type'] ?? '') === 'refList') {
+                $values = []; foreach ($rows as $row) { array_push($values, ...(is_array($row[$name] ?? null) ? $row[$name] : [])); } $values = array_values(array_unique($values));
             } elseif ($ref === null) {
                 continue;
             } else {

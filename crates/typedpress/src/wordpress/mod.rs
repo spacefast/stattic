@@ -18,6 +18,8 @@ pub struct Hook {
     pub params: Vec<(String, Ty)>,
     /// What a filter returns: its first parameter's type.
     pub returns: Ty,
+    /// The handler may be `async`: TypedPress fires this hook itself and awaits nothing WordPress wouldn't.
+    pub async_handler: bool,
 }
 
 fn catalog() -> &'static Value {
@@ -52,6 +54,7 @@ pub fn hook(name: &str) -> Option<Hook> {
         filter,
         returns: if filter { params[0].1.clone() } else { Ty::Void },
         params,
+        async_handler: h["async"] == true,
     })
 }
 
@@ -222,6 +225,9 @@ fn ts(text: &str) -> Ty {
         "unknown" => Ty::Unknown,
         "Record<string, unknown>" => Ty::Map(Box::new(Ty::Unknown)),
         "WP_Post" | "WP_User" | "WP_Query" => class(text),
+        literal if literal.len() > 1 && literal.starts_with('"') && literal.ends_with('"') => {
+            Ty::StrLit(literal[1..literal.len() - 1].into())
+        }
         other => panic!("catalog type `{other}` is outside the generator's grammar"),
     }
 }
@@ -262,6 +268,31 @@ mod tests {
         let content = hook("the_content").unwrap();
         assert_eq!(content.returns, Ty::Str);
         assert!(matches!(&hook("pre_get_posts").unwrap().params[0].1, Ty::Obj(f) if f.contains_key("set")));
+    }
+
+    #[test]
+    fn typedpress_own_hooks_are_catalog_entries() {
+        // In the catalog, so a misspelt file name is offered it ("did you mean").
+        let names: Vec<&str> = hook_names().collect();
+        assert_eq!(
+            crate::diag::suggest("typedpress_woo_order_stok", names.iter().copied()).as_deref(),
+            Some("typedpress_woo_order_stock")
+        );
+        let stock = hook("typedpress_woo_order_stock").unwrap();
+        assert!(!stock.filter && stock.async_handler);
+        assert_eq!(
+            stock.params[3],
+            (
+                "reason".to_string(),
+                Ty::union([Ty::StrLit("sale".into()), Ty::StrLit("return".into())])
+            )
+        );
+        // WordPress calls its own hooks synchronously, so none of core's admits an async handler.
+        assert!(
+            names
+                .iter()
+                .all(|n| *n == "typedpress_woo_order_stock" || !hook(n).unwrap().async_handler)
+        );
     }
 
     #[test]

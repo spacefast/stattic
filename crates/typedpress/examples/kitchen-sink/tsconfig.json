@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": [],
+    "jsx": "react-jsx",
+    "jsxImportSource": "typedpress",
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "typedpress": ["../../types/typedpress/index.d.ts"],
+      "typedpress/*": ["../../types/typedpress/*.d.ts"],
+      "typedpress:db": ["../../types/typedpress/db.d.cts"],
+      "php/wordpress": ["../../types/typedpress/wordpress.d.ts"]
+    }
+  },
+  "include": ["typedpress.config.ts", "tp", "emails"]
+}

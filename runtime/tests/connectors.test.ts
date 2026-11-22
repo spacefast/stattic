@@ -344,6 +344,38 @@ test("a tool's result reaches the page as the provider's payload, with its HTTP 
   }
 });
 
+test("an HTTP tool's upstream headers reach the page only when they are pagination, caching or rate limits", async () => {
+  answers.crm = () =>
+    Response.json({
+      state: { role: "crm", code: "ok", message: "Connected." },
+      result: {
+        ok: true,
+        data: { deals: [] },
+        http: {
+          status: 200,
+          headers: {
+            "Set-Cookie": "session=team-account-session; HttpOnly",
+            authorization: "Bearer echoed-team-key",
+            "www-authenticate": 'Bearer realm="provider"',
+            "x-account-id": "acct_team",
+            "x-ratelimit-user": "team@example.com",
+            ETag: '"v1"',
+            "x-ratelimit-remaining": "41",
+          },
+        },
+      },
+    });
+  try {
+    expect(await (await call("/__spacefast/connectors/crm/deals.list")).json()).toEqual({
+      data: { deals: [] },
+      http: { status: 200, headers: { etag: '"v1"', "x-ratelimit-remaining": "41" } },
+      state: "ok",
+    });
+  } finally {
+    delete answers.crm;
+  }
+});
+
 test("an ok answer without a top-level result reads as null", async () => {
   answers.crm = () =>
     Response.json({

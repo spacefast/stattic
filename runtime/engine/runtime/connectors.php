@@ -31,6 +31,16 @@ const STATTIC_CONNECTORS_RESPONSE_HEADERS = [
     'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
     STATTIC_EDGE_CACHE_HEADER => 'no-cache',
 ];
+// Upstream headers a page may read from an HTTP tool: pagination, caching and
+// rate limits only. Mirrors apps/control-plane/src/connectors/response-headers.ts;
+// anything else (`set-cookie`, `x-account-id`, echoed credentials) never reaches a viewer.
+const STATTIC_CONNECTORS_SAFE_UPSTREAM_HEADERS = [
+    'age', 'cache-control', 'content-type', 'date', 'etag', 'last-modified', 'link',
+    'ratelimit-limit', 'ratelimit-policy', 'ratelimit-remaining', 'ratelimit-reset',
+    'retry-after', 'vary', 'x-next-cursor', 'x-page', 'x-per-page',
+    'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+    'x-ratelimit-resource', 'x-ratelimit-used', 'x-total-count',
+];
 
 function _stattic_connectors_refuse(int $status, string $code, string $message): never
 {
@@ -278,7 +288,7 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
         if (is_array($result) && ($result['ok'] ?? null) === true && array_key_exists('data', $result)) {
             $body['data'] = $result['data'];
             if (is_array($result['http'] ?? null)) {
-                $body['http'] = $result['http'];
+                $body['http'] = _stattic_connectors_safe_http($result['http']);
             }
         }
         if (is_string($state['cachedAt'] ?? null)) {
@@ -335,6 +345,20 @@ function _stattic_connectors_post(string $url, string $token, array $body, int $
             'schemes' => ['https', 'http'],
         ]),
     );
+}
+
+/** An HTTP tool's `{status, headers}` with only the allowlisted headers, lowercased. */
+function _stattic_connectors_safe_http(array $http): array
+{
+    $headers = [];
+    foreach (is_array($http['headers'] ?? null) ? $http['headers'] : [] as $name => $value) {
+        $key = strtolower((string) $name);
+        if (is_string($value) && in_array($key, STATTIC_CONNECTORS_SAFE_UPSTREAM_HEADERS, true)) {
+            $headers[$key] = $value;
+        }
+    }
+    $http['headers'] = (object) $headers;
+    return $http;
 }
 
 function _stattic_connectors_send(array $body): never

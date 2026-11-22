@@ -839,7 +839,11 @@ function _stattic_access_session_create(
             return null;
         }
     }
-    $profile = _stattic_access_public_profile($claims['profile'] ?? null);
+    // A handoff that names nobody keeps the account it attaches to whole:
+    // its public profile and sign-in provider stay with its identity.
+    $names = _stattic_access_principal_from_claims($claims) !== null;
+    $profile = _stattic_access_public_profile($names ? ($claims['profile'] ?? null) : ($inherit['profile'] ?? null));
+    $authProvider = $names ? ($claims['authProvider'] ?? null) : ($inherit['authProvider'] ?? null);
     $session = [
         'v' => STATTIC_ACCESS_SESSION_CLAIM_VERSION,
         'sid' => $sessionId,
@@ -859,10 +863,10 @@ function _stattic_access_session_create(
         'iat' => $now,
         'exp' => $now + STATTIC_ACCESS_SESSION_CLAIM_TTL_SECONDS,
         ...($profile !== null ? ['profile' => $profile] : []),
-        ...(in_array($claims['authProvider'] ?? null, ['google', 'gravatar'], true) ? ['authProvider' => $claims['authProvider']] : []),
+        ...(in_array($authProvider, ['google', 'gravatar'], true) ? ['authProvider' => $authProvider] : []),
         ..._stattic_access_session_carried_identity($inherit),
     ];
-    $principalDeadline = _stattic_access_principal_from_claims($claims) !== null
+    $principalDeadline = $names
         ? ($claims['authorityExpiresAt'] ?? null)
         : ($inherit['principalExpiresAt'] ?? null);
     if (is_int($principalDeadline)) $session['principalExpiresAt'] = $principalDeadline;
@@ -918,6 +922,8 @@ function _stattic_access_session_inheritable(?array $identity): array
         'principal' => $record['principal'] ?? null,
         'principalExpiresAt' => $record['principalExpiresAt'] ?? null,
         'identity' => $record['identity'] ?? null,
+        'profile' => $record['profile'] ?? null,
+        'authProvider' => $record['authProvider'] ?? null,
         'anonymousId' => $record['anonymousId'] ?? null,
         'identityCheckedAt' => $record['identityCheckedAt'] ?? null,
         'accessRequestedPath' => $record['accessRequestedPath'] ?? null,
@@ -4589,6 +4595,27 @@ function _stattic_access_consume_handoff_token(
     $currentAuthorities = !$replaceSession && is_array($current) && is_array($current['authorityEntries'] ?? null)
         ? $current['authorityEntries']
         : [];
+    $inherit = $replaceSession ? [] : _stattic_access_session_inheritable($current);
+    // One session holds one account, on every lane a handoff attaches through
+    // (`/__spacefast/in/`, `/__sf/redeem`). A handoff that names someone other
+    // than the session's own principal takes nothing a previous account held:
+    // a guest keeps only its credential lanes (link, password, machine, claim
+    // preview), which say what the holder may do and never who they are, and
+    // its pseudonym. A handoff that names nobody (a link, a password) attaches
+    // to whoever the session already is.
+    $principal = _stattic_access_principal_from_claims($claims);
+    $currentPrincipal = _stattic_access_identity_principal($current);
+    if (!$replaceSession && $principal !== null && $principal !== $currentPrincipal) {
+        $guest = !_stattic_access_principal_is_account($currentPrincipal);
+        $currentAuthorities = $guest
+            ? array_values(array_filter(
+                $currentAuthorities,
+                static fn (mixed $entry): bool => is_array($entry)
+                    && preg_match('/\A(?:link|password|machine|claim-preview):/', (string) ($entry['reference'] ?? '')) === 1
+            ))
+            : [];
+        $inherit = $guest ? $inherit : [];
+    }
     $combinedAuthorities = _stattic_merge_authority_lru(
         $currentAuthorities,
         _stattic_callback_authorities($verified),
@@ -4613,7 +4640,7 @@ function _stattic_access_consume_handoff_token(
         is_array($serving['authorization'] ?? null) ? $serving['authorization'] : [],
         $combinedAuthorities,
         $storedRecord,
-        $replaceSession ? [] : _stattic_access_session_inheritable($current)
+        $inherit
     );
     if ($credential === null) {
         return null;

@@ -1,7 +1,7 @@
 {
-  "revision": "50906ad0a0a025b286fc389e18c3a1b926dc96f4",
-  "sourceHash": "3463d88331ce71f1c95baf518370ca87b3e180a1aa0da03cd2f6e98bfc655b0b",
-  "manifestSha256": "abce4da01b4e3e90cd335b0ff4b789d5f2d958309fbae93ebfba4647e884e23a",
+  "revision": "4ef8115ea72be092a5f65deb3c695fa973bc41b0",
+  "sourceHash": "b773102e1126eb36deff5aa9d23d9be3da54a0e595aedf86bae29613dba12767",
+  "manifestSha256": "940df6a4b2dec83bf16e71ee3fddffe16775f62512f48396f967428976106d9f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "8f2b0848bffe3b61d8e0e8f072731e08efc28713311d8faa0720eb655cbfe4df"
+      "sha256": "28ca3c9a70b5d65cbe16ef8631046073781402763fef9a68cc41360d20710187"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "98e91ab2180c2a95259b63729b7d96b170d0bb6f8fc88c6e2289b51a6aac1e29"
+      "sha256": "ddf3aa7ac86000a6dd091b3c1f2adcf9df026765fd5eaa46b9337aa1c63d792b"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29184,20 +29184,60 @@
       "sha256": "d4bec792df4d2bb5cc1735e10b2cb5623a559919efb3189665c959e6bb3ac64f"
     },
     {
+      "path": "runtime/browser-specs/confined.sh",
+      "sha256": "f22a7d51ecc629689709b2bb9042dedd0dbacaecdd259153c7db429d106a2b59"
+    },
+    {
+      "path": "runtime/browser-specs/confinement.ts",
+      "sha256": "ce829217689df623f82ef696cacd9f2a4f7b492e8e824857c09f91ab6e7c591e"
+    },
+    {
+      "path": "runtime/browser-specs/control-plane-access-fixture-main.ts",
+      "sha256": "5853767ea72737a03e626a75c36e7ac80153c1ecec59f6ef1ee5a4698167bc2b"
+    },
+    {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
-      "sha256": "dd09656a16e301cfbfc31bfdc01b80276615c8cd0b23f63f607c4ec356502042"
+      "sha256": "dbb273ec8d9f34bac4932b7fc85fc0457f9ef47d7de327d51b36a0256a5490eb"
+    },
+    {
+      "path": "runtime/browser-specs/launcher-database.ts",
+      "sha256": "35230e041eb21dd5109bc3681546a78105a02eb09d6d4f523b55dfd11cc04499"
+    },
+    {
+      "path": "runtime/browser-specs/loopback-relay.ts",
+      "sha256": "81d7f792307c3a53bb58a680fbb49028dfcc359d3e812fb033b1d37723afc904"
+    },
+    {
+      "path": "runtime/browser-specs/name-proxy.ts",
+      "sha256": "dbdef08a7fdc49d6f4be6983be6117c7d591b0ce28b3cb8b7e6a26543e20be62"
     },
     {
       "path": "runtime/browser-specs/origin-null-access.test.ts",
-      "sha256": "1cb2152de6e908ef7c908bb76789f5486145cdb768f62d9f54e096fc2dd7b57a"
+      "sha256": "115347879159039b77080d1b7b483f6e6be194f5277f04cfba7b2030a5da73db"
     },
     {
       "path": "runtime/browser-specs/run-ci.sh",
-      "sha256": "36694f789ce9cbe4fffbff45ab5354640ab3ce825834d60d9f77a5ac4f243ee4"
+      "sha256": "9aa03d391b2b3212d77b11b0f3e8f128b0be9de50492d4e5dbb6b5e257f5ee90"
+    },
+    {
+      "path": "runtime/browser-specs/run-main.ts",
+      "sha256": "ba717f761a6adde0f4ab949487f4fe3cadedcc966f017028088d39e3d0b4f2fe"
     },
     {
       "path": "runtime/browser-specs/run.ts",
-      "sha256": "34f078844a2fda367a42bb8b8fabe240215e8ee70f095af428c0d9cea133cf3f"
+      "sha256": "4ff22566fe746e9dc39d4100a44a5e2f092ed57fb157aa4a05475c6ba1a660bb"
+    },
+    {
+      "path": "runtime/browser-specs/sign-in-flow-fixture-main.ts",
+      "sha256": "3346e9301329cc0a6a58f91b4098bc7b990340f321667471623e7684e178e9db"
+    },
+    {
+      "path": "runtime/browser-specs/sign-in-flow-fixture.ts",
+      "sha256": "b7b56a81b3b2c05720bcfe595f425f75639091e0e665f5ae8b107fa74845870e"
+    },
+    {
+      "path": "runtime/browser-specs/sign-in-flow.test.ts",
+      "sha256": "e0e57e58dea7b72aadd0226669d74d980515ccc007414957513d2e8081820db0"
     },
     {
       "path": "runtime/browser/sell-checkout-element.js",
@@ -29405,7 +29445,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "ea54f0302c0edbfd58b6e3142886b6dba9e1c3db7bb4d4b4fc6cdc6f1360abf6"
+      "sha256": "068edd3498d455373342c90a7940d436359900a223063e5d7938d3395560eb07"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -30109,7 +30149,7 @@
     },
     {
       "path": "runtime/tests/access-chain.test.ts",
-      "sha256": "a5df2fdca8a0d5a16e909de76b5b3727535da16cbe166960528395e042c4429d"
+      "sha256": "61841bb4bdd9d83365ed81f8026cca33778a58d9c980b8cce15b3c079f4683cd"
     },
     {
       "path": "runtime/tests/access-page.test.ts",

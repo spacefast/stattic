@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
-# Runs the runtime browser proof. Turbo's ci:runtime-browser calls it directly:
-# spacefast#generate restored the skill artifacts, and ci:runtime-prepare built
-# the native runtime and the Zero dashboard in this checkout. Outside CI it
-# builds both itself, so a local run never reuses a stale dashboard.
+# Runs the runtime browser proof in a loopback-only network namespace
+# (confined.sh). Turbo's ci:runtime-browser calls it directly.
+#
+# It builds nothing and downloads nothing: everything it needs must already be
+# in this checkout, and run.ts refuses to start, inside the namespace, when an
+# input is missing, naming the command that makes it. In CI, ci:runtime-prepare
+# (runtime/tests/prepare.sh) fetches the pinned WordPress toolkit and builds the
+# native runtime and the Zero dashboard, and turbo builds the hosted dashboard
+# (`@spacefast/my#build`) and the skill artifacts (spacefast#generate) first.
+# Locally:
+#
+#   bash runtime/tests/prepare.sh            # toolkit, native runtime, Zero dashboard
+#   bun run --cwd apps/my build:hosted       # the hosted dashboard
+#   bash runtime/browser-specs/run-ci.sh [spec]
+#
+# (SPACEFAST_RUNTIME_BIN names a native runtime built elsewhere from this
+# checkout's native inputs.)
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+
+# The proof runs only with loopback-only networking. Say so at once on a host
+# that cannot give it one.
+unshare -rn true || {
+  echo "run-ci.sh: unprivileged user and network namespaces (unshare -rn) are not" \
+    "available here, and the browser proof will not run with host networking." >&2
+  exit 3
+}
 
 if [[ -n "${CI:-}" ]]; then
   # This task runs beside the integration suite, which reports coverage from the
@@ -19,23 +40,16 @@ if [[ -n "${CI:-}" ]]; then
   export LLVM_PROFILE_FILE="$profile_dir/browser-%p-%m.profraw"
   export SPACEFAST_PHP_COVERAGE_DIR="$repo_root/.ci-coverage/runtime/php-browser"
   mkdir -p "$SPACEFAST_PHP_COVERAGE_DIR"
+elif [[ -n "${SPACEFAST_RUNTIME_BIN:-}" ]]; then
+  # A binary the caller already built from this checkout's native inputs.
+  runtime_binary="$SPACEFAST_RUNTIME_BIN"
 else
-  cargo build --locked -p stattic-runtime-compiler --bin stattic-runtime
-  runtime_binary="$(bash runtime/tests/runtime-binary.sh)"
+  # The debug build prepare.sh made; run.ts names the command when there is none.
+  runtime_binary="$(bash runtime/tests/runtime-binary.sh 2>/dev/null)" || runtime_binary=""
 fi
 
-# CI starts from a fresh checkout, so an existing dashboard came from
-# ci:runtime-prepare in this run. Locally the gitignored directory can be stale
-# or half-written.
-if [[ -z "${CI:-}" || ! -f runtime/wordpress/zero-dashboard/zero-dashboard.php ]]; then
-  bun legacy/zero-0.8/dashboard/scripts/build.ts >/dev/null
-fi
-
-database_url="${SPACEFAST_TEST_DATABASE_ADMIN_URL:-postgres://stattic:stattic@127.0.0.1:25432/stattic}"
-DATABASE_URL="$database_url" bun run --cwd apps/control-plane db:migrate
-SPACEFAST_RUNTIME_BIN="${SPACEFAST_RUNTIME_BIN:-$runtime_binary}" \
-  SPACEFAST_TEST_DATABASE_URL="$database_url" \
-  bun runtime/browser-specs/run.ts
+SPACEFAST_RUNTIME_BIN="$runtime_binary" \
+  bash runtime/browser-specs/confined.sh bun --no-install runtime/browser-specs/run.ts "$@"
 
 if [[ -n "${CI:-}" ]]; then
   # The proof's PHP coverage must land in its own directory, not in the one the

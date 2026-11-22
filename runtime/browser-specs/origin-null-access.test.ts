@@ -3,6 +3,7 @@ import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { chromium, type Browser } from "@playwright/test";
 
 import { browserTestOptions } from "../../scripts/browser-test-options.cjs";
+import { requireLoopbackOnly } from "./confinement.ts";
 
 setDefaultTimeout(120_000);
 
@@ -51,6 +52,8 @@ const UNREACHABLE_IN_THIS_FIXTURE = {
   "open-used": "requires a consumed single-use central Open credential",
 } as const;
 
+// No browser starts outside the launcher's loopback-only namespace.
+await requireLoopbackOnly();
 const fixture = (() => {
   const raw = process.env.SPACEFAST_BROWSER_FIXTURE_JSON;
   if (!raw) throw new Error("control-plane access fixture is required");

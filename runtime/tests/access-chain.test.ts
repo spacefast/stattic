@@ -337,7 +337,15 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     audience: { kind: "external", issuer: "spacefast-share", subject: "consent.view" },
     capabilities: ["page.view"],
   });
-  const capabilities = (cookie: string) => {
+  // A share link, so a link can be followed through an account sign-in.
+  config.authorization.grants.push({
+    ...owner,
+    id: "grt_chain_link",
+    audience: { kind: "link", linkId: "lnk_chain" },
+    capabilities: ["page.view", "comments.read"],
+  });
+  // What a session cookie says: who it is, and what it may do on `/`.
+  const sessionOf = (cookie: string) => {
     const php = Bun.spawnSync(
       [
         process.env.PHP_BINARY ?? "php",
@@ -350,7 +358,11 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       $claims = _stattic_access_session_decode($serving, '${OAUTH_HOST}', $input['cookie']);
       if ($claims === null) throw new RuntimeException('invalid signed session');
       $refs = array_column($claims['authorities'], 'reference');
-      echo json_encode(_stattic_grant_decision($projection, '/', ['kind' => 'live'], $refs, $refs)['capabilities']);
+      echo json_encode([
+        'principal' => $claims['principal'] ?? null,
+        'identity' => $claims['identity']['subject'] ?? null,
+        'capabilities' => _stattic_grant_decision($projection, '/', ['kind' => 'live'], $refs, $refs)['capabilities'],
+      ]);
     `,
         fileURLToPath(new URL("../engine/runtime/access-rules.php", import.meta.url)),
       ],
@@ -365,8 +377,15 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       },
     );
     expect(php.exitCode, php.stderr.toString()).toBe(0);
-    return z.array(z.string()).parse(JSON.parse(php.stdout.toString()));
+    return z
+      .object({
+        principal: z.string().nullable(),
+        identity: z.string().nullable(),
+        capabilities: z.array(z.string()),
+      })
+      .parse(JSON.parse(php.stdout.toString()));
   };
+  const capabilities = (cookie: string) => sessionOf(cookie).capabilities;
   await deploy(runtime, {
     spaceId: OAUTH_SPACE,
     versionId: OAUTH_VERSION,
@@ -718,6 +737,80 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     keepCookies(response);
   }
   expect([...jar.keys()].filter((name) => name.startsWith("__Host-spacefast_oauth_"))).toEqual([]);
+  // Every way a handoff attaches (here `/__spacefast/in/`) keeps one account
+  // per session: another account's sign-in takes nothing the first account
+  // held, while a link or the same account attaches to what is there.
+  const handoff = (claims: { sub: string; principal?: string }) => {
+    const now = Math.floor(Date.now() / 1000);
+    return signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {
+      ...claims,
+      purpose: "handoff",
+      authorities: [claims.sub],
+      iss: "spacefast-api",
+      aud: OAUTH_SPACE,
+      host: OAUTH_HOST,
+      spaceId: OAUTH_SPACE,
+      generation: 1,
+      sid: createHash("sha256").update(randomUUID()).digest("hex"),
+      emailVerified: false,
+      iat: now,
+      nbf: now,
+      exp: now + 60,
+      jti: randomUUID(),
+    });
+  };
+  const redeemOver = async (held: string, token: string) => {
+    const response = await get(
+      runtime,
+      OAUTH_HOST,
+      `/__spacefast/in/${encodeURIComponent(token)}?return=%2Fdocs%2F`,
+      { headers: { cookie: held } },
+    );
+    expect(response.status).toBe(303);
+    return (
+      response.headers
+        .getSetCookie()
+        .find((value) => value.startsWith("__Host-spacefast_session="))
+        ?.split(";")[0] ?? ""
+    );
+  };
+  const manager = await redeemOver(
+    "",
+    handoff({ sub: MEMBER, principal: "account:usr_oauth_chain" }),
+  );
+  expect(capabilities(manager)).toContain("access.manage");
+  const otherAccount = await redeemOver(
+    manager,
+    handoff({ sub: SHARE_REFERENCE, principal: "account:usr_oauth_other" }),
+  );
+  expect(sessionOf(otherAccount)).toEqual({
+    principal: "account:usr_oauth_other",
+    identity: null,
+    capabilities: ["page.view"],
+  });
+  const sameAccount = await redeemOver(
+    manager,
+    handoff({ sub: SHARE_REFERENCE, principal: "account:usr_oauth_chain" }),
+  );
+  expect(sessionOf(sameAccount).principal).toBe("account:usr_oauth_chain");
+  expect(capabilities(sameAccount)).toContain("access.manage");
+  // A link names nobody: the account that follows it stays itself and keeps
+  // what it held.
+  const managerWithLink = await redeemOver(manager, handoff({ sub: "link:lnk_chain" }));
+  expect(sessionOf(managerWithLink).principal).toBe("account:usr_oauth_chain");
+  expect(capabilities(managerWithLink)).toEqual(
+    expect.arrayContaining(["access.manage", "comments.read"]),
+  );
+  // A guest's link says what the holder may do, never who they are, so it
+  // stays when the guest signs in.
+  const guest = await redeemOver("", handoff({ sub: "link:lnk_chain" }));
+  expect(capabilities(guest)).toContain("comments.read");
+  const guestSignedIn = await redeemOver(
+    guest,
+    handoff({ sub: SHARE_REFERENCE, principal: "account:usr_oauth_other" }),
+  );
+  expect(sessionOf(guestSignedIn).principal).toBe("account:usr_oauth_other");
+  expect(capabilities(guestSignedIn)).toContain("comments.read");
   const exchangesBeforeRotation = exchangeCount;
   await putRoute(runtime, OAUTH_SPACE, "production", {
     version_id: OAUTH_VERSION,

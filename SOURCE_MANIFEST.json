@@ -1,7 +1,7 @@
 {
-  "revision": "e104c6e186d3c7d3502dc1fbd46a9b829b62d746",
+  "revision": "38772a7ebc0d820710f8a7b107b6fe1e382479c6",
   "sourceHash": "f9246c0f4dd4f6b0b41dbd86b60a963b8fe44715d203c9c888f4278ef5466085",
-  "manifestSha256": "196621f52ced70f6d45281ff782a1f6f540da89f037bcda47b996b5ae5e86175",
+  "manifestSha256": "0417cc4d4fc1feaac8d37611a009603152a000bba7798fd6257c34cd61911349",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "cbe8699ac03154b31cbf5c0d034fa982ff40ecf38f6c7fbbea1576df666eb865"
+      "sha256": "fe9ff3e7b450c85c1f499c3d506cb7ced7ad8e6c859ae26343c665264a472e9c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "87d8b97d74c4a3b76be0ca89206705ab450b6d6b31940339bbbae23cdc0d152e"
+      "sha256": "97a24df720f596c900bc9c2947d36d81eab74ee1f43797653f99b6841d348c83"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -30909,7 +30909,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "1cfbe7b81fff4515b4802e0aa4d5a6e82061ceabbc50613f3cbb8bbd218cdd0a"
+      "sha256": "62654167e0b5930133d11ea3b1629a610160ed78bf1539e80b73e76d8569b1bd"
     },
     {
       "path": "runtime/tests/run-ci.sh",

@@ -853,6 +853,10 @@ test("host classes: canonical redirects, and a version-pinned host serves its ve
   expect(canonical.headers.get("location")).toBe(
     "https://site.test/blog/post.html?from=www&return=%2Fdocs%3Fa%3D1",
   );
+  expect(await healthServing(rt, WWW, "ver_site_1")).toMatchObject({
+    state: "serving",
+    version_match: true,
+  });
   // A 308 keeps the method, so a POST is redirected too, never answered 405.
   const posted = await get(rt, WWW, "/blog/post.html?from=www", { method: "POST" });
   expect(posted.status).toBe(308);

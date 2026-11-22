@@ -97,6 +97,8 @@ pub struct FinalizeTelemetry {
     pub listings_ms: u64,
     pub response_tables_ms: u64,
     pub catalog_delta_ms: u64,
+    #[serde(default)]
+    pub cookie_scan_ms: u64,
     /// Writing and validating the version artifacts: metadata, catalog, debug
     /// and Zero artifacts, plus the staging-workspace teardown.
     #[serde(default)]

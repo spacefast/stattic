@@ -221,7 +221,12 @@ test("native finalize publishes and serves a site end to end", async () => {
   });
   expect(nextResponse.status).toBe(200);
   const nextReceipt = runtimeVersionFinalizeResponseSchema.parse(await nextResponse.json());
-  expect(nextReceipt.delta).toEqual({ added: 0, changed: 1, removed: 0 });
+  expect(nextReceipt.delta).toEqual({
+    added: 0,
+    changed: 1,
+    removed: 0,
+    base_version_id: "ver_native_1",
+  });
 
   const updatedHome = await get(rt, HOST, "/");
   expect(updatedHome.status).toBe(200);

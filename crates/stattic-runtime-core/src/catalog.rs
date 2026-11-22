@@ -119,6 +119,14 @@ pub struct FileCatalog {
     /// existed, which disables adoption against them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_context_digest: Option<String>,
+    /// Digest over the cookie-write scanner revision and normalized shared
+    /// apexes that validated every script/HTML object in this catalog. A later
+    /// finalize may skip re-scanning an object whose `(sha256, html, encoding,
+    /// syntax)` already appeared in a previous catalog with a matching digest;
+    /// absent on older catalogs or when no managed apexes were configured,
+    /// which fails closed to a full scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_scan_policy_digest: Option<String>,
 }
 
 /// The two scalars the control plane keeps on the version row instead of a file
@@ -190,6 +198,10 @@ pub struct CatalogDelta {
     pub added: usize,
     pub changed: usize,
     pub removed: usize,
+    /// The version this delta was computed against, stored in immutable
+    /// metadata so replays report the exact comparison base even if Live moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_version_id: Option<String>,
     /// The request paths whose cached responses this publish invalidates.
     /// `null` means the purge cannot be scoped and the caller must drop the
     /// whole host cache.
@@ -420,6 +432,7 @@ pub fn build_catalog(input: &CatalogInput<'_>) -> FileCatalog {
         template_paths: input.template_paths.clone(),
         generated_at: input.generated_at.into(),
         pipeline_context_digest: input.pipeline_context_digest.clone(),
+        cookie_scan_policy_digest: None,
     }
 }
 
@@ -530,6 +543,7 @@ pub fn catalog_delta(
         added,
         changed: changed_count,
         removed,
+        base_version_id: None,
         changed_paths,
     };
 

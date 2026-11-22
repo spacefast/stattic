@@ -1,7 +1,7 @@
 {
-  "revision": "dcd7fdd9e5ed1a244b28c4def8a9e93162cfea9b",
-  "sourceHash": "0ec354d8da4d2c5763897a8f925786ccc6a12b9dc60a66cec995193ffd01fc5f",
-  "manifestSha256": "202581bca7f6d236aa9c6a310962b631df378648cf81032d5021d1a55e38372b",
+  "revision": "3abe72d7d4b669cd7c684c96f283345f4f56d493",
+  "sourceHash": "e200c4aad923d660098f7fc3310abe82c52b3bb1cd76a0661da89f4c3518c86b",
+  "manifestSha256": "480b2426f33b8123f355d113fe7eec2d9920fbe725f4c92132b6900a6e451e7e",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "486c82f7a7fa37717104fbccf84e02989f01503a5fd953cc3e62c71b907b0b0a"
+      "sha256": "a7b9de99aac6d92a4e2dc658b850b2c6bf9d4c8d92b92dccb4a7a73d219cc32b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "db3d6fc556db2b5bc4a73f9b6e2500253905b36932a9de47f0be12946568ca06"
+      "sha256": "324ca2f257c0544e3f79d6b67c7f885a58ac404adc45121093355a3b3d04745c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -49,7 +49,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/catalog.rs",
-      "sha256": "bc0340a77571e50be2781757b48699efca1bbe459b8f093283bae4ff1be38d1e"
+      "sha256": "73ce4dc514b6918fd0d0eb247f9ffbe44d058e825b37c3b5722dc63c5ea77415"
     },
     {
       "path": "crates/stattic-runtime-core/src/config/access.rs",
@@ -109,7 +109,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/content/mod.rs",
-      "sha256": "17760f9e0c320165f85b1bc7f3a1b86ff3951a1e0530e4c75fb267ee1b9415cb"
+      "sha256": "3c00208b9bb2648260ef6536fc13f66c30b40ae0efdc71d2488c36a5b41ac724"
     },
     {
       "path": "crates/stattic-runtime-core/src/content/support.rs",
@@ -121,7 +121,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/cookie_writes.rs",
-      "sha256": "236c1b2c8abba540de93c841ec6df068d4081158af3dc266f8794afb222c2037"
+      "sha256": "d009d02375e7de9c45608ff853c5be693fbfbc7ce4a831c2339781d79c7043ce"
     },
     {
       "path": "crates/stattic-runtime-core/src/csp.rs",
@@ -141,7 +141,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/html_scripts.rs",
-      "sha256": "ad2ad798cd0db4ec4cda302e68aca80bd9cc274369b6b6db0b6fe900b0700b4c"
+      "sha256": "18909067fa49aa0fa95e9c3dc6b528f8635044073be7527705be04e942b64f6b"
     },
     {
       "path": "crates/stattic-runtime-core/src/io.rs",
@@ -181,7 +181,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/model.rs",
-      "sha256": "1ac83ee3f80d3d399f3a39aee2c2b79115c66d3f69776c936f9fc7bdf563b43a"
+      "sha256": "75e676219af12cf188210685d20e133fed449e5cfe9a58370baa926bc5d640b6"
     },
     {
       "path": "crates/stattic-runtime-core/src/policy.rs",
@@ -233,11 +233,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "85e7e4551ad6e737eedbed70aefeea7e56e5229ff8b4b6b1f844557f25c9ffdd"
+      "sha256": "2ed97564fe2d2086825e8db30ca364017b84cbff66620c45f0f496b0eb2edd7b"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
-      "sha256": "0e9ccd362b730a4f08a15e5ddc758a2aa8806bd5800efd6e420c81839686321c"
+      "sha256": "92bcf7e03842d03ee100298455ea83844022e6cb48e54c98334dc2460aa58341"
     },
     {
       "path": "crates/stattic-runtime-core/src/transforms/conventions.rs",
@@ -29273,7 +29273,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "df59cf4cab9e481d0d823bf2f48d07e617d4189bc357729d60f89248a42a1af7"
+      "sha256": "fdcdd6c4bef99fa6c6e21e1405d07e4cc6b0667fe5e43d91bb1bd51fa7c47563"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -29469,7 +29469,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "c4517da5b45d03fb1e785b3df86c7edf24f5be8e713eaf01de1c25f1fbae250e"
+      "sha256": "f664962646a30cc49d350e2a80b6e5a4cc8f0741e72d696ee42922329ebfef0a"
     },
     {
       "path": "runtime/engine/runtime/sell.php",
@@ -29484,16 +29484,16 @@
       "sha256": "2efd75810b1491a413ac29000ef24470d10ba179948ca46f5d1cd5fbea3b14ae"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/auto-42R3BR4Z.js",
-      "sha256": "1a8376ddffc9863198c2b62dee1667a9e8fa3b6e08b61f310578a2e80da411c1"
+      "path": "runtime/engine/runtime/space-client/chunks/auto-CQWFNIQJ.js",
+      "sha256": "e464980730011d8b890a8dbe2d3fdec856249813831c857de745e878a9654e47"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/bar-H3BCEIWS.js",
-      "sha256": "726ce24d9026c84ac8a64018d3776bb7570152309513272af71b9cbfdb7c89ad"
+      "path": "runtime/engine/runtime/space-client/chunks/bar-L5KB2NRI.js",
+      "sha256": "90ef4a61e4ea0271288c83f64960aee18a634f60133aa5f37aa02891999b03a5"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/bar-comments-343ZLFD7.js",
-      "sha256": "18f93d211bd7c3ef2d788a7e8e1a2920d46b4a350cbedad68ac5837e4d9709d6"
+      "path": "runtime/engine/runtime/space-client/chunks/bar-comments-WUSLSDRE.js",
+      "sha256": "07224f981313616dd2b5219ed6d16c48d3808ab9941eee67b353d935cabb897d"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/capture-LTHFQROJ.js",
@@ -29510,6 +29510,18 @@
     {
       "path": "runtime/engine/runtime/space-client/chunks/chart-map-H4NFNBEY.js",
       "sha256": "bf4b708fa839c84b0f4c1b6db7fa4302723454e9a30a6e676a1d70e73dd2ecbe"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-3TBODU23.js",
+      "sha256": "ec9bdfcd8bea9b5a17ec831e44d37714ee1d59d17fdec011c43afddf7264c806"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-4XHXHDMG.js",
+      "sha256": "6bda0ec952cf259f66a588ddcdc7879f3164e89a449c71acf620c844c5a87e2f"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-5C47OZI6.js",
+      "sha256": "6e63c1a9d59cafae5048df0a61757d71e5f136cddf984d647b7b6c09d843c9db"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-74NIGQOE.js",
@@ -29536,8 +29548,20 @@
       "sha256": "8dc37918c47444e46718cde2c10951e226f40abb43cad2e33d9c4ad332add584"
     },
     {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-B2KXSPAD.js",
+      "sha256": "002283f5e0ee548a2809a31adfd84bd2fa9c7ffd6d7e8003df66add3d7c17229"
+    },
+    {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-BBZ3KVP6.js",
       "sha256": "0e51ab0510c342039189043a811c61d9796d44e7c0706284a88da6277d3d68f8"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-BEGT72XY.js",
+      "sha256": "49810c2526ef1a15eb46d0b9681e8942fcbcae96d0f1f072d11ffeca99625b29"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-BFRY5SU4.js",
+      "sha256": "ae6e68869ddfdf49dc218336009c954af8e35e198f98d7d121e245e2b2e84801"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-BPQDU4JB.js",
@@ -29546,6 +29570,10 @@
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-CXBGMSNS.js",
       "sha256": "2ea9f41f1aecce5847989500a92f76699bdd63485e68581c6179c79c76b25cfa"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-D3XNUNJB.js",
+      "sha256": "c635c8010f998c92b3317548913bed2f14c6eeb48842278242d7f22a4b7545fc"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-DCANE7XH.js",
@@ -29564,12 +29592,12 @@
       "sha256": "f1e29e1869110818429e29cdea64c24c8c91cd77be0866d19e1600606c9b364e"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-FGRW3PCW.js",
-      "sha256": "217adc7dfcdd6654f8ff04504abef9b3b918e53a8a82bc0df0f3388f2961c25d"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-F5XHYE3I.js",
+      "sha256": "5fcba1fe629631aa4a6961d0d8a3c553755c566efe3edcb92937e45a319d806a"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-GWN5G4I7.js",
-      "sha256": "b36b27ff405d6e47aa03eba4999fa3dc887c956439a978d983d3a5b4d6ef7d0c"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-FGRW3PCW.js",
+      "sha256": "217adc7dfcdd6654f8ff04504abef9b3b918e53a8a82bc0df0f3388f2961c25d"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-HWO2J6AG.js",
@@ -29584,14 +29612,6 @@
       "sha256": "8bfd288f9aa7b80036203cc4d80a5209548b75bedf303a9ce2ba85e503aa027c"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-IYTDJONF.js",
-      "sha256": "7357282ccf3839f91b7641bd73e5bf97749bb87ed99c728098be544e74e04bef"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-K4F6IOVV.js",
-      "sha256": "5b6885399248986ef9013accfa105814f760f558688daae4468127e7d7a811b9"
-    },
-    {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-KCEFERC7.js",
       "sha256": "a86a73d295644d4266a894edf0f3f51cc5f5f2e443b33a424c42525b829d7923"
     },
@@ -29600,60 +29620,40 @@
       "sha256": "5750b7233fb95813265f912ded2d32a7b41538cb4b6de6b4eed1e047863368c9"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-LLGJVLE6.js",
-      "sha256": "eab8d5248b3f1f2c51fafb3cc2f58e4d429e89b3e90e24b9a6406c29bb0ac9ed"
-    },
-    {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-MMXFK2VG.js",
       "sha256": "8ded4155d0d53a6da43c676b59b4a4b01d76770d8fa6d8d26ef9e82068d0b24b"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-MTAP4OGP.js",
-      "sha256": "4591d7134eadca77540ff31584b1b378c2d1ed2a0f5b071d0fa4fb1250d1ba8e"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-OEFJXNBA.js",
       "sha256": "56e2d6c6b4d0858988f697067a7ed92f37e6e11295ad0e535bed8f7eee7f88a1"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-OOLZDKHT.js",
-      "sha256": "3a530f9f5ca56ee1170c2c71118e8f9eb7201aa8f96b26cc12d4543f82af596f"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-OU6GHPIR.js",
-      "sha256": "f8c091596eb5d480005fc81f999405e6ecc6c8a779586b1e4bc1a9a067af4b3a"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-Q2WMRSGV.js",
-      "sha256": "67ae9f4358fa1b3cc6b8cb430d151755a05acf425866adf64f088f602dad85e0"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-QBXVM7ZM.js",
-      "sha256": "799dc3b43bb89b6ad54f8d14dcbe5d344ff517ff0c17c81895a07700c10ff817"
-    },
-    {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-QYNF6E6C.js",
-      "sha256": "12c9e1b198bbadd8298d38106a2cb5800be8fe9b60bdd1d18ba0c7f24817db6f"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-RDUK4YBR.js",
+      "sha256": "225075b00f21cc0880b15fefa2b2cbcff873914e8c39a7dc59bb4e80eb0bf1a0"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-RNUAGWEV.js",
       "sha256": "c1db05a7a47d075250a5dec444df171151ffb998bb182b653d1a852ccebb610d"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-SZWLPZNI.js",
-      "sha256": "62ab7bd7f6a79e8d9d8cea76de31255a6028521717843d8fc376b8689b1a2c0e"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-S56ZP5KK.js",
+      "sha256": "9f32da29121b8a166d15437e274f4002721fe8e2414184cbb6e08ea9272f0982"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-SHKCAMGS.js",
+      "sha256": "2ac1f5f090ebc1941825598b2a6f3a16456eb7ed21dd6a5032dccb6d317f77c8"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-T4WTB5OG.js",
       "sha256": "0bc2777a03a7884fae3c57872bfc1be2f92f30898e1f066fed9c0e3869ef68c7"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-TGHRVDIR.js",
-      "sha256": "d68751d0340f18b05e578042e0191f4080fc5a3d9c6175e9dc6e1cf59fa49b06"
-    },
-    {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-TGJY5LSH.js",
       "sha256": "5c0d368760c3a2f3904675802b62051579f37ce4712288475414ffce923247db"
+    },
+    {
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-UNTXIPSO.js",
+      "sha256": "1ce771de6254a101c9d5a602a891f78bc4a20b55bec4b70650e191e24eacd73f"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/chunk-UTPTYCGH.js",
@@ -29668,20 +29668,20 @@
       "sha256": "aa3ca10f8a15f10a35ae30341da3ac45100501cc181e20b0afbd709a29f082b9"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/chunk-Z4YBXYQ5.js",
-      "sha256": "ce1b9e867768a7a410108e2eb18faed0f86477bbacaf9f10f5c96703aff27f05"
+      "path": "runtime/engine/runtime/space-client/chunks/chunk-YPIE7W5W.js",
+      "sha256": "8f64b2f81db34839d1d35e663dfdcc95b242fe0672f56372463762a6a6c56a8a"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-MLRDSMZH.js",
-      "sha256": "1295e818c520d92c06dc2af2b0cb53d21c0d3d662c6eb38eab2d2acdad3667dc"
+      "path": "runtime/engine/runtime/space-client/chunks/collaboration-runtime-UA5GFZO3.js",
+      "sha256": "706a9d981482b862cc0e94becf166a4f4d305ea509a3b07ab6fe2eab8327e1e0"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/composer-MHP3EJUG.js",
-      "sha256": "1a3e224d692925ec9bcbafc368e624d4f24e318656dbef8bd7f1140eb199228d"
+      "path": "runtime/engine/runtime/space-client/chunks/composer-GGAJE2SE.js",
+      "sha256": "99ec0ad75835c69720c45f3a555e1f391fe8ee22856321cea02fc39ab44e95c3"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/cursors-6ZBMWBCL.js",
-      "sha256": "4ac9f8a4757b15d5e3c341776dce36a11e09f3b314026b9f9d326118afe5f743"
+      "path": "runtime/engine/runtime/space-client/chunks/cursors-KMP2SQQS.js",
+      "sha256": "341660bb7c2536f3969226fcd88550a5271adc94bfee6f66f795b0080797bfe0"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/draw-23WW3APS.js",
@@ -29692,8 +29692,8 @@
       "sha256": "1ca2d21c20ffa5a5705d6c6cf857f8662be6303496b6345d42d36b7209f40877"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/mount-B4OD6CSG.js",
-      "sha256": "8ec566e4855b0dc058b2b3e618d9fa2edf09eb5a502e9af90739181151ce5319"
+      "path": "runtime/engine/runtime/space-client/chunks/mount-7QSHHQR3.js",
+      "sha256": "3647c4fadb44d9e428010760c6b337f62253e636f067b05fffc8b2de79af1909"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/picker-4477LWBQ.js",
@@ -29704,28 +29704,28 @@
       "sha256": "ccdda7f52a18c4fb4bc65aa7980d7b76d40aa8fb009a47a2c078e2586a5c3783"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/presence-list-7J4KXWQN.js",
-      "sha256": "d94792e0a50d2c26eca2f40998bfd34a8fdf18ffcdcbb441c2b2246aaa60e127"
+      "path": "runtime/engine/runtime/space-client/chunks/presence-list-7IVVZIQ5.js",
+      "sha256": "7872decb0009f7cbaf2254a3025e4ac82234488fb77e260d6679bafa224149f5"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/sidebar-P2TWZ3FN.js",
-      "sha256": "e0e790eb6d9e696244ff09c76c604fc6a5d949268f88b5bf66af64fc36fc3518"
+      "path": "runtime/engine/runtime/space-client/chunks/sidebar-2L3XOU5M.js",
+      "sha256": "1f712c9ad1305f96cae9eb91b07b9bab4348345f963128a27fcd3d45061aab9a"
     },
     {
       "path": "runtime/engine/runtime/space-client/chunks/text-ACUKE57Q.js",
       "sha256": "5dd69eb5208cdd8d47c7ae6b19b44971056f9cf3464a2bd8f9a71cb412e31b6c"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/toolbar-YIJACO5X.js",
-      "sha256": "3efbd9cdf09837119433775f9d517427d3978e2864752966a16330cca709c607"
+      "path": "runtime/engine/runtime/space-client/chunks/toolbar-BNLUDIJ2.js",
+      "sha256": "67ef271dcd033331b8d601efbb93a5111ae67c401d26b60166d1d2d38da0046e"
     },
     {
-      "path": "runtime/engine/runtime/space-client/chunks/trends-body-23HQGMHA.js",
-      "sha256": "0ce59ed6f53689ec99d716f78dded2a2ea64ae034fde72a582d0f0f2801f03ba"
+      "path": "runtime/engine/runtime/space-client/chunks/trends-body-OZKOX6SB.js",
+      "sha256": "2e05d4bc8475e411d533363fa43a8946aea9888a1da6a9b9c70331f13c90cd0e"
     },
     {
       "path": "runtime/engine/runtime/space-client/client.js",
-      "sha256": "91fa642414df8d12d73c66fd211b22dd31d26a45891f17a6341c848767034392"
+      "sha256": "55bac36588a2872f0b5cbb3dd8d30d691a8d7e804a7ace2d913705977634304c"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -30301,7 +30301,7 @@
     },
     {
       "path": "runtime/tests/finalize-rust.test.ts",
-      "sha256": "f4d0f356901a09ed636f35dfc2ccde2fd42bd73dbc639f1f51cfe38196a09d8d"
+      "sha256": "e4a5f3679478d2c9c935a9d3160f946e271f6ee9471aebed8ff49bc8e2cce4bf"
     },
     {
       "path": "runtime/tests/fixtures/admission-counter-generation.php",

@@ -606,6 +606,9 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
             'added' => (int) ($delta['added'] ?? 0),
             'changed' => (int) ($delta['changed'] ?? 0),
             'removed' => (int) ($delta['removed'] ?? 0),
+            ...(is_string($delta['baseVersionId'] ?? null) && $delta['baseVersionId'] !== ''
+                ? ['base_version_id' => $delta['baseVersionId']]
+                : []),
         ]] : []),
         'diagnostics' => _stattic_runtime_metadata_list($metadata, 'diagnostics'),
         'variable_digests' => is_array($metadata['variableDigests'] ?? null) ? (object) $metadata['variableDigests'] : (object) [],

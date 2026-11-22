@@ -8,6 +8,7 @@ use oxc_ast::ast::{
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
+use regex::bytes::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read};
@@ -16,12 +17,17 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::catalog::FileCatalog;
+use crate::catalog::{FileCatalog, ObjectIdentity};
 use crate::finalize::{invalid_with_details, FinalizeError, Result};
+use crate::hash::stable_json_sha256;
 use crate::storage::blob_path;
 
 #[path = "html_scripts.rs"]
 mod html_scripts;
+
+/// Bump whenever cookie-write detection semantics change so previously scanned
+/// catalogs fail closed and rescan under the new rules.
+pub(crate) const COOKIE_SCAN_REVISION: u32 = 1;
 
 const MAX_TOKEN: usize = 8192;
 const MAX_SCRIPT: usize = 1024 * 1024;
@@ -238,26 +244,88 @@ impl<'a> Visit<'a> for CookieVisitor<'_> {
     }
 }
 
-fn detect_script(
-    source: &str,
-    source_type: SourceType,
-    apexes: &[String],
-) -> Option<(String, usize)> {
-    if source.len() > MAX_SCRIPT || !within_parse_budget(source, source_type) {
-        return None;
+// The AST visitor only accepts an unescaped literal domain, compared with
+// ASCII case folding. A byte search can rule out a match before parsing.
+struct CookieScan<'a> {
+    apexes: &'a [String],
+    literal_domain: Option<Regex>,
+}
+
+impl<'a> CookieScan<'a> {
+    fn new(apexes: &'a [String]) -> Self {
+        let pattern = apexes
+            .iter()
+            .map(|apex| regex::escape(apex))
+            .collect::<Vec<_>>()
+            .join("|");
+        Self {
+            apexes,
+            literal_domain: RegexBuilder::new(&pattern)
+                .unicode(false)
+                .case_insensitive(true)
+                .build()
+                .ok(),
+        }
+    }
+
+    fn may_name_domain(&self, source: &str) -> bool {
+        self.literal_domain
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(source.as_bytes()))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScanVerdict {
+    Clean,
+    /// Size/parser/HTML budget exit, parse error, or invalid UTF-8: publish
+    /// stays allowed (best-effort), but the catalog must not stamp reusable
+    /// cookie-scan evidence for future publishes.
+    Inconclusive,
+    Found(String, usize),
+}
+
+fn normalized_apexes(apexes: &[String]) -> Vec<String> {
+    apexes
+        .iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed
+                .strip_prefix('.')
+                .unwrap_or(trimmed)
+                .to_ascii_lowercase()
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn detect_script(source: &str, source_type: SourceType, policy: &CookieScan<'_>) -> ScanVerdict {
+    if source.len() > MAX_SCRIPT {
+        return ScanVerdict::Inconclusive;
+    }
+    if !policy.may_name_domain(source) {
+        return ScanVerdict::Clean;
+    }
+    if !within_parse_budget(source, source_type) {
+        return ScanVerdict::Inconclusive;
     }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if parsed.fatal_error || parsed.diagnostics.errors().next().is_some() {
-        return None;
+        return ScanVerdict::Inconclusive;
     }
     let mut visitor = CookieVisitor {
         source,
-        apexes,
+        apexes: policy.apexes,
         finding: None,
     };
     visitor.visit_program(&parsed.program);
-    visitor.finding
+    match visitor.finding {
+        Some((domain, offset)) => ScanVerdict::Found(domain, offset),
+        None => ScanVerdict::Clean,
+    }
 }
 
 fn line_breaks(source: &str) -> usize {
@@ -274,34 +342,60 @@ fn line_breaks(source: &str) -> usize {
 }
 
 /// Returns only domain and line, never the cookie name/value or source snippet.
-fn detect(reader: impl Read, html: bool, apexes: &[String]) -> io::Result<Option<(String, usize)>> {
-    detect_as(reader, html, SourceType::unambiguous(), apexes)
-}
-
 fn detect_as(
     reader: impl Read,
     html: bool,
     source_type: SourceType,
-    apexes: &[String],
-) -> io::Result<Option<(String, usize)>> {
+    policy: &CookieScan<'_>,
+) -> io::Result<ScanVerdict> {
     let mut bytes = Vec::new();
-    reader.take(MAX_DECOMPRESSED).read_to_end(&mut bytes)?;
+    reader.take(MAX_DECOMPRESSED + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() as u64 > MAX_DECOMPRESSED;
+    if truncated {
+        bytes.truncate(MAX_DECOMPRESSED as usize);
+    }
     let Ok(source) = std::str::from_utf8(&bytes) else {
-        return Ok(None);
+        return Ok(ScanVerdict::Inconclusive);
+    };
+    let finish = |verdict: ScanVerdict| match verdict {
+        ScanVerdict::Clean if truncated => ScanVerdict::Inconclusive,
+        other => other,
     };
     if !html {
-        return Ok(detect_script(source, source_type, apexes)
-            .map(|(domain, offset)| (domain, 1 + line_breaks(&source[..offset]))));
+        return Ok(finish(match detect_script(source, source_type, policy) {
+            ScanVerdict::Found(domain, offset) => {
+                ScanVerdict::Found(domain, 1 + line_breaks(&source[..offset]))
+            }
+            other => other,
+        }));
     }
-    for script in html_scripts::scripts(source) {
-        if let Some((domain, offset)) = detect_script(script.text(source), script.kind, apexes) {
-            return Ok(Some((
-                domain,
-                1 + line_breaks(&source[..script.source_offset(offset)]),
-            )));
+    // HTML script data is raw. SVG script text can assemble a domain from
+    // character references and separate text nodes, so it needs the tree parser.
+    if !crate::content::contains_html_tag_start(source, "<script")
+        || (!policy.may_name_domain(source)
+            && !crate::content::contains_html_tag_start(source, "<svg"))
+    {
+        return Ok(finish(ScanVerdict::Clean));
+    }
+    let extracted = html_scripts::scripts(source);
+    let mut saw_inconclusive = truncated || !extracted.complete;
+    for script in extracted.scripts {
+        match detect_script(script.text(source), script.kind, policy) {
+            ScanVerdict::Found(domain, offset) => {
+                return Ok(ScanVerdict::Found(
+                    domain,
+                    1 + line_breaks(&source[..script.source_offset(offset)]),
+                ));
+            }
+            ScanVerdict::Inconclusive => saw_inconclusive = true,
+            ScanVerdict::Clean => {}
         }
     }
-    Ok(None)
+    Ok(if saw_inconclusive {
+        ScanVerdict::Inconclusive
+    } else {
+        ScanVerdict::Clean
+    })
 }
 
 fn script_kind(path: &str, mime: &str) -> Option<bool> {
@@ -335,9 +429,11 @@ fn refuse(path: &str, sha256: &str, domain: &str, line: usize) -> Result<()> {
 }
 
 pub(crate) fn validate_embedded_html(body: &serde_json::Value, apexes: &[String]) -> Result<()> {
-    if apexes.is_empty() {
+    let normalized = normalized_apexes(apexes);
+    if normalized.is_empty() {
         return Ok(());
     }
+    let policy = CookieScan::new(&normalized);
     for field in ["page_artifacts", "access_pages", "layout_template"] {
         let Some(value) = body.get(field) else {
             continue;
@@ -351,8 +447,9 @@ pub(crate) fn validate_embedded_html(body: &serde_json::Value, apexes: &[String]
         };
         for (path, value) in entries {
             if let Some(text) = value.as_str() {
-                if let Some((domain, line)) =
-                    detect(text.as_bytes(), true, apexes).expect("in-memory text read cannot fail")
+                if let ScanVerdict::Found(domain, line) =
+                    detect_as(text.as_bytes(), true, SourceType::unambiguous(), &policy)
+                        .expect("in-memory text read cannot fail")
                 {
                     refuse(
                         &path,
@@ -367,24 +464,47 @@ pub(crate) fn validate_embedded_html(body: &serde_json::Value, apexes: &[String]
     Ok(())
 }
 
-pub(crate) fn validate_cookie_writes(
-    blobs: &Path,
-    catalog: &FileCatalog,
-    apexes: &[String],
-) -> Result<()> {
-    if apexes.is_empty() {
-        return Ok(());
+/// Digest over the scanner revision and normalized shared apexes. Returns
+/// `None` when no managed apex is configured, so a catalog built without an
+/// active cookie policy never claims prior validation.
+#[cfg(test)]
+fn policy_digest(apexes: &[String]) -> Option<String> {
+    policy_digest_for_normalized(&normalized_apexes(apexes))
+}
+
+fn policy_digest_for_normalized(normalized: &[String]) -> Option<String> {
+    if normalized.is_empty() {
+        return None;
     }
-    let mut scanned = BTreeSet::new();
+    Some(stable_json_sha256(&json!({
+        "revision": COOKIE_SCAN_REVISION,
+        "apexes": normalized,
+    })))
+}
+
+type CookieScanKey<'a> = (&'a str, bool, &'static str, Option<&'static str>);
+
+fn catalog_scan_entries<'a>(
+    catalog: &'a FileCatalog,
+) -> impl Iterator<Item = (&'a str, &'a ObjectIdentity, CookieScanKey<'a>)> {
     let objects = catalog
         .paths
         .iter()
         .flat_map(|(path, entry)| {
-            std::iter::once((path, &entry.source))
-                .chain(entry.served.iter().map(move |object| (path, object)))
+            std::iter::once((path.as_str(), &entry.source)).chain(
+                entry
+                    .served
+                    .iter()
+                    .map(move |object| (path.as_str(), object)),
+            )
         })
-        .chain(catalog.variants.values().flat_map(|paths| paths.iter()));
-    for (path, object) in objects {
+        .chain(
+            catalog
+                .variants
+                .values()
+                .flat_map(|paths| paths.iter().map(|(path, object)| (path.as_str(), object))),
+        );
+    objects.filter_map(|(path, object)| {
         let source = crate::serving_paths::precompressed_source(path).unwrap_or(path);
         let encoding = if source.len() == path.len() {
             ""
@@ -393,26 +513,72 @@ pub(crate) fn validate_cookie_writes(
         } else {
             "br"
         };
-        let Some(html) = script_kind(source, &object.content_type) else {
-            continue;
+        let html = script_kind(source, &object.content_type)?;
+        let extension = Path::new(source)
+            .extension()
+            .and_then(|value| value.to_str());
+        let syntax = if html {
+            None
+        } else {
+            match extension {
+                Some("mjs") => Some("mjs"),
+                Some("cjs") => Some("cjs"),
+                Some("jsx") => Some("jsx"),
+                Some("ts") => Some("ts"),
+                Some("tsx") => Some("tsx"),
+                _ => None,
+            }
         };
-        if !scanned.insert((&object.sha256, source, html, encoding)) {
+        Some((
+            path,
+            object,
+            (object.sha256.as_str(), html, encoding, syntax),
+        ))
+    })
+}
+
+pub(crate) fn validate_cookie_writes(
+    blobs: &Path,
+    catalog: &FileCatalog,
+    previous_catalog: Option<&FileCatalog>,
+    apexes: &[String],
+) -> Result<Option<String>> {
+    let normalized = normalized_apexes(apexes);
+    let Some(digest) = policy_digest_for_normalized(&normalized) else {
+        return Ok(None);
+    };
+    let policy = CookieScan::new(&normalized);
+    let mut scanned = BTreeSet::new();
+    let mut all_conclusive = true;
+    // Reuse completed scans only when the previous catalog was validated under
+    // the exact same scanner revision and normalized shared-apex policy.
+    if let Some(previous) = previous_catalog
+        .filter(|previous| previous.cookie_scan_policy_digest.as_deref() == Some(digest.as_str()))
+    {
+        for (_, _, key) in catalog_scan_entries(previous) {
+            scanned.insert(key);
+        }
+    }
+    for (path, object, key) in catalog_scan_entries(catalog) {
+        if !scanned.insert(key) {
             continue;
         }
+        let (_, html, encoding, syntax) = key;
         let full_path = blob_path(blobs, &object.sha256);
-        let scan = || -> io::Result<Option<(String, usize)>> {
+        let scan = || -> io::Result<ScanVerdict> {
             let file = File::open(&full_path)?;
             let reader: Box<dyn Read> = match encoding {
                 "gz" => Box::new(flate2::read::MultiGzDecoder::new(file)),
                 "br" => Box::new(brotli::Decompressor::new(file, 8192)),
                 _ => Box::new(file),
             };
-            // Reaching the inspection budget is not evidence against an artifact.
+            // Reaching the inspection budget is not evidence against an artifact,
+            // but it withholds reusable scan evidence for future publishes.
             // Decode errors within the inspected prefix still propagate.
             detect_as(
                 reader,
                 html,
-                match Path::new(source).extension().and_then(|v| v.to_str()) {
+                match syntax {
                     Some("mjs") => SourceType::mjs(),
                     Some("cjs") => SourceType::cjs(),
                     Some("jsx") => SourceType::jsx().with_unambiguous(true),
@@ -420,35 +586,42 @@ pub(crate) fn validate_cookie_writes(
                     Some("tsx") => SourceType::tsx().with_unambiguous(true),
                     _ => SourceType::unambiguous(),
                 },
-                apexes,
+                &policy,
             )
         };
-        let finding = scan().map_err(|error| FinalizeError::Invalid {
+        let verdict = scan().map_err(|error| FinalizeError::Invalid {
             code: "artifact_cookie_scan_failed",
             message: format!("Could not inspect script text in {path}: {error}"),
             details: Some(json!({"path":path,"pointer":"/files"})),
         })?;
-        if let Some((domain, line)) = finding {
-            refuse(path, &object.sha256, &domain, line)?;
+        match verdict {
+            ScanVerdict::Found(domain, line) => refuse(path, &object.sha256, &domain, line)?,
+            ScanVerdict::Inconclusive => all_conclusive = false,
+            ScanVerdict::Clean => {}
         }
     }
-    Ok(())
+    Ok(all_conclusive.then_some(digest))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     fn scan(source: &str, html: bool) -> Option<(String, usize)> {
-        detect(
+        match detect_as(
             source.as_bytes(),
             html,
-            &[
+            SourceType::unambiguous(),
+            &CookieScan::new(&[
                 "space.fast".into(),
                 "view.fast".into(),
                 "partner.test".into(),
-            ],
+            ]),
         )
         .unwrap()
+        {
+            ScanVerdict::Found(domain, line) => Some((domain, line)),
+            ScanVerdict::Clean | ScanVerdict::Inconclusive => None,
+        }
     }
     #[test]
     fn literal_writes_require_cookie_context_and_exact_apex() {
@@ -471,10 +644,10 @@ mod tests {
                     source.as_bytes(),
                     false,
                     source_type,
-                    &["space.fast".into()]
+                    &CookieScan::new(&["space.fast".into()])
                 )
                 .unwrap(),
-                Some(("space.fast".into(), 1))
+                ScanVerdict::Found("space.fast".into(), 1)
             );
         }
         assert_eq!(
@@ -911,5 +1084,175 @@ document.cookie = 'domain=space.fast';"#,
             "<br>".repeat(100_001)
         );
         assert_eq!(scan(&many, true), None);
+    }
+
+    #[test]
+    fn validate_cookie_writes_reuses_matching_policy_digest_and_fails_closed_otherwise() {
+        use crate::catalog::{CatalogPath, ObjectIdentity, FILE_CATALOG_FORMAT};
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir().unwrap();
+        let blobs = temp.path();
+        let apexes = vec!["view.fast".to_string(), "space.fast".to_string()];
+        let same_policy_reordered = vec![" .SPACE.FAST ".to_string(), "VIEW.FAST".to_string()];
+        let digest = policy_digest(&apexes).expect("non-empty apexes produce a policy digest");
+        assert_eq!(policy_digest(&same_policy_reordered), Some(digest.clone()));
+        assert_eq!(policy_digest(&[]), None);
+
+        let clean_sha = "1".repeat(64);
+        let obj = ObjectIdentity {
+            sha256: clean_sha.clone(),
+            size: 10,
+            content_type: "text/javascript".into(),
+        };
+        let make_catalog = |path: &str, policy: Option<String>| FileCatalog {
+            format: FILE_CATALOG_FORMAT.into(),
+            space_id: "s".into(),
+            version_id: "v".into(),
+            paths: BTreeMap::from([(
+                path.to_string(),
+                CatalogPath {
+                    source: obj.clone(),
+                    served: Some(obj.clone()),
+                    public: true,
+                },
+            )]),
+            variants: BTreeMap::new(),
+            serving_digest: "d".into(),
+            template_paths: Vec::new(),
+            generated_at: "2026-11-21T00:00:00Z".into(),
+            pipeline_context_digest: None,
+            cookie_scan_policy_digest: policy,
+        };
+
+        // The blob is absent from disk: succeeding proves `validate_cookie_writes`
+        // skipped opening it when the previous catalog carries the matching digest.
+        let previous = make_catalog("app.js", Some(digest.clone()));
+        let next = make_catalog("app.js", None);
+        assert_eq!(
+            validate_cookie_writes(blobs, &next, Some(&previous), &same_policy_reordered).unwrap(),
+            Some(digest.clone())
+        );
+
+        // Changing syntax (.tsx vs .js), compression (.gz), policy apexes, or
+        // omitting the previous digest must fail closed and attempt to scan.
+        for (candidate, prev, check_apexes) in [
+            (make_catalog("app.tsx", None), Some(&previous), &apexes),
+            (make_catalog("app.js.gz", None), Some(&previous), &apexes),
+            (
+                make_catalog("app.js", None),
+                Some(&previous),
+                &vec!["view.fast".to_string(), "extra.fast".to_string()],
+            ),
+        ] {
+            let err = validate_cookie_writes(blobs, &candidate, prev, check_apexes).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    FinalizeError::Invalid {
+                        code: "artifact_cookie_scan_failed",
+                        ..
+                    }
+                ),
+                "expected fail-closed blob scan attempt, got {err:?}"
+            );
+        }
+        let legacy_previous = make_catalog("app.js", None);
+        let err =
+            validate_cookie_writes(blobs, &next, Some(&legacy_previous), &apexes).unwrap_err();
+        assert!(matches!(
+            err,
+            FinalizeError::Invalid {
+                code: "artifact_cookie_scan_failed",
+                ..
+            }
+        ));
+
+        // Unnormalized apex spelling must feed the scanner identically to the digest.
+        let bad_bytes = b"document.cookie = 'x=y; domain=view.fast';";
+        let bad_sha = crate::finalize::sha256(bad_bytes);
+        crate::storage::put_blob(blobs, bad_bytes).unwrap();
+        let bad_obj = ObjectIdentity {
+            sha256: bad_sha,
+            size: bad_bytes.len() as u64,
+            content_type: "text/javascript".into(),
+        };
+        let bad_catalog = FileCatalog {
+            paths: BTreeMap::from([(
+                "bad.js".to_string(),
+                CatalogPath {
+                    source: bad_obj.clone(),
+                    served: Some(bad_obj),
+                    public: true,
+                },
+            )]),
+            ..make_catalog("app.js", None)
+        };
+        assert!(matches!(
+            validate_cookie_writes(blobs, &bad_catalog, None, &same_policy_reordered),
+            Err(FinalizeError::Invalid {
+                code: "shared_apex_cookie_write",
+                ..
+            })
+        ));
+
+        // An inconclusive scan (parse error or invalid UTF-8) stays publishable
+        // (best-effort) but withholds `cookie_scan_policy_digest` so future
+        // finalizes do not skip re-scanning it.
+        for inconclusive_bytes in [
+            b"document.cookie = 'x=y; domain=view.fast'; const broken =".as_slice(),
+            &[0xff, 0xfe, 0xfd],
+        ] {
+            let inc_sha = crate::finalize::sha256(inconclusive_bytes);
+            crate::storage::put_blob(blobs, inconclusive_bytes).unwrap();
+            let inc_obj = ObjectIdentity {
+                sha256: inc_sha,
+                size: inconclusive_bytes.len() as u64,
+                content_type: "text/javascript".into(),
+            };
+            let inc_catalog = FileCatalog {
+                paths: BTreeMap::from([(
+                    "inc.js".to_string(),
+                    CatalogPath {
+                        source: inc_obj.clone(),
+                        served: Some(inc_obj),
+                        public: true,
+                    },
+                )]),
+                ..make_catalog("app.js", None)
+            };
+            assert_eq!(
+                validate_cookie_writes(blobs, &inc_catalog, None, &apexes).unwrap(),
+                None
+            );
+        }
+
+        // Oversized HTML still refuses a violation in the inspected prefix,
+        // and withholds reusable evidence when the prefix is clean.
+        let oversized_bad = format!(
+            "<script>document.cookie = 'x=y; domain=view.fast';</script>{}",
+            " ".repeat(MAX_DECOMPRESSED as usize)
+        );
+        assert_eq!(
+            detect_as(
+                oversized_bad.as_bytes(),
+                true,
+                SourceType::unambiguous(),
+                &CookieScan::new(&["view.fast".into()])
+            )
+            .unwrap(),
+            ScanVerdict::Found("view.fast".into(), 1)
+        );
+        let oversized_clean = vec![b' '; MAX_DECOMPRESSED as usize + 16];
+        assert_eq!(
+            detect_as(
+                oversized_clean.as_slice(),
+                true,
+                SourceType::unambiguous(),
+                &CookieScan::new(&["view.fast".into()])
+            )
+            .unwrap(),
+            ScanVerdict::Inconclusive
+        );
     }
 }

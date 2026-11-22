@@ -166,6 +166,7 @@ pub fn materialize_html_pipeline(
     // Only actual references claim private fragments. Include-bearing pages
     // compile on every publish; ordinary pages keep their existing adoption.
     let mut expanded = BTreeMap::new();
+    let mut ordinary_html = BTreeSet::new();
     for path in files
         .keys()
         .filter(|path| includes::is_html(path) && !bound_private.contains(*path))
@@ -175,12 +176,15 @@ pub fn materialize_html_pipeline(
             continue;
         }
         if let Some(source) = pipeline_text(files_root, path, diagnostics)? {
-            if !source.contains(includes::PREFIX) {
-                continue;
+            if source.contains(includes::PREFIX) {
+                let document = includes.resolve(path, &source)?;
+                if document != source {
+                    expanded.insert(path.clone(), document);
+                    continue;
+                }
             }
-            let document = includes.resolve(path, &source)?;
-            if document != source {
-                expanded.insert(path.clone(), document);
+            if !source.contains("<!-- wp:") {
+                ordinary_html.insert(path.clone());
             }
         }
     }
@@ -328,6 +332,10 @@ pub fn materialize_html_pipeline(
             if claimed {
                 private.insert(path.clone());
             }
+            continue;
+        }
+        // Include expansion and files-mode rendering can change this verdict.
+        if !files_mode_gutenberg && ordinary_html.contains(path) {
             continue;
         }
         let Some(source) = pipeline_text(files_root, path, diagnostics)? else {
@@ -484,8 +492,16 @@ pub fn materialize_html_pipeline(
         if !body_decorated {
             undecorated.insert(path.clone());
         }
-        let document = anchor_preview_image_urls(&document, &path);
-        let document = provider_safe_icon_urls(&document, &path);
+        let document = if contains_html_tag_start(&document, "<meta") {
+            anchor_preview_image_urls(&document, &path)
+        } else {
+            document
+        };
+        let document = if contains_html_tag_start(&document, "<link") {
+            provider_safe_icon_urls(&document, &path)
+        } else {
+            document
+        };
         preview_images.extend(advertised_image_files(
             &document,
             &path,
@@ -512,6 +528,17 @@ pub fn materialize_html_pipeline(
         preview_images,
         preview_image_hosts,
         undecorated,
+    })
+}
+
+/// A negative result rules out a literal HTML start tag. The parser still
+/// decides whether a positive match names an element in the requested context.
+pub(crate) fn contains_html_tag_start(source: &str, prefix: &str) -> bool {
+    source.match_indices('<').any(|(offset, _)| {
+        source
+            .as_bytes()
+            .get(offset..offset + prefix.len())
+            .is_some_and(|bytes| bytes.eq_ignore_ascii_case(prefix.as_bytes()))
     })
 }
 
@@ -546,6 +573,9 @@ fn advertised_image_files(
     assigned_hostnames: &[String],
     preview_image_hosts: &mut BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<String> {
+    if !contains_html_tag_start(html, "<meta") {
+        return Vec::new();
+    }
     let found = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&found);
     let base_href = Rc::new(RefCell::new(None));
@@ -597,12 +627,10 @@ fn advertised_image_files(
         .collect()
 }
 
-/// Keep preview metadata tied to the published document. A rewrite or SPA
-/// fallback must not change which local image a cookieless scraper requests.
-fn anchor_preview_image_urls(html: &str, page_path: &str) -> String {
-    let Ok(document) = url::Url::parse(&format!("https://local.invalid/{page_path}")) else {
-        return html.to_string();
-    };
+fn html_base_href(html: &str) -> Option<String> {
+    if !contains_html_tag_start(html, "<base") {
+        return None;
+    }
     let base_href = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&base_href);
     let _ = rewrite_str(
@@ -617,7 +645,16 @@ fn anchor_preview_image_urls(html: &str, page_path: &str) -> String {
             }
         )),
     );
-    let href = base_href.take();
+    base_href.take()
+}
+
+/// Keep preview metadata tied to the published document. A rewrite or SPA
+/// fallback must not change which local image a cookieless scraper requests.
+fn anchor_preview_image_urls(html: &str, page_path: &str) -> String {
+    let Ok(document) = url::Url::parse(&format!("https://local.invalid/{page_path}")) else {
+        return html.to_string();
+    };
+    let href = html_base_href(html);
     let base = href
         .as_deref()
         .and_then(|href| document.join(href).ok())
@@ -944,21 +981,7 @@ fn provider_safe_icon_urls(html: &str, page_path: &str) -> String {
     let Ok(document) = url::Url::parse(&format!("https://local.invalid/{page_path}")) else {
         return html.to_string();
     };
-    let base_href = Rc::new(RefCell::new(None));
-    let sink = Rc::clone(&base_href);
-    let _ = rewrite_str(
-        html,
-        RewriteStrSettings::new().append_element_content_handler(element!(
-            "head base[href]",
-            move |element| {
-                if sink.borrow().is_none() {
-                    *sink.borrow_mut() = element.get_attribute("href");
-                }
-                Ok(())
-            }
-        )),
-    );
-    let href = base_href.take();
+    let href = html_base_href(html);
     // An explicit base authority is external even if it happens to match our
     // synthetic origin. Do not change remote, protocol-relative or data URLs.
     if href.as_deref().is_some_and(image_reference_has_origin) {

@@ -1188,7 +1188,7 @@ fn run_finalize_pipeline(
     // the one document the blob collector sweeps, so every sha it names — source,
     // served, and per-channel variant — keeps its blob alive.
     let catalog_started = Instant::now();
-    let catalog = build_catalog(&CatalogInput {
+    let mut catalog = build_catalog(&CatalogInput {
         space_id: &input.space_id,
         version_id: &input.version_id,
         files,
@@ -1205,7 +1205,6 @@ fn run_finalize_pipeline(
         generated_at: &input.generated_at,
         pipeline_context_digest: Some(context_digest),
     });
-    crate::cookie_writes::validate_cookie_writes(&blobs, &catalog, &managed_apexes)?;
     let delta = finalize_catalog_delta(
         previous_catalog.as_ref(),
         &catalog,
@@ -1215,6 +1214,15 @@ fn run_finalize_pipeline(
     );
     let catalog_digests = catalog.digests();
     telemetry.catalog_delta_ms = elapsed_ms(catalog_started);
+    let cookie_scan_policy_digest = timed(&mut telemetry.cookie_scan_ms, || {
+        crate::cookie_writes::validate_cookie_writes(
+            &blobs,
+            &catalog,
+            previous_catalog.as_ref(),
+            &managed_apexes,
+        )
+    })?;
+    catalog.cookie_scan_policy_digest = cookie_scan_policy_digest;
     let preview_image = preview_image_path(&catalog);
 
     let debug_json = json!({
@@ -1513,6 +1521,7 @@ fn finalize_catalog_delta(
         &DeltaServing::from_serving_config(serving_config),
         &ImmutablePaths::from_header_rules(headers_exact, headers_pattern),
     );
+    delta.base_version_id = Some(previous.version_id.clone());
     if previous.serving_digest != next.serving_digest {
         // Routing rules, serving config, or the control plane's serving state
         // moved, so a URL can answer differently with every file untouched. The
@@ -3202,11 +3211,77 @@ mod tests {
     }
 
     #[test]
+    fn cookie_scan_policy_digest_persists_and_fails_closed_when_apexes_change() {
+        let (_temp, private, initial) = finalize_fixture(
+            &[
+                ("index.html", b"<p>hello</p>"),
+                ("app.js", b"document.cookie = 'x=y; domain=partner.fast'"),
+            ],
+            json!({"mode":"website"}),
+            json!({"managed_space_apexes":["view.fast"]}),
+        );
+        initial.unwrap();
+        let v1_catalog = catalog_at(&private, "v");
+        let v1_digest = v1_catalog
+            .cookie_scan_policy_digest
+            .clone()
+            .expect("finalize stamps cookie_scan_policy_digest when apexes are configured");
+
+        // Same apexes + previous_version_id reuses the scan and keeps the digest.
+        let mut v2 = fixture_input(
+            &private,
+            vec![],
+            json!({"mode":"website"}),
+            json!({
+                "managed_space_apexes": ["VIEW.FAST"],
+                "previous_version_id": "v",
+            }),
+        );
+        v2.version_id = "v2".into();
+        v2.session =
+            json!({"manifest":[],"accepted":{},"retention":"all","reusable_version_id":"v"});
+        let v2_out = finalize_site(v2, false).unwrap();
+        assert_eq!(
+            v2_out
+                .delta
+                .as_ref()
+                .and_then(|d| d.base_version_id.as_deref()),
+            Some("v")
+        );
+        assert_eq!(
+            catalog_at(&private, "v2").cookie_scan_policy_digest,
+            Some(v1_digest)
+        );
+
+        // Adding partner.fast invalidates the digest and refuses the retained app.js.
+        let mut v3 = fixture_input(
+            &private,
+            vec![],
+            json!({"mode":"website"}),
+            json!({
+                "managed_space_apexes": ["view.fast", "partner.fast"],
+                "previous_version_id": "v2",
+            }),
+        );
+        v3.version_id = "v3".into();
+        v3.session =
+            json!({"manifest":[],"accepted":{},"retention":"all","reusable_version_id":"v2"});
+        assert!(matches!(
+            finalize_site(v3, false),
+            Err(FinalizeError::Invalid {
+                code: "shared_apex_cookie_write",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn cookie_guard_decodes_each_precompressed_text_companion() {
         use std::io::Write;
         let javascript = b"\x0bdocument.cookie = 'x=y; domain=space.fast'";
-        let html =
-            b"<svg><script><!--\0-->document.cookie = 'x=y; domain=space.fast'</script></svg>";
+        // SVG script text can assemble a domain that never appears literally
+        // in the source. The prefilter must still send it to the tree parser.
+        let html = b"<SVG><SCRIPT><!--\0-->document.cookie = 'x=y; domain=sp&#97;ce.<g></g>fast'</SCRIPT></SVG>";
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gz.write_all(javascript).unwrap();
         let gz = gz.finish().unwrap();
@@ -3865,6 +3940,7 @@ mod tests {
                 + telemetry.listings_ms
                 + telemetry.response_tables_ms
                 + telemetry.catalog_delta_ms
+                + telemetry.cookie_scan_ms
                 + telemetry.artifacts_write_ms
                 <= telemetry.total_ms,
             "{telemetry:?}"

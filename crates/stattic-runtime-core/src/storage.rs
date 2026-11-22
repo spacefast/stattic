@@ -1040,6 +1040,7 @@ mod tests {
             template_paths: vec!["index.html".into()],
             generated_at: "2026-08-13T00:00:00Z".into(),
             pipeline_context_digest: None,
+            cookie_scan_policy_digest: None,
         };
         let previous_root = private.join("spaces/s/versions/prev");
         fs::create_dir_all(&previous_root).unwrap();
@@ -1294,6 +1295,7 @@ mod tests {
             template_paths: Vec::new(),
             generated_at: "2026-09-13T00:00:00Z".into(),
             pipeline_context_digest: None,
+            cookie_scan_policy_digest: None,
         };
         let previous_root = private.join("spaces/s/versions/prev");
         fs::create_dir_all(&previous_root).unwrap();

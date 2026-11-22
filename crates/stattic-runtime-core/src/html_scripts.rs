@@ -566,7 +566,12 @@ fn tag(name: &[u8], kind: TagKind, self_closing: bool, attrs: Vec<Attribute>) ->
     })
 }
 
-pub(super) fn scripts(source: &str) -> Vec<Script> {
+pub(super) struct ExtractedScripts {
+    pub scripts: Vec<Script>,
+    pub complete: bool,
+}
+
+pub(super) fn scripts(source: &str) -> ExtractedScripts {
     let sink = Sink::default();
     sink.allocate(Node::default());
     let tree = TreeBuilder::new(sink, Default::default());
@@ -583,14 +588,21 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
     let mut count = 0;
     let trace = ParserHandles::default();
     let mut scripts = Vec::new();
+    let mut complete = true;
     while let Some(token) = tokenizer.next() {
         let token = token.expect("in-memory HTML read cannot fail");
         if tree.sink.exhausted.get() {
-            return Vec::new();
+            return ExtractedScripts {
+                scripts: Vec::new(),
+                complete: false,
+            };
         }
         count += 1;
         if count > MAX_TOKENS {
-            return Vec::new();
+            return ExtractedScripts {
+                scripts: Vec::new(),
+                complete: false,
+            };
         }
         tree.sink.token.set(RangeKind::Other);
         trace.handles.borrow_mut().clear();
@@ -611,7 +623,10 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
         let token = match token {
             SpannedToken::StartTag(start) => {
                 if start.span.end - start.span.start > MAX_TAG_BYTES {
-                    return Vec::new();
+                    return ExtractedScripts {
+                        scripts: Vec::new(),
+                        complete: false,
+                    };
                 }
                 tree.sink.token.set(RangeKind::Start(start.span.end));
                 let attrs = start
@@ -634,7 +649,10 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
             }
             SpannedToken::EndTag(end) => {
                 if end.span.end - end.span.start > MAX_TAG_BYTES {
-                    return Vec::new();
+                    return ExtractedScripts {
+                        scripts: Vec::new(),
+                        complete: false,
+                    };
                 }
                 if end.name.as_ref() == b"script" {
                     closing_offset = Some(end.span.start);
@@ -661,7 +679,10 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
                 trace.handles.borrow_mut().clear();
                 tree.trace_handles(&trace);
                 if tree.sink.exhausted.get() || trace.handles.borrow().len() > MAX_DEPTH {
-                    return Vec::new();
+                    return ExtractedScripts {
+                        scripts: Vec::new(),
+                        complete: false,
+                    };
                 }
                 continue;
             }
@@ -682,12 +703,20 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
             TokenSinkResult::Script(_) => tokenizer.set_state(State::Data),
             TokenSinkResult::Continue | TokenSinkResult::EncodingIndicator(_) => {}
             // The tree builder only requests the initial ScriptData state.
-            TokenSinkResult::RawData(RawKind::ScriptDataEscaped(_)) => return Vec::new(),
+            TokenSinkResult::RawData(RawKind::ScriptDataEscaped(_)) => {
+                return ExtractedScripts {
+                    scripts: Vec::new(),
+                    complete: false,
+                };
+            }
         }
         trace.handles.borrow_mut().clear();
         tree.trace_handles(&trace);
         if tree.sink.exhausted.get() || trace.handles.borrow().len() > MAX_DEPTH {
-            return Vec::new();
+            return ExtractedScripts {
+                scripts: Vec::new(),
+                complete: false,
+            };
         }
         if let Some(end) = closing_offset {
             let handles = trace.handles.borrow();
@@ -701,6 +730,8 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
                                 && !script.characters.as_ref().is_some_and(|text| text.overflow)
                             {
                                 scripts.push(script);
+                            } else {
+                                complete = false;
                             }
                         }
                     } else {
@@ -714,8 +745,11 @@ pub(super) fn scripts(source: &str) -> Vec<Script> {
     let _ = tree.process_token(Token::EOFToken, 1);
     tree.end();
     if tree.sink.exhausted.get() {
-        return Vec::new();
+        return ExtractedScripts {
+            scripts: Vec::new(),
+            complete: false,
+        };
     }
     scripts.sort_unstable_by_key(|script| script.start);
-    scripts
+    ExtractedScripts { scripts, complete }
 }

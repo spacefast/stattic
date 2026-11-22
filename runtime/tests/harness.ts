@@ -948,7 +948,7 @@ export function dispatchCli(
     ],
     {
       cwd: rt.root,
-      env: { ...env, SPACEFAST_RUNTIME_DISPATCH_REQUEST_PATH: requestPath } as NodeJS.ProcessEnv,
+      env: { ...env, SPACEFAST_RUNTIME_DISPATCH_REQUEST_PATH: requestPath },
       stdio: "ignore",
     },
   );

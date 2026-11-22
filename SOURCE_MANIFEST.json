@@ -1,7 +1,7 @@
 {
-  "revision": "d3d380929faef2a5456c45508e43a97f6e5668e8",
-  "sourceHash": "8c5e326e854382768aaa451e6b974bd55be32b1e67cc8da53086e52fbdd30767",
-  "manifestSha256": "a5398f7061105bc9a78329510ef553ee89cc65a229a5d49cd036bd0855aa1d17",
+  "revision": "acde251f8082268ced45dec46fa8b212dfc1f254",
+  "sourceHash": "acedff007b4cc7f19ab878b2f9debb28dd2ecb6a5949064e6d9a43bacc12e703",
+  "manifestSha256": "3226c735444185d98f5963590ba185eb9fa094046801604bebdb2262144e8e32",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "407fbc5dc3e7f4334fc7e6ec9782194053bc2a3d53d5fc02fe9cab0d71a4aef8"
+      "sha256": "2bf77518318f914e37500c7ddff7bfeb3e70fb8f5a89434cec7132901e624f2f"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "82acee2f9a62634c6f0a4f0aeaa77ee90aaa06740857a37df372dcca5c53c36c"
+      "sha256": "5479bb5692c1e444d873c520a265d22dd5dab4043e345a5532b9fb2d3bc86403"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29777,7 +29777,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "9b60d30e6f1911312e4689fe673da71f934b3f034c6617d7cdcc5776faa408f9"
+      "sha256": "b4c0ec7e6312d5787db7edcaf9bf6f49ed3fa798608540e9b7fe3c45a24b2967"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -30060,12 +30060,28 @@
       "sha256": "70b48ce5d10d83429f6b75bb326f74b3dee486a09af22f0b2a62844f0ef8ebba"
     },
     {
+      "path": "runtime/engine/runtime/access-legacy-account-flow.php",
+      "sha256": "25d641d79931a5137296625104ff8e7e8096539c4e5e61dd7ad20d9b6cf01c8b"
+    },
+    {
+      "path": "runtime/engine/runtime/access-legacy-compat.php",
+      "sha256": "5ad94da75aef694b4f53b8aa8a4c1d034c7251e609330111802dff305797f875"
+    },
+    {
+      "path": "runtime/engine/runtime/access-legacy-redeem.php",
+      "sha256": "e4743345288774007ef802af92f689503d1cfa54b2e4539019d477f03ba6f36b"
+    },
+    {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "646a803c1d7f4fa7823f50ca8f95146a5d2071e3b0788edfa732aa715482a509"
+      "sha256": "ecad9d28ee259b580d291cdf3e195910023404b97c3a1b3196ab9842f713c66b"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
       "sha256": "b5b85487bea7c0b0c0f49fa66d445bdb74f5b245f10458f4a5f969ea9b10fc62"
+    },
+    {
+      "path": "runtime/engine/runtime/collab-exchange.php",
+      "sha256": "dacf6573bf3d8e1ab841a710bc09696502d97219113d5f533f1ad2c00e27cbb2"
     },
     {
       "path": "runtime/engine/runtime/connectors.php",
@@ -30136,6 +30152,10 @@
       "sha256": "2efd75810b1491a413ac29000ef24470d10ba179948ca46f5d1cd5fbea3b14ae"
     },
     {
+      "path": "runtime/engine/runtime/space-bar.php",
+      "sha256": "39bc682c107dfe39fecfca099785353ce8e21f8e59dfb3278543de03d6c6d3f5"
+    },
+    {
       "path": "runtime/engine/runtime/space-client/sdk.js",
       "sha256": "52f5f171d1c92461e6882cd8144c0e12ca63a4cbb8c0c245e06363bc3fa416e8"
     },
@@ -30145,11 +30165,15 @@
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "1b6130817608e65596d24673b940c026663b300697a2a43695508d8eb618846d"
+      "sha256": "553a00685fe68b740d3143506e66274248647cd41b942334bdd667fd1902b2a4"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
       "sha256": "03143b75ca2ec5b7a395229cc4c31f59a5866bb8f3b4a2708181a6df706812e8"
+    },
+    {
+      "path": "runtime/engine/runtime/tracker.php",
+      "sha256": "3e55757bd091ad1057f3391a512d3803d2365b814460ff86cb4ecb82e7f7c59f"
     },
     {
       "path": "runtime/engine/runtime/zero-routes.php",
@@ -30593,7 +30617,7 @@
     },
     {
       "path": "runtime/tests/content-source-sync.test.ts",
-      "sha256": "ff64c2cd4eff0f2e801773ed132fc8818d6b48eaba3d73f4d0cd36308fe0fee3"
+      "sha256": "01a1aac943cfb5861bfd9bc7062f32d6909d3f478b3a7c835d3e7c93cbf3dc8d"
     },
     {
       "path": "runtime/tests/content-storage-upload.test.ts",
@@ -30793,7 +30817,7 @@
     },
     {
       "path": "runtime/tests/harness.ts",
-      "sha256": "0e4b162a995f691bdfac0f7ac24691aee03089b12095aed1670f6acee6ebc451"
+      "sha256": "aac41c9c4ecb6db3c66916bd87c30ebe80089909af9d5ffed11e12c303dc9bcf"
     },
     {
       "path": "runtime/tests/headers.test.ts",

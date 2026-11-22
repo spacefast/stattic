@@ -6,6 +6,12 @@ declare(strict_types=1);
 require_once __DIR__ . '/../shared/bootstrap-config.php';
 require_once __DIR__ . '/../shared/response.php';
 require_once __DIR__ . '/../shared/injection-plan.php';
+require_once __DIR__ . '/space-bar.php';
+require_once __DIR__ . '/tracker.php';
+require_once __DIR__ . '/collab-exchange.php';
+
+// sdk.js with nothing on for this version: valid JavaScript that does nothing.
+const STATTIC_SPACEFAST_SDK_OFF = "/* spacefast: injection off */\n";
 
 /**
  * The three documents the collaboration layer boots from: `sdk.js`, the
@@ -90,232 +96,6 @@ function _stattic_serve_spacefast_sdk(
         echo $body;
     }
     exit;
-}
-
-function _stattic_comments_request_origin(string $requestHost): ?string
-{
-    $host = _stattic_normalize_hostname($requestHost);
-    if ($host === '' || preg_match('/[\\x00-\\x20\\x7f\\/\\\\]/', $host) === 1) {
-        return null;
-    }
-    // The edge terminates TLS, so PHP may never see https: only the explicit
-    // dev/test flag selects http (same contract as _stattic_cookies_secure).
-    return (_stattic_cookies_secure() ? 'https' : 'http') . '://' . $host;
-}
-
-function _stattic_comments_render_json(int $status, array $body): never
-{
-    _stattic_json_response(
-        $status,
-        $body,
-        $status >= 400 ? STATTIC_PROBLEM_MEDIA_TYPE : 'application/json',
-        _stattic_private_content_response_headers([
-            'Cache-Control' => 'private, no-store',
-            'Referrer-Policy' => 'no-referrer',
-        ]),
-    );
-}
-
-// There is no second cookie: the unified host session carries the Comments
-// identity, and the anonymous id stays server-owned. The page never names it.
-function _stattic_comments_visitor_identity(
-    array $serving,
-    string $requestHost,
-    ?array $sessionIdentity
-): array {
-    $fromSession = _stattic_access_identity_comments($sessionIdentity);
-    if ($fromSession !== null) {
-        return $fromSession;
-    }
-    // No pseudonym yet. Writing one also settles the session id: a stateless
-    // session mints its own on that write, a recorded one already has it.
-    $remembered = _stattic_access_session_remember(
-        $serving,
-        $requestHost,
-        $sessionIdentity,
-        ['anonymousId' => _stattic_collab_mint_anonymous_id()]
-    );
-    $visitor = $remembered === null
-        ? null
-        : _stattic_access_identity_comments(['sessionRecord' => $remembered]);
-    if ($visitor === null) {
-        _stattic_render_json_unauthenticated('comments_unavailable');
-    }
-    return $visitor;
-}
-
-function _stattic_comments_handle_exchange(
-    string $privateRoot,
-    array $serving,
-    string $requestHost,
-    string $requestPath
-): void {
-    // Required here rather than trusting the dispatcher: a missing include must
-    // not turn a Comments boot into a fatal instead of a typed refusal.
-    require_once __DIR__ . '/access-rules.php';
-    if (_stattic_runtime_request_method() !== 'POST') {
-        _stattic_method_not_allowed('POST');
-    }
-    if (!_stattic_access_same_origin_post($requestHost)) {
-        _stattic_render_json_unauthenticated('comments_origin_invalid');
-    }
-    // 8 KiB leaves headroom for the principal/authorities envelope added before
-    // re-encoding against the control plane's 16 KiB payload cap.
-    $raw = _stattic_request_body_contents();
-    $input = is_string($raw) && strlen($raw) <= 8192 ? json_decode($raw, true) : null;
-    $rawPath = is_array($input) && is_string($input['pagePath'] ?? null)
-        ? _stattic_canonical_request_path($input['pagePath'])
-        : null;
-    // The control plane decodes the forwarded path once more. A percent sign
-    // left after this decode would name a different room there, so refuse it.
-    $pagePath = is_string($rawPath) && !str_contains($rawPath, '%')
-        ? _stattic_scope_path($rawPath)
-        : null;
-    // The canonical route budget is 2048 UTF-8 bytes on every Comments lane.
-    if ($pagePath === null || strlen($pagePath) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
-        _stattic_render_json_unauthenticated('comments_path_invalid');
-    }
-    _stattic_admission_acquire_access_lane($privateRoot, $serving);
-    if (_stattic_enforce_scoped_admission($serving, $requestHost, $pagePath, true) === null) {
-        _stattic_render_json_unauthenticated('comments_denied');
-    }
-    // Every lane here MINTS something and so reaches the control plane: a ticket
-    // is auth, and auth is not this host's to issue. Configuration is not minted
-    // — it is served as the collaboration manifest.
-    $isTicket = $requestPath === STATTIC_COMMENTS_TICKET_PATH;
-    $isVersionUrls = $requestPath === STATTIC_COMMENTS_VERSION_URLS_PATH;
-    $isMentionable = $requestPath === STATTIC_COMMENTS_MENTIONABLE_PATH;
-    // Both spellings identify the same mint: the config response advertises the
-    // canonical `/__zero` path, while frozen capsule clients baked the legacy
-    // one. Missing either sends the request down the Comments ticket lane and
-    // mints a ticket Cast will not accept.
-    $isZeroRealtimeTicket = $requestPath === STATTIC_ZERO_REALTIME_TICKET_PATH
-        || $requestPath === STATTIC_ZERO_CANONICAL_REALTIME_TICKET_PATH;
-    // A SpacePress / TypedPress build publishes no Zero realtime notices, so it
-    // has no room to join: its pages poll (zero-v2-realtime.php serves them no
-    // transport). Zero 0.8's per-version rooms and v2's shared room stay.
-    if ($isZeroRealtimeTicket && in_array($serving['zero_generation'] ?? null, ['tp_v1', 'spacepress'], true)) {
-        _stattic_render_json_unauthenticated('zero_realtime_unavailable');
-    }
-    $exchange = _stattic_access_page_exchange($serving);
-    $exchangeKey = match (true) {
-        $isZeroRealtimeTicket => 'zeroRealtimeTicketUrl',
-        $isVersionUrls => 'commentsVersionUrlsUrl',
-        $isMentionable => 'commentsMentionableUrl',
-        default => 'commentsTicketUrl',
-    };
-    $exchangeUrl = is_array($exchange) ? (string) ($exchange[$exchangeKey] ?? '') : '';
-    $origin = _stattic_comments_request_origin($requestHost);
-    if ($exchangeUrl === '' || $origin === null) {
-        _stattic_render_json_unauthenticated('comments_unavailable');
-    }
-    $identity = _stattic_verify_cookie_identity($serving, $requestHost);
-    $authorities = [];
-    // A missing sessionVersion degrades to a guest ticket rather than failing
-    // control-plane validation with an impossible negative version.
-    $sessionVersion = _stattic_session_version($serving);
-    if ($sessionVersion >= 0 && is_array($identity) && is_array($identity['authorityEntries'] ?? null)) {
-        foreach ($identity['authorityEntries'] as $entry) {
-            $authorities[] = [
-                'authorityReference' => $entry['reference'],
-                'authorityGeneration' => $entry['generation'],
-                'sessionVersion' => $sessionVersion,
-                'emailVerifiedUntil' => $entry['emailVerifiedUntil'] ?? null,
-                // A Space-origin session's cap travels with its authority, so
-                // the ticket is decided on the same terms as the page.
-                ...(is_array($entry['capabilities'] ?? null) ? ['capabilities' => $entry['capabilities']] : []),
-            ];
-        }
-    }
-    $visitor = $isZeroRealtimeTicket
-        ? null
-        : _stattic_comments_visitor_identity($serving, $requestHost, $identity);
-    $payload = $isZeroRealtimeTicket ? [
-        'origin' => $origin,
-        'pagePath' => $pagePath,
-        'versionId' => is_string($serving['version_id'] ?? null) ? $serving['version_id'] : '',
-    ] : [
-        'origin' => $origin,
-        'pagePath' => $pagePath,
-        'visitorSessionId' => $visitor['sessionId'],
-        // The mint derives actorKind from the principal alone, never from the
-        // authorities below, which say only what the session may do.
-        'principal' => _stattic_access_identity_principal($identity),
-        ...(!empty($serving['immutable']) && is_string($serving['version_id'] ?? null)
-            ? ['versionId' => $serving['version_id']]
-            : []),
-        'authorities' => $authorities,
-    ];
-    if ($isVersionUrls) {
-        $ids = [];
-        foreach (is_array($input) && is_array($input['ids'] ?? null) ? $input['ids'] : [] as $id) {
-            if (is_string($id) && $id !== '' && strlen($id) <= 160) {
-                $ids[$id] = true;
-            }
-            if (count($ids) >= STATTIC_COMMENTS_VERSION_URLS_MAX_IDS) {
-                break;
-            }
-        }
-        if ($ids === []) {
-            _stattic_render_json_unauthenticated('comments_versions_invalid');
-        }
-        $payload['ids'] = array_keys($ids);
-    }
-    if ($isMentionable) {
-        $query = is_array($input) && is_string($input['query'] ?? null) ? trim($input['query']) : '';
-        if (strlen($query) > 160) {
-            _stattic_render_json_unauthenticated('comments_query_invalid');
-        }
-        $payload['query'] = $query;
-    }
-    if ($isTicket) {
-        $browserIdentity = is_array($input) && is_array($input['identity'] ?? null)
-            ? $input['identity']
-            : null;
-        $name = is_array($browserIdentity) && is_string($browserIdentity['name'] ?? null)
-            ? trim($browserIdentity['name'])
-            : '';
-        // 640 bytes is the widest UTF-8 encoding of the control plane's 160
-        // character cap; exact character-length enforcement stays schema-side.
-        if (
-            $name === ''
-            || strlen($name) > 640
-            || !is_bool($browserIdentity['namedByUser'] ?? null)
-        ) {
-            _stattic_render_json_unauthenticated('comments_identity_invalid');
-        }
-        // The name is the visitor's claim. The anonymous subject comes from the
-        // session record, never from the page.
-        $payload['identity'] = [
-            'anonymousId' => $visitor['anonymousId'],
-            'name' => $name,
-            'namedByUser' => $browserIdentity['namedByUser'],
-        ];
-        $overlay = _stattic_comments_local_config($privateRoot, $serving, $requestHost);
-        $payload['notices'] = ($overlay['features']['notices'] ?? null) === true;
-    }
-    $context = _stattic_access_context($serving, $requestHost, $pagePath);
-    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
-    $result = is_string($encoded)
-        ? _stattic_access_exchange_post(
-            $exchangeUrl,
-            ['payload' => $encoded],
-            _stattic_access_exchange_headers($exchange, $context, 'application/json')
-        )
-        : null;
-    if ($result === null || !is_array($result['body'] ?? null)) {
-        $unavailableCode = $isZeroRealtimeTicket
-            ? 'zero_realtime_ticket_unavailable'
-            : 'comments_exchange_unavailable';
-        _stattic_comments_render_json(502, _stattic_problem_document(
-            502,
-            $unavailableCode,
-            $isZeroRealtimeTicket
-                ? 'Zero realtime could not reach Spacefast. Try again.'
-                : 'Comments could not reach Spacefast. Try again.'
-        ));
-    }
-    _stattic_comments_render_json($result['status'], $result['body']);
 }
 
 function _stattic_spacefast_sdk_bootstrap(
@@ -488,340 +268,6 @@ function _stattic_spacefast_sdk_page_config(
     return $config;
 }
 
-/**
- * The Space bar's projection for this request, or null when the page keeps
- * the separate overlay: no projection (an old control plane, or a box whose
- * engine the control plane did not credit with `runtime.space-bar.v1`), a
- * frame URL that is not an https platform URL, or a Space anyone may open.
- */
-function _stattic_spacefast_bar_config(array $serving, string $requestHost): ?array
-{
-    $bar = _stattic_spacefast_bar_projection($serving);
-    if ($bar === null) {
-        return null;
-    }
-    $public = _stattic_access_anonymous_admits($serving, _stattic_canonicalize_host($requestHost), '/');
-    // A Space anyone may open keeps its overlay for anyone, unless the
-    // control plane said this engine may offer the bar there too
-    // (`runtime.space-bar-public.v1`): then only a browser that signed in
-    // here with an account loads client.js, and the session it asks decides.
-    if ($public && ($bar['public'] ?? false) !== true) {
-        return null;
-    }
-    return [...$bar, 'public' => $public];
-}
-
-/**
- * The bar this host's page tries, or null: injection has the bar on for the
- * served version, and `_stattic_spacefast_bar_config` gives one for this host
- * (projected, with a platform URL, and on a public host only where the
- * control plane said `public_spaces`). The one decision behind the SDK's bar
- * and the returning-account marker a handoff writes.
- */
-function _stattic_spacefast_bar_tried(array $serving, string $requestHost): ?array
-{
-    return _stattic_injection_on($serving, 'space-bar')
-        ? _stattic_spacefast_bar_config($serving, $requestHost)
-        : null;
-}
-
-/** Whether the control plane projected a usable bar to this Space at all. */
-function _stattic_spacefast_bar_projected(array $serving): bool
-{
-    return _stattic_spacefast_bar_projection($serving) !== null;
-}
-
-/**
- * The projected bar's URLs, checked, plus whether it may show on a Space
- * anyone may open; null when there is none or a URL is not a platform URL.
- */
-function _stattic_spacefast_bar_projection(array $serving): ?array
-{
-    $bar = _stattic_spacefast_sdk_config($serving)['bar'] ?? null;
-    if (!is_array($bar)) {
-        return null;
-    }
-    $frame = is_string($bar['frame_url'] ?? null) ? $bar['frame_url'] : '';
-    $dashboard = is_string($bar['dashboard_url'] ?? null) ? $bar['dashboard_url'] : '';
-    foreach ([$frame, $dashboard] as $url) {
-        $scheme = parse_url($url, PHP_URL_SCHEME);
-        if (
-            ($scheme !== 'https' && !($scheme === 'http' && _stattic_spacefast_sdk_host_is_local(parse_url($url, PHP_URL_HOST))))
-            || preg_match('/[\x00-\x20"\'<>`\\\\]/', $url) === 1
-            || strlen($url) > 2000
-        ) {
-            return null;
-        }
-    }
-    return [
-        'frame' => $frame,
-        'dashboard' => $dashboard,
-        'public' => ($bar['public_spaces'] ?? false) === true,
-    ];
-}
-
-
-
-// Beacon's own lifetime for t.js, so a new tracker reaches pages as fast
-// through this copy as it does from Beacon. It is how long the edge keeps a
-// fresh copy, and how long a box keeps its copy before asking Beacon again.
-const STATTIC_SPACEFAST_TRACKER_TTL_SECONDS = 300;
-// A browser's lifetime for every answer, and the edge's for everything that is
-// not a fresh copy: an empty script for a Space with no tracker or a URL with a
-// query, or an old copy while Beacon is down. The edge asks again after a
-// minute, so switching a Space on, or Beacon coming back, shows within one.
-const STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS = 60;
-const STATTIC_SPACEFAST_TRACKER_MAX_BYTES = 524288;
-const STATTIC_SPACEFAST_TRACKER_EMPTY = "/* No Spacefast analytics here. */\n";
-// sdk.js with nothing on for this version: valid JavaScript that does nothing.
-const STATTIC_SPACEFAST_SDK_OFF = "/* spacefast: injection off */\n";
-
-/**
- * The tracker this Space's pages load, as the control plane projected it, or
- * null when they load none: the Space has analytics off, or the deployment has
- * no Beacon. `src` is a path on this host (or a platform URL), `endpoint` is
- * Beacon's origin, `key` is the tracker's `data-site`, and `wait` says the
- * tracker sends nothing until the visitor agrees in the page's consent banner.
- */
-function _stattic_spacefast_tracker_config(array $serving): ?array
-{
-    require_once __DIR__ . '/../shared/egress.php';
-    $tracker = _stattic_spacefast_sdk_config($serving)['tracker'] ?? null;
-    if (!is_array($tracker) || !_stattic_injection_on($serving, 'tracker')) {
-        return null;
-    }
-    $src = is_string($tracker['src'] ?? null) ? $tracker['src'] : '';
-    $endpoint = is_string($tracker['endpoint'] ?? null) ? rtrim($tracker['endpoint'], '/') : '';
-    $key = is_string($tracker['key'] ?? null) ? $tracker['key'] : '';
-    $samePath = preg_match('~\A/(?![/\\\\])[^\s"\'<>\\\\]*\z~', $src) === 1;
-    if (
-        !($samePath || _stattic_platform_destination_allowed($src))
-        || !_stattic_platform_destination_allowed($endpoint)
-        || $key === ''
-        || strlen($key) > 256
-        || preg_match('/[\x00-\x1f\x7f]/', $key) === 1
-    ) {
-        return null;
-    }
-    return [
-        'src' => $src,
-        'endpoint' => $endpoint,
-        'key' => $key,
-        'wait' => ($tracker['consent'] ?? null) === 'wait',
-    ];
-}
-
-
-// The tracker this page view counts with, or null: only a visitor's view of
-// the live surface counts.
-function _stattic_spacefast_tracker_for_page(array $serving, ?string $previewToken): ?array
-{
-    $tracker = _stattic_spacefast_tracker_config($serving);
-    if (
-        $tracker === null
-        || $previewToken !== null
-        || isset($_GET['review'])
-        || _stattic_system_view_review() !== null
-        || _stattic_spacefast_preview_surface($serving)
-    ) {
-        return null;
-    }
-    return $tracker;
-}
-
-/**
- * `/__spacefast/t.js`: Beacon's tracker, fetched from the Beacon this Space
- * reports to and served from the Space's own origin. Proxied rather than
- * bundled, so the page always runs the tracker that Beacon's wire format
- * expects. It is served after the access check, like sdk.js, so a visitor who
- * may not view a protected Space gets the answer every other path gives and
- * learns nothing about whether it has analytics on. On an open Space every
- * answer is public, so the edge serves repeats and PHP sees only misses; on a
- * protected one it stays out of shared caches. No admission slot is taken,
- * because a miss is no Space work: the box keeps one copy per Beacon and asks
- * Beacon at most once per lifetime.
- *
- * A miss must not be something a visitor can manufacture. The edge keys on
- * host, path and query, so a URL with any query gets the empty script without
- * touching the copy or Beacon, as a Space with no tracker does.
- *
- * Beacon unreachable is the last copy, or the empty script, never an error: a
- * page must not break because its analytics are down.
- */
-function _stattic_serve_spacefast_tracker(string $privateRoot, array $serving, bool $privateCache): never
-{
-    $method = _stattic_runtime_request_method();
-    if (!in_array($method, ['GET', 'HEAD'], true)) {
-        _stattic_method_not_allowed('GET, HEAD', [
-            'body' => '',
-            'media_type' => 'application/javascript; charset=utf-8',
-        ]);
-    }
-    $tracker = (string) ($_SERVER['QUERY_STRING'] ?? '') === ''
-        ? _stattic_spacefast_tracker_config($serving)
-        : null;
-    $copy = $tracker === null
-        ? ['body' => null, 'fresh' => false]
-        : _stattic_spacefast_tracker_copy($privateRoot, $tracker['endpoint']);
-    $body = $copy['body'] ?? STATTIC_SPACEFAST_TRACKER_EMPTY;
-    http_response_code(200);
-    header('Content-Type: application/javascript; charset=utf-8', true);
-    header('X-Content-Type-Options: nosniff', true);
-    // A browser keeps even a fresh copy for only a minute. The edge sends no
-    // Age, so a browser counts its lifetime from its own fetch, however long
-    // the edge had already held that copy.
-    _stattic_send_cache_policy_headers(
-        $privateCache,
-        'public, max-age=' . STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS . ($copy['fresh']
-            ? ', s-maxage=' . STATTIC_SPACEFAST_TRACKER_TTL_SECONDS
-            : '')
-    );
-    header('ETag: "' . hash('sha256', $body) . '"', true);
-    header('Content-Length: ' . strlen($body), true);
-    if ($method !== 'HEAD') {
-        echo $body;
-    }
-    exit;
-}
-
-/**
- * The box's copy of one Beacon's t.js: fresh for its lifetime, then refreshed by
- * the one worker that takes the lock while the others wait for its answer.
- * A refresh that fails keeps the old copy and is not tried again for a short
- * lifetime, so a Beacon outage costs a box one request a minute. An answer
- * Beacon's edge marked no-cache is waited out the same way, though its body
- * replaces the copy.
- *
- * @return array{body: ?string, fresh: bool}
- */
-function _stattic_spacefast_tracker_copy(string $privateRoot, string $endpoint): array
-{
-    require_once __DIR__ . '/../shared/lock.php';
-    require_once __DIR__ . '/../shared/pointers.php';
-    $directory = $privateRoot . '/runtime/tracker';
-    if (!_stattic_runtime_mkdir_soft($directory)) {
-        return ['body' => null, 'fresh' => false];
-    }
-    $path = $directory . '/' . hash('sha256', $endpoint) . '.json';
-    $copy = _stattic_spacefast_tracker_read($path);
-    $now = time();
-    $answer = static fn (array $copy): array => [
-        'body' => $copy['body'],
-        'fresh' => $copy['body'] !== null
-            && $now - $copy['fetched_at'] < STATTIC_SPACEFAST_TRACKER_TTL_SECONDS,
-    ];
-    if ($answer($copy)['fresh']) {
-        return $answer($copy);
-    }
-    return _stattic_lock_with(
-        $path . '.lock',
-        STATTIC_LOCK_WAIT,
-        static function () use ($path, $copy, $answer): array {
-            error_log('spacefast tracker copy busy, served the last copy path=' . $path);
-            return $answer($copy);
-        },
-        static function () use ($path, $endpoint, $now, $answer): array {
-            // Another worker may have refreshed it, or just failed to, while
-            // this one waited.
-            $copy = _stattic_spacefast_tracker_read($path);
-            if (
-                $answer($copy)['fresh']
-                || $now - $copy['attempted_at'] < STATTIC_SPACEFAST_TRACKER_SHORT_SECONDS
-            ) {
-                return $answer($copy);
-            }
-            $fetched = _stattic_spacefast_tracker_upstream($endpoint, $noCache);
-            // Once per tracker release per box. The short shas are the heads of
-            // the ETags t.js is served with, old and new.
-            if ($fetched !== null && $fetched !== $copy['body']) {
-                error_log(
-                    'spacefast tracker copy refreshed endpoint=' . $endpoint
-                    . ' sha256=' . substr(hash('sha256', $fetched), 0, 12)
-                    . ' previous=' . ($copy['body'] === null ? 'none' : substr(hash('sha256', $copy['body']), 0, 12))
-                );
-            }
-            // A no-cache answer is kept but already expired: it is served as not
-            // fresh, and asked for again once the retry window has passed.
-            $next = [
-                'fetched_at' => $fetched === null ? $copy['fetched_at'] : ($noCache ? 0 : $now),
-                'attempted_at' => $now,
-                'body' => $fetched ?? $copy['body'],
-            ];
-            $encoded = json_encode($next, JSON_UNESCAPED_SLASHES);
-            if (!is_string($encoded) || !_sf_atomic_put($path, $encoded, false)) {
-                error_log('spacefast tracker copy not written path=' . $path);
-            }
-            return $answer($next);
-        }
-    );
-}
-
-/** @return array{fetched_at: int, attempted_at: int, body: ?string} */
-function _stattic_spacefast_tracker_read(string $path): array
-{
-    $raw = is_file($path) ? file_get_contents($path) : false;
-    $decoded = is_string($raw) ? json_decode($raw, true) : null;
-    $copy = is_array($decoded) ? $decoded : [];
-    return [
-        'fetched_at' => is_int($copy['fetched_at'] ?? null) ? $copy['fetched_at'] : 0,
-        'attempted_at' => is_int($copy['attempted_at'] ?? null) ? $copy['attempted_at'] : 0,
-        'body' => is_string($copy['body'] ?? null) && $copy['body'] !== '' ? $copy['body'] : null,
-    ];
-}
-
-// Beacon's t.js, or null when Beacon did not answer with a script. The
-// endpoint is the control plane's, so it is held to the platform destination
-// rule, not to the rule for URLs a tenant names. `$noCache` says the answer
-// carried Cache-Control no-cache, which Beacon's edge sends on a copy it served
-// stale while it asks Beacon again.
-function _stattic_spacefast_tracker_upstream(string $endpoint, ?bool &$noCache = null): ?string
-{
-    require_once __DIR__ . '/../shared/egress.php';
-    require_once __DIR__ . '/../shared/http.php';
-    $noCache = false;
-    $url = $endpoint . '/t.js';
-    if (!_stattic_platform_destination_allowed($url)) {
-        return null;
-    }
-    $result = _stattic_http_request([
-        'url' => $url,
-        'method' => 'GET',
-        'headers' => ['Accept' => 'text/javascript, application/javascript'],
-        'connect_timeout_ms' => 1000,
-        'timeout_ms' => 2000,
-        'schemes' => ['https', 'http'],
-        'max_body_bytes' => STATTIC_SPACEFAST_TRACKER_MAX_BYTES,
-    ]);
-    $type = strtolower((string) (_stattic_http_header_map($result['headers'])['content-type'] ?? ''));
-    if ($result['status'] !== 200 || !$result['ok'] || trim($result['body']) === '' || !str_contains($type, 'javascript')) {
-        error_log(
-            'spacefast tracker upstream unavailable status=' . $result['status']
-            . ' error=' . ($result['error'] ?? 'not_a_script')
-        );
-        return null;
-    }
-    // Every Cache-Control line counts: the edge may add its own beside Beacon's.
-    $noCache = array_any(
-        $result['headers'],
-        static fn (array $header): bool => strtolower((string) $header[0]) === 'cache-control'
-            && _stattic_cache_control_has_directive((string) $header[1], 'no-cache')
-    );
-    return $result['body'];
-}
-
-/**
- * The orb, painted before a single Cast byte is fetched.
- *
- * A disc carrying the comment glyph, in the placement the visitor last dragged
- * it to, with the `connecting` pulse. Like the real orb it is neutral ink read
- * off the site's own background: a dark disc on a light site, a light one on a
- * dark site (theme/tokens.ts `--sf-collab-accent`, theme/adaptive.ts), so the
- * handover swaps no shape and no colour. It has no behaviour: the SDK removes
- * it when the real overlay mounts. Placement mirrors the store's
- * `restoreOrbPlacement` + `orbDockStyle`; a rejected stored value falls back to
- * the default bottom-right dock.
- */
-
 // The API base comes from configuration, and from nowhere else.
 //
 // This used to fall back to rewriting the relay's hostname (`cast.` -> `api.`)
@@ -842,19 +288,6 @@ function _stattic_spacefast_sdk_api_base_url(): ?string
     return _stattic_runtime_api_base_url() ?: null;
 }
 
-function _stattic_spacefast_sdk_host_is_local(mixed $host): bool
-{
-    if (!is_string($host)) {
-        return false;
-    }
-    $host = _stattic_normalize_hostname($host);
-    return $host === 'localhost'
-        || str_ends_with($host, '.localhost')
-        || $host === '127.0.0.1'
-        || $host === '[::1]'
-        || $host === '::1';
-}
-
 function _stattic_spacefast_sdk_config_string(array $config, string $key): ?string
 {
     $value = $config[$key] ?? null;
@@ -869,16 +302,6 @@ function _stattic_spacefast_sdk_base_url(array $sdkConfig): ?string
     // Every consumer (the SDK loader and the Collab frame) gets the same
     // answer: a configured value that is not a URL is absent, not a base.
     return $base !== '' && filter_var($base, FILTER_VALIDATE_URL) !== false ? $base : null;
-}
-
-// THE SDK configuration, and the only place it comes from: the Space overlay,
-// written by the control plane's serving-state push. Nothing here asks the
-// control plane at request time. A Cast endpoint move, a Comments toggle or a
-// theme change syncs when the overlay swaps.
-function _stattic_spacefast_sdk_config(array $serving): array
-{
-    $sdk = is_array($serving['sdk'] ?? null) ? $serving['sdk'] : [];
-    return is_array($sdk['config'] ?? null) ? $sdk['config'] : [];
 }
 
 // The production tag JavaScript this Space releases, served inside the one
@@ -985,14 +408,10 @@ function _stattic_spacefast_collab_ui(array $serving): string
  * the only place that can do it once per publish instead of once per request.
  * This function names the keys and their types; it derives nothing.
  *
- * The accent is the one exception, and it is not derivation: it is re-checked
- * against 6-hex here because it is the only theme value that leaves JSON. The
- * placeholder orb concatenates it into an HTML attribute inside `innerHTML`, so
- * a serving state carrying anything else would be markup injection on every page
- * of the Space. Invalid is null, and the orb paints its own default. The check
- * accepts either case so an older serving state still paints, but the manifest
- * publishes the lowercase spelling `collabThemeSchema` requires — a client
- * parsing this document must not fail on how the value happens to be written.
+ * The accent is re-checked against 6-hex here and normalized to lowercase:
+ * invalid values become null rather than failing `collabThemeSchema` validation
+ * in clients parsing the manifest, while uppercase hex from an older serving
+ * state is still accepted and published in lowercase.
  */
 function _stattic_spacefast_collab_theme(array $comments): array
 {
@@ -1134,21 +553,19 @@ function _stattic_spacefast_collab_manifest(
 /**
  * The Comments facts THIS host resolves for the SDK bootstrap, the collab
  * manifest and the ticket exchange: whether this surface collaborates, the Cast
- * endpoint and resource, the same-origin ticket and upload endpoints, the
- * notices flag and the orb accent. Everything space-level rides the overlay;
- * nothing here is per-page.
+ * endpoint and resource, the same-origin ticket and upload endpoints, and the
+ * notices flag. Everything space-level rides the overlay; nothing here is
+ * per-page.
  */
 function _stattic_comments_local_config(string $privateRoot, array $serving, string $requestHost): array
 {
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
     $comments = is_array($sdkConfig['comments'] ?? null) ? $sdkConfig['comments'] : [];
     $origin = _stattic_comments_request_origin($requestHost);
-    $theme = ['accent' => _stattic_spacefast_collab_theme($comments)['accent']];
     $endpoints = ['ticket' => ($origin ?? '') . STATTIC_COMMENTS_TICKET_PATH];
     $disabled = [
         'enabled' => false,
         'resource_key' => null,
-        'theme' => $theme,
         'ws_url' => null,
         'endpoints' => $endpoints,
         'uploads' => null,
@@ -1177,7 +594,6 @@ function _stattic_comments_local_config(string $privateRoot, array $serving, str
     return [
         'enabled' => true,
         'resource_key' => $resourceKey,
-        'theme' => $theme,
         'ws_url' => $wsUrl,
         'endpoints' => $endpoints,
         'uploads' => [
@@ -1211,4 +627,3 @@ function _stattic_send_spacefast_sdk_cors_headers(): void
     header('Cross-Origin-Resource-Policy: cross-origin', false);
     header('Timing-Allow-Origin: *', false);
 }
-

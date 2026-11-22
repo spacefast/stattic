@@ -3,6 +3,9 @@ declare(strict_types=1);
 
 require_once __DIR__ . "/../shared/request-origin.php";
 require_once __DIR__ . "/share-oauth.php";
+require_once __DIR__ . "/access-legacy-compat.php";
+require_once __DIR__ . "/access-legacy-account-flow.php";
+require_once __DIR__ . "/access-legacy-redeem.php";
 
 require_once __DIR__ . "/../shared/security-telemetry.php";
 
@@ -104,9 +107,6 @@ const STATTIC_ACCESS_SESSION_TOUCH_INTERVAL_SECONDS = 21600;
 // the clock reaches it; it is not deleted. Visitor-token expiry has its own rule
 // (shared/jwt.php) and does not follow this value.
 const STATTIC_ACCESS_SESSION_CLOCK_SKEW_SECONDS = 300;
-const STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX = '__Host-spacefast_access_state_';
-const STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX = 'spacefast_access_state_dev_';
-const STATTIC_ACCESS_BROWSER_STATE_SECONDS = 600;
 // Returning accounts. A browser that held an account session on this host may
 // renew one without a click: the Comments overlay, about to make it a visitor,
 // navigates to this host's account start (`/__spacefast/access/account?silent=1`),
@@ -141,7 +141,10 @@ function _stattic_page_serving(): array
 function _stattic_is_anonymous_id(mixed $value): bool
 {
     return is_string($value)
-        && preg_match('/\A(?:pg1_[A-Za-z0-9_-]{43}|anon_[a-f0-9]{32})\z/', $value) === 1;
+        && (
+            preg_match('/\Apg1_[A-Za-z0-9_-]{43}\z/', $value) === 1
+            || _stattic_is_legacy_anonymous_id($value)
+        );
 }
 
 // What the exchange is told this browser is, for its per-browser rate limits:
@@ -241,7 +244,6 @@ function _stattic_access_session_shows_bar(array $serving, ?array $identity, str
     return false;
 }
 
-/** Valid only inside an already verified handoff or host-bound session. */
 /**
  * The account-identity issuer this runtime accepts.
  *
@@ -260,6 +262,7 @@ function _stattic_access_identity_issuer_accepted(string $issuer): bool
     return preg_match('~\Ahttps?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/v1/auth\z~', $issuer) === 1;
 }
 
+/** Valid only inside an already verified handoff or host-bound session. */
 function _stattic_access_account_identity(array $claims): ?array
 {
     $identity = $claims['identity'] ?? null;
@@ -465,9 +468,7 @@ function _stattic_access_session_hmac_key(array $serving, string $label): ?strin
     if (_stattic_space_session_key_valid($own)) {
         return hash_hmac('sha256', $label, $own);
     }
-    // old-engine-compat: S19 visitor sessions under the exchange credential.
-    $credential = is_string($exchange['credential'] ?? null) ? $exchange['credential'] : '';
-    return strlen($credential) >= 32 ? hash_hmac('sha256', $label, $credential) : null;
+    return _stattic_access_legacy_hmac_key($exchange, $label);
 }
 
 function _stattic_space_session_key_valid(mixed $key): bool
@@ -1830,9 +1831,7 @@ function _stattic_grant_index_belonging(array $grants): array
             || isset($grant['constraints']['notBefore'])) {
             continue;
         }
-        $source = is_string($grant['source']['reference'] ?? null) ? $grant['source']['reference'] : '';
-        if (preg_match('/\Ashare-consent:[^:]+:(.+)\z/', $source, $match) === 1
-            && isset($publicGrantIds[$match[1]])) {
+        if (_stattic_grant_index_is_legacy_public_consent($grant, $publicGrantIds)) {
             continue;
         }
         $reference = _stattic_grant_audience_reference($grant['audience']);
@@ -1967,14 +1966,7 @@ function _stattic_authorization_projection_current(mixed $value): ?array
     if (_stattic_authorization_projection_compiled($value)) {
         return $value;
     }
-    if (($value['compiledVersion'] ?? null) === 3 && is_array($value['grantIndex'] ?? null)) {
-        $value['compiledVersion'] = 4;
-        $value['grantIndex']['hasFrameLinks'] = false;
-    }
-    if (($value['compiledVersion'] ?? null) === 4 && is_array($value['grantIndex'] ?? null)) {
-        $value['compiledVersion'] = STATTIC_AUTHORIZATION_COMPILED_VERSION;
-        $value['grantIndex']['teamReference'] = null;
-    }
+    $value = _stattic_authorization_projection_upgrade_legacy($value);
     return _stattic_authorization_projection_compiled($value) ? $value : null;
 }
 
@@ -3486,39 +3478,6 @@ function _stattic_access_url_with_params(string $url, array $params): string
     return $url . (str_contains($url, '?') ? '&' : '?') . $query;
 }
 
-function _stattic_access_browser_state_cookie_prefix(): string
-{
-    return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1'
-        ? STATTIC_ACCESS_BROWSER_STATE_DEV_COOKIE_PREFIX
-        : STATTIC_ACCESS_BROWSER_STATE_COOKIE_PREFIX;
-}
-
-function _stattic_access_browser_state_cookie_name(string $state): string
-{
-    return _stattic_access_browser_state_cookie_prefix() . substr($state, 0, 16);
-}
-
-function _stattic_access_browser_state_from_request(?string $expected = null): string
-{
-    if ($expected !== null) {
-        $value = $_COOKIE[_stattic_access_browser_state_cookie_name($expected)] ?? '';
-        return is_string($value) && hash_equals($expected, $value) ? $value : '';
-    }
-    $prefix = _stattic_access_browser_state_cookie_prefix();
-    foreach ($_COOKIE as $name => $value) {
-        if (
-            is_string($name)
-            && is_string($value)
-            && str_starts_with($name, $prefix)
-            && preg_match('/\A[a-f0-9]{64}\z/D', $value) === 1
-            && hash_equals($name, _stattic_access_browser_state_cookie_name($value))
-        ) {
-            return $value;
-        }
-    }
-    return '';
-}
-
 function _stattic_returning_account_cookie_name(): string
 {
     return _stattic_config_value('SPACEFAST_INSECURE_COOKIES') === '1'
@@ -3548,28 +3507,6 @@ function _stattic_access_forget_returning_account(): void
     if (isset($_COOKIE[$name])) {
         _stattic_clear_cookie($name);
     }
-}
-
-// Each nonce gets its own short-lived cookie name, so concurrent first-time
-// starts cannot overwrite each other before their callbacks return. Sequential
-// starts reuse an existing nonce and avoid growing the cookie jar.
-function _stattic_access_browser_state_begin(): string
-{
-    static $state = null;
-    if (is_string($state)) {
-        return $state;
-    }
-    $state = _stattic_access_browser_state_from_request();
-    if ($state !== '') {
-        return $state;
-    }
-    $state = bin2hex(random_bytes(32));
-    _stattic_set_cookie(
-        _stattic_access_browser_state_cookie_name($state),
-        $state,
-        STATTIC_ACCESS_BROWSER_STATE_SECONDS
-    );
-    return $state;
 }
 
 // Flow-state params are stripped so redirects and forms never loop.
@@ -3608,13 +3545,6 @@ function _stattic_request_is_document_navigation(): bool
     return $destination === 'document';
 }
 
-// The control plane's no-grant bounce names the account it found: a visitor
-// without authority gets no runtime session, so this host cannot know who it is.
-// The hint has its own purpose, is never redeemable, and opens nothing. Its one
-// power beyond display: a verified one marks this browser's invite request for
-// that exact address as from a verified address.
-const STATTIC_ACCESS_ACCOUNT_HINT_PARAM = 'sf_access_as';
-const STATTIC_ACCESS_ACCOUNT_HINT_PURPOSE = 'account-hint';
 // The access flow's own params. None of them is ever part of a page a flow
 // returns to, and `__` is a durable share-link secret.
 const STATTIC_ACCESS_FLOW_PARAMS = [
@@ -3645,45 +3575,6 @@ function _stattic_access_return_without_flow_params(string $returnPath): string
     return substr($withoutFragment, 0, $queryAt)
         . ($kept === [] ? '' : '?' . implode('&', $kept))
         . $fragment;
-}
-
-// The token's browserState claim when this browser holds the matching state
-// cookie, else ''.
-function _stattic_access_claims_browser_state(array $claims): string
-{
-    $tokenState = $claims['browserState'] ?? null;
-    if (!is_string($tokenState) || preg_match('/\A[a-f0-9]{64}\z/D', $tokenState) !== 1) {
-        return '';
-    }
-    return _stattic_access_browser_state_from_request($tokenState);
-}
-
-// ['email' => ..., 'token' => ..., 'browserState' => ...] for a hint that
-// verifies here, else null.
-function _stattic_access_account_hint(array $serving, string $host, mixed $token): ?array
-{
-    if (!is_string($token) || $token === '' || strlen($token) > 4096) {
-        return null;
-    }
-    $verified = _stattic_visitor_verify(
-        $token,
-        _stattic_visitor_verify_options($serving, $host, null, ['requireJti' => false])
-    );
-    $claims = is_array($verified) && is_array($verified['claims'] ?? null) ? $verified['claims'] : [];
-    if (($claims['purpose'] ?? null) !== STATTIC_ACCESS_ACCOUNT_HINT_PURPOSE) {
-        return null;
-    }
-    // Bound to the browser that started the sign-in, so a forwarded URL never
-    // shows one person's address in someone else's browser.
-    $browserState = _stattic_access_claims_browser_state($claims);
-    if ($browserState === '') {
-        return null;
-    }
-    $email = is_string($claims['email'] ?? null) ? trim($claims['email']) : '';
-    if ($email === '' || strlen($email) > 320 || filter_var($email, FILTER_VALIDATE_EMAIL) === false) {
-        return null;
-    }
-    return ['email' => $email, 'token' => $token, 'browserState' => $browserState];
 }
 
 function _stattic_access_status_fragment(string $status, ?string $accountEmail = null): string
@@ -4059,32 +3950,21 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
         )
         && _stattic_platform_bearer_token_from_request() === null
     ) {
-        $redirect = null;
         if ($lanes['silent'] && _stattic_share_oauth_is_account_url($lanes['account'])) {
             // Same rule as below: the probe is recorded before the browser leaves.
             _stattic_access_record_identity_check($serving, $requestHost, $identity);
             _stattic_share_oauth_begin($serving, $host, $returnPath, true, $expired);
         }
         if ($lanes['silent'] && is_string($lanes['account'])) {
-            $redirectParams = [
-                'silent' => '1',
-                'host' => $host,
-                'return' => $returnPath,
-                'browserState' => _stattic_access_browser_state_begin(),
-            ];
-            // A silent recovery with no upstream session must still preserve
-            // the expiry diagnosis instead of the generic signed-out page.
-            if ($expired) {
-                $redirectParams['fallback'] = 'session-expired';
-            }
-            $redirect = _stattic_access_url_with_params($lanes['account'], $redirectParams);
-        }
-        if ($redirect !== null) {
-            // Win or lose, the probe ran: recording it before leaving is what
-            // stops a bounce that finds nothing from looping. That hands this
-            // browser a stateless session, so the bounce cannot be cacheable.
-            _stattic_access_record_identity_check($serving, $requestHost, $identity);
-            _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE);
+            _stattic_access_legacy_silent_sso_redirect(
+                $serving,
+                $requestHost,
+                $host,
+                $lanes['account'],
+                $returnPath,
+                $identity,
+                $expired
+            );
         }
     }
     if ($status === '' && $expired) {
@@ -4234,10 +4114,7 @@ function _stattic_access_exchange_headers(array $exchange, array $context, strin
 {
     $headers = [
         'Accept: ' . $accept,
-        // old-engine-compat: S13 older Space runtime credentials. An older
-        // control plane reads only this; a newer one checks the Space token
-        // below first and refuses this once it has registered the box's key.
-        'Spacefast-Runtime-Exchange: ' . $exchange['credential'],
+        _stattic_access_legacy_exchange_header($exchange),
     ];
     $serving = is_array($context['serving'] ?? null) ? $context['serving'] : null;
     if ($serving !== null) {
@@ -4260,12 +4137,10 @@ function _stattic_access_exchange_headers(array $exchange, array $context, strin
         $headers[] = 'Spacefast-Visitor-User-Agent: ' . $agent;
     }
     if (_stattic_is_anonymous_id($context['browser'] ?? null)) {
-        // The box's own key once it has one. old-engine-compat: S19 until
-        // then the exchange credential, exactly as before.
         $own = $serving['authorization']['sessionKey'] ?? null;
         $browserKey = _stattic_space_session_key_valid($own)
             ? hash_hmac('sha256', 'visitor-browser', $own)
-            : $exchange['credential'];
+            : (string) _stattic_access_legacy_hmac_key($exchange);
         $headers[] = 'Spacefast-Visitor-Browser: '
             . _stattic_access_browser_header_value($context['browser'], $browserKey);
     }
@@ -4358,17 +4233,11 @@ function _stattic_access_handle_account_start(array $serving, string $requestHos
     if (_stattic_share_oauth_url($serving) !== null) {
         _stattic_share_oauth_begin($serving, _stattic_canonicalize_host($requestHost), $returnPath, $silent);
     }
-    $redirect = _stattic_access_url_with_params($accountUrl, [
-        'host' => _stattic_canonicalize_host($requestHost),
-        'return' => $returnPath,
-        'browserState' => _stattic_access_browser_state_begin(),
-        // "Use another account": sign in as someone else, not re-check this one.
-        // The bar's Switch Account asks with `prompt=select_account`, also on a
-        // page still open after Sign in with Spacefast was switched off.
-        ...((($_GET['addAccount'] ?? null) === '1' || ($_GET['prompt'] ?? null) === 'select_account')
-            ? ['addAccount' => '1'] : []),
-    ]);
-    _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_NO_STORE, true);
+    _stattic_access_legacy_account_start_redirect(
+        $accountUrl,
+        _stattic_canonicalize_host($requestHost),
+        $returnPath
+    );
 }
 
 function _stattic_access_post_lane_begin(
@@ -4654,20 +4523,11 @@ function _stattic_access_handle_request_invite(array $serving, string $requestHo
             ...($presentedBrowser === null ? ['anonymousId' => $browser] : []),
         ]
     );
-    // The control plane says whether anything is left to confirm: `sent` means
-    // the request is with the owner. An older one answers `pending` and mails
-    // an unhinted visitor a confirmation link first (control planes before
-    // #5288, such as prod/2026.11.13-1321). old-engine-compat: delete the
-    // `pending` reading and the `request-confirm` status once no control-plane
-    // image a box can reach, including a rollback target, has the
-    // `request_verify` handoff flow.
-    $sent = is_array($result['body'] ?? null)
-        && (($result['body']['data']['status'] ?? null) === 'sent');
     _stattic_access_gate_after_post(
         $serving,
         $requestHost,
         $returnPath,
-        $sent ? 'request-sent' : ($accountHint === '' ? 'request-confirm' : 'request-pending')
+        _stattic_access_legacy_request_invite_status($result['body'] ?? null, $accountHint)
     );
 }
 
@@ -5352,21 +5212,6 @@ function _stattic_access_exchange_link_token(array $serving, string $requestHost
     ];
 }
 
-// The credential lives in one reserved path for one request only: exchange it,
-// set the host-only session cookie, then move to the clean landing URL. Customer
-// bytes are never served from a credential path.
-function _stattic_access_handle_link_entry(
-    array $serving,
-    string $requestPath,
-    string $requestHost
-): void {
-    $token = _stattic_access_entry_token($requestPath);
-    if ($token === null) {
-        return;
-    }
-    _stattic_access_redeem_link_entry($serving, $requestHost, $token);
-}
-
 // `/__spacefast`: the door. It shows the Space's gate with every lane this
 // Space offers (a password field, Sign in with Spacefast), returning to
 // `?return=` once the visitor is in. A visitor who already has access to that
@@ -5439,7 +5284,7 @@ function _stattic_access_handle_in(array $serving, string $requestPath, string $
     // (`_stattic_spacefast_bar_tried`, the SDK's own decision): no marker with
     // the bar switched off, injection off, or on a public host whose
     // projection doesn't offer the bar there.
-    require_once __DIR__ . '/spacefast-sdk.php';
+    require_once __DIR__ . '/space-bar.php';
     if (
         _stattic_access_principal_is_account($handoffPrincipal ?? '')
         && _stattic_spacefast_bar_tried($serving, $host) !== null
@@ -5452,77 +5297,6 @@ function _stattic_access_handle_in(array $serving, string $requestPath, string $
         STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
         true
     );
-}
-
-// `/__sf/redeem`: the handoff address of a control plane that predates
-// `/__spacefast/in/`, with every shape it sends there. A browser follows
-// `GET ?sf_token=<handoff>&return=<path>` (with `silent=1` on a renewal nobody
-// clicked for, or `display=popup` from a popup), and a released CLI posts the
-// JSON handoff's `token` and `return` as a same-origin form. Same consumption
-// and session as `/__spacefast/in/`. Delete with compat/old-engine.ts S12 once
-// no control plane image or CLI release that sends it can reach a box.
-function _stattic_access_handle_legacy_redeem(array $serving, string $requestHost): never
-{
-    $method = _stattic_runtime_request_method();
-    if (!in_array($method, ['GET', 'HEAD', 'POST'], true)) {
-        _stattic_render_method_not_allowed_lazy();
-    }
-    if (
-        $method === 'POST'
-        && (
-            !_stattic_access_same_origin_post($requestHost)
-            || strtolower(trim((string) strstr(($_SERVER['CONTENT_TYPE'] ?? '') . ';', ';', true)))
-                !== 'application/x-www-form-urlencoded'
-        )
-    ) {
-        _stattic_render_json_or_deny('access_origin_invalid', 'Cross-origin access submissions are not accepted.');
-    }
-    $fields = $method === 'POST' ? $_POST : $_GET;
-    $tokenField = $method === 'POST' ? 'token' : 'sf_token';
-    $token = is_string($fields[$tokenField] ?? null) ? trim((string) $fields[$tokenField]) : '';
-    $returnTo = _stattic_safe_return_path(is_string($fields['return'] ?? null) ? (string) $fields['return'] : '/');
-    $parsed = $token === '' ? null : _stattic_access_in_token(STATTIC_ACCESS_IN_PREFIX . $token);
-    if ($parsed === null || $parsed[0] !== 'handoff' || $returnTo === null) {
-        _stattic_render_access_route_not_found();
-    }
-    $storedRecord = null;
-    $credential = _stattic_access_consume_handoff_token(
-        $serving,
-        _stattic_canonicalize_host($requestHost),
-        $parsed[1],
-        $storedRecord
-    );
-    if ($credential === null) {
-        if ($method !== 'POST' && ($fields['silent'] ?? null) === '1') {
-            _stattic_access_redirect($returnTo, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-        }
-        _stattic_render_access_route_not_found();
-    }
-    _stattic_access_set_session_cookie($credential);
-    // As it always has: the saved record's principal decides, so a handoff
-    // that attaches to a browser already signed in to an account keeps its
-    // marker. The canonical route decides from the handoff's own claims.
-    if (_stattic_access_principal_is_account((string) ($storedRecord['principal'] ?? ''))) {
-        _stattic_access_remember_returning_account();
-    }
-    if ($method !== 'POST' && ($fields['display'] ?? '') === 'popup') {
-        // The session cookie is already set browser-wide: tell the opener
-        // (same origin only) and close. No token ever crosses postMessage.
-        $nonce = bin2hex(random_bytes(16));
-        header('Cache-Control: ' . STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-        header('Referrer-Policy: no-referrer', true);
-        header("Content-Security-Policy: default-src 'none'; script-src 'nonce-" . $nonce . "'; base-uri 'none'; frame-ancestors 'none'", true);
-        header('Content-Type: text/html; charset=utf-8', true);
-        echo '<!doctype html><meta name="referrer" content="no-referrer"><title>Signed in</title>'
-            . '<p>You&#039;re in. You can close this window.</p>'
-            . '<p><a href="' . _stattic_html_escape($returnTo) . '">Continue</a></p>'
-            . '<script nonce="' . $nonce . '">'
-            . 'if(window.opener){try{window.opener.postMessage("sf-access-complete",window.location.origin)}catch(e){}}'
-            . 'window.close();'
-            . '</script>';
-        exit;
-    }
-    _stattic_access_redirect($returnTo, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
 }
 
 // `$requestedReturn` is the page a deep link asked for; without one the link's
@@ -6119,7 +5893,7 @@ function _stattic_access_handle_session(array $serving, string $requestHost): ne
         // session holds and never by page script. Said only where the control
         // plane projected a bar (its capability and `share.sign_in` on).
         require_once __DIR__ . '/../shared/bootstrap-config.php';
-        require_once __DIR__ . '/spacefast-sdk.php';
+        require_once __DIR__ . '/space-bar.php';
         if (_stattic_spacefast_bar_projected($serving)) {
             $session['bar'] = _stattic_access_session_shows_bar($serving, $identity, $principal);
         }
@@ -6187,27 +5961,25 @@ function _stattic_access_handle_logout(string $requestHost): void
         // browser without Fetch Metadata, a no-referrer page's opaque Origin,
         // a link or form elsewhere) ends nothing. It asks, and the button posts
         // back here with this origin: `same-origin` keeps that Origin real.
-        if ($method === 'GET' || $method === 'POST') {
-            // A refusal of the request as it came, whatever the page offers.
-            require_once __DIR__ . '/../shared/errors.php';
-            _stattic_refusal_header_mark('access_origin_invalid');
-            _stattic_serve_page('sign-out', [
-                'status' => 403,
-                'headers' => [
-                    'Cache-Control' => 'no-store',
-                    'Referrer-Policy' => 'same-origin',
-                    'Content-Security-Policy' => "frame-ancestors 'none'",
-                    STATTIC_REFUSAL_HEADER => 'access_origin_invalid',
-                ],
-                'message' => 'Sign out of this Space?',
-                'code' => 'access_origin_invalid',
-                'fragment' => '<form method="post" action="' . _stattic_html_escape(STATTIC_ACCESS_LOGOUT_PATH)
-                    . '"><input type="hidden" name="return" value="' . _stattic_html_escape($returnTo)
-                    . '"><div class="sf-actions"><button class="sf-button" type="submit">Sign Out</button>'
-                    . '<a class="sf-button sf-button-quiet" href="' . _stattic_html_escape($returnTo) . '">Stay Signed In</a></div></form>',
-            ]);
-            exit;
-        }
+        // A refusal of the request as it came, whatever the page offers.
+        require_once __DIR__ . '/../shared/errors.php';
+        _stattic_refusal_header_mark('access_origin_invalid');
+        _stattic_serve_page('sign-out', [
+            'status' => 403,
+            'headers' => [
+                'Cache-Control' => 'no-store',
+                'Referrer-Policy' => 'same-origin',
+                'Content-Security-Policy' => "frame-ancestors 'none'",
+                STATTIC_REFUSAL_HEADER => 'access_origin_invalid',
+            ],
+            'message' => 'Sign out of this Space?',
+            'code' => 'access_origin_invalid',
+            'fragment' => '<form method="post" action="' . _stattic_html_escape(STATTIC_ACCESS_LOGOUT_PATH)
+                . '"><input type="hidden" name="return" value="' . _stattic_html_escape($returnTo)
+                . '"><div class="sf-actions"><button class="sf-button" type="submit">Sign Out</button>'
+                . '<a class="sf-button sf-button-quiet" href="' . _stattic_html_escape($returnTo) . '">Stay Signed In</a></div></form>',
+        ]);
+        exit;
     }
     $clearUrl = _stattic_access_end_session(_stattic_page_serving(), $requestHost, $returnTo);
     if ($clearUrl === false) {

@@ -292,7 +292,7 @@ test("the document envelope is one spelling and one byte limit on both sides", a
   );
   expect(created.ledger.baseText).toContain(`"title":"${title}"`);
   // SAFETY: the ledger's branded digest types are the contract's.
-  await verifySyncLedgerV1(created.ledger as never);
+  await verifySyncLedgerV1(created.ledger);
 
   // 667 three-byte letters: 667 UTF-16 units, 2001 bytes. Both sides refuse it.
   const oversized = source.replace(JSON.stringify(title), JSON.stringify("€".repeat(667)));
@@ -345,7 +345,7 @@ test("a repo Markdown file binds, survives a WordPress edit, and round-trips bac
   expect(created.ledger.baseText).toContain("# Launch");
   // SAFETY: the ledger's branded digest types are the contract's; the kernel
   // produced these bytes and this call is what proves they parse and verify.
-  await verifySyncLedgerV1(created.ledger as never);
+  await verifySyncLedgerV1(created.ledger);
 
   const pull = receipt(pulled);
   expect(pull.status).toBe("pulled");
@@ -373,7 +373,7 @@ test("a repo Markdown file binds, survives a WordPress edit, and round-trips bac
   expect(receipt(published).ledger.metadataDigest).not.toBe(pull.ledger.metadataDigest);
 
   // SAFETY: same branded-digest reason as the ledger verified above.
-  await verifySyncLedgerV1(pull.ledger as never);
+  await verifySyncLedgerV1(pull.ledger);
 });
 
 test("binding accepts absolute media URLs already stored in the source and WordPress", async () => {

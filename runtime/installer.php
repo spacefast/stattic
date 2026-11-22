@@ -23,15 +23,51 @@ if (PHP_VERSION_ID < 80500 || PHP_VERSION_ID >= 80600) {
 // _REVISION and optional _NATIVE_SHA256 ride the environment. The JSON receipt
 // on stdout is the whole report. There is no callback.
 
+/**
+ * Consolidated mutable state for one installer invocation.
+ *
+ * @return array{
+ *   phase:'staging'|'publishing'|'committed'|'rolled_back'|'rollback_failed',
+ *   recovery_in_progress:bool,
+ *   install_root:?string,
+ *   previous_pointer:?array,
+ *   new_target:?string,
+ *   release_root:?string,
+ *   cleanup_paths:list<string>,
+ *   file_swaps:list<array>,
+ *   tree_swaps:list<array>,
+ *   public_versions:list<string>,
+ *   test_pause_reached:bool
+ * }
+ */
+function &installer_state(): array
+{
+    static $state = [
+        'phase' => 'staging',
+        'recovery_in_progress' => false,
+        'install_root' => null,
+        'previous_pointer' => null,
+        'new_target' => null,
+        'release_root' => null,
+        'cleanup_paths' => [],
+        'file_swaps' => [],
+        'tree_swaps' => [],
+        'public_versions' => [],
+        'test_pause_reached' => false,
+    ];
+    return $state;
+}
+
 function fail(string $message, int $exitCode = 1): never
 {
     static $cleaning = false;
-    $rollbackComplete = true;
+    $state = &installer_state();
+    $rollbackComplete = $state['phase'] !== 'rollback_failed';
     if (!$cleaning) {
         $cleaning = true;
-        if (($GLOBALS['spacefast_install_phase'] ?? null) === 'publishing') {
+        if ($state['phase'] === 'publishing') {
             $rollbackComplete = rollback_install_transaction($message);
-        } elseif (($GLOBALS['spacefast_install_phase'] ?? null) !== 'committed') {
+        } elseif ($state['phase'] === 'staging') {
             cleanup_registered_paths();
         }
     }
@@ -686,7 +722,7 @@ function validate_engine_stage(string $stageRoot, array $staged): void
 }
 
 /**
- * @return array{state:'absent'|'valid'|'legacy'|'malformed'|'missing'|'corrupt'|'unsupported'|'unknown',target?:string,root?:string}
+ * @return array{state:'absent'|'valid'|'legacy'|'malformed'|'missing'|'corrupt'|'dangling'|'unsupported'|'unknown',target?:string,root?:string,payload_identity?:string}
  */
 function active_release_pointer_state(string $installRoot): array
 {
@@ -747,8 +783,9 @@ function active_release_pointer_state(string $installRoot): array
     if (!is_file($identityMarker) || is_link($identityMarker)) {
         return ['state' => 'corrupt', 'target' => $target];
     }
-    return installed_release_payload_matches($releaseRoot)
-        ? ['state' => 'valid', 'target' => $target, 'root' => $releaseRoot]
+    $verifiedIdentity = verified_release_payload_identity($releaseRoot);
+    return is_string($verifiedIdentity)
+        ? ['state' => 'valid', 'target' => $target, 'root' => $releaseRoot, 'payload_identity' => $verifiedIdentity]
         : ['state' => 'dangling', 'target' => $target];
 }
 
@@ -781,6 +818,17 @@ function active_release_pointer_target(string $installRoot): ?string
     return in_array($state['state'], ['valid', 'legacy'], true) ? ($state['target'] ?? null) : null;
 }
 
+function read_active_release_pointer_raw(string $installRoot): ?string
+{
+    $pointer = $installRoot . '/active-release';
+    if (!is_file($pointer) || is_link($pointer)) {
+        return null;
+    }
+    clearstatcache(true, $pointer);
+    $raw = file_get_contents($pointer, false, null, 0, 512);
+    return is_string($raw) ? trim($raw) : null;
+}
+
 function publish_active_release(string $installRoot, string $target): bool
 {
     if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
@@ -793,8 +841,7 @@ function publish_active_release(string $installRoot, string $target): bool
     if (!publish_regular_file($pointer, $target . "\n", 0644)) {
         return false;
     }
-    clearstatcache(true, $pointer);
-    return active_release_pointer_target($installRoot) === $target;
+    return read_active_release_pointer_raw($installRoot) === $target;
 }
 
 function release_has_structural_artifacts(string $root): bool
@@ -837,7 +884,7 @@ function restore_active_release_pointer(string $installRoot, array $previous, st
         return true;
     }
     if (
-        !in_array(($current['state'] ?? null), ['valid', 'legacy', 'missing', 'corrupt'], true)
+        !in_array(($current['state'] ?? null), ['valid', 'legacy', 'missing', 'corrupt', 'dangling'], true)
         || ($current['target'] ?? null) !== $newTarget
     ) {
         return false;
@@ -872,9 +919,10 @@ function restore_active_release_pointer(string $installRoot, array $previous, st
 
 function rollback_install_pointer(): bool
 {
-    $installRoot = $GLOBALS['spacefast_install_root'] ?? null;
-    $previous = $GLOBALS['spacefast_previous_release_pointer'] ?? null;
-    $newTarget = $GLOBALS['spacefast_new_release_target'] ?? null;
+    $state = &installer_state();
+    $installRoot = $state['install_root'];
+    $previous = $state['previous_pointer'];
+    $newTarget = $state['new_target'];
     if (!is_string($installRoot) || !is_array($previous) || !is_string($newTarget)) {
         return true;
     }
@@ -978,15 +1026,21 @@ function release_payload_identity(string $releaseRoot): ?string
     return hash_final($digest);
 }
 
-function installed_release_payload_matches(string $releaseRoot): bool
+function verified_release_payload_identity(string $releaseRoot): ?string
 {
     $marker = $releaseRoot . '/.payload-identity';
     $raw = is_file($marker) && !is_link($marker) ? file_get_contents($marker, false, null, 0, 128) : false;
     $expected = is_string($raw) ? trim($raw) : '';
+    if (preg_match('/^[a-f0-9]{64}$/', $expected) !== 1) {
+        return null;
+    }
     $actual = release_payload_identity($releaseRoot);
-    return preg_match('/^[a-f0-9]{64}$/', $expected) === 1
-        && is_string($actual)
-        && hash_equals($expected, $actual);
+    return is_string($actual) && hash_equals($expected, $actual) ? $expected : null;
+}
+
+function installed_release_payload_matches(string $releaseRoot): bool
+{
+    return verified_release_payload_identity($releaseRoot) !== null;
 }
 
 function installed_release_loader_identity(string $releaseRoot): ?string
@@ -1051,8 +1105,12 @@ function installed_tree_files(string $root): ?array
  *   alias:list<array{source:string,path:string,executable:bool}>
  * } $manifest
  */
-function installed_public_payload_matches(string $releaseRoot, string $publicRoot, array $manifest): bool
-{
+function installed_public_payload_matches(
+    string $releaseRoot,
+    string $publicRoot,
+    array $manifest,
+    ?string $loaderIdentity = null,
+): bool {
     foreach ($manifest['alias'] as $entry) {
         if (public_path_has_symlink_parent($publicRoot, $entry['path'])) {
             return false;
@@ -1068,7 +1126,7 @@ function installed_public_payload_matches(string $releaseRoot, string $publicRoo
             return false;
         }
     }
-    $loaderIdentity = installed_release_loader_identity($releaseRoot);
+    $loaderIdentity ??= loader_payload_identity($releaseRoot, $manifest['alias'], $manifest['trees'], false);
     if (!is_string($loaderIdentity)) {
         return false;
     }
@@ -1144,8 +1202,13 @@ function legacy_public_payload_matches(string $releaseRoot, string $publicRoot, 
 }
 
 /** @return null|array{release:string,payload_identity:string,loader_identity:string,revision:string} */
-function release_authority(string $installRoot, string $releaseRoot): ?array
-{
+function release_authority(
+    string $installRoot,
+    string $releaseRoot,
+    ?string $loaderIdentity = null,
+    ?string $payloadIdentity = null,
+    ?string $revision = null,
+): ?array {
     $basename = basename($releaseRoot);
     if (preg_match('/^release-[A-Za-z0-9._-]+$/', $basename) !== 1) {
         return null;
@@ -1167,14 +1230,17 @@ function release_authority(string $installRoot, string $releaseRoot): ?array
     ) {
         return null;
     }
-    $marker = $releaseRoot . '/.payload-identity';
-    $payloadIdentity = is_file($marker) && !is_link($marker) ? trim((string) file_get_contents($marker)) : '';
-    $loaderIdentity = installed_release_loader_identity($releaseRoot);
+    if ($payloadIdentity === null) {
+        $marker = $releaseRoot . '/.payload-identity';
+        $payloadIdentity = is_file($marker) && !is_link($marker) ? trim((string) file_get_contents($marker)) : '';
+    }
+    $loaderIdentity ??= installed_release_loader_identity($releaseRoot);
+    $revision ??= read_engine_revision($releaseRoot);
     if (
         !hash_equals($decoded['payload_identity'], $payloadIdentity)
         || !is_string($loaderIdentity)
         || !hash_equals($decoded['loader_identity'], $loaderIdentity)
-        || read_engine_revision($releaseRoot) !== $decoded['revision']
+        || $revision !== $decoded['revision']
     ) {
         return null;
     }
@@ -1211,7 +1277,7 @@ function write_release_authority(
     $record = $authoritiesRoot . '/' . basename($releaseRoot) . '.json';
     return is_string($payload)
         && publish_regular_file($record, $payload . "\n", 0600)
-        && release_authority($installRoot, $releaseRoot) !== null;
+        && release_authority($installRoot, $releaseRoot, $loaderIdentity, $payloadIdentity, $revision) !== null;
 }
 
 /** @return list<string> */
@@ -1473,7 +1539,8 @@ function remove_retired_public_paths(string $publicRoot, array $manifest, array 
             ) {
                 fail('runtime_engine_retired_tree_invalid:' . $path);
             }
-            $GLOBALS['spacefast_tree_swaps'][] = [
+            $state = &installer_state();
+            $state['tree_swaps'][] = [
                 'target' => $target,
                 'kind' => 'symlink',
                 'previous' => $link,
@@ -1496,7 +1563,8 @@ function remove_retired_public_paths(string $publicRoot, array $manifest, array 
             fail('runtime_engine_retired_tree_invalid:' . $path);
         }
         $backup = $target . '.previous.' . $suffix;
-        $GLOBALS['spacefast_tree_swaps'][] = [
+        $state = &installer_state();
+        $state['tree_swaps'][] = [
             'target' => $target,
             'kind' => 'directory',
             'backup' => $backup,
@@ -1607,9 +1675,10 @@ function installer_config_value(string $envName): string
 
 function installer_test_pause(string $phase): void
 {
+    $state = &installer_state();
     if (
         installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE') !== $phase
-        || ($GLOBALS['spacefast_test_pause_reached'] ?? false) === true
+        || $state['test_pause_reached'] === true
     ) {
         return;
     }
@@ -1617,7 +1686,7 @@ function installer_test_pause(string $phase): void
     if ($marker === '' || file_put_contents($marker, "ready\n") === false) {
         fail('runtime_engine_test_pause_failed');
     }
-    $GLOBALS['spacefast_test_pause_reached'] = true;
+    $state['test_pause_reached'] = true;
     fwrite(STDOUT, "runtime_engine_test_paused\n");
     fflush(STDOUT);
     if (installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_RESUME_STDIN') === '1') {
@@ -1716,21 +1785,24 @@ function installed_native_matches(string $releaseRoot, string $expectedSha256): 
 // all, or a cron retrying a corrupt artifact fills the disk with archives.
 function register_cleanup_path(string $path): void
 {
-    $GLOBALS['spacefast_cleanup_paths'][] = $path;
+    $state = &installer_state();
+    $state['cleanup_paths'][] = $path;
 }
 
 function unregister_cleanup_path(string $path): void
 {
-    $GLOBALS['spacefast_cleanup_paths'] = array_values(array_filter(
-        $GLOBALS['spacefast_cleanup_paths'] ?? [],
+    $state = &installer_state();
+    $state['cleanup_paths'] = array_values(array_filter(
+        $state['cleanup_paths'],
         fn (string $registered): bool => $registered !== $path,
     ));
 }
 
 function cleanup_registered_paths(): bool
 {
+    $state = &installer_state();
     $clean = true;
-    foreach ($GLOBALS['spacefast_cleanup_paths'] ?? [] as $path) {
+    foreach ($state['cleanup_paths'] as $path) {
         if (is_dir($path) && !is_link($path)) {
             $clean = remove_managed_tree($path) && $clean;
         } else {
@@ -1738,7 +1810,7 @@ function cleanup_registered_paths(): bool
         }
     }
     if ($clean) {
-        $GLOBALS['spacefast_cleanup_paths'] = [];
+        $state['cleanup_paths'] = [];
     }
     return $clean;
 }
@@ -1753,12 +1825,13 @@ function cleanup_registered_paths(): bool
  */
 function register_file_swap(string $target, string $suffix): void
 {
+    $state = &installer_state();
     if (is_link($target)) {
         $previous = readlink($target);
         if (!is_string($previous)) {
             fail('runtime_engine_file_readlink_failed:' . $target);
         }
-        $GLOBALS['spacefast_file_swaps'][] = [
+        $state['file_swaps'][] = [
             'target' => $target,
             'kind' => 'symlink',
             'previous' => $previous,
@@ -1780,7 +1853,7 @@ function register_file_swap(string $target, string $suffix): void
             unlink_if_present($backup);
             fail('runtime_engine_file_backup_failed:' . $target);
         }
-        $GLOBALS['spacefast_file_swaps'][] = [
+        $state['file_swaps'][] = [
             'target' => $target,
             'kind' => 'file',
             'backup' => $backup,
@@ -1788,7 +1861,7 @@ function register_file_swap(string $target, string $suffix): void
         return;
     }
     if (!file_exists($target)) {
-        $GLOBALS['spacefast_file_swaps'][] = ['target' => $target, 'kind' => 'absent'];
+        $state['file_swaps'][] = ['target' => $target, 'kind' => 'absent'];
     }
 }
 
@@ -1836,22 +1909,24 @@ function rollback_file_swap(array $swap): bool
 
 function rollback_registered_file_swaps(): bool
 {
-    $swaps = array_reverse($GLOBALS['spacefast_file_swaps'] ?? []);
+    $state = &installer_state();
+    $swaps = array_reverse($state['file_swaps']);
     $failed = [];
     foreach ($swaps as $swap) {
         if (!rollback_file_swap($swap)) {
             $failed[] = $swap;
         }
     }
-    $GLOBALS['spacefast_file_swaps'] = array_reverse($failed);
+    $state['file_swaps'] = array_reverse($failed);
     return $failed === [];
 }
 
 function commit_registered_file_swaps(): bool
 {
+    $state = &installer_state();
     $committed = true;
     $remaining = [];
-    foreach ($GLOBALS['spacefast_file_swaps'] ?? [] as $swap) {
+    foreach ($state['file_swaps'] as $swap) {
         $backup = $swap['backup'] ?? null;
         if (is_string($backup) && !remove_managed_file($backup)) {
             $remaining[] = $swap;
@@ -1860,7 +1935,7 @@ function commit_registered_file_swaps(): bool
             unregister_cleanup_path($backup);
         }
     }
-    $GLOBALS['spacefast_file_swaps'] = $remaining;
+    $state['file_swaps'] = $remaining;
     return $committed;
 }
 
@@ -1994,44 +2069,46 @@ function rollback_tree_swap(array $swap): bool
 
 function rollback_registered_tree_swaps(): bool
 {
-    $swaps = array_reverse($GLOBALS['spacefast_tree_swaps'] ?? []);
+    $state = &installer_state();
+    $swaps = array_reverse($state['tree_swaps']);
     $failed = [];
     foreach ($swaps as $swap) {
         if (!rollback_tree_swap($swap)) {
             $failed[] = $swap;
         }
     }
-    $GLOBALS['spacefast_tree_swaps'] = array_reverse($failed);
+    $state['tree_swaps'] = array_reverse($failed);
     return $failed === [];
 }
 
 function preserve_registered_rollback_artifacts(): void
 {
-    foreach ($GLOBALS['spacefast_file_swaps'] ?? [] as $swap) {
+    $state = &installer_state();
+    foreach ($state['file_swaps'] as $swap) {
         if (is_string($swap['backup'] ?? null)) {
             unregister_cleanup_path($swap['backup']);
         }
     }
-    foreach ($GLOBALS['spacefast_tree_swaps'] ?? [] as $swap) {
+    foreach ($state['tree_swaps'] as $swap) {
         foreach (['backup', 'version'] as $key) {
             if (is_string($swap[$key] ?? null)) {
                 unregister_cleanup_path($swap[$key]);
             }
         }
     }
-    foreach ($GLOBALS['spacefast_public_versions'] ?? [] as $version) {
+    foreach ($state['public_versions'] as $version) {
         unregister_cleanup_path($version);
     }
-    $releaseRoot = $GLOBALS['spacefast_committed_release_root'] ?? null;
-    if (is_string($releaseRoot)) {
-        unregister_cleanup_path($releaseRoot);
+    if (is_string($state['release_root'])) {
+        unregister_cleanup_path($state['release_root']);
     }
 }
 
 /** @param array{pointer:bool,trees:bool,files:bool} $result */
 function write_rollback_failure_journal(string $reason, array $result): void
 {
-    $installRoot = $GLOBALS['spacefast_install_root'] ?? null;
+    $state = &installer_state();
+    $installRoot = $state['install_root'];
     if (!is_string($installRoot) || !ensure_install_dir($installRoot)) {
         return;
     }
@@ -2040,20 +2117,20 @@ function write_rollback_failure_journal(string $reason, array $result): void
         'format' => 'spacefast.runtime.rollback-failure.v1',
         'reason' => $reason,
         'result' => $result,
-        'release' => basename((string) ($GLOBALS['spacefast_committed_release_root'] ?? '')),
+        'release' => basename((string) ($state['release_root'] ?? '')),
         'failed_file_targets' => array_values(array_map(
             fn (array $swap): string => $swap['target'],
-            $GLOBALS['spacefast_file_swaps'] ?? [],
+            $state['file_swaps'],
         )),
         'failed_tree_targets' => array_values(array_map(
             fn (array $swap): string => $swap['target'],
-            $GLOBALS['spacefast_tree_swaps'] ?? [],
+            $state['tree_swaps'],
         )),
         'retained_backups' => array_values(array_filter(array_merge(
-            array_map(fn (array $swap): ?string => $swap['backup'] ?? null, $GLOBALS['spacefast_file_swaps'] ?? []),
-            array_map(fn (array $swap): ?string => $swap['backup'] ?? null, $GLOBALS['spacefast_tree_swaps'] ?? []),
+            array_map(fn (array $swap): ?string => $swap['backup'] ?? null, $state['file_swaps']),
+            array_map(fn (array $swap): ?string => $swap['backup'] ?? null, $state['tree_swaps']),
         ), 'is_string')),
-        'retained_public_versions' => array_values($GLOBALS['spacefast_public_versions'] ?? []),
+        'retained_public_versions' => array_values($state['public_versions']),
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     if (!is_string($payload) || !publish_regular_file($journal, $payload . "\n", 0600)) {
         error_log('runtime_engine_rollback_journal_failed');
@@ -2311,13 +2388,17 @@ function cleanup_failed_transaction_release(string $installRoot, ?string $target
 
 function rollback_install_transaction(string $reason): bool
 {
-    if (($GLOBALS['spacefast_install_phase'] ?? null) !== 'publishing') {
+    $state = &installer_state();
+    if ($state['phase'] === 'rolled_back') {
         return true;
     }
-    if (is_bool($GLOBALS['spacefast_rollback_complete'] ?? null)) {
-        return $GLOBALS['spacefast_rollback_complete'];
+    if ($state['phase'] === 'rollback_failed') {
+        return false;
     }
-    if (($GLOBALS['spacefast_recovery_in_progress'] ?? false) === true) {
+    if ($state['phase'] !== 'publishing') {
+        return true;
+    }
+    if ($state['recovery_in_progress']) {
         // The live paths may already contain residue from an earlier hard
         // crash. Treating that residue as this retry's rollback baseline would
         // clear the request gate while restoring a mixed release. Keep every
@@ -2329,7 +2410,7 @@ function rollback_install_transaction(string $reason): bool
             'files' => false,
         ]);
         cleanup_registered_paths();
-        $GLOBALS['spacefast_rollback_complete'] = false;
+        $state['phase'] = 'rollback_failed';
         return false;
     }
     $pointerRolledBack = rollback_install_pointer();
@@ -2338,7 +2419,7 @@ function rollback_install_transaction(string $reason): bool
     // restore their files unless every tree first returned to the same release.
     $filesRolledBack = $treesRolledBack && rollback_registered_file_swaps();
     $complete = $pointerRolledBack && $treesRolledBack && $filesRolledBack;
-    $installRoot = $GLOBALS['spacefast_install_root'] ?? null;
+    $installRoot = $state['install_root'];
     if ($complete && is_string($installRoot)) {
         $complete = clear_regular_state_file($installRoot . '/install-transaction.json');
     }
@@ -2351,15 +2432,16 @@ function rollback_install_transaction(string $reason): bool
         ]);
     }
     cleanup_registered_paths();
-    $GLOBALS['spacefast_rollback_complete'] = $complete;
+    $state['phase'] = $complete ? 'rolled_back' : 'rollback_failed';
     return $complete;
 }
 
 function commit_registered_tree_swaps(): bool
 {
+    $state = &installer_state();
     $committed = true;
     $remaining = [];
-    foreach ($GLOBALS['spacefast_tree_swaps'] ?? [] as $swap) {
+    foreach ($state['tree_swaps'] as $swap) {
         $backup = $swap['backup'] ?? null;
         if (is_string($backup) && !remove_managed_tree($backup)) {
             $remaining[] = $swap;
@@ -2396,9 +2478,9 @@ function commit_registered_tree_swaps(): bool
             }
         }
     }
-    $GLOBALS['spacefast_tree_swaps'] = $remaining;
+    $state['tree_swaps'] = $remaining;
     if ($committed) {
-        $GLOBALS['spacefast_public_versions'] = [];
+        $state['public_versions'] = [];
     }
     return $committed;
 }
@@ -2445,6 +2527,7 @@ function prepare_manifest_tree(
 
 function publish_manifest_tree(array $prepared, array $historicalOwners, string $suffix): void
 {
+    $state = &installer_state();
     ['publicRoot' => $publicRoot, 'target' => $target, 'version' => $version, 'versionStage' => $versionStage,
         'versionStore' => $versionStore, 'relativeVersion' => $relativeVersion, 'tree' => $tree] = $prepared;
     if (!is_string(ensure_public_directory($publicRoot, dirname($tree['path'])))
@@ -2452,7 +2535,7 @@ function publish_manifest_tree(array $prepared, array $historicalOwners, string 
         fail('runtime_engine_tree_mkdir_failed:' . $tree['path']);
     }
     register_cleanup_path($version);
-    $GLOBALS['spacefast_public_versions'][] = $version;
+    $state['public_versions'][] = $version;
     if (!rename($versionStage, $version)) {
         fail('runtime_engine_tree_commit_failed:' . $tree['path']);
     }
@@ -2474,7 +2557,7 @@ function publish_manifest_tree(array $prepared, array $historicalOwners, string 
         if (!is_string($previous)) {
             fail('runtime_engine_tree_readlink_failed:' . $tree['path']);
         }
-        $GLOBALS['spacefast_tree_swaps'][] = [
+        $state['tree_swaps'][] = [
             'target' => $target,
             'kind' => 'symlink',
             'previous' => $previous,
@@ -2491,7 +2574,7 @@ function publish_manifest_tree(array $prepared, array $historicalOwners, string 
         }
         $backup = $target . '.previous.' . $suffix;
         rrmdir($backup);
-        $GLOBALS['spacefast_tree_swaps'][] = [
+        $state['tree_swaps'][] = [
             'target' => $target,
             'kind' => 'directory',
             'backup' => $backup,
@@ -2508,7 +2591,7 @@ function publish_manifest_tree(array $prepared, array $historicalOwners, string 
     } elseif (file_exists($target)) {
         fail('runtime_engine_tree_target_invalid:' . $tree['path']);
     } else {
-        $GLOBALS['spacefast_tree_swaps'][] = [
+        $state['tree_swaps'][] = [
             'target' => $target,
             'kind' => 'absent',
             'version' => $version,
@@ -2946,6 +3029,16 @@ function validate_expected_md5(string $zipPath, string $expectedMd5): void
  */
 function installer_selected_chroot(): array
 {
+    if (!function_exists('_spacefast_runtime_resolve_chroot')) {
+        $selectionHelper = __DIR__ . '/engine/shared/engine-selection.php';
+        if (is_file($selectionHelper) && !is_link($selectionHelper)) {
+            require_once $selectionHelper;
+        }
+    }
+    if (function_exists('_spacefast_runtime_resolve_chroot')) {
+        $resolved = _spacefast_runtime_resolve_chroot(true);
+        return ['revision' => $resolved['revision'], 'reason' => $resolved['reason']];
+    }
     if (!class_exists('Atomic_Persistent_Data')) {
         return ['revision' => null, 'reason' => 'no_persistent_data'];
     }
@@ -3000,8 +3093,10 @@ function installer_selected_chroot(): array
  * passes every check the thin loader makes and serves `$revision`: the site
  * files laid down are then that revision's, byte for byte, and nothing is
  * left for the loader to fall back to.
+ *
+ * @return array{revision:string,reason:'chroot'}
  */
-function require_chroot_site(string $revision): void
+function require_chroot_site(string $revision): array
 {
     $chroot = installer_selected_chroot();
     if ($chroot['reason'] !== 'chroot') {
@@ -3010,6 +3105,7 @@ function require_chroot_site(string $revision): void
     if ($chroot['revision'] !== $revision) {
         fail('runtime_engine_chroot_site_revision_mismatch');
     }
+    return $chroot;
 }
 
 /**
@@ -3028,15 +3124,9 @@ function require_chroot_site(string $revision): void
 function remove_own_releases(string $installRoot, array $publication, string $revision): array
 {
     $publicationLock = acquire_publication_lock($installRoot);
-    $chroot = installer_selected_chroot();
-    if ($chroot['reason'] !== 'chroot') {
-        fail('runtime_engine_chroot_site_unavailable:' . $chroot['reason']);
-    }
-    // The channel moved during the install: the site files laid down are not
-    // the serving revision's, so the release stays until a retry lays them.
-    if ($chroot['revision'] !== $revision) {
-        fail('runtime_engine_chroot_site_revision_mismatch');
-    }
+    // The channel may have moved during the install: if so, the site files laid
+    // down are not the serving revision's, so the release stays until a retry.
+    $chroot = require_chroot_site($revision);
     $releasesRoot = $installRoot . '/releases';
     if (is_link($releasesRoot) || (file_exists($releasesRoot) && !is_dir($releasesRoot))) {
         fail('runtime_engine_releases_invalid');
@@ -3093,7 +3183,8 @@ $chrootSite = ($argv[2] ?? null) === '--chroot-site';
 $installRoot = prepare_install_root($publicRoot);
 $installerLock = acquire_installer_lock($installRoot);
 assert_engine_publication_instance($publicRoot, installer_config_value('SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID'));
-$GLOBALS['spacefast_install_phase'] = 'staging';
+$state = &installer_state();
+$state['phase'] = 'staging';
 $recoveryTransaction = read_install_transaction($installRoot);
 $recoveryRecords = install_transaction_recovery_records($recoveryTransaction);
 $recoveryReleaseRoots = array_values(array_map(
@@ -3104,11 +3195,11 @@ $recoveryReleaseTargets = array_values(array_map(
     fn (array $record): string => $record['release'],
     $recoveryRecords,
 ));
-$GLOBALS['spacefast_recovery_in_progress'] = is_array($recoveryTransaction)
+$state['recovery_in_progress'] = is_array($recoveryTransaction)
     && ($recoveryTransaction['phase'] ?? 'publishing') !== 'committed';
-$GLOBALS['spacefast_installer_running'] = true;
 register_shutdown_function(static function (): void {
-    if (($GLOBALS['spacefast_install_phase'] ?? null) === 'publishing') {
+    $currentState = &installer_state();
+    if ($currentState['phase'] === 'publishing') {
         rollback_install_transaction('runtime_engine_install_interrupted');
     }
 });
@@ -3193,15 +3284,15 @@ $installedManifest = is_string($installedReleaseRoot) ? installed_engine_manifes
 // only repeat that proof.
 $installedReleasePayloadMatches = ($installedPointer['state'] ?? null) === 'valid'
     && is_string($installedReleaseRoot);
-$installedReleaseLoaderIdentity = $installedReleasePayloadMatches && is_string($installedReleaseRoot)
-    ? installed_release_loader_identity($installedReleaseRoot)
+$installedReleaseLoaderIdentity = $installedReleasePayloadMatches && is_string($installedReleaseRoot) && is_array($installedManifest)
+    ? loader_payload_identity($installedReleaseRoot, $installedManifest['alias'], $installedManifest['trees'], false)
     : null;
 $installedLoaderIdentity = installed_loader_identity($installRoot);
 $installedPublicPayloadMatches = $installedReleasePayloadMatches
     && is_array($installedManifest)
     && is_string($installedReleaseLoaderIdentity)
     && $installedReleaseLoaderIdentity === $installedLoaderIdentity
-    && installed_public_payload_matches($installedReleaseRoot, $publicRoot, $installedManifest);
+    && installed_public_payload_matches($installedReleaseRoot, $publicRoot, $installedManifest, $installedReleaseLoaderIdentity);
 $installedHistoricalOwners = historical_public_owners(
     $installRoot . '/releases',
     $publicRoot,
@@ -3211,11 +3302,20 @@ $installedHistoricalOwners = historical_public_owners(
 );
 $rollbackJournalPresent = is_file($installRoot . '/rollback-failure.json') || is_link($installRoot . '/rollback-failure.json');
 $installTransactionPresent = is_file($installRoot . '/install-transaction.json') || is_link($installRoot . '/install-transaction.json');
-$installedPayloadIdentity = is_string($installedReleaseRoot)
-    ? trim((string) @file_get_contents($installedReleaseRoot . '/.payload-identity'))
-    : '';
+$installedPayloadIdentity = is_string($installedPointer['payload_identity'] ?? null)
+    ? $installedPointer['payload_identity']
+    : (is_string($installedReleaseRoot)
+        ? trim((string) @file_get_contents($installedReleaseRoot . '/.payload-identity'))
+        : '');
+$installedRevision = is_string($installedReleaseRoot) ? read_engine_revision($installedReleaseRoot) : null;
 $installedAuthority = is_string($installedReleaseRoot)
-    ? release_authority($installRoot, $installedReleaseRoot)
+    ? release_authority(
+        $installRoot,
+        $installedReleaseRoot,
+        $installedReleaseLoaderIdentity,
+        $installedPayloadIdentity,
+        $installedRevision,
+    )
     : null;
 // A chroot site keeps no release to call current: it is laid down again.
 if (
@@ -3226,7 +3326,7 @@ if (
     && $expectedNativeSha256 !== ''
     && $installedReleaseTarget !== null
     && is_string($installedReleaseRoot)
-    && read_engine_revision($installedReleaseRoot) === $expectedRevision
+    && $installedRevision === $expectedRevision
     && installed_native_matches($installedReleaseRoot, $expectedNativeSha256)
     && retired_public_paths_absent($publicRoot, $installedManifest, $installedHistoricalOwners)
     && is_array($installedAuthority)
@@ -3239,7 +3339,6 @@ if (
         $expectedNativeSha256,
     )
 ) {
-    $GLOBALS['spacefast_installer_running'] = false;
     echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release', 'publication_nonce' => $publication['nonce']], JSON_PRETTY_PRINT) . "\n";
     if (defined('SPACEFAST_RUNTIME_INSTALLER_EMBEDDED') && SPACEFAST_RUNTIME_INSTALLER_EMBEDDED === true) {
         return;
@@ -3309,21 +3408,21 @@ register_cleanup_path($releaseRoot);
 if (!rename($stageRoot, $releaseRoot)) {
     fail('runtime_engine_release_commit_failed');
 }
-$GLOBALS['spacefast_committed_release_root'] = $releaseRoot;
+$state['release_root'] = $releaseRoot;
 $newReleaseTarget = 'releases/' . basename($releaseRoot);
 $previousReleasePointer = $installedPointer;
 $previousReleaseRoot = is_string($installedReleaseRoot) ? $installedReleaseRoot : null;
-$GLOBALS['spacefast_install_root'] = $installRoot;
-$GLOBALS['spacefast_previous_release_pointer'] = $previousReleasePointer;
-$GLOBALS['spacefast_new_release_target'] = $newReleaseTarget;
+$state['install_root'] = $installRoot;
+$state['previous_pointer'] = $previousReleasePointer;
+$state['new_target'] = $newReleaseTarget;
 
 $releaseIdentity = release_payload_identity($releaseRoot);
 $releaseIdentityMarker = $releaseRoot . '/.payload-identity';
-if (
-    !is_string($releaseIdentity)
-    || !publish_regular_file($releaseIdentityMarker, $releaseIdentity . "\n", 0644)
-    || !installed_release_payload_matches($releaseRoot)
-) {
+$writtenMarker = is_string($releaseIdentity)
+    && publish_regular_file($releaseIdentityMarker, $releaseIdentity . "\n", 0644)
+    ? trim((string) file_get_contents($releaseIdentityMarker, false, null, 0, 128))
+    : '';
+if (!is_string($releaseIdentity) || !hash_equals($releaseIdentity, $writtenMarker)) {
     fail('runtime_engine_release_identity_failed');
 }
 if ($expectedNativeSha256 !== '' && !installed_native_matches($releaseRoot, $expectedNativeSha256)) {
@@ -3355,7 +3454,7 @@ $recoveryScratchClean = cleanup_install_transaction_scratch(
 if (!$recoveryScratchClean) {
     fail('runtime_engine_recovery_scratch_invalid');
 }
-$GLOBALS['spacefast_install_phase'] = 'publishing';
+$state['phase'] = 'publishing';
 if (!write_install_transaction(
     $installRoot,
     $newReleaseTarget,
@@ -3413,8 +3512,8 @@ if ($installAliases) {
     }
 }
 
-$injectedPointerFailure = installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE') === 'pointer_publication';
-if ($injectedPointerFailure || !publish_active_release($installRoot, $newReleaseTarget)) {
+$injectedFailure = installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE');
+if ($injectedFailure === 'pointer_publication' || !publish_active_release($installRoot, $newReleaseTarget)) {
     fail('runtime_engine_pointer_publication_failed');
 }
 
@@ -3425,11 +3524,11 @@ remove_retired_public_paths($publicRoot, $manifest, $historicalOwners, $suffix);
 $publishedPointer = active_release_pointer_state($installRoot);
 $publishedReleaseRoot = ($publishedPointer['state'] ?? null) === 'valid' ? ($publishedPointer['root'] ?? null) : null;
 $publishedManifest = is_string($publishedReleaseRoot) ? installed_engine_manifest($publishedReleaseRoot) : null;
-$publishedLoaderIdentity = is_string($publishedReleaseRoot)
-    ? installed_release_loader_identity($publishedReleaseRoot)
+$publishedLoaderIdentity = is_string($publishedReleaseRoot) && is_array($publishedManifest)
+    ? loader_payload_identity($publishedReleaseRoot, $publishedManifest['alias'], $publishedManifest['trees'], false)
     : null;
 $injectedPostcheckFailure = in_array(
-    installer_config_value('SPACEFAST_RUNTIME_INSTALLER_TEST_FAILURE'),
+    $injectedFailure,
     ['post_publication_check', 'tree_rollback', 'file_rollback'],
     true,
 );
@@ -3437,10 +3536,11 @@ if (
     $injectedPostcheckFailure
     || $publishedReleaseRoot !== realpath($releaseRoot)
     || ($publishedPointer['target'] ?? null) !== $newReleaseTarget
+    || ($publishedPointer['payload_identity'] ?? null) !== $releaseIdentity
     || $publishedLoaderIdentity !== $loaderIdentity
     || installed_loader_identity($installRoot) !== $loaderIdentity
     || !is_array($publishedManifest)
-    || !installed_public_payload_matches($publishedReleaseRoot ?? '', $publicRoot, $publishedManifest)
+    || !installed_public_payload_matches($publishedReleaseRoot ?? '', $publicRoot, $publishedManifest, $publishedLoaderIdentity)
     || !retired_public_paths_absent($publicRoot, $publishedManifest ?? ['alias' => [], 'trees' => []], $historicalOwners)
     || read_engine_revision($publishedReleaseRoot ?? '') !== $actualRevision
     || ($expectedNativeSha256 !== '' && !installed_native_matches($publishedReleaseRoot ?? '', $expectedNativeSha256))
@@ -3455,47 +3555,61 @@ if (
     fail('runtime_engine_post_publication_check_failed');
 }
 
-$GLOBALS['spacefast_install_phase'] = 'committed';
-$GLOBALS['spacefast_installer_running'] = false;
+// Stay in 'publishing' until the authority record, active-release proof, and
+// committed transaction journal are all durably written; any failure before
+// that point still rolls back to the previous release.
+$releaseAuthorityRecord = $installRoot . '/release-authorities/' . basename($releaseRoot) . '.json';
+register_cleanup_path($releaseAuthorityRecord);
+if (
+    $injectedFailure === 'release_authority'
+    || !write_release_authority(
+        $installRoot,
+        $releaseRoot,
+        $actualRevision,
+        $releaseIdentity,
+        $loaderIdentity,
+    )
+) {
+    fail('runtime_engine_release_authority_failed');
+}
+if (
+    $injectedFailure === 'release_proof'
+    || !write_active_release_proof(
+        $installRoot,
+        $newReleaseTarget,
+        $actualRevision,
+        $releaseIdentity,
+        $loaderIdentity,
+        $expectedNativeSha256,
+        $publication,
+    )
+) {
+    fail('runtime_engine_release_proof_failed');
+}
+if (
+    $injectedFailure === 'transaction_commit'
+    || !write_install_transaction(
+        $installRoot,
+        $newReleaseTarget,
+        $actualRevision,
+        $releaseIdentity,
+        $loaderIdentity,
+        compact_install_transaction_recoveries($recoveryRecords, $releaseIdentity),
+        $publication,
+        'committed',
+    )
+) {
+    fail('runtime_engine_transaction_commit_failed');
+}
+$state['phase'] = 'committed';
 if (function_exists('pcntl_signal')) {
     foreach ([SIGTERM, SIGINT, SIGHUP] as $signal) {
         pcntl_signal($signal, SIG_DFL);
     }
 }
 unregister_cleanup_path($releaseRoot);
-unset($GLOBALS['spacefast_committed_release_root']);
-if (!write_release_authority(
-    $installRoot,
-    $releaseRoot,
-    $actualRevision,
-    $releaseIdentity,
-    $loaderIdentity,
-)) {
-    fail('runtime_engine_release_authority_failed');
-}
-if (!write_active_release_proof(
-    $installRoot,
-    $newReleaseTarget,
-    $actualRevision,
-    $releaseIdentity,
-    $loaderIdentity,
-    $expectedNativeSha256,
-    $publication,
-)) {
-    fail('runtime_engine_release_proof_failed');
-}
-if (!write_install_transaction(
-    $installRoot,
-    $newReleaseTarget,
-    $actualRevision,
-    $releaseIdentity,
-    $loaderIdentity,
-    compact_install_transaction_recoveries($recoveryRecords, $releaseIdentity),
-    $publication,
-    'committed',
-)) {
-    fail('runtime_engine_transaction_commit_failed');
-}
+unregister_cleanup_path($releaseAuthorityRecord);
+$state['release_root'] = null;
 // The live tree and its proof are durable. Keep cleanup debt in the journal,
 // but let new requests use the complete release while old artifacts are pruned.
 preserve_registered_rollback_artifacts();

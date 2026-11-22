@@ -1751,3 +1751,81 @@ test("the upload surface rejects unsupported operations, and refusals stay reada
   expect(await errorCode(unroutablePut)).toBe("runtime_upload_route_not_found");
   expect(unroutablePut.headers.get("access-control-allow-origin")).toBe(origin);
 });
+
+test("finalize retains the upload session when a post-finalize artifact write fails", async () => {
+  const versionId = "ver_post_finalize_session_keep";
+  const files = { "index.html": "<h1>post-finalize</h1>\n" };
+  const session = await createDeclaredSession(rt, SPACE, versionId, files);
+  await uploadSessionBlobs(rt, session, files);
+  const getUploadSession = () =>
+    api(
+      rt,
+      "GET",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${versionId}/uploads`,
+      "get_upload_session",
+      { space_id: SPACE, version_id: versionId },
+    );
+  expect((await getUploadSession()).status).toBe(200);
+
+  const finalizeBody = {
+    upload_id: session.uploadId,
+    connectors_token: "tok_post_finalize_retry",
+    serving: {
+      zero_endpoints: [
+        {
+          execution_mode: "write",
+          method: "POST",
+          path: "/api/post-finalize/db",
+          source: `globalThis.__statticZeroResult = JSON.stringify({ status: 200, headers: {}, body: "ok" });`,
+          capabilities: { db: true },
+          db: {
+            schemaHash: "sha256:post-finalize-test",
+            migrationOperations: [],
+            tables: {
+              items: {
+                physicalName: "sf_post_finalize_items",
+                primaryKey: "id",
+                columns: { id: "item_id", title: { physicalName: "item_title" } },
+              },
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  // Rust finalize succeeds and produces zero/migrations.json; PHP then runs
+  // post-finalize steps and fails in _stattic_runtime_apply_zero_migrations
+  // because this harness has no database configured.
+  const failed = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${versionId}/finalize`,
+    "finalize_version",
+    { space_id: SPACE, version_id: versionId },
+    finalizeBody,
+  );
+  const versionDir = versionRoot(rt, SPACE, versionId);
+  const migrationsPath = path.join(versionDir, "zero", "migrations.json");
+  expect(failed.status).toBe(500);
+  expect(await errorCode(failed)).toBe("zero_migration_failed");
+  expect(existsSync(migrationsPath)).toBe(true);
+  // Session must remain active (unexpired and indexed) so a retry can finish
+  // post-finalize steps instead of seeing a released session.
+  expect((await getUploadSession()).status).toBe(200);
+
+  rmSync(migrationsPath);
+  const succeeded = await api(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${SPACE}/versions/${versionId}/finalize`,
+    "finalize_version",
+    { space_id: SPACE, version_id: versionId },
+    finalizeBody,
+  );
+  expect(succeeded.status).toBe(200);
+  expect(readFileSync(path.join(versionDir, "connectors", "token"), "utf8")).toBe(
+    "tok_post_finalize_retry",
+  );
+  expect((await getUploadSession()).status).toBe(404);
+});

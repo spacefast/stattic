@@ -137,6 +137,9 @@ if (is_array($adminSession)) {
     if ($target['kind'] === 'unavailable') {
         _stattic_content_media_refuse(503);
     }
+    if ($target['kind'] === 'denied') {
+        _stattic_content_media_refuse(403);
+    }
     if ($target['kind'] !== 'present') {
         _stattic_content_media_refuse(404);
     }

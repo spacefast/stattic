@@ -28,6 +28,93 @@ declare(strict_types=1);
 // release: a site switched back to the generic chroot keeps serving.
 
 const SPACEFAST_RUNTIME_CHROOT_SELECTION = '#^chroot/(staging|production)/(latest|previous)$#D';
+const SPACEFAST_RUNTIME_CHROOT_REVISION = '/^sf-engine-([0-9a-f]{40})$/D';
+const SPACEFAST_RUNTIME_CHROOT_REQUIRED_FILES = [
+    'engine/loader/request.php',
+    'engine/loader/wordpress.php',
+    'engine/shared/engine-selection.php',
+    'engine/init.php',
+];
+const SPACEFAST_RUNTIME_CHROOT_CONTAINMENT_CAPABILITY = 'runtime.security.tenant-containment.v1';
+
+/**
+ * Read the publisher's capability claim as data; never execute candidate PHP to
+ * ask whether it is safe.
+ */
+function _spacefast_runtime_chroot_contained(string $engineReal): bool
+{
+    $inventory = json_decode((string) @file_get_contents($engineReal . '/engine/wordpress/components.json'), true);
+    foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
+        if (
+            is_array($component)
+            && ($component['id'] ?? null) === 'runtime-engine'
+            && is_array($component['provides'] ?? null)
+            && in_array(SPACEFAST_RUNTIME_CHROOT_CONTAINMENT_CAPABILITY, $component['provides'], true)
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Resolve the site's chroot selection as data without falling back to a site
+ * release. Shared by command engine selection and the installer.
+ *
+ * @return array{kind:'chroot',release_root:string,native_binary:string,revision:string,reason:'chroot'}
+ *        |array{kind:'fallback',reason:string,revision:?string}
+ */
+function _spacefast_runtime_resolve_chroot(bool $clearStatCache = false): array
+{
+    // The provider defines the class in its prepend. A PHP process without it
+    // (a bare CLI, a local stack) has no persistent data to select with.
+    if (!class_exists('Atomic_Persistent_Data')) {
+        return ['kind' => 'fallback', 'reason' => 'no_persistent_data', 'revision' => null];
+    }
+    $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
+    if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, is_string($selection) ? trim($selection) : '', $selected) !== 1) {
+        return ['kind' => 'fallback', 'reason' => 'unselected', 'revision' => null];
+    }
+    $channel = $selected[1] . '-' . $selected[2];
+    // Tests stand a chroot up under a temporary root; the box has it at `/`.
+    $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
+    if ($clearStatCache) {
+        clearstatcache(true);
+    }
+    $scriptsReal = realpath($chrootRoot . '/scripts');
+    $engineReal = realpath($chrootRoot . '/scripts/sf-engine-' . $channel);
+    if (
+        !is_string($scriptsReal)
+        || !is_string($engineReal)
+        || dirname($engineReal) !== $scriptsReal
+        || preg_match(SPACEFAST_RUNTIME_CHROOT_REVISION, basename($engineReal), $match) !== 1
+    ) {
+        return ['kind' => 'fallback', 'reason' => 'chroot_missing', 'revision' => null];
+    }
+    $revision = $match[1];
+    // An engine without this rule, or without the loader bodies the thin
+    // loader hands requests to, predates that loader: the site's own release
+    // serves instead, until the chroot carries an engine with both.
+    foreach (SPACEFAST_RUNTIME_CHROOT_REQUIRED_FILES as $file) {
+        if (!is_file($engineReal . '/' . $file)) {
+            return ['kind' => 'fallback', 'reason' => 'chroot_engine_unsupported', 'revision' => $revision];
+        }
+    }
+    if (!_spacefast_runtime_chroot_contained($engineReal)) {
+        return ['kind' => 'fallback', 'reason' => 'chroot_containment_missing', 'revision' => $revision];
+    }
+    $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $revision . '/stattic-runtime';
+    if (!is_file($binary) || !is_executable($binary)) {
+        return ['kind' => 'fallback', 'reason' => 'chroot_binary_missing', 'revision' => $revision];
+    }
+    return [
+        'kind' => 'chroot',
+        'release_root' => $engineReal,
+        'native_binary' => $binary,
+        'revision' => $revision,
+        'reason' => 'chroot',
+    ];
+}
 
 /**
  * `reason` says why the site runs where it does, and `chroot_revision` which
@@ -38,73 +125,21 @@ const SPACEFAST_RUNTIME_CHROOT_SELECTION = '#^chroot/(staging|production)/(lates
  */
 function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
 {
-    $site = static fn (string $reason, ?string $chrootRevision = null): array => [
+    $resolved = _spacefast_runtime_resolve_chroot(false);
+    if ($resolved['kind'] === 'chroot') {
+        return [
+            'release_root' => $resolved['release_root'],
+            'native_binary' => $resolved['native_binary'],
+            'source' => 'chroot',
+            'reason' => 'chroot',
+            'chroot_revision' => $resolved['revision'],
+        ];
+    }
+    return [
         'release_root' => $siteReleaseRoot,
         'native_binary' => $siteReleaseRoot . '/bin/stattic-runtime',
         'source' => 'site',
-        'reason' => $reason,
-        'chroot_revision' => $chrootRevision,
-    ];
-    // The provider defines the class in its prepend. A PHP process without it
-    // (a bare CLI, a local stack) has no persistent data to select with.
-    if (!class_exists('Atomic_Persistent_Data')) {
-        return $site('no_persistent_data');
-    }
-    $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
-    if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, is_string($selection) ? trim($selection) : '', $selected) !== 1) {
-        return $site('unselected');
-    }
-    $channel = $selected[1] . '-' . $selected[2];
-    // Tests stand a chroot up under a temporary root; the box has it at `/`.
-    $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
-    $scriptsReal = realpath($chrootRoot . '/scripts');
-    $engineReal = realpath($chrootRoot . '/scripts/sf-engine-' . $channel);
-    if (
-        !is_string($scriptsReal)
-        || !is_string($engineReal)
-        || dirname($engineReal) !== $scriptsReal
-        || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($engineReal), $match) !== 1
-    ) {
-        return $site('chroot_missing');
-    }
-    // An engine without this rule, or without the loader bodies the thin
-    // loader hands requests to, predates that loader: the site's own release
-    // serves instead, until the chroot carries an engine with both.
-    if (
-        !is_file($engineReal . '/engine/loader/request.php')
-        || !is_file($engineReal . '/engine/loader/wordpress.php')
-        || !is_file($engineReal . '/engine/shared/engine-selection.php')
-        || !is_file($engineReal . '/engine/init.php')
-    ) {
-        return $site('chroot_engine_unsupported', $match[1]);
-    }
-    // Read data from the resolved release, never execute candidate PHP to ask
-    // whether it is safe. The artifact publisher owns this capability claim.
-    $inventory = json_decode((string) @file_get_contents($engineReal . '/engine/wordpress/components.json'), true);
-    $contained = false;
-    foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
-        if (
-            is_array($component)
-            && ($component['id'] ?? null) === 'runtime-engine'
-            && is_array($component['provides'] ?? null)
-            && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
-        ) {
-            $contained = true;
-            break;
-        }
-    }
-    if (!$contained) {
-        return $site('chroot_containment_missing', $match[1]);
-    }
-    $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $match[1] . '/stattic-runtime';
-    if (!is_file($binary) || !is_executable($binary)) {
-        return $site('chroot_binary_missing', $match[1]);
-    }
-    return [
-        'release_root' => $engineReal,
-        'native_binary' => $binary,
-        'source' => 'chroot',
-        'reason' => 'chroot',
-        'chroot_revision' => $match[1],
+        'reason' => $resolved['reason'],
+        'chroot_revision' => $resolved['revision'],
     ];
 }

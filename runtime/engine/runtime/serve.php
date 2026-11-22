@@ -165,19 +165,24 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_blob_gate_serve($privateRoot, $requestMethod, $originalRequestPath);
     }
 
-    // ---- route pointer + host shard -------------------------------------
+    // ---- route pointer + host shard + space overlay ----------------------
     // `unavailable` is a failed read of an EXISTING pointer, never `undeployed`:
     // that page is a deployment claim, and a transient I/O failure must not
     // impersonate one (the "Waiting for launch" incident).
-    $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
-    if ($routesRead['kind'] === 'unavailable') {
-        _stattic_render_runtime_unavailable_lazy('route_pointer_unreadable');
+    $routesResult = _stattic_v4_read_routes_pointer($privateRoot);
+    switch ($routesResult['kind']) {
+        case 'unavailable':
+            _stattic_render_runtime_unavailable_lazy($routesResult['code']);
+        case 'undeployed':
+            _stattic_render_platform_action(_stattic_undeployed_action());
+        case 'schema_mismatch':
+            _stattic_render_runtime_invariant_error_lazy(
+                'artifact-schema-mismatch',
+                'Runtime ' . $routesResult['what'] . ' schema does not match this runtime.'
+            );
+        case 'present':
+            break;
     }
-    $routes = $routesRead['value'];
-    if (!is_array($routes) || !isset($routes['gen'])) {
-        _stattic_render_platform_action(_stattic_undeployed_action());
-    }
-    _stattic_v4_assert_schema($routes['schema'] ?? null, 'route pointer');
 
     // Proves the production pointer itself, so it terminates before visitor
     // access and redirects can remap the request.
@@ -187,48 +192,37 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         exit;
     }
 
-    $host = _stattic_v4_host_lookup($privateRoot, $routes, $requestHost);
-    if ($host === false) {
-        _stattic_render_runtime_unavailable_lazy('route_shard_unreadable');
+    $resolved = _stattic_v4_resolve_host($privateRoot, $requestHost, $routesResult['routes']);
+    switch ($resolved['kind']) {
+        case 'unavailable':
+            _stattic_render_runtime_unavailable_lazy($resolved['code']);
+        case 'schema_mismatch':
+            _stattic_render_runtime_invariant_error_lazy(
+                'artifact-schema-mismatch',
+                'Runtime ' . $resolved['what'] . ' schema does not match this runtime.'
+            );
+        case 'undeployed':
+            _stattic_render_platform_action(_stattic_undeployed_action());
+        case 'platform_action':
+            $hostAction = $resolved['action'];
+            if (!_stattic_action_allows_method($hostAction, $requestMethod)) {
+                _stattic_render_method_not_allowed_lazy();
+            }
+            _stattic_prime_platform_page_serving($privateRoot, $resolved['host_entry'], $hostAction);
+            _stattic_render_platform_action($hostAction);
+        case 'denied':
+            // Fail closed: an absent/invalid overlay, or one fenced mid-mutation
+            // toward a stronger state, is a denial, never an open space.
+            _stattic_v4_render_forbidden('denied', 'access_denied', 'This page is private.');
+        case 'resolved':
+            break;
     }
-    if ($host === null) {
-        _stattic_render_platform_action(_stattic_undeployed_action());
-    }
-    $hostEntry = $host['entry'];
-    $hostRoutes = $host['routes'];
-    $spaceId = is_string($hostEntry['space_id'] ?? null) ? $hostEntry['space_id'] : '';
-
-    // A host whose entry is a terminal platform answer carries no Space bytes
-    // and must stay reachable after the Space route is gone.
-    $hostAction = is_array($hostEntry['route_action'] ?? null) ? $hostEntry['route_action'] : null;
-    if (is_array($hostAction) && in_array(($hostAction['action'] ?? null), ['tombstone', 'platform_error'], true)) {
-        if (!_stattic_action_allows_method($hostAction, $requestMethod)) {
-            _stattic_render_method_not_allowed_lazy();
-        }
-        _stattic_prime_platform_page_serving($privateRoot, $hostEntry, $hostAction);
-        _stattic_render_platform_action($hostAction);
-    }
-
-    // ---- space pointer + overlay ----------------------------------------
-    $space = null;
-    if ($spaceId !== '') {
-        $spaceRead = _sf_pointer_read('space:' . $spaceId, $privateRoot . '/spaces/' . $spaceId . '/space.json');
-        if ($spaceRead['kind'] === 'unavailable') {
-            _stattic_render_runtime_unavailable_lazy('space_pointer_unreadable');
-        }
-        $space = $spaceRead['value'];
-    }
-    $overlay = _stattic_v4_overlay($privateRoot, $spaceId, $space);
-    if ($overlay === false) {
-        _stattic_render_runtime_unavailable_lazy('space_overlay_unreadable');
-    }
-    // Fail closed: an absent/invalid overlay, or one fenced mid-mutation toward
-    // a stronger state, is a denial, never an open space. A failed READ of an
-    // existing overlay took the unavailable exit above.
-    if ($overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
-        _stattic_v4_render_forbidden('denied', 'access_denied', 'This page is private.');
-    }
-    $open = ($overlay['open'] ?? null) === true;
+    $hostEntry = $resolved['host_entry'];
+    $hostRoutes = $resolved['host_routes'];
+    $spaceId = $resolved['space_id'];
+    $overlay = $resolved['overlay'];
+    $open = $resolved['open'];
+    $versionId = $resolved['version_id'];
 
     // A protected provider-extension asset changes its final client URL before
     // X-Accel. The alias is reserved, resolves the original path, and re-runs
@@ -251,7 +245,6 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         $originalRequestUri = $requestUri;
     }
 
-    $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
     $serving = _stattic_v4_legacy_serving($spaceId, $versionId, $hostEntry, $overlay);
     $GLOBALS['SPACEFAST_PAGE_SERVING'] = $serving;
 

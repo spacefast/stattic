@@ -4352,6 +4352,79 @@ check((_stattic_typedpress_manifest($typedPressRoot)['appHash'] ?? null) === 'a'
 unlink($typedPressRoot . '/manifest.json');
 rmdir($typedPressRoot);
 
+// --- Zero v2 version state and advisory lock integration ----------------------------
+require_once __DIR__ . '/../engine/shared/zero-v2.php';
+require_once __DIR__ . '/../engine/shared/lock.php';
+$zeroStateRoot = realpath(sys_get_temp_dir()) . '/sf-zero-state-' . bin2hex(random_bytes(5));
+$zeroPrivateRoot = $zeroStateRoot . '/.stattic/storage';
+$zeroVersionRoot = $zeroPrivateRoot . '/spaces/spc_zstate/versions/ver_1';
+mkdir($zeroVersionRoot . '/.zero-compiled', 0775, true);
+check(_stattic_zero_v2_version_state($zeroVersionRoot) === 'absent', 'zero v2 state is absent without manifest.json');
+file_put_contents($zeroVersionRoot . '/.zero-compiled/manifest.json', '{}');
+check(_stattic_zero_v2_version_state($zeroVersionRoot) === 'uninitialized', 'zero v2 state is uninitialized with manifest.json but no ready.json');
+file_put_contents($zeroVersionRoot . '/.zero-compiled/ready.json', '{"version_id":"ver_1"}');
+check(_stattic_zero_v2_version_state($zeroVersionRoot) === 'ready', 'zero v2 state is ready once ready.json exists');
+
+$lockHandle1 = _stattic_zero_v2_lock($zeroPrivateRoot, 'spc_zstate');
+$lockPath = $zeroPrivateRoot . '/spaces/spc_zstate/zero-v2-finalize.lock';
+$registry = &_stattic_lock_registry();
+check(is_resource($lockHandle1) && isset($registry[$lockPath]) && $registry[$lockPath]['depth'] === 1, 'zero v2 lock acquires through _stattic_lock_acquire registry');
+$lockHandle2 = _stattic_zero_v2_lock($zeroPrivateRoot, 'spc_zstate');
+check($lockHandle2 === $lockHandle1 && $registry[$lockPath]['depth'] === 2, 'zero v2 lock re-enters cleanly via _stattic_lock_acquire');
+_stattic_lock_release($lockHandle2);
+check(isset($registry[$lockPath]) && $registry[$lockPath]['depth'] === 1, 'nested zero v2 lock release decrements depth');
+_stattic_lock_release($lockHandle1);
+check(!isset($registry[$lockPath]), 'outermost zero v2 lock release clears registry entry');
+@unlink($lockPath);
+@unlink($zeroVersionRoot . '/.zero-compiled/ready.json');
+@unlink($zeroVersionRoot . '/.zero-compiled/manifest.json');
+@rmdir($zeroVersionRoot . '/.zero-compiled');
+@rmdir($zeroVersionRoot);
+@rmdir($zeroPrivateRoot . '/spaces/spc_zstate/versions');
+@rmdir($zeroPrivateRoot . '/spaces/spc_zstate');
+@rmdir($zeroPrivateRoot . '/spaces');
+@rmdir($zeroPrivateRoot);
+@rmdir($zeroStateRoot . '/.stattic');
+@rmdir($zeroStateRoot);
+
+// --- content-page.php does not leak Space globals on non-match ----------------------
+require_once __DIR__ . '/../engine/runtime/content-page.php';
+$cpRoot = realpath(sys_get_temp_dir()) . '/sf-content-page-globals-' . bin2hex(random_bytes(5));
+$cpPrivate = $cpRoot . '/.stattic/storage';
+mkdir($cpPrivate . '/spaces/spc_cp', 0775, true);
+file_put_contents($cpRoot . '/wp-load.php', "<?php\n");
+file_put_contents($cpPrivate . '/spaces/spc_cp/wordpress-routes.json', json_encode(['/missing' => ['postId' => 99, 'postType' => 'page']]));
+$savedReentry = $GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'] ?? null;
+unset(
+    $GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'],
+    $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'],
+    $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'],
+    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_PAGE_REQUEST'],
+    $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'],
+);
+$fallbackResult = _stattic_wordpress_fallback_try_serve(
+    ['private_root' => $cpPrivate, 'space_id' => 'spc_cp', 'version_id' => 'ver_1', 'serving' => []],
+    '/missing',
+    'GET'
+);
+check(
+    $fallbackResult === false
+        && !isset($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'])
+        && !isset($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'])
+        && !isset($GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION']),
+    'content-page fallback restores Space globals when wp-load declines to match'
+);
+if ($savedReentry !== null) {
+    $GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'] = $savedReentry;
+}
+@unlink($cpPrivate . '/spaces/spc_cp/wordpress-routes.json');
+@rmdir($cpPrivate . '/spaces/spc_cp');
+@rmdir($cpPrivate . '/spaces');
+@rmdir($cpPrivate);
+@rmdir($cpRoot . '/.stattic');
+@unlink($cpRoot . '/wp-load.php');
+@rmdir($cpRoot);
+
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");
     foreach ($failures as $failure) {

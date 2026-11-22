@@ -187,75 +187,77 @@ declare(strict_types=1);
         $loader['install_root'] = $installReal;
 
         // Which engine: the reasons are the ones health reports as
-        // engine_source_reason.
-        $siteReason = 'unselected';
-        $chrootRevision = null;
-        $selection = class_exists('Atomic_Persistent_Data')
-            ? (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE
-            : false;
-        if ($selection === false) {
-            // The provider defines the class in its prepend. A PHP process
-            // without it (a bare CLI, a local stack) has nothing to select with.
-            $siteReason = 'no_persistent_data';
-        } elseif (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', is_string($selection) ? trim($selection) : '', $selected) === 1) {
+        // engine_source_reason. Restates engine/shared/engine-selection.php
+        // because this thin loader runs before any engine is chosen.
+        $resolveChroot = static function (): array {
+            if (!class_exists('Atomic_Persistent_Data')) {
+                return ['kind' => 'fallback', 'reason' => 'no_persistent_data', 'revision' => null];
+            }
+            $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
+            if (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', is_string($selection) ? trim($selection) : '', $selected) !== 1) {
+                return ['kind' => 'fallback', 'reason' => 'unselected', 'revision' => null];
+            }
             // Tests stand a chroot up under a temporary root; the box has it at `/`.
             $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
             $scriptsReal = realpath($chrootRoot . '/scripts');
             $revisionReal = realpath($chrootRoot . '/scripts/sf-engine-' . $selected[1] . '-' . $selected[2]);
-            $inventory = null;
             if (
                 !is_string($scriptsReal)
                 || !is_string($revisionReal)
                 || dirname($revisionReal) !== $scriptsReal
                 || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($revisionReal), $revision) !== 1
             ) {
-                $siteReason = 'chroot_missing';
-            } elseif (
-                // A revision without loader bodies predates this loader.
-                !is_file($revisionReal . '/engine/loader/request.php')
-                || !is_file($revisionReal . '/engine/loader/wordpress.php')
-                || !is_file($revisionReal . '/engine/shared/engine-selection.php')
-                || !is_file($revisionReal . '/engine/init.php')
-            ) {
-                $siteReason = 'chroot_engine_unsupported';
-                $chrootRevision = $revision[1];
-            } else {
-                $chrootRevision = $revision[1];
-                // Read the publisher's capability claim as data; never execute
-                // candidate PHP to ask whether it is safe.
-                $inventory = json_decode((string) @file_get_contents($revisionReal . '/engine/wordpress/components.json'), true);
-                $contained = false;
-                foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
-                    if (
-                        is_array($component)
-                        && ($component['id'] ?? null) === 'runtime-engine'
-                        && is_array($component['provides'] ?? null)
-                        && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
-                    ) {
-                        $contained = true;
-                        break;
-                    }
-                }
-                // The binary is named by the revision the link resolved to,
-                // never through its own channel link, so a deploy that moves
-                // both links between two reads cannot pair one revision's
-                // engine with another's binary.
-                $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $revision[1] . '/stattic-runtime';
-                if (!$contained) {
-                    $siteReason = 'chroot_containment_missing';
-                } elseif (!is_file($binary) || !is_executable($binary)) {
-                    $siteReason = 'chroot_binary_missing';
-                } else {
-                    $loader['engine_root'] = $revisionReal;
-                    $loader['native_binary'] = $binary;
-                    $loader['engine_source'] = 'chroot';
-                    $loader['engine_source_reason'] = 'chroot';
-                    $loader['chroot_revision'] = $revision[1];
+                return ['kind' => 'fallback', 'reason' => 'chroot_missing', 'revision' => null];
+            }
+            $rev = $revision[1];
+            // A revision without loader bodies predates this loader.
+            foreach (['engine/loader/request.php', 'engine/loader/wordpress.php', 'engine/shared/engine-selection.php', 'engine/init.php'] as $requiredFile) {
+                if (!is_file($revisionReal . '/' . $requiredFile)) {
+                    return ['kind' => 'fallback', 'reason' => 'chroot_engine_unsupported', 'revision' => $rev];
                 }
             }
-        }
+            // Read the publisher's capability claim as data; never execute
+            // candidate PHP to ask whether it is safe.
+            $inventory = json_decode((string) @file_get_contents($revisionReal . '/engine/wordpress/components.json'), true);
+            $contained = false;
+            foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
+                if (
+                    is_array($component)
+                    && ($component['id'] ?? null) === 'runtime-engine'
+                    && is_array($component['provides'] ?? null)
+                    && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
+                ) {
+                    $contained = true;
+                    break;
+                }
+            }
+            if (!$contained) {
+                return ['kind' => 'fallback', 'reason' => 'chroot_containment_missing', 'revision' => $rev];
+            }
+            // The binary is named by the revision the link resolved to,
+            // never through its own channel link, so a deploy that moves
+            // both links between two reads cannot pair one revision's
+            // engine with another's binary.
+            $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $rev . '/stattic-runtime';
+            if (!is_file($binary) || !is_executable($binary)) {
+                return ['kind' => 'fallback', 'reason' => 'chroot_binary_missing', 'revision' => $rev];
+            }
+            return [
+                'kind' => 'chroot',
+                'engine_root' => $revisionReal,
+                'native_binary' => $binary,
+                'revision' => $rev,
+            ];
+        };
 
-        if (!isset($loader['engine_root'])) {
+        $chroot = $resolveChroot();
+        if ($chroot['kind'] === 'chroot') {
+            $loader['engine_root'] = $chroot['engine_root'];
+            $loader['native_binary'] = $chroot['native_binary'];
+            $loader['engine_source'] = 'chroot';
+            $loader['engine_source_reason'] = 'chroot';
+            $loader['chroot_revision'] = $chroot['revision'];
+        } else {
             // The site's own release. A missing or incomplete chroot lands
             // here too, so a site switched back to the generic chroot keeps
             // serving.
@@ -282,8 +284,8 @@ declare(strict_types=1);
             $loader['engine_root'] = $releaseReal;
             $loader['native_binary'] = $releaseReal . '/bin/stattic-runtime';
             $loader['engine_source'] = 'site';
-            $loader['engine_source_reason'] = $siteReason;
-            $loader['chroot_revision'] = $chrootRevision;
+            $loader['engine_source_reason'] = $chroot['reason'];
+            $loader['chroot_revision'] = $chroot['revision'];
         }
     }
 

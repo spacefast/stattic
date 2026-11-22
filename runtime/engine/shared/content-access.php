@@ -41,59 +41,44 @@ function _stattic_content_version_model_revision(string $privateRoot, string $sp
  * serves an unpublished Space on purpose but must never stay editable behind a
  * platform hold.
  *
- * @return array{kind: 'present', open: bool, space_id: string, version_id: string, serving: array}|array{kind: 'absent', hold: ?string}|array{kind: 'unavailable'}
+ * `denied` marks an exposure fence or missing overlay (matching serve.php and
+ * health.php) so callers return 403 instead of misclassifying as 503.
+ *
+ * @return array{kind: 'present', open: bool, space_id: string, version_id: string, serving: array}
+ *        |array{kind: 'absent', hold: ?string}
+ *        |array{kind: 'denied'}
+ *        |array{kind: 'unavailable'}
  */
 function _stattic_content_access_target(string $privateRoot, string $requestHost): array
 {
-    $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
-    if ($routesRead['kind'] !== 'present' || !is_array($routesRead['value'])) {
-        return $routesRead['kind'] === 'absent'
-            ? ['kind' => 'absent', 'hold' => null]
-            : ['kind' => 'unavailable'];
+    $resolved = _stattic_v4_resolve_host($privateRoot, _stattic_normalize_hostname($requestHost));
+    switch ($resolved['kind']) {
+        case 'unavailable':
+        case 'schema_mismatch':
+            return ['kind' => 'unavailable'];
+        case 'undeployed':
+            return ['kind' => 'absent', 'hold' => null];
+        case 'platform_action':
+            return ['kind' => 'absent', 'hold' => (string) $resolved['action']['action']];
+        case 'denied':
+            return ['kind' => 'denied'];
+        case 'resolved':
+            if ($resolved['version_id'] === null) {
+                return ['kind' => 'absent', 'hold' => null];
+            }
+            return [
+                'kind' => 'present',
+                'open' => $resolved['open'],
+                'space_id' => $resolved['space_id'],
+                'version_id' => $resolved['version_id'],
+                'serving' => _stattic_v4_legacy_serving(
+                    $resolved['space_id'],
+                    $resolved['version_id'],
+                    $resolved['host_entry'],
+                    $resolved['overlay']
+                ),
+            ];
     }
-    $host = _stattic_v4_host_lookup(
-        $privateRoot,
-        $routesRead['value'],
-        _stattic_normalize_hostname($requestHost)
-    );
-    if ($host === false) {
-        return ['kind' => 'unavailable'];
-    }
-    $hostEntry = is_array($host['entry'] ?? null) ? $host['entry'] : null;
-    $spaceId = is_string($hostEntry['space_id'] ?? null) ? $hostEntry['space_id'] : '';
-    if ($hostEntry === null || $spaceId === '') {
-        return ['kind' => 'absent', 'hold' => null];
-    }
-    $hostAction = is_array($hostEntry['route_action'] ?? null) ? $hostEntry['route_action'] : null;
-    $holdAction = is_array($hostAction) ? ($hostAction['action'] ?? null) : null;
-    if (in_array($holdAction, ['tombstone', 'platform_error'], true)) {
-        return ['kind' => 'absent', 'hold' => (string) $holdAction];
-    }
-
-    $spaceRead = _sf_pointer_read(
-        'space:' . $spaceId,
-        $privateRoot . '/spaces/' . $spaceId . '/space.json'
-    );
-    if ($spaceRead['kind'] !== 'present' || !is_array($spaceRead['value'])) {
-        return $spaceRead['kind'] === 'absent'
-            ? ['kind' => 'absent', 'hold' => null]
-            : ['kind' => 'unavailable'];
-    }
-    $overlay = _stattic_v4_overlay($privateRoot, $spaceId, $spaceRead['value']);
-    if ($overlay === false || $overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
-        return ['kind' => 'unavailable'];
-    }
-    $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
-    if ($versionId === null) {
-        return ['kind' => 'absent', 'hold' => null];
-    }
-    return [
-        'kind' => 'present',
-        'open' => ($overlay['open'] ?? null) === true,
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'serving' => _stattic_v4_legacy_serving($spaceId, $versionId, $hostEntry, $overlay),
-    ];
 }
 
 /** Keep only the two host-bound visitor cookies the content access gate reads. */
@@ -136,10 +121,10 @@ function _stattic_content_access_authorization_header(?string $token): string
 }
 
 /** A declared application route owns the request before WordPress's default routes. */
-function _stattic_content_deployment_claims_path(string $privateRoot, string $host, string $path, string $method): bool
+function _stattic_content_deployment_claims_path(string $privateRoot, string $host, string $path, string $method, ?array $target = null): bool
 {
     require_once __DIR__ . '/../runtime/serve.php';
-    $target = _stattic_content_access_target($privateRoot, $host);
+    $target ??= _stattic_content_access_target($privateRoot, $host);
     if ($target['kind'] !== 'present') {
         return false;
     }

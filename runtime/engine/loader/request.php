@@ -33,58 +33,6 @@ return static function (array $loader): void {
         ]);
         exit;
     };
-    $publicationLockPath = $installRoot . '/publication.lock';
-    if (is_link($installRoot) || is_link($publicationLockPath)) {
-        $publicationUnavailable();
-    }
-    // Only installation creates this lock; retained-evidence reads never do.
-    $publicationLock = @fopen($publicationLockPath, 're');
-    if (!is_resource($publicationLock)) {
-        $publicationUnavailable();
-    }
-    $requestPath = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
-    $managementRequest = in_array($requestPath, [
-        '/__spacefast/api.php',
-        '/__spacefast/upload.php',
-        '/__spacefast/health.php',
-    ], true);
-    // Staging runs beside the active release. Visitors only wait for the
-    // final publication transaction; management keeps its retryable receipt.
-    $publicationDeadline = hrtime(true) + 5_000_000_000;
-    while (!flock($publicationLock, LOCK_SH | LOCK_NB)) {
-        if ($managementRequest || hrtime(true) >= $publicationDeadline) {
-            $publicationUnavailable();
-        }
-        usleep(10000);
-    }
-    $GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK'] = $publicationLock;
-    $installTransaction = $installRoot . '/install-transaction.json';
-    $committedTarget = null;
-    if (file_exists($installTransaction) || is_link($installTransaction)) {
-        $transaction = !is_link($installTransaction) && is_file($installTransaction)
-            ? json_decode((string) @file_get_contents($installTransaction, false, null, 0, 16384), true)
-            : null;
-        if ($transaction === null) {
-            clearstatcache(true, $installTransaction);
-        }
-        if ($transaction === null && !file_exists($installTransaction) && !is_link($installTransaction)) {
-            // Completed cleanup unlinked the journal between the two reads.
-        } elseif (($transaction['phase'] ?? null) !== 'committed'
-            || ($transaction['format'] ?? null) !== 'spacefast.runtime.install-transaction.v2'
-            || !is_string($transaction['release'] ?? null)) {
-            $publicationUnavailable();
-        } else {
-            $committedTarget = $transaction['release'];
-        }
-    }
-    $pointerPath = $installRoot . '/active-release';
-    $pointer = is_file($pointerPath)
-        ? file_get_contents($pointerPath, false, null, 0, 256)
-        : false;
-    $target = is_string($pointer) ? trim($pointer) : '';
-    if ($committedTarget !== null && $committedTarget !== $target) {
-        $publicationUnavailable();
-    }
     $bindDatabasePassword = static function (): void {
         if (!defined('DB_PASSWORD')) {
             $spacefastDbPassword = getenv('DB_PASSWORD');
@@ -98,42 +46,122 @@ return static function (array $loader): void {
             unset($spacefastDbPassword);
         }
     };
+    $runRestFrontController = static function (string $controllerPath, bool $useThemes): never {
+        if (!defined('WP_USE_THEMES')) {
+            define('WP_USE_THEMES', $useThemes);
+        }
+        $isolationStream = function_exists('_stattic_document_isolation_stream_begin');
+        if ($isolationStream) {
+            _stattic_document_isolation_stream_begin();
+        }
+        require $controllerPath;
+        if (function_exists('_stattic_enforce_document_isolation')) {
+            _stattic_enforce_document_isolation();
+        }
+        if ($isolationStream) {
+            ob_end_flush();
+        }
+        exit;
+    };
 
+    // Pass 1 acquires publication.lock and pins SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT.
+    // Pass 2 (index.php or /__spacefast/*.php after auto_prepend) keeps pass 1's
+    // lock handle and engine untouched instead of releasing/re-acquiring mid-request.
     $releaseRoot = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] ?? null;
-    if (!is_string($releaseRoot)) {
-        $releaseRoot = $loader['engine_root'];
-        if ($loader['engine_source'] === 'site') {
-            if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
-                exit(1);
+    $hasPass1Lock = is_resource($GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK'] ?? null);
+    if (!is_string($releaseRoot) || !$hasPass1Lock) {
+        $publicationLockPath = $installRoot . '/publication.lock';
+        if (is_link($installRoot) || is_link($publicationLockPath)) {
+            $publicationUnavailable();
+        }
+        // Only installation creates this lock; retained-evidence reads never do.
+        $publicationLock = @fopen($publicationLockPath, 're');
+        if (!is_resource($publicationLock)) {
+            $publicationUnavailable();
+        }
+        $requestPath = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
+        $managementRequest = in_array($requestPath, [
+            '/__spacefast/api.php',
+            '/__spacefast/upload.php',
+            '/__spacefast/health.php',
+        ], true);
+        // Staging runs beside the active release. Visitors only wait for the
+        // final publication transaction; management keeps its retryable receipt.
+        $publicationDeadline = hrtime(true) + 5_000_000_000;
+        while (!flock($publicationLock, LOCK_SH | LOCK_NB)) {
+            if ($managementRequest || hrtime(true) >= $publicationDeadline) {
+                $publicationUnavailable();
             }
-            $releaseReal = realpath($installRoot . '/' . $target);
-            if (!is_string($releaseReal) || !str_starts_with($releaseReal, $loader['install_root'] . '/releases/')) {
-                exit(1);
+            usleep(10000);
+        }
+        $GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK'] = $publicationLock;
+        $installTransaction = $installRoot . '/install-transaction.json';
+        $committedTarget = null;
+        if (file_exists($installTransaction) || is_link($installTransaction)) {
+            $transaction = !is_link($installTransaction) && is_file($installTransaction)
+                ? json_decode((string) @file_get_contents($installTransaction, false, null, 0, 16384), true)
+                : null;
+            if ($transaction === null) {
+                clearstatcache(true, $installTransaction);
             }
-            if ($releaseReal !== $releaseRoot) {
-                // The loader read the pointer before this lock, and the
-                // installer published another release in between. Run that
-                // release's own body; it takes the lock again.
-                $body = $releaseReal . '/engine/loader/request.php';
-                if (!empty($loader['republished']) || !is_file($body)) {
-                    $publicationUnavailable();
-                }
-                (require $body)([
-                    'engine_root' => $releaseReal,
-                    'native_binary' => $releaseReal . '/bin/stattic-runtime',
-                    'republished' => true,
-                ] + $loader);
-                return;
+            if ($transaction === null && !file_exists($installTransaction) && !is_link($installTransaction)) {
+                // Completed cleanup unlinked the journal between the two reads.
+            } elseif (($transaction['phase'] ?? null) !== 'committed'
+                || ($transaction['format'] ?? null) !== 'spacefast.runtime.install-transaction.v2'
+                || !is_string($transaction['release'] ?? null)) {
+                $publicationUnavailable();
+            } else {
+                $committedTarget = $transaction['release'];
             }
         }
-        $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $loader['native_binary'];
-        $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $loader['engine_source'];
-        $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE_REASON'] = $loader['engine_source_reason'];
-        $GLOBALS['SPACEFAST_RUNTIME_CHROOT_REVISION'] = $loader['chroot_revision'];
-        $GLOBALS['SPACEFAST_RUNTIME_LOADER_VERSION'] = $loader['loader_version'];
-        // Named, not derived: a chroot engine lives outside this install root.
-        $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $loader['install_root'];
-        $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
+        $pointerPath = $installRoot . '/active-release';
+        $pointer = is_file($pointerPath)
+            ? file_get_contents($pointerPath, false, null, 0, 256)
+            : false;
+        $target = is_string($pointer) ? trim($pointer) : '';
+        if ($committedTarget !== null && $committedTarget !== $target) {
+            $publicationUnavailable();
+        }
+
+        if (!is_string($releaseRoot)) {
+            $releaseRoot = $loader['engine_root'];
+            if ($loader['engine_source'] === 'site') {
+                if (preg_match('#^releases/[A-Za-z0-9._-]+$#', $target) !== 1) {
+                    exit(1);
+                }
+                $releaseReal = realpath($installRoot . '/' . $target);
+                if (!is_string($releaseReal) || !str_starts_with($releaseReal, $loader['install_root'] . '/releases/')) {
+                    exit(1);
+                }
+                if ($releaseReal !== $releaseRoot) {
+                    // The loader read the pointer before this lock, and the
+                    // installer published another release in between. Release
+                    // this handle and run that release's own body so it takes a
+                    // fresh lock cleanly.
+                    $body = $releaseReal . '/engine/loader/request.php';
+                    if (!empty($loader['republished']) || !is_file($body)) {
+                        $publicationUnavailable();
+                    }
+                    unset($GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK']);
+                    flock($publicationLock, LOCK_UN);
+                    fclose($publicationLock);
+                    (require $body)([
+                        'engine_root' => $releaseReal,
+                        'native_binary' => $releaseReal . '/bin/stattic-runtime',
+                        'republished' => true,
+                    ] + $loader);
+                    return;
+                }
+            }
+            $GLOBALS['SPACEFAST_RUNTIME_NATIVE_BINARY'] = $loader['native_binary'];
+            $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE'] = $loader['engine_source'];
+            $GLOBALS['SPACEFAST_RUNTIME_ENGINE_SOURCE_REASON'] = $loader['engine_source_reason'];
+            $GLOBALS['SPACEFAST_RUNTIME_CHROOT_REVISION'] = $loader['chroot_revision'];
+            $GLOBALS['SPACEFAST_RUNTIME_LOADER_VERSION'] = $loader['loader_version'];
+            // Named, not derived: a chroot engine lives outside this install root.
+            $GLOBALS['SPACEFAST_RUNTIME_INSTALL_ROOT'] = $loader['install_root'];
+            $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseRoot;
+        }
     }
 
     // Install the header dispatcher before WordPress or plugins can register
@@ -229,6 +257,7 @@ return static function (array $loader): void {
         // ask still leaves $bindDatabasePassword() the first thing any engine
         // code that could observe DB_PASSWORD sees.
         $isContentAdminPath = false;
+        $isZeroAdminPath = $path === '/zero-admin' || str_starts_with($path, '/zero-admin/');
         $restFrontController = null;
         if (
             !isset($entrypointPaths[$path])
@@ -253,8 +282,7 @@ return static function (array $loader): void {
             // editor behind it.
             if (
                 $isContentAdminPath
-                && (_stattic_content_rest_request_path($path, $restSelectors)
-                    || $path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))
+                && (_stattic_content_rest_request_path($path, $restSelectors) || $isZeroAdminPath)
             ) {
                 // WordPress core is not the document root on a managed box: the
                 // provider keeps it under `__wp__/` and links only wp-load.php
@@ -267,8 +295,7 @@ return static function (array $loader): void {
                 $wpLoad = dirname($installRoot) . '/wp-load.php';
                 $wpRoot = is_file($wpLoad) ? dirname(realpath($wpLoad) ?: $wpLoad) : null;
                 $frontController = $wpRoot === null ? null : $wpRoot . (
-                    $path === '/zero-admin' || str_starts_with($path, '/zero-admin/')
-                        ? '/wp-admin/admin.php' : '/wp-blog-header.php'
+                    $isZeroAdminPath ? '/wp-admin/admin.php' : '/wp-blog-header.php'
                 );
                 $restFrontController = $frontController !== null && is_file($frontController)
                     ? $frontController
@@ -290,11 +317,15 @@ return static function (array $loader): void {
             $isContentAdminRequest = true;
             $privateRoot = $installRoot . '/storage';
             $host = _stattic_normalize_host_authority((string) ($_SERVER['HTTP_HOST'] ?? ''));
+            // Resolve the host's content-access target ONCE per request and
+            // reuse it for hold detection, deployment route claim checks,
+            // anonymous REST access enforcement, and Zero v2 selection.
+            $accessTarget = _stattic_content_access_target($privateRoot, $host);
             // The platform's answer outranks the session. A tombstoned or
             // held host gets the platform's page from every visitor; leaving
             // it editable for the rest of a session TTL would let an editor
             // keep writing into a Space the platform has taken over.
-            $hold = _stattic_content_admin_platform_hold($privateRoot, $host);
+            $hold = _stattic_content_admin_platform_hold($privateRoot, $host, $accessTarget);
             if ($hold === 'tombstone') {
                 _stattic_problem_response(
                     404,
@@ -309,18 +340,18 @@ return static function (array $loader): void {
                     'This Space is not editable right now.'
                 );
             }
-            $deploymentPath = $path === '/'
-                ? _stattic_content_rest_access_path($path, $restSelectors)
-                : $path;
+            $restAccessPath = _stattic_content_rest_access_path($path, $restSelectors);
+            $deploymentPath = $path === '/' ? $restAccessPath : $path;
             $isRestRequest = _stattic_content_rest_request_path($path, $restSelectors);
             $wordpressRest = $releaseRoot . '/engine/shared/wordpress-rest.php';
             if (is_file($wordpressRest)) require_once $wordpressRest;
             $hasRestBoundary = function_exists('_stattic_wordpress_rest_origin_allowed');
             $hasRestCookieBoundary = function_exists('_stattic_wordpress_rest_cookie_allowed');
             // Defer a platform credential to verification below; its presence never admits a cookie.
-            $platformCredentialPresented = $isRestRequest && _stattic_platform_bearer_token_from_request() !== null;
+            $bearerPresented = _stattic_platform_bearer_token_from_request() !== null;
+            $platformCredentialPresented = $isRestRequest && $bearerPresented;
             $identityRestRequest = $isRestRequest && function_exists('_stattic_wordpress_identity_rest_route') && _stattic_wordpress_identity_rest_route(
-                substr(_stattic_content_rest_access_path($path, $restSelectors), strlen('/wp-json'))
+                substr($restAccessPath, strlen('/wp-json'))
             );
             $restOriginAllowed = !$isRestRequest || !$hasRestBoundary || _stattic_wordpress_rest_origin_allowed(
                 $host,
@@ -332,7 +363,7 @@ return static function (array $loader): void {
             if (!$restOriginAllowed && !$identityRestRequest && !$platformCredentialPresented && $_COOKIE !== []) {
                 _stattic_problem_response(403, 'rest_origin_denied', 'Use this Space from its own origin.');
             }
-            if (_stattic_content_deployment_claims_path($privateRoot, $host, $deploymentPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')))) {
+            if (_stattic_content_deployment_claims_path($privateRoot, $host, $deploymentPath, strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')), $accessTarget)) {
                 require $releaseRoot . '/engine/init.php';
                 return;
             }
@@ -367,45 +398,40 @@ return static function (array $loader): void {
                 require_once $releaseRoot . '/engine/runtime/serve.php';
                 require_once $releaseRoot . '/engine/runtime/access-rules.php';
                 _sf_load_generated_config($privateRoot);
-                // The path the access engine sees. The query spelling
-                // (`/?rest_route=`) addresses the same resource as
-                // `/wp-json/...` and must be enforced against the same path, or
-                // a Grant that scopes `/wp-json` binds only the pretty spelling.
-                $accessPath = _stattic_content_rest_access_path(
-                    $path,
-                    $restSelectors
-                );
-                $target = _stattic_content_access_target($privateRoot, $host);
-                if ($target['kind'] === 'unavailable') {
+                if ($accessTarget['kind'] === 'unavailable') {
                     _stattic_problem_response(
                         503,
                         'content_admin_space_unavailable',
                         'This Space is not editable right now.'
                     );
                 }
-                if ($target['kind'] !== 'present') {
+                if ($accessTarget['kind'] === 'denied') {
+                    _stattic_problem_response(
+                        403,
+                        'access_denied',
+                        'This page is private.'
+                    );
+                }
+                if ($accessTarget['kind'] !== 'present') {
                     _stattic_problem_response(
                         404,
                         'content_admin_space_not_found',
                         'No editable Space is active for this host.'
                     );
                 }
-                $GLOBALS['SPACEFAST_PAGE_SERVING'] = $target['serving'];
+                $GLOBALS['SPACEFAST_PAGE_SERVING'] = $accessTarget['serving'];
                 // An open Space skips enforcement for the anonymous answer, but a
                 // presented credential is still a credential: an unusable one
                 // must deny here rather than fall through to WordPress's public
                 // answer, so a machine caller never has its failure hidden.
-                if (
-                    !$target['open']
-                    || _stattic_platform_bearer_token_from_request() !== null
-                ) {
+                if (!$accessTarget['open'] || $bearerPresented) {
                     // Denials terminate inside, with the same answer this path
                     // would give a browser asking for the page.
-                    _stattic_access_enforce_v4($host, $accessPath, $accessPath, $isRestRequest);
+                    _stattic_access_enforce_v4($host, $restAccessPath, $restAccessPath, $isRestRequest);
                 }
                 if (!$restOriginAllowed && $platformCredentialPresented
                     && (!function_exists('_stattic_current_session_identity')
-                        || _stattic_current_session_identity($target['serving'], $host) === null)) {
+                        || _stattic_current_session_identity($accessTarget['serving'], $host) === null)) {
                     _stattic_problem_response(403, 'rest_origin_denied', 'Use this Space from its own origin.');
                 }
                 // Admitted. Who WordPress runs as is a separate question from
@@ -414,9 +440,9 @@ return static function (array $loader): void {
                 // Space is exactly what it would do on its own.
                 $principal = !$restCookieAllowed && !$platformCredentialPresented
                     ? null : _stattic_access_wordpress_principal(
-                        $target['serving'],
+                        $accessTarget['serving'],
                         $host,
-                        $accessPath
+                        $restAccessPath
                     );
                 if ($principal !== null) {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
@@ -424,33 +450,32 @@ return static function (array $loader): void {
                 }
                 _stattic_content_admin_enter_wordpress(
                     $privateRoot,
-                    $target['space_id'],
+                    $accessTarget['space_id'],
                     null,
                     ['surface' => 'wordpress']
                 );
                 $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = _stattic_content_version_model_revision(
                     $privateRoot,
-                    $target['space_id'],
-                    $target['version_id']
+                    $accessTarget['space_id'],
+                    $accessTarget['version_id']
                 );
             }
-            $zeroTarget = $session !== null ? _stattic_content_access_target($privateRoot, $host) : $target;
-            if ($zeroTarget['kind'] === 'present') {
+            if ($accessTarget['kind'] === 'present') {
                 $zeroHost = $releaseRoot . '/engine/shared/zero-v2.php';
                 if (is_file($zeroHost)) {
                     require_once $zeroHost;
-                    _stattic_zero_generation_serve(_stattic_version_root($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id']), $zeroTarget['serving']);
+                    _stattic_zero_generation_serve(_stattic_version_root($privateRoot, $accessTarget['space_id'], $accessTarget['version_id']), $accessTarget['serving']);
                     // A content-admin session has no page serving yet; the binding's
                     // Users settings come from the same route entry.
-                    if (_stattic_zero_v2_select($privateRoot, $zeroTarget['space_id'], $zeroTarget['version_id'], $zeroTarget['serving'])) {
-                        $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $zeroTarget['serving'];
+                    if (_stattic_zero_v2_select($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'], $accessTarget['serving'])) {
+                        $GLOBALS['SPACEFAST_PAGE_SERVING'] ??= $accessTarget['serving'];
                     }
                 }
             }
             // Both REST doors end here. /wp-admin needs none of it: those are
             // real WordPress scripts, and returning is exactly how they run.
             if ($restFrontController !== null) {
-                if ($path === '/zero-admin' || str_starts_with($path, '/zero-admin/')) {
+                if ($isZeroAdminPath) {
                     $_GET['page'] = 'zero';
                     $_REQUEST['page'] = 'zero';
                     $_SERVER['PHP_SELF'] = '/wp-admin/admin.php';
@@ -471,25 +496,11 @@ return static function (array $loader): void {
                 if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
                     $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] = [
                         'path' => $restFrontController,
-                        'use_themes' => $path === '/zero-admin' || str_starts_with($path, '/zero-admin/'),
+                        'use_themes' => $isZeroAdminPath,
                     ];
                     return;
                 }
-                if (!defined('WP_USE_THEMES') && !($path === '/zero-admin' || str_starts_with($path, '/zero-admin/'))) {
-                    define('WP_USE_THEMES', false);
-                }
-                $isolationStream = function_exists('_stattic_document_isolation_stream_begin');
-                if ($isolationStream) {
-                    _stattic_document_isolation_stream_begin();
-                }
-                require $restFrontController;
-                if (function_exists('_stattic_enforce_document_isolation')) {
-                    _stattic_enforce_document_isolation();
-                }
-                if ($isolationStream) {
-                    ob_end_flush();
-                }
-                exit;
+                $runRestFrontController($restFrontController, $isZeroAdminPath);
             }
         }
         if (
@@ -513,21 +524,7 @@ return static function (array $loader): void {
     $deferredRest = $GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER'] ?? null;
     if (is_array($deferredRest)) {
         unset($GLOBALS['SPACEFAST_RUNTIME_DEFERRED_REST_FRONT_CONTROLLER']);
-        if (!defined('WP_USE_THEMES')) {
-            define('WP_USE_THEMES', $deferredRest['use_themes']);
-        }
-        $isolationStream = function_exists('_stattic_document_isolation_stream_begin');
-        if ($isolationStream) {
-            _stattic_document_isolation_stream_begin();
-        }
-        require $deferredRest['path'];
-        if (function_exists('_stattic_enforce_document_isolation')) {
-            _stattic_enforce_document_isolation();
-        }
-        if ($isolationStream) {
-            ob_end_flush();
-        }
-        exit;
+        $runRestFrontController($deferredRest['path'], $deferredRest['use_themes']);
     }
 
     // A request the auto_prepend pass handed here so WordPress could boot with

@@ -52,6 +52,36 @@ function _stattic_wordpress_lane_refuse_page_cache(): void
     }
 }
 
+const STATTIC_WORDPRESS_CONTENT_GLOBAL_KEYS = [
+    'SPACEFAST_CONTENT_SPACE_ID',
+    'SPACEFAST_CONTENT_PRIVATE_ROOT',
+    'SPACEFAST_CONTENT_PUBLIC_PAGE_REQUEST',
+    'SPACEFAST_CONTENT_PINNED_MODEL_REVISION',
+];
+
+/** @return array<string, array{exists: bool, value: mixed}> */
+function _stattic_wordpress_content_globals_save(): array
+{
+    $saved = [];
+    foreach (STATTIC_WORDPRESS_CONTENT_GLOBAL_KEYS as $key) {
+        $exists = array_key_exists($key, $GLOBALS);
+        $saved[$key] = ['exists' => $exists, 'value' => $exists ? $GLOBALS[$key] : null];
+    }
+    return $saved;
+}
+
+/** @param array<string, array{exists: bool, value: mixed}> $saved */
+function _stattic_wordpress_content_globals_restore(array $saved): void
+{
+    foreach ($saved as $key => $entry) {
+        if ($entry['exists']) {
+            $GLOBALS[$key] = $entry['value'];
+        } else {
+            unset($GLOBALS[$key]);
+        }
+    }
+}
+
 /**
  * Render only the canonical document route selected by the runtime inventory.
  *
@@ -103,69 +133,79 @@ function _stattic_wordpress_page_try_serve(array $context, string $requestPath, 
     // media resolve. Left until after the hand-off, WordPress serves the URL as
     // nobody's Space: the right post, rendered through no template, which is an
     // empty document.
-    $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
-    $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
-    $GLOBALS['SPACEFAST_CONTENT_PUBLIC_PAGE_REQUEST'] = true;
-    // Activation may stage a newer model before its routes become live. The
-    // selected version owns the model; live posts still supply mutable content.
-    $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $modelRevision;
+    $savedGlobals = _stattic_wordpress_content_globals_save();
+    $keepGlobals = false;
+    try {
+        $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
+        $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
+        $GLOBALS['SPACEFAST_CONTENT_PUBLIC_PAGE_REQUEST'] = true;
+        // Activation may stage a newer model before its routes become live. The
+        // selected version owns the model; live posts still supply mutable content.
+        $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $modelRevision;
 
-    if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
-        return true;
-    }
-
-    // Only this lane renders the document itself, so only this lane turns themes
-    // off. A request handed on is served by WordPress's own front controller,
-    // which needs them.
-    foreach ([
-        'DISALLOW_FILE_EDIT' => true,
-        'DISALLOW_FILE_MODS' => true,
-        'AUTOMATIC_UPDATER_DISABLED' => true,
-        'WP_AUTO_UPDATE_CORE' => false,
-        'WP_USE_THEMES' => false,
-    ] as $name => $value) {
-        if (!defined($name)) {
-            define($name, $value);
+        if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
+            $keepGlobals = true;
+            return true;
         }
-    }
 
-    // wp-load initializes core and the Space-scoping kernel, but runs no main
-    // query, canonical redirect, or theme. A miss therefore returns cleanly to
-    // the Spacefast SPA/404 tail.
-    ob_start();
-    require_once $wpLoad;
-    // Before the discard: when the page cache's buffer is the one on top, closing
-    // it hands the page cache whatever core printed while booting.
-    _stattic_wordpress_lane_refuse_page_cache();
-    ob_end_clean();
-    if (!function_exists('spacefast_content_model_sync_binding') || !function_exists('spacefast_content_sync_find_post')) {
-        return false;
-    }
-    $binding = spacefast_content_model_sync_binding($route['bindingId']);
-    if (!is_array($binding) || !in_array($binding['post_type'] ?? null, ['page', 'post'], true)) {
-        return false;
-    }
-    if ($immutable && (($binding['format'] ?? null) !== $snapshot['format']
-        || ($binding['documentSeed']['sha256'] ?? null) !== $snapshot['sha256'])) {
-        return false;
-    }
-    $page = $immutable
-        ? _stattic_wordpress_page_snapshot_post($route, $snapshot)
-        : spacefast_content_sync_find_post($route['bindingId'], $binding, false);
-    if (!is_object($page) || (string) ($page->post_status ?? '') !== 'publish') {
-        return false;
-    }
-    $postId = (int) ($page->ID ?? 0);
-    $spaceMeta = defined('SPACEFAST_CONTENT_SPACE_META')
-        ? (string) constant('SPACEFAST_CONTENT_SPACE_META')
-        : '_spacefast_space_id';
-    $owner = function_exists('get_post_meta') ? get_post_meta($postId, $spaceMeta, true) : null;
-    if (!$immutable && (!is_string($owner) || !hash_equals($spaceId, $owner))) {
-        return false;
-    }
-    if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
-        _stattic_method_decline(['GET', 'HEAD']);
-        return false;
+        // Only this lane renders the document itself, so only this lane turns themes
+        // off. A request handed on is served by WordPress's own front controller,
+        // which needs them.
+        foreach ([
+            'DISALLOW_FILE_EDIT' => true,
+            'DISALLOW_FILE_MODS' => true,
+            'AUTOMATIC_UPDATER_DISABLED' => true,
+            'WP_AUTO_UPDATE_CORE' => false,
+            'WP_USE_THEMES' => false,
+        ] as $name => $value) {
+            if (!defined($name)) {
+                define($name, $value);
+            }
+        }
+
+        // wp-load initializes core and the Space-scoping kernel, but runs no main
+        // query, canonical redirect, or theme. A miss therefore returns cleanly to
+        // the Spacefast SPA/404 tail.
+        ob_start();
+        require_once $wpLoad;
+        // Before the discard: when the page cache's buffer is the one on top, closing
+        // it hands the page cache whatever core printed while booting.
+        _stattic_wordpress_lane_refuse_page_cache();
+        ob_end_clean();
+        if (!function_exists('spacefast_content_model_sync_binding') || !function_exists('spacefast_content_sync_find_post')) {
+            return false;
+        }
+        $binding = spacefast_content_model_sync_binding($route['bindingId']);
+        if (!is_array($binding) || !in_array($binding['post_type'] ?? null, ['page', 'post'], true)) {
+            return false;
+        }
+        if ($immutable && (($binding['format'] ?? null) !== $snapshot['format']
+            || ($binding['documentSeed']['sha256'] ?? null) !== $snapshot['sha256'])) {
+            return false;
+        }
+        $page = $immutable
+            ? _stattic_wordpress_page_snapshot_post($route, $snapshot)
+            : spacefast_content_sync_find_post($route['bindingId'], $binding, false);
+        if (!is_object($page) || (string) ($page->post_status ?? '') !== 'publish') {
+            return false;
+        }
+        $postId = (int) ($page->ID ?? 0);
+        $spaceMeta = defined('SPACEFAST_CONTENT_SPACE_META')
+            ? (string) constant('SPACEFAST_CONTENT_SPACE_META')
+            : '_spacefast_space_id';
+        $owner = function_exists('get_post_meta') ? get_post_meta($postId, $spaceMeta, true) : null;
+        if (!$immutable && (!is_string($owner) || !hash_equals($spaceId, $owner))) {
+            return false;
+        }
+        if (!in_array($requestMethod, ['GET', 'HEAD'], true)) {
+            _stattic_method_decline(['GET', 'HEAD']);
+            return false;
+        }
+        $keepGlobals = true;
+    } finally {
+        if (!$keepGlobals) {
+            _stattic_wordpress_content_globals_restore($savedGlobals);
+        }
     }
 
     $title = _stattic_wordpress_page_escape((string) ($page->post_title ?? ''));
@@ -412,36 +452,46 @@ function _stattic_wordpress_fallback_try_serve(array $context, string $requestPa
     if (!is_file($wpLoad)) {
         return false;
     }
-    $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $context['space_id'];
-    $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     require_once __DIR__ . '/../shared/content-access.php';
     $revision = _stattic_content_version_model_revision($privateRoot, $context['space_id'], $context['version_id']);
-    if ($revision !== null) {
-        $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $revision;
-    }
-    if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
-        return true;
-    }
-    if (!defined('WP_USE_THEMES')) {
-        define('WP_USE_THEMES', true);
-    }
-    require_once $wpLoad;
-    _stattic_wordpress_lane_refuse_page_cache();
-    if (!function_exists('wp') || !function_exists('is_404')) {
-        return false;
-    }
-    $resolveRequest = static fn (array $query): array => isset($route['postId'])
-        ? ['p' => $route['postId'], 'post_type' => $route['postType']]
-        : ($route['query'] ?? ['feed' => 'rss2']);
-    add_filter('request', $resolveRequest, PHP_INT_MAX);
+    $savedGlobals = _stattic_wordpress_content_globals_save();
+    $keepGlobals = false;
     try {
-        wp();
+        $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $context['space_id'];
+        $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
+        if ($revision !== null) {
+            $GLOBALS['SPACEFAST_CONTENT_PINNED_MODEL_REVISION'] = $revision;
+        }
+        if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
+            $keepGlobals = true;
+            return true;
+        }
+        if (!defined('WP_USE_THEMES')) {
+            define('WP_USE_THEMES', true);
+        }
+        require_once $wpLoad;
+        _stattic_wordpress_lane_refuse_page_cache();
+        if (!function_exists('wp') || !function_exists('is_404')) {
+            return false;
+        }
+        $resolveRequest = static fn (array $query): array => isset($route['postId'])
+            ? ['p' => $route['postId'], 'post_type' => $route['postType']]
+            : ($route['query'] ?? ['feed' => 'rss2']);
+        add_filter('request', $resolveRequest, PHP_INT_MAX);
+        try {
+            wp();
+        } finally {
+            remove_filter('request', $resolveRequest, PHP_INT_MAX);
+        }
+        if (is_404()) {
+            http_response_code(200);
+            return false;
+        }
+        $keepGlobals = true;
     } finally {
-        remove_filter('request', $resolveRequest, PHP_INT_MAX);
-    }
-    if (is_404()) {
-        http_response_code(200);
-        return false;
+        if (!$keepGlobals) {
+            _stattic_wordpress_content_globals_restore($savedGlobals);
+        }
     }
     // A plugin may replace PHP's sole header callback. Enforce before template
     // output as well, including templates that flush or exit during rendering.

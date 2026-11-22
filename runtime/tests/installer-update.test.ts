@@ -251,7 +251,10 @@ async function runInstaller(
       | "pointer_publication"
       | "post_publication_check"
       | "tree_rollback"
-      | "file_rollback";
+      | "file_rollback"
+      | "release_authority"
+      | "release_proof"
+      | "transaction_commit";
     /** Run as `--chroot-site` against this chroot, with the site's persistent data. */
     chrootSite?: { chrootRoot: string };
   },
@@ -1726,5 +1729,96 @@ test("a chroot-site install leaves the site the chroot's loader and no engine co
   expect(readVisitor(fixture.publicRoot)).toEqual({
     context: fixture.revision,
     module: fixture.revision,
+  });
+});
+
+test("commit metadata failures roll back cleanly instead of stranding the site in publishing", async () => {
+  for (const [failurePhase, expectedError] of [
+    ["release_authority", "runtime_engine_release_authority_failed"],
+    ["release_proof", "runtime_engine_release_proof_failed"],
+    ["transaction_commit", "runtime_engine_transaction_commit_failed"],
+  ] as const) {
+    const old = await startUpdateFixture({
+      revision: `old-${failurePhase}`,
+      visitorEngine: true,
+      tree: true,
+    });
+    expect((await runInstaller(old)).exitCode).toBe(0);
+    const oldTarget = readActiveReleaseTarget(installRootOf(old.publicRoot));
+    const next = await startUpdateFixture({
+      revision: `next-${failurePhase}`,
+      visitorEngine: true,
+      tree: true,
+      publicRoot: old.publicRoot,
+    });
+
+    const failed = await runInstaller(next, { failurePhase });
+    expect(failed.exitCode).toBe(1);
+    expect(failed.stderr).toContain(expectedError);
+    expect(failed.stderr).not.toContain("runtime_engine_rollback_incomplete");
+    expect(readActiveReleaseTarget(installRootOf(old.publicRoot))).toBe(oldTarget);
+    expect(existsSync(path.join(installRootOf(old.publicRoot), "install-transaction.json"))).toBe(
+      false,
+    );
+    expect(readVisitor(old.publicRoot)).toEqual({
+      context: old.revision,
+      module: old.revision,
+    });
+  }
+});
+
+test("restore_active_release_pointer restores the previous release when the new release is dangling", async () => {
+  const first = await startUpdateFixture({ revision: "dangling-prev", visitorEngine: true });
+  expect((await runInstaller(first)).exitCode).toBe(0);
+  const installRoot = installRootOf(first.publicRoot);
+  const prevTarget = readActiveReleaseTarget(installRoot);
+  const second = await startUpdateFixture({
+    revision: "dangling-new",
+    visitorEngine: true,
+    publicRoot: first.publicRoot,
+  });
+  expect((await runInstaller(second)).exitCode).toBe(0);
+  const newTarget = readActiveReleaseTarget(installRoot);
+  const newRoot = path.join(installRoot, newTarget);
+  // Corrupt a file inside the new release so active_release_pointer_state reports 'dangling'.
+  appendFileSync(path.join(newRoot, "engine/runtime/revision.php"), "// corrupted\n");
+
+  const check = Bun.spawnSync({
+    cmd: [
+      "php",
+      "-d",
+      "auto_prepend_file=",
+      "-r",
+      String.raw`
+        // Load installer functions only by truncating before the CLI entrypoint.
+        $src = file_get_contents($argv[1]);
+        $cut = strpos($src, "if ((\$argv[1] ?? null) === '--proof')");
+        eval(substr($src, strlen("<?php"), $cut - strlen("<?php")));
+        $installRoot = $argv[2];
+        $prevTarget = $argv[3];
+        $newTarget = $argv[4];
+        $before = active_release_pointer_state($installRoot);
+        $previous = [
+          'state' => 'valid',
+          'target' => $prevTarget,
+          'root' => realpath($installRoot . '/' . $prevTarget),
+        ];
+        $restored = restore_active_release_pointer($installRoot, $previous, $newTarget);
+        $after = active_release_pointer_state($installRoot);
+        echo json_encode(['before' => $before['state'], 'restored' => $restored, 'after' => $after]);
+      `,
+      path.resolve(import.meta.dirname, "../installer.php"),
+      installRoot,
+      prevTarget,
+      newTarget,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(check.exitCode, check.stderr.toString()).toBe(0);
+  expect(JSON.parse(check.stdout.toString())).toMatchObject({
+    before: "dangling",
+    restored: true,
+    after: { state: "valid", target: prevTarget },
   });
 });

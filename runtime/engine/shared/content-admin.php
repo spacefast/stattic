@@ -568,9 +568,9 @@ function _stattic_content_admin_enter_wordpress(
  * would have blocked is revoked by the commit the fence was announcing. Fencing
  * here would only close the editor during every routine access change.
  */
-function _stattic_content_admin_platform_hold(string $privateRoot, string $requestHost): ?string
+function _stattic_content_admin_platform_hold(string $privateRoot, string $requestHost, ?array $target = null): ?string
 {
-    $target = _stattic_content_access_target($privateRoot, $requestHost);
+    $target ??= _stattic_content_access_target($privateRoot, $requestHost);
     $hold = $target['kind'] === 'absent' ? ($target['hold'] ?? null) : null;
     return is_string($hold) ? $hold : null;
 }

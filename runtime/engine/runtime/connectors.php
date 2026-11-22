@@ -294,6 +294,9 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
         if (is_string($state['cachedAt'] ?? null)) {
             $body['cachedAt'] = $state['cachedAt'];
         }
+        if (($state['stale'] ?? null) === true) {
+            $body['stale'] = true;
+        }
         _stattic_connectors_send($body);
     }
     if ($code === 'approval_pending' && ($state['pendingReason'] ?? null) === 'running') {

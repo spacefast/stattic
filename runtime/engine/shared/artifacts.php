@@ -457,18 +457,45 @@ function _stattic_route_match_shape(string $pattern): array
 // still read. runtime/serve.php walks these in order.
 // ---------------------------------------------------------------------------
 
+function _stattic_v4_schema_valid(mixed $schema): bool
+{
+    return is_int($schema)
+        && $schema >= STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN
+        && $schema <= STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX;
+}
+
 function _stattic_v4_assert_schema(mixed $schema, string $what): void
 {
-    if (
-        !is_int($schema)
-        || $schema < STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN
-        || $schema > STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX
-    ) {
+    if (!_stattic_v4_schema_valid($schema)) {
         _stattic_render_runtime_invariant_error_lazy(
             'artifact-schema-mismatch',
             'Runtime ' . $what . ' schema does not match this runtime.'
         );
     }
+}
+
+/**
+ * Read and validate the routes pointer without exiting.
+ *
+ * @return array{kind: 'present', routes: array}
+ *        |array{kind: 'undeployed'}
+ *        |array{kind: 'unavailable', code: string}
+ *        |array{kind: 'schema_mismatch', what: string}
+ */
+function _stattic_v4_read_routes_pointer(string $privateRoot): array
+{
+    $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
+    if ($routesRead['kind'] === 'unavailable') {
+        return ['kind' => 'unavailable', 'code' => 'route_pointer_unreadable'];
+    }
+    $routes = $routesRead['value'];
+    if (!is_array($routes) || !isset($routes['gen'])) {
+        return ['kind' => 'undeployed'];
+    }
+    if (!_stattic_v4_schema_valid($routes['schema'] ?? null)) {
+        return ['kind' => 'schema_mismatch', 'what' => 'route pointer'];
+    }
+    return ['kind' => 'present', 'routes' => $routes];
 }
 
 /**
@@ -563,25 +590,144 @@ function _stattic_v4_wildcard_match(array $entries, string $requestHost): ?array
     return $best;
 }
 
-// false = the overlay artifact exists but could not be read. The caller must
-// answer unavailable, not denied: a failure is not an access decision.
-function _stattic_v4_overlay(string $privateRoot, string $spaceId, mixed $space): array|false|null
+/**
+ * Read and validate a Space overlay without exiting.
+ *
+ * @return array{kind: 'present', overlay: array}
+ *        |array{kind: 'missing'}
+ *        |array{kind: 'unavailable', code: string}
+ *        |array{kind: 'schema_mismatch', what: string}
+ */
+function _stattic_v4_read_overlay(string $privateRoot, string $spaceId, mixed $space): array
 {
     if ($spaceId === '' || !is_array($space) || !is_string($space['overlay'] ?? null)) {
-        return null;
+        return ['kind' => 'missing'];
     }
-    _stattic_v4_assert_schema($space['schema'] ?? null, 'space pointer');
+    if (!_stattic_v4_schema_valid($space['schema'] ?? null)) {
+        return ['kind' => 'schema_mismatch', 'what' => 'space pointer'];
+    }
     $overlay = _stattic_v4_include_artifact(
         _stattic_space_root($privateRoot, $spaceId) . '/' . $space['overlay']
     );
     if ($overlay === false) {
-        return false;
+        return ['kind' => 'unavailable', 'code' => 'space_overlay_unreadable'];
     }
     if (!is_array($overlay) || !is_bool($overlay['open'] ?? null)) {
-        return null;
+        return ['kind' => 'missing'];
     }
-    _stattic_v4_assert_schema($overlay['schema'] ?? null, 'space overlay');
-    return $overlay;
+    if (!_stattic_v4_schema_valid($overlay['schema'] ?? null)) {
+        return ['kind' => 'schema_mismatch', 'what' => 'space overlay'];
+    }
+    return ['kind' => 'present', 'overlay' => $overlay];
+}
+
+// false = the overlay artifact exists but could not be read. The caller must
+// answer unavailable, not denied: a failure is not an access decision.
+function _stattic_v4_overlay(string $privateRoot, string $spaceId, mixed $space): array|false|null
+{
+    $read = _stattic_v4_read_overlay($privateRoot, $spaceId, $space);
+    switch ($read['kind']) {
+        case 'present':
+            return $read['overlay'];
+        case 'unavailable':
+            return false;
+        case 'schema_mismatch':
+            _stattic_render_runtime_invariant_error_lazy(
+                'artifact-schema-mismatch',
+                'Runtime ' . $read['what'] . ' schema does not match this runtime.'
+            );
+            return null;
+        case 'missing':
+            return null;
+    }
+}
+
+/**
+ * Pure non-exiting host resolution walk shared by serve.php, health.php, and
+ * content-access.php: routes pointer -> host shard -> platform action ->
+ * space pointer -> overlay -> exposure fence -> version id.
+ *
+ * @return array{kind: 'unavailable', code: string}
+ *        |array{kind: 'schema_mismatch', what: string}
+ *        |array{kind: 'undeployed'}
+ *        |array{kind: 'platform_action', host_entry: array, host_routes: array, space_id: string, action: array}
+ *        |array{kind: 'denied', reason: 'overlay_missing'|'exposure_fence', host_entry: array, host_routes: array, space_id: string}
+ *        |array{kind: 'resolved', host_entry: array, host_routes: array, space_id: string, overlay: array, open: bool, version_id: ?string}
+ */
+function _stattic_v4_resolve_host(string $privateRoot, string $requestHost, ?array $routes = null): array
+{
+    if ($routes === null) {
+        $routesResult = _stattic_v4_read_routes_pointer($privateRoot);
+        if ($routesResult['kind'] !== 'present') {
+            return $routesResult;
+        }
+        $routes = $routesResult['routes'];
+    }
+
+    $host = _stattic_v4_host_lookup($privateRoot, $routes, $requestHost);
+    if ($host === false) {
+        return ['kind' => 'unavailable', 'code' => 'route_shard_unreadable'];
+    }
+    if ($host === null) {
+        return ['kind' => 'undeployed'];
+    }
+    $hostEntry = $host['entry'];
+    $hostRoutes = $host['routes'];
+    $spaceId = is_string($hostEntry['space_id'] ?? null) ? $hostEntry['space_id'] : '';
+
+    $hostAction = is_array($hostEntry['route_action'] ?? null) ? $hostEntry['route_action'] : null;
+    if (is_array($hostAction) && in_array(($hostAction['action'] ?? null), ['tombstone', 'platform_error'], true)) {
+        return [
+            'kind' => 'platform_action',
+            'host_entry' => $hostEntry,
+            'host_routes' => $hostRoutes,
+            'space_id' => $spaceId,
+            'action' => $hostAction,
+        ];
+    }
+
+    $space = null;
+    if ($spaceId !== '') {
+        $spaceRead = _sf_pointer_read('space:' . $spaceId, $privateRoot . '/spaces/' . $spaceId . '/space.json');
+        if ($spaceRead['kind'] === 'unavailable') {
+            return ['kind' => 'unavailable', 'code' => 'space_pointer_unreadable'];
+        }
+        $space = $spaceRead['value'];
+    }
+
+    $overlayRead = _stattic_v4_read_overlay($privateRoot, $spaceId, $space);
+    if ($overlayRead['kind'] === 'unavailable' || $overlayRead['kind'] === 'schema_mismatch') {
+        return $overlayRead;
+    }
+    if ($overlayRead['kind'] === 'missing') {
+        return [
+            'kind' => 'denied',
+            'reason' => 'overlay_missing',
+            'host_entry' => $hostEntry,
+            'host_routes' => $hostRoutes,
+            'space_id' => $spaceId,
+        ];
+    }
+    $overlay = $overlayRead['overlay'];
+    if (($overlay['fence'] ?? null) === 'exposure') {
+        return [
+            'kind' => 'denied',
+            'reason' => 'exposure_fence',
+            'host_entry' => $hostEntry,
+            'host_routes' => $hostRoutes,
+            'space_id' => $spaceId,
+        ];
+    }
+
+    return [
+        'kind' => 'resolved',
+        'host_entry' => $hostEntry,
+        'host_routes' => $hostRoutes,
+        'space_id' => $spaceId,
+        'overlay' => $overlay,
+        'open' => ($overlay['open'] ?? null) === true,
+        'version_id' => _stattic_v4_version_for_host($hostEntry, $overlay),
+    ];
 }
 
 // The Space's live production surface, or one of the surfaces that stand in

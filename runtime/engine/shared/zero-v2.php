@@ -10,6 +10,20 @@ function _stattic_zero_generation(array $authority): string
 }
 
 /**
+ * Lifecycle state of a version's compiled Zero v2 bundle.
+ *
+ * @return 'absent'|'uninitialized'|'ready'
+ */
+function _stattic_zero_v2_version_state(string $versionRoot): string
+{
+    $compiled = $versionRoot . '/.zero-compiled';
+    if (!is_file($compiled . '/manifest.json')) {
+        return 'absent';
+    }
+    return is_file($compiled . '/ready.json') ? 'ready' : 'uninitialized';
+}
+
+/**
  * The cordon's verdict for one selected version: null when it may serve, else
  * the refusal the visitor gets. health.php asks the same question so readiness
  * never accepts a version this refuses.
@@ -30,10 +44,11 @@ function _stattic_zero_generation_refusal(string $versionRoot, array $serving): 
             'details' => ['live_hostname' => $serving['live_hostname'] ?? null],
         ]];
     }
-    if (!in_array($generation, ['v2', 'tp_v1'], true) && is_file($versionRoot . '/.zero-compiled/manifest.json')) {
+    $zeroV2Present = _stattic_zero_v2_version_state($versionRoot) !== 'absent';
+    if (!in_array($generation, ['v2', 'tp_v1'], true) && $zeroV2Present) {
         return [409, 'zero_generation_locked', 'This Space has not activated Zero v2.', []];
     }
-    if (is_file($versionRoot . '/.zero-compiled/manifest.json')) {
+    if ($zeroV2Present) {
         $typedpress = _stattic_typedpress_manifest($versionRoot . '/.zero-compiled') !== null;
         if ($typedpress !== ($generation === 'tp_v1')) return [409, 'zero_generation_locked', 'This version belongs to a different runtime.', []];
     }
@@ -51,10 +66,12 @@ function _stattic_zero_generation_serve(string $versionRoot, array $serving): vo
 
 function _stattic_zero_v2_select(string $privateRoot, string $spaceId, string $versionId, array $authority, bool $initializing = false): bool
 {
-    $root = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId . '/.zero-compiled';
-    if (!is_file($root . '/manifest.json')) return false;
+    $versionRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
+    $state = _stattic_zero_v2_version_state($versionRoot);
+    if ($state === 'absent') return false;
     if (!$initializing && !in_array(_stattic_zero_generation($authority), ['v2', 'tp_v1'], true)) throw new RuntimeException('This Space has not activated Zero v2.');
-    if (!$initializing && !is_file($root . '/ready.json')) throw new RuntimeException('Zero v2 initialization is incomplete.');
+    if (!$initializing && $state !== 'ready') throw new RuntimeException('Zero v2 initialization is incomplete.');
+    $root = $versionRoot . '/.zero-compiled';
     if (isset($GLOBALS['SPACEFAST_ZERO_V2_ROOT']) && $GLOBALS['SPACEFAST_ZERO_V2_ROOT'] !== $root) {
         throw new RuntimeException('Only one Zero version may load in a request.');
     }
@@ -210,8 +227,9 @@ function _stattic_zero_v2_configure_spacefast_provider(string $compiledRoot): vo
 /** Authenticated finalize values are private immutable inputs, including empty overrides. */
 function _stattic_zero_v2_write_variables(string $privateRoot, string $spaceId, string $versionId, mixed $variables): void
 {
-    $root = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId . '/.zero-compiled';
-    if (!is_file($root . '/manifest.json')) return;
+    $versionRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
+    if (_stattic_zero_v2_version_state($versionRoot) === 'absent') return;
+    $root = $versionRoot . '/.zero-compiled';
     if (!is_array($variables)) throw new RuntimeException('Invalid managed Zero variables.');
     foreach ($variables as $name => $value) {
         if (!is_string($name) || !is_string($value)) throw new RuntimeException('Invalid managed Zero variables.');
@@ -224,7 +242,7 @@ function _stattic_zero_v2_initialize(string $privateRoot, string $spaceId, strin
     $authority['users'] = ['enabled' => _stattic_zero_v2_users_enabled($privateRoot, $spaceId)];
     if (!_stattic_zero_v2_select($privateRoot, $spaceId, $versionId, $authority, true)) return;
     $root = $GLOBALS['SPACEFAST_ZERO_V2_ROOT'];
-    if (is_file($root . '/ready.json')) return;
+    if (_stattic_zero_v2_version_state(dirname($root)) === 'ready') return;
     if (function_exists('did_action') && did_action('plugins_loaded') > 0) throw new RuntimeException('WordPress booted before the candidate version was selected.');
     $bootstrap = dirname($privateRoot, 2) . '/wp-load.php';
     if (!is_file($bootstrap)) throw new RuntimeException('WordPress is required for Zero v2.');
@@ -262,7 +280,7 @@ function _stattic_zero_v2_client(string $versionRoot, string $path, string $meth
     $root = $versionRoot . '/.zero-compiled';
     $types = $path === STATTIC_ZERO_V2_CLIENT_TYPES_PATH;
     $file = $root . '/client/' . ($types ? 'client.d.ts' : 'client.js');
-    if (!is_file($root . '/ready.json') || !is_file($file)) {
+    if (_stattic_zero_v2_version_state($versionRoot) !== 'ready' || !is_file($file)) {
         _stattic_problem_response(404, 'not_found', 'This version has no generated Zero client.');
     }
     $body = file_get_contents($file);
@@ -282,17 +300,20 @@ function _stattic_zero_v2_finalize_lock(string $privateRoot, string $spaceId, ar
     $files = array_merge($session['manifest'] ?? [], $session['retained_files'] ?? []);
     $reusable = $session['reusable_version_id'] ?? null;
     $inheritsZero = ($session['retention'] ?? null) === 'all' && is_string($reusable)
-        && is_file($privateRoot . '/spaces/' . $spaceId . '/versions/' . $reusable . '/.zero-compiled/manifest.json');
+        && _stattic_zero_v2_version_state($privateRoot . '/spaces/' . $spaceId . '/versions/' . $reusable) !== 'absent';
     if (!$inheritsZero && !array_any($files, static fn ($file): bool => is_array($file) && (($file['path'] ?? '') === 'zero.config.ts' || ($file['path'] ?? '') === 'typedpress.config.ts' || str_starts_with((string) ($file['path'] ?? ''), '.typedpress-source/') || str_starts_with((string) ($file['path'] ?? ''), '.zero-source/')))) return null;
     return _stattic_zero_v2_lock($privateRoot, $spaceId);
 }
 
 function _stattic_zero_v2_lock(string $privateRoot, string $spaceId): mixed
 {
+    require_once __DIR__ . '/lock.php';
     $file = $privateRoot . '/spaces/' . $spaceId . '/zero-v2-finalize.lock';
-    $handle = fopen($file, 'c');
-    if ($handle === false || !flock($handle, LOCK_EX | LOCK_NB)) {
-        if (is_resource($handle)) fclose($handle);
+    if (!is_file($file) && !_stattic_runtime_mkdir_soft(dirname($file))) {
+        _stattic_problem_response(409, 'zero_v2_finalize_busy', 'Another Zero publication is initializing this Space. Retry after it completes.');
+    }
+    $handle = _stattic_lock_acquire($file, STATTIC_LOCK_TRY);
+    if ($handle === false) {
         _stattic_problem_response(409, 'zero_v2_finalize_busy', 'Another Zero publication is initializing this Space. Retry after it completes.');
     }
     return $handle;

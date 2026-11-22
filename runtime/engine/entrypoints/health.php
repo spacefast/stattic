@@ -91,73 +91,30 @@ function _stattic_health_purge_pending(string $privateRoot, string $requestHost)
 function _stattic_health_serving(string $privateRoot, string $requestHost): array
 {
     $none = static fn (string $state): array => ['state' => $state, 'version_id' => null];
-    $routesRead = _sf_pointer_read('routes', $privateRoot . '/routes/current.json');
-    if ($routesRead['kind'] === 'unavailable') {
-        return $none('unavailable');
-    }
-    $routes = $routesRead['value'];
-    if (!is_array($routes) || !isset($routes['gen'])) {
-        return $none('undeployed');
-    }
-    // The visitor lane checks `gen` before the schema too: a pointer without
-    // one is "undeployed" there. An out-of-range schema then gets the
-    // invariant error, so nothing is being served to anyone.
-    if (!_stattic_health_schema_ok($routes['schema'] ?? null)) {
-        return $none('unavailable');
-    }
-    $host = _stattic_v4_host_lookup($privateRoot, $routes, $requestHost);
-    if ($host === false) {
-        return $none('unavailable');
-    }
-    if ($host === null) {
-        return $none('undeployed');
-    }
-    $hostEntry = $host['entry'];
-    $hostAction = is_array($hostEntry['route_action'] ?? null) ? $hostEntry['route_action'] : null;
-    if (is_array($hostAction) && in_array(($hostAction['action'] ?? null), ['tombstone', 'platform_error'], true)) {
-        // A CSAM tombstone answers byte-for-byte as a never-deployed host
-        // (shared/artifacts.php), so health must not tell the two apart.
-        return $none(($hostAction['page_id'] ?? null) === 'tombstone-csam' ? 'undeployed' : 'platform');
-    }
-    $spaceId = is_string($hostEntry['space_id'] ?? null) ? $hostEntry['space_id'] : '';
-    $space = null;
-    if ($spaceId !== '') {
-        $spaceRead = _sf_pointer_read('space:' . $spaceId, $privateRoot . '/spaces/' . $spaceId . '/space.json');
-        if ($spaceRead['kind'] === 'unavailable') {
+    $resolved = _stattic_v4_resolve_host($privateRoot, $requestHost);
+    switch ($resolved['kind']) {
+        case 'unavailable':
+        case 'schema_mismatch':
             return $none('unavailable');
-        }
-        $space = $spaceRead['value'];
+        case 'undeployed':
+            return $none('undeployed');
+        case 'platform_action':
+            // A CSAM tombstone answers byte-for-byte as a never-deployed host
+            // (shared/artifacts.php), so health must not tell the two apart.
+            return $none(($resolved['action']['page_id'] ?? null) === 'tombstone-csam' ? 'undeployed' : 'platform');
+        case 'denied':
+            return $none('denied');
+        case 'resolved':
+            break;
     }
-    // `_stattic_v4_overlay` renders the invariant page for a schema this engine
-    // cannot read; health answers that as unavailable instead of exiting.
-    if (is_array($space) && is_string($space['overlay'] ?? null) && !_stattic_health_schema_ok($space['schema'] ?? null)) {
-        return $none('unavailable');
-    }
-    $overlay = $spaceId === '' || !is_array($space) || !is_string($space['overlay'] ?? null)
-        ? null
-        : _stattic_v4_include_artifact(_stattic_space_root($privateRoot, $spaceId) . '/' . $space['overlay']);
-    if ($overlay === false) {
-        return $none('unavailable');
-    }
-    if (!is_array($overlay) || !is_bool($overlay['open'] ?? null)) {
-        $overlay = null;
-    } elseif (!_stattic_health_schema_ok($overlay['schema'] ?? null)) {
-        return $none('unavailable');
-    }
-    // The visitor lane denies before selecting a version here, so no version
-    // is being served to anyone.
-    if ($overlay === null || ($overlay['fence'] ?? null) === 'exposure') {
-        return $none('denied');
-    }
-    $versionId = _stattic_v4_version_for_host($hostEntry, $overlay);
+    $versionId = $resolved['version_id'];
     if ($versionId === null) {
         return $none('pending');
     }
     // The Zero generation cordon refuses some selected versions outright. A
     // compiled Zero v2 version is not live until initialized: its app requests
-    // refuse it until `ready.json` exists (a file check, because the selector
-    // itself sets request globals).
-    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    // refuse it until `ready.json` exists.
+    $versionRoot = _stattic_version_root($privateRoot, $resolved['space_id'], $versionId);
     // The same version root the visitor lane loads (serve.php
     // `_stattic_v4_version_root_artifact`): until it reads as a root with
     // tables, visitors get "version pending"; an unreadable or out-of-schema
@@ -166,21 +123,14 @@ function _stattic_health_serving(string $privateRoot, string $requestHost): arra
     if ($rootState !== 'ready') {
         return $none($rootState);
     }
-    $serving = _stattic_v4_legacy_serving($spaceId, $versionId, $hostEntry, $overlay);
+    $serving = _stattic_v4_legacy_serving($resolved['space_id'], $versionId, $resolved['host_entry'], $resolved['overlay']);
     if (
         _stattic_zero_generation_refusal($versionRoot, $serving) !== null
-        || (is_file($versionRoot . '/.zero-compiled/manifest.json') && !is_file($versionRoot . '/.zero-compiled/ready.json'))
+        || _stattic_zero_v2_version_state($versionRoot) === 'uninitialized'
     ) {
         return $none('pending');
     }
     return ['state' => 'serving', 'version_id' => $versionId];
-}
-
-function _stattic_health_schema_ok(mixed $schema): bool
-{
-    return is_int($schema)
-        && $schema >= STATTIC_RUNTIME_ARTIFACT_SCHEMA_MIN
-        && $schema <= STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX;
 }
 
 /** @return 'ready'|'pending'|'unavailable' */
@@ -201,5 +151,5 @@ function _stattic_health_version_root_state(string $versionRoot): string
     if (!is_array($root) || !is_array($root['tables'] ?? null)) {
         return 'pending';
     }
-    return _stattic_health_schema_ok($root['schema'] ?? null) ? 'ready' : 'unavailable';
+    return _stattic_v4_schema_valid($root['schema'] ?? null) ? 'ready' : 'unavailable';
 }

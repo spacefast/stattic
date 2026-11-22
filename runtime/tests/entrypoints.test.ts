@@ -679,3 +679,169 @@ for (const entrypointPath of ENTRYPOINT_PATHS) {
     await probe.verify(await probe.request(rt));
   });
 }
+
+test("pass 2 keeps pass 1's publication.lock handle and pinned engine without re-acquiring", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-pass2-lock-")));
+  try {
+    const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    installLoaderBody(engineRoot);
+    mkdirSync(path.join(engineRoot, "shared"), { recursive: true });
+    mkdirSync(path.join(engineRoot, "entrypoints"), { recursive: true });
+    writeFileSync(path.join(engineRoot, "shared/context.php"), "<?php\n");
+    writeFileSync(
+      path.join(engineRoot, "entrypoints/health.php"),
+      '<?php echo json_encode(["lockId" => get_resource_id($GLOBALS["SPACEFAST_RUNTIME_PUBLICATION_LOCK"]), "engine" => $GLOBALS["SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT"]]);',
+    );
+    mkdirSync(path.join(root, ".stattic"), { recursive: true });
+    writeFileSync(path.join(root, ".stattic/publication.lock"), "");
+    writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
+    copyFileSync(
+      path.resolve(import.meta.dir, "../custom-redirects.php"),
+      path.join(root, "custom-redirects.php"),
+    );
+    mkdirSync(path.join(root, "__spacefast"), { recursive: true });
+    copyFileSync(
+      path.resolve(import.meta.dir, "../custom-redirects.php"),
+      path.join(root, "__spacefast/health.php"),
+    );
+    const driver = path.join(root, "driver.php");
+    writeFileSync(
+      driver,
+      [
+        "<?php",
+        `$_SERVER['DOCUMENT_ROOT'] = ${JSON.stringify(root)};`,
+        "$_SERVER['REQUEST_METHOD'] = 'GET';",
+        "$_SERVER['REQUEST_URI'] = '/__spacefast/health.php';",
+        "$_SERVER['HTTP_HOST'] = 'example.test';",
+        // Pass 1: auto_prepend acquires publication.lock and pins the engine.
+        `require ${JSON.stringify(path.join(root, "custom-redirects.php"))};`,
+        "$pass1LockId = get_resource_id($GLOBALS['SPACEFAST_RUNTIME_PUBLICATION_LOCK']);",
+        "$pass1Engine = $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'];",
+        // Simulate an install transaction appearing between pass 1 and pass 2:
+        // pass 2 must keep pass 1's lock and engine without re-opening or 503-ing.
+        `file_put_contents(${JSON.stringify(path.join(root, ".stattic/install-transaction.json"))}, json_encode(['phase' => 'publishing']));`,
+        // Pass 2: the entrypoint script runs.
+        "ob_start();",
+        `require ${JSON.stringify(path.join(root, "__spacefast/health.php"))};`,
+        "$pass2 = json_decode((string) ob_get_clean(), true);",
+        "echo json_encode(['sameLock' => $pass1LockId === $pass2['lockId'], 'sameEngine' => $pass1Engine === $pass2['engine']]);",
+      ].join("\n"),
+    );
+
+    const result = Bun.spawnSync({
+      cmd: ["php", "-d", "auto_prepend_file=", driver],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toEqual({
+      sameLock: true,
+      sameEngine: true,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("request.php computes _stattic_content_access_target once per request and denies fenced hosts with 403", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-access-once-")));
+  try {
+    const engineRoot = path.join(root, ".stattic/releases/test/engine");
+    const sharedRoot = path.join(engineRoot, "shared");
+    const runtimeRoot = path.join(engineRoot, "runtime");
+    installLoaderBody(engineRoot);
+    mkdirSync(sharedRoot, { recursive: true });
+    mkdirSync(runtimeRoot, { recursive: true });
+    writeFileSync(path.join(sharedRoot, "bootstrap-config.php"), "<?php\n");
+    writeFileSync(path.join(sharedRoot, "cache-policy.php"), "<?php\n");
+    writeFileSync(path.join(sharedRoot, "artifacts.php"), "<?php\n");
+    writeFileSync(
+      path.join(sharedRoot, "context.php"),
+      `<?php
+function _stattic_platform_bearer_token_from_request(): ?string { return null; }
+function _stattic_normalize_host_authority(string $host): string { return strtolower($host); }
+function _stattic_problem_response(int $status, string $code, string $message): never {
+  echo json_encode(['status' => $status, 'code' => $code, 'calls' => $GLOBALS['TEST_TARGET_CALLS'] ?? 0]);
+  exit(0);
+}
+`,
+    );
+    writeFileSync(
+      path.join(sharedRoot, "storage.php"),
+      "<?php function _stattic_visitor_lane_begin(string $root): void {}\n",
+    );
+    writeFileSync(
+      path.join(runtimeRoot, "serve.php"),
+      "<?php function _sf_load_generated_config(string $root): void {}\n",
+    );
+    writeFileSync(path.join(runtimeRoot, "access-rules.php"), "<?php\n");
+    writeFileSync(
+      path.join(sharedRoot, "content-access.php"),
+      `<?php
+function _stattic_content_access_target(string $root, string $host): array {
+  $GLOBALS['TEST_TARGET_CALLS'] = ($GLOBALS['TEST_TARGET_CALLS'] ?? 0) + 1;
+  $kind = getenv('SPACEFAST_TEST_KIND') ?: 'present';
+  if ($kind === 'denied') return ['kind' => 'denied'];
+  return ['kind' => 'present', 'open' => true, 'space_id' => 'spc_1', 'version_id' => 'ver_1', 'serving' => ['space_id' => 'spc_1']];
+}
+function _stattic_content_deployment_claims_path(string $root, string $host, string $path, string $method, ?array $target = null): bool {
+  return false;
+}
+function _stattic_content_version_model_revision(string $root, string $spaceId, string $versionId): ?string {
+  return null;
+}
+`,
+    );
+    writeFileSync(
+      path.join(sharedRoot, "content-admin.php"),
+      `<?php
+function _stattic_content_admin_request_path(string $path, array $selectors): bool { return true; }
+function _stattic_content_rest_request_path(string $path, array $selectors): bool { return true; }
+function _stattic_content_rest_access_path(string $path, array $selectors): string { return $path; }
+function _stattic_content_admin_platform_hold(string $root, string $host, ?array $target = null): ?string {
+  $target ??= _stattic_content_access_target($root, $host);
+  return $target['kind'] === 'absent' ? ($target['hold'] ?? null) : null;
+}
+function _stattic_content_admin_cookie_name(): string { return 'sf_admin'; }
+function _stattic_content_admin_verify_session(string $root, string $token, string $host): ?array { return null; }
+function _stattic_content_admin_enter_wordpress(string $root, string $spaceId, ?string $frame, array $access): void {}
+function _stattic_access_wordpress_principal(array $serving, string $host, string $path): ?array { return null; }
+`,
+    );
+    writeFileSync(path.join(root, "wp-load.php"), "<?php\n");
+    writeFileSync(
+      path.join(root, "wp-blog-header.php"),
+      '<?php echo json_encode(["status" => 200, "calls" => $GLOBALS["TEST_TARGET_CALLS"] ?? 0]);',
+    );
+    mkdirSync(path.join(root, ".stattic"), { recursive: true });
+    writeFileSync(path.join(root, ".stattic/publication.lock"), "");
+    writeActiveReleasePointer(path.join(root, ".stattic"), "releases/test");
+    copyFileSync(
+      path.resolve(import.meta.dir, "../custom-redirects.php"),
+      path.join(root, "custom-redirects.php"),
+    );
+
+    const runCase = (kind: string) => {
+      const result = Bun.spawnSync({
+        cmd: [
+          "php",
+          "-d",
+          "auto_prepend_file=",
+          "-r",
+          `$_SERVER['REQUEST_METHOD']='GET'; $_SERVER['REQUEST_URI']='/wp-json/wp/v2/posts'; $_SERVER['HTTP_HOST']='space.example'; require $argv[1];`,
+          path.join(root, "custom-redirects.php"),
+        ],
+        env: { ...process.env, SPACEFAST_TEST_KIND: kind },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      return JSON.parse(result.stdout.toString());
+    };
+
+    expect(runCase("present")).toEqual({ status: 200, calls: 1 });
+    expect(runCase("denied")).toEqual({ status: 403, code: "access_denied", calls: 1 });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

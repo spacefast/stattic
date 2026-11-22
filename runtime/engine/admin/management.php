@@ -474,9 +474,11 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
             _stattic_problem_response(422, 'zero_v2_initialize_failed', 'Zero could not initialize against this box WordPress platform.', ['details' => ['reason' => $error->getMessage()]]);
         }
     } finally {
-        if (is_resource($zeroLock)) { flock($zeroLock, LOCK_UN); fclose($zeroLock); }
+        if (is_resource($zeroLock)) {
+            require_once __DIR__ . '/../shared/lock.php';
+            _stattic_lock_release($zeroLock);
+        }
     }
-    _stattic_runtime_publish_session_release($privateRoot, $spaceId, $uploadId);
     $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
     _stattic_legacy_zero_write_version_config($versionRoot, $body);
     if ($functionsFinalize !== null) {
@@ -493,6 +495,9 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
         _stattic_runtime_write_private_string($versionRoot . '/' . STATTIC_SPACE_CLIENT_TYPES_PATH, $connectorsTypes);
     }
     _stattic_runtime_apply_zero_migrations($versionRoot);
+    // Release the upload session only after every post-finalize artifact is
+    // durably on disk so a failure in any artifact write remains retryable.
+    _stattic_runtime_publish_session_release($privateRoot, $spaceId, $uploadId);
     $finalizedEvent = [
         'event' => 'version_finalized',
         'space_id' => $spaceId,
@@ -549,7 +554,7 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
 {
     require_once __DIR__ . '/../shared/zero-v2.php';
     $metadata ??= _stattic_runtime_read_json($versionRoot . '/metadata.json');
-    if (is_file($versionRoot . '/.zero-compiled/manifest.json') && !is_file($versionRoot . '/.zero-compiled/ready.json')) {
+    if (_stattic_zero_v2_version_state($versionRoot) === 'uninitialized') {
         _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
     }
     $readinessTarget = is_array($metadata) && is_array($metadata['readinessTarget'] ?? null)
@@ -1337,8 +1342,8 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     $configDigest = is_string($body['config_digest'] ?? null) && $body['config_digest'] !== ''
         ? $body['config_digest']
         : null;
-    $compiled = _stattic_version_root($privateRoot, $spaceId, $versionId) . '/.zero-compiled';
-    if (is_file($compiled . '/manifest.json') && !is_file($compiled . '/ready.json')) {
+    require_once __DIR__ . '/../shared/zero-v2.php';
+    if (_stattic_zero_v2_version_state(_stattic_version_root($privateRoot, $spaceId, $versionId)) === 'uninitialized') {
         _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
     }
     $routePath = _stattic_route_pointer_path($privateRoot, $spaceId, $routeName);

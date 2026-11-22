@@ -72,6 +72,16 @@ test("a published config role reads once for every viewer and writes only for a 
     cleanupSpaceWithKey,
   } = await import("../../apps/control-plane/src/test/seed.js");
   const { setFeatureFlagEnv } = await import("../../apps/control-plane/src/test/feature-flags.js");
+  const { env } = await import("../../apps/control-plane/src/config/env.js");
+  const { inProcessValkey } =
+    await import("../../apps/control-plane/src/test/in-process-valkey.js");
+  const valkey = inProcessValkey();
+  const previousValkey = env.VALKEY_URL;
+  Reflect.set(env, "VALKEY_URL", valkey.url);
+  cleanup.defer(() => {
+    Reflect.set(env, "VALKEY_URL", previousValkey);
+    valkey.stop();
+  });
   const { platformWpCloudContext } =
     await import("../../apps/control-plane/src/wp-cloud/tenant-client.js");
   const { simulatedWpCloudContext } =

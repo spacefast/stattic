@@ -1373,7 +1373,8 @@ test("keeps serving a committed release if cleanup is interrupted", async () => 
     tree: true,
     publicRoot: old.publicRoot,
   });
-  const transactionPath = path.join(installRootOf(old.publicRoot), "install-transaction.json");
+  const installRoot = installRootOf(old.publicRoot);
+  const transactionPath = path.join(installRoot, "install-transaction.json");
   await expect(
     runInstaller(next, {
       pause: {
@@ -1400,6 +1401,11 @@ test("keeps serving a committed release if cleanup is interrupted", async () => 
   const repaired = await runInstaller(next);
   expect(repaired.exitCode, repaired.stderr).toBe(0);
   expect(existsSync(transactionPath)).toBe(false);
+  expect(
+    readdirSync(installRoot).filter((name) =>
+      name.startsWith("active-release-proof.json.previous."),
+    ),
+  ).toEqual([]);
   expect(readVisitor(old.publicRoot)).toEqual({ context: next.revision, module: next.revision });
 });
 
@@ -1732,19 +1738,24 @@ test("a chroot-site install leaves the site the chroot's loader and no engine co
   });
 });
 
-test("commit metadata failures roll back cleanly instead of stranding the site in publishing", async () => {
-  for (const [failurePhase, expectedError] of [
-    ["release_authority", "runtime_engine_release_authority_failed"],
-    ["release_proof", "runtime_engine_release_proof_failed"],
-    ["transaction_commit", "runtime_engine_transaction_commit_failed"],
-  ] as const) {
+test.each([
+  ["release_authority", "runtime_engine_release_authority_failed"],
+  ["release_proof", "runtime_engine_release_proof_failed"],
+  ["transaction_commit", "runtime_engine_transaction_commit_failed"],
+] as const)(
+  "a %s failure restores the serving release and its proof",
+  async (failurePhase, expectedError) => {
     const old = await startUpdateFixture({
       revision: `old-${failurePhase}`,
       visitorEngine: true,
       tree: true,
     });
-    expect((await runInstaller(old)).exitCode).toBe(0);
-    const oldTarget = readActiveReleaseTarget(installRootOf(old.publicRoot));
+    expect((await runInstaller(old, { nativeSha256: old.nativeSha256 })).exitCode).toBe(0);
+    const installRoot = installRootOf(old.publicRoot);
+    const oldTarget = readActiveReleaseTarget(installRoot);
+    const proofPath = path.join(installRoot, "active-release-proof.json");
+    const oldProof = JSON.parse(readFileSync(proofPath, "utf8"));
+    const expectedNonce = publicationNonce(old.publicRoot);
     const next = await startUpdateFixture({
       revision: `next-${failurePhase}`,
       visitorEngine: true,
@@ -1752,20 +1763,37 @@ test("commit metadata failures roll back cleanly instead of stranding the site i
       publicRoot: old.publicRoot,
     });
 
-    const failed = await runInstaller(next, { failurePhase });
+    const commandId = crypto.randomUUID();
+    const command = { commandId, expectedNonce, nativeSha256: next.nativeSha256 };
+    const failed = await runInstaller(next, { ...command, failurePhase });
     expect(failed.exitCode).toBe(1);
     expect(failed.stderr).toContain(expectedError);
     expect(failed.stderr).not.toContain("runtime_engine_rollback_incomplete");
-    expect(readActiveReleaseTarget(installRootOf(old.publicRoot))).toBe(oldTarget);
-    expect(existsSync(path.join(installRootOf(old.publicRoot), "install-transaction.json"))).toBe(
-      false,
-    );
+    expect(readActiveReleaseTarget(installRoot)).toBe(oldTarget);
+    expect(existsSync(path.join(installRoot, "install-transaction.json"))).toBe(false);
+    const rolledBackNonce = publicationNonce(old.publicRoot);
+    expect(rolledBackNonce).not.toBe(expectedNonce);
+    expect(JSON.parse(readFileSync(proofPath, "utf8"))).toEqual({
+      ...oldProof,
+      publication: expect.objectContaining({
+        command_id: commandId,
+        expected_nonce: expectedNonce,
+        nonce: rolledBackNonce,
+      }),
+    });
     expect(readVisitor(old.publicRoot)).toEqual({
       context: old.revision,
       module: old.revision,
     });
-  }
-});
+    const retry = await runInstaller(next, command);
+    expect(retry.exitCode, retry.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(proofPath, "utf8"))).toMatchObject({
+      release: readActiveReleaseTarget(installRoot),
+      revision: next.revision,
+      publication: { nonce: rolledBackNonce },
+    });
+  },
+);
 
 test("restore_active_release_pointer restores the previous release when the new release is dangling", async () => {
   const first = await startUpdateFixture({ revision: "dangling-prev", visitorEngine: true });

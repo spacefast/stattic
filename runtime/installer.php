@@ -1844,7 +1844,8 @@ function register_file_swap(string $target, string $suffix): void
         register_cleanup_path($backup);
         $mode = fileperms($target);
         if (
-            !copy($target, $backup)
+            !create_exclusive_regular_file($backup)
+            || !copy($target, $backup)
             || !is_int($mode)
             || !chmod($backup, $mode & 0777)
             || !sync_regular_file($backup)
@@ -2255,6 +2256,10 @@ function install_transaction_scratch_artifacts(
             fail('runtime_engine_transaction_invalid');
         }
         $suffix = substr($basename, strlen('release-'));
+        $artifacts[] = [
+            'path' => $installRoot . '/active-release-proof.json.previous.' . $suffix,
+            'kind' => 'file',
+        ];
         foreach ($manifest['alias'] as $entry) {
             $target = $publicRoot . '/' . $entry['path'];
             $artifacts[] = [
@@ -3572,6 +3577,8 @@ if (
 ) {
     fail('runtime_engine_release_authority_failed');
 }
+// Roll back the release fields while keeping the command's reserved nonce.
+register_file_swap($installRoot . '/active-release-proof.json', $suffix);
 if (
     $injectedFailure === 'release_proof'
     || !write_active_release_proof(

@@ -1,7 +1,7 @@
 {
-  "revision": "5259bed6ca8f338d373196d2ae74db29839732c7",
-  "sourceHash": "e200c4aad923d660098f7fc3310abe82c52b3bb1cd76a0661da89f4c3518c86b",
-  "manifestSha256": "fd2599cd148f897535e6f7adc62bca290ec89b053b04a351796ccad3832d1933",
+  "revision": "a6deb422ca9df013fb63d2959f51fff95c48611f",
+  "sourceHash": "ef33b1698f06003236cb67c80fa83fb45156fbb46cca7dbde4791b21ffa888fc",
+  "manifestSha256": "385f87f76c2ba147b1bd021a7bf66e10327910bc407c4e2a63bde42d4044a085",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "1273e441604974b844551e2acc04831915bf5b1a22eefebe3a18b455f5e5619c"
+      "sha256": "d1d429ecb91cf8200d107ff25fbfef46fec36907e79c2e4aa15cb23e35587b9d"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "0286e8d7e92109bb8c9b941059681d8ddd4d6baa1e7397d8065560f5dab9df59"
+      "sha256": "b8b6ec5dc66015a4630d4f8bf1a7ee38b7433f170a88e40a7ab1da166fcbae52"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29837,7 +29837,7 @@
     },
     {
       "path": "runtime/engine/shared/db-broker.php",
-      "sha256": "1e9ea1aeb172f020eefe934f8934246eee5dd3936534c37c360ef2e074f51924"
+      "sha256": "ef2aa1017315dd2b36be670a232764feeeb5d947ba50a9af8e0bb821f5243b2d"
     },
     {
       "path": "runtime/engine/shared/design-upload.generated.php",
@@ -30249,7 +30249,7 @@
     },
     {
       "path": "runtime/tests/db-broker-admission.test.ts",
-      "sha256": "735e29ab39ad705ac7ef374fb7b1b74b7ef30f9571929fc0c7b81e9fc45c63aa"
+      "sha256": "76f6063b8693f1a117f536bc2634b91ec95da198e4ba2d5113d3f6d771a5f309"
     },
     {
       "path": "runtime/tests/db-broker-bench.php",
@@ -30269,7 +30269,7 @@
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "e3042ba9ffaa0fb1057d11c0bafb360ced504f110215b4a0e33bb978cd5cf562"
+      "sha256": "44d804fc9b4cb8f1bf82d6cb244ae3a337f4273f6e6e06d2a4512ef543c79a30"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",

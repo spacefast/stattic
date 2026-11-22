@@ -1484,7 +1484,7 @@ function _stattic_db_broker_dsn(): array
         );
     }
     $label = is_string($source) ? trim($source) : '';
-    if ($label !== '' && $label !== 'application' && $label !== 'provider') {
+    if ($label !== 'application' && $label !== 'provider') {
         return _stattic_db_broker_error(
             'zero_db_url_invalid',
             'SPACEFAST_ZERO_DATABASE_URL_SOURCE must be application or provider.'
@@ -1494,6 +1494,15 @@ function _stattic_db_broker_dsn(): array
     $parts = parse_url(trim($url));
     if (!is_array($parts) || ($parts['scheme'] ?? '') !== 'mysql' || !is_string($parts['host'] ?? null)) {
         return _stattic_db_broker_error('zero_db_url_invalid', 'Zero DB URL could not be parsed.');
+    }
+
+    if ($label === 'application') {
+        if (array_key_exists('query', $parts)) {
+            return _stattic_db_broker_error('zero_db_url_invalid', 'Application Zero DB URLs cannot contain driver options.');
+        }
+        // Like the native runner, mysqli cannot dial a pinned IP and verify the
+        // original hostname independently. Refuse before handing it the DSN.
+        return _stattic_db_broker_error('zero_db_tls_required', 'Application Zero DB connections require pinned, hostname-verified TLS.');
     }
 
     $socket = null;

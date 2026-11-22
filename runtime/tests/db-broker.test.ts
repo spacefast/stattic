@@ -76,7 +76,7 @@ async function phpRaw(
       "-d",
       `memory_limit=${memoryLimit}`,
       CLI_PATH,
-      JSON.stringify({ url: mysql.url, ...request }),
+      JSON.stringify({ url: mysql.url, source: "provider", ...request }),
     ],
     {
       env: { ...process.env, ...env },
@@ -398,6 +398,20 @@ test("each size cap refuses with its own code", async () => {
 });
 
 // --- capability gating ---------------------------------------------------------------------
+
+test("the PHP broker connects only with explicit provider authority", async () => {
+  const operations = [op({ sql: "SELECT 1 AS allowed" })];
+  for (const [source, url, code] of [
+    [null, mysql.url, "zero_db_url_invalid"],
+    ["application", mysql.url, "zero_db_tls_required"],
+    ["application", `${mysql.url}?socket=test`, "zero_db_url_invalid"],
+  ] as const) {
+    const { responses } = await php({ source, url, operations });
+    expect(JSON.parse(String(responses?.[0]))).toMatchObject({ ok: false, code });
+  }
+  const { responses } = await php({ source: "provider", operations });
+  expect(JSON.parse(String(responses?.[0]))).toEqual({ ok: true, rows: [{ allowed: 1 }] });
+});
 
 test("a read-only grant refuses a mutation", async () => {
   const { responses } = await php({

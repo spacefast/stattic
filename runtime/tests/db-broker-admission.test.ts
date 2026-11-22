@@ -24,7 +24,12 @@ test("migration artifact admission checks format and statement capacity before c
     const result = Bun.spawnSync([
       "php",
       path.join(import.meta.dir, "db-broker-cli.php"),
-      JSON.stringify({ action: "migrate", path: artifact, url: "not a url at all" }),
+      JSON.stringify({
+        action: "migrate",
+        path: artifact,
+        url: "not a url at all",
+        source: "provider",
+      }),
     ]);
     expect(result.exitCode).toBe(0);
     expect(result.stderr.toString()).toBe("");

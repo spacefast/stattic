@@ -10,7 +10,7 @@ import { requireLauncherDatabase } from "./launcher-database.ts";
 export async function main(): Promise<void> {
   await requireLauncherDatabase();
   // Packages load only now, past the check: importing this module resolves none.
-  const { eq } = await import("drizzle-orm");
+  const { and, desc, eq, inArray } = await import("drizzle-orm");
   const { MAIN_TENANT_ID } = await import("@spacefast/common/contracts/ids");
 
   // Loaded by control-plane-access-fixture.ts once it has checked the namespace
@@ -31,7 +31,8 @@ export async function main(): Promise<void> {
     { env },
     { db },
     { authMembers },
-    { domains },
+    { domains, spaces },
+    { accessRequests },
     { createId },
     { ensureSpaceDefaultHostname },
     { runtimeRouteConfigForSpace },
@@ -48,6 +49,7 @@ export async function main(): Promise<void> {
     import("../../apps/control-plane/src/db/client.ts"),
     import("../../apps/control-plane/src/db/schema/auth.ts"),
     import("../../apps/control-plane/src/db/schema/core.ts"),
+    import("../../apps/control-plane/src/db/schema/policy.ts"),
     import("../../apps/control-plane/src/lib/ids.ts"),
     import("../../apps/control-plane/src/runtime/hostname-identity.ts"),
     import("../../apps/control-plane/src/runtime/route-config.ts"),
@@ -206,9 +208,12 @@ export async function main(): Promise<void> {
           return (async () => {
             if (!runtime) return Response.json({ error: "runtime unavailable" }, { status: 503 });
             await logoutAllSpaceSessions(seed.spaceId);
-            const refreshedSpace = await db.query.spaces.findFirst({
-              where: (spaces, { eq: equals }) => equals(spaces.id, seed.spaceId),
-            });
+            const refreshedSpace = await db
+              .select()
+              .from(spaces)
+              .where(eq(spaces.id, seed.spaceId))
+              .limit(1)
+              .then((rows) => rows[0]);
             if (!refreshedSpace) {
               return Response.json({ error: "space unavailable" }, { status: 503 });
             }
@@ -225,29 +230,33 @@ export async function main(): Promise<void> {
         if (pathname === "/__fixture/request-state") {
           if (request.method === "GET") {
             return Response.json(
-              await db.query.accessRequests.findMany({
-                columns: { status: true },
-                where: (requests, { and, eq: equals }) =>
+              await db
+                .select({ status: accessRequests.status })
+                .from(accessRequests)
+                .where(
                   and(
-                    equals(requests.spaceId, seed.spaceId),
-                    equals(requests.normalizedEmail, requestLifecycleEmail),
+                    eq(accessRequests.spaceId, seed.spaceId),
+                    eq(accessRequests.normalizedEmail, requestLifecycleEmail),
                   ),
-                orderBy: (requests, { desc }) => [desc(requests.createdAt)],
-              }),
+                )
+                .orderBy(desc(accessRequests.createdAt)),
             );
           }
           const body: unknown = await request.json();
           const action = body instanceof Object && "action" in body ? body.action : null;
-          const current = await db.query.accessRequests.findFirst({
-            columns: { id: true, status: true },
-            where: (requests, { and, eq: equals, inArray }) =>
+          const current = await db
+            .select({ id: accessRequests.id, status: accessRequests.status })
+            .from(accessRequests)
+            .where(
               and(
-                equals(requests.spaceId, seed.spaceId),
-                equals(requests.normalizedEmail, requestLifecycleEmail),
-                inArray(requests.status, ["verification_pending", "pending"]),
+                eq(accessRequests.spaceId, seed.spaceId),
+                eq(accessRequests.normalizedEmail, requestLifecycleEmail),
+                inArray(accessRequests.status, ["verification_pending", "pending"]),
               ),
-            orderBy: (requests, { desc }) => [desc(requests.createdAt)],
-          });
+            )
+            .orderBy(desc(accessRequests.createdAt))
+            .limit(1)
+            .then((rows) => rows[0]);
           if (!current || !controlPlane) {
             return new Response("request lifecycle fixture state missing", { status: 409 });
           }
@@ -341,9 +350,12 @@ export async function main(): Promise<void> {
     const linkToken = new URL(link.url).searchParams.get("__");
     if (!linkToken) throw new Error("share link fixture produced no branded URL token");
 
-    const space = await db.query.spaces.findFirst({
-      where: (spaces, { eq: equals }) => equals(spaces.id, seed.spaceId),
-    });
+    const space = await db
+      .select()
+      .from(spaces)
+      .where(eq(spaces.id, seed.spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     if (!space) throw new Error("seeded space disappeared before route projection");
 
     // Project the whole runtime route through production boundaries. Neither

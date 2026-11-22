@@ -514,7 +514,12 @@ export async function main(): Promise<void> {
       }
       const identity = await ensureSpaceDefaultHostname(owner.spaceId);
       routes.set(identity.hostname, rt);
-      const space = await db.query.spaces.findFirst({ where: eq(spaces.id, owner.spaceId) });
+      const space = await db
+        .select()
+        .from(spaces)
+        .where(eq(spaces.id, owner.spaceId))
+        .limit(1)
+        .then((rows) => rows[0]);
       if (!space) throw new Error(`seeded Space ${owner.spaceId} vanished`);
       // A page that signs out through the Space client, as an author's page would.
       const page = (title: string, extra = "") =>
@@ -554,7 +559,12 @@ export async function main(): Promise<void> {
         .update(authUsers)
         .set({ emailVerified: true, name })
         .where(eq(authUsers.id, user.userId));
-      const row = await db.query.authUsers.findFirst({ where: eq(authUsers.id, user.userId) });
+      const row = await db
+        .select()
+        .from(authUsers)
+        .where(eq(authUsers.id, user.userId))
+        .limit(1)
+        .then((rows) => rows[0]);
       if (!row) throw new Error("seeded user vanished");
       const signed = (await seed.sessionCookie(user.sessionToken)).split("=").slice(1).join("=");
       return {

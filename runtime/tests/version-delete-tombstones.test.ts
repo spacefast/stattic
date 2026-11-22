@@ -122,7 +122,12 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
     scopeLabel: identity.scopeLabel,
     hostname: identity.hostname,
   };
-  const space = await db.query.spaces.findFirst({ where: eq(spaces.id, seed.spaceId) });
+  const space = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   if (!space) throw new Error("seeded Space is missing");
   const [first, second, live] = [createId("ver"), createId("ver"), createId("ver")] as const;
   const ids = [first, second, live];
@@ -196,7 +201,12 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
     details: null,
   };
   expect(await applySpaceTakedown(takedown)).toBe(true);
-  const disabled = await db.query.spaces.findFirst({ where: eq(spaces.id, seed.spaceId) });
+  const disabled = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   if (!disabled) throw new Error("Space vanished during takedown");
   await restoreSpaceTakedown({ space: disabled, operationId: createId("op") });
   expect(await routed(live)).toBe(true);
@@ -267,7 +277,12 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
     expect((await executeLeasedOperation({ ...leased, signal: undefined })).status).toBe(
       "succeeded",
     );
-    const row = await db.query.operations.findFirst({ where: eq(operations.id, operationId) });
+    const row = await db
+      .select()
+      .from(operations)
+      .where(eq(operations.id, operationId))
+      .limit(1)
+      .then((rows) => rows[0]);
     return z
       .object({
         results: z.array(
@@ -368,7 +383,12 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
   // The copy's files stay on the previous box, and it no longer routes there.
   expect(existsSync(versionRoot(runtime, seed.spaceId, failedCopy))).toBe(true);
   expect(await failedCopyRouted()).toBe(false);
-  const retiredRow = await db.query.versions.findFirst({ where: eq(versions.id, failedCopy) });
+  const retiredRow = await db
+    .select()
+    .from(versions)
+    .where(eq(versions.id, failedCopy))
+    .limit(1)
+    .then((rows) => rows[0]);
   expect(retiredRow?.deletedAt).toBeTruthy();
   expect(retiredRow?.deletionReason).toBe("failed_copy_retired");
   expect(retiredRow?.deletedByActorId).toBe(admin.userId);

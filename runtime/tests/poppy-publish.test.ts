@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { Window } from "happy-dom";
 import { z } from "zod";
 
+import { operations } from "../../apps/control-plane/src/db/schema/core.js";
 import { startRuntime } from "./harness.ts";
 
 const API = "https://api.sf.localhost";
@@ -179,9 +180,12 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       .update(runtimeBoxes)
       .set({ boxHostname: runtime.baseUrl })
       .where(eq(runtimeBoxes.id, box.boxId));
-    const hostname = await db.query.spaceHostnames.findFirst({
-      where: eq(spaceHostnames.spaceId, spaceId),
-    });
+    const hostname = await db
+      .select()
+      .from(spaceHostnames)
+      .where(eq(spaceHostnames.spaceId, spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     if (!hostname) throw new Error("Created Space has no hostname");
     const servingOrigin = runtime.baseUrl;
     // Bind the fixture's public address to real PHP, preserving its virtual host.
@@ -211,7 +215,12 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
           html: `<meta name="baked-demo" content="${value}"><script>window.__baked = "${value}";</script>`,
         },
       });
-    const space = await db.query.spaces.findFirst({ where: eq(spaces.id, spaceId) });
+    const space = await db
+      .select()
+      .from(spaces)
+      .where(eq(spaces.id, spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     if (!space) throw new Error("Created Space is missing");
     await seedReleasedTagGraph({
       setId: tagSetId,
@@ -254,7 +263,12 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       .parse(await published.json());
     expect(receipt.data.referral.url).toBe(referralUrl);
     expect(receipt.data.referral.message).toContain(referralUrl);
-    const channel = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
+    const channel = await db
+      .select()
+      .from(channels)
+      .where(eq(channels.spaceId, spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     expect(channel?.versionId).toBe(receipt.data.version.id);
     const served = await fetch(runtime.baseUrl, { headers: { host: hostname.hostname } });
     expect(served.status, await served.clone().text()).toBe(200);
@@ -337,33 +351,50 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
         }),
       })
       .parse(await refused.json());
-    const review = await db.query.safetyReviewItems.findFirst({
-      where: eq(safetyReviewItems.spaceId, spaceId),
-    });
+    const review = await db
+      .select()
+      .from(safetyReviewItems)
+      .where(eq(safetyReviewItems.spaceId, spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     expect(review?.category).toBe("privacy_violation");
     expect(review?.detailsJson).toMatchObject({
       engine: "artifact_cookie_literal",
       ...problem.details.runtimeDetails,
     });
     if (!review?.versionId) throw new Error("Refused publish has no review version");
-    const failed = await db.query.versions.findFirst({ where: eq(versions.id, review.versionId) });
+    const failed = await db
+      .select()
+      .from(versions)
+      .where(eq(versions.id, review.versionId))
+      .limit(1)
+      .then((rows) => rows[0]);
     expect(failed?.status).toBe("failed");
     expect(failed?.failureCode).toBe(problem.code);
-    const events = await db.query.activityEvents.findMany({
-      where: eq(activityEvents.spaceId, spaceId),
-    });
+    const events = await db
+      .select()
+      .from(activityEvents)
+      .where(eq(activityEvents.spaceId, spaceId));
     expect(
       events
         .filter((event) => event.code === "version.failed")
         .map((event) => event.detailsJson?.errorCode),
     ).toEqual([problem.code]);
-    const diagnostic = await db.query.versionDiagnostics.findFirst({
-      where: eq(versionDiagnostics.versionId, review.versionId),
-    });
+    const diagnostic = await db
+      .select()
+      .from(versionDiagnostics)
+      .where(eq(versionDiagnostics.versionId, review.versionId))
+      .limit(1)
+      .then((rows) => rows[0]);
     expect(diagnostic?.detailsJson).toMatchObject({
       runtimeDetails: problem.details.runtimeDetails,
     });
-    const unchanged = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
+    const unchanged = await db
+      .select()
+      .from(channels)
+      .where(eq(channels.spaceId, spaceId))
+      .limit(1)
+      .then((rows) => rows[0]);
     expect(unchanged?.versionId).toBe(receipt.data.version.id);
     // Roll back original source bytes after both the live content and tag settings move.
     const newer = new FormData();
@@ -410,11 +441,19 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
         })
         .parse(await response.json());
       const outcome = await runOperationNow({ operationId: result.operation.id });
-      const pending = await db.query.operations.findFirst({
-        where: (row, { eq }) => eq(row.id, result.operation.id),
-      });
+      const pending = await db
+        .select()
+        .from(operations)
+        .where(eq(operations.id, result.operation.id))
+        .limit(1)
+        .then((rows) => rows[0]);
       expect(outcome, JSON.stringify(pending)).toBe("succeeded");
-      const live = await db.query.channels.findFirst({ where: eq(channels.spaceId, spaceId) });
+      const live = await db
+        .select()
+        .from(channels)
+        .where(eq(channels.spaceId, spaceId))
+        .limit(1)
+        .then((rows) => rows[0]);
       expect(live?.versionId).toBe(result.data.id);
       const responseHtml = await (
         await fetch(runtime.baseUrl, { headers: { host: hostname.hostname } })

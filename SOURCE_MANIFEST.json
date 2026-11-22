@@ -1,7 +1,7 @@
 {
-  "revision": "acde251f8082268ced45dec46fa8b212dfc1f254",
+  "revision": "5f0715695ebf0e4926adde493e0b25298babbfb4",
   "sourceHash": "acedff007b4cc7f19ab878b2f9debb28dd2ecb6a5949064e6d9a43bacc12e703",
-  "manifestSha256": "3226c735444185d98f5963590ba185eb9fa094046801604bebdb2262144e8e32",
+  "manifestSha256": "2f2445574162425803dd3a9f8ac754bbecdf76bbb0d306f47b39748aea15ef83",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "2bf77518318f914e37500c7ddff7bfeb3e70fb8f5a89434cec7132901e624f2f"
+      "sha256": "da31528d08f24dab02e524462cc46a84d06626d088e4f18f605ff06e968c399a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5479bb5692c1e444d873c520a265d22dd5dab4043e345a5532b9fb2d3bc86403"
+      "sha256": "c02dc75a1be67a34d23040c0f812648c01d4b9544f56dbff02bd83266278aac4"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29705,7 +29705,7 @@
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture-main.ts",
-      "sha256": "5853767ea72737a03e626a75c36e7ac80153c1ecec59f6ef1ee5a4698167bc2b"
+      "sha256": "fc05563fe5f03ebb4e738293a2eb315f33ab904682e1d064a5fd6743aaca9600"
     },
     {
       "path": "runtime/browser-specs/control-plane-access-fixture.ts",
@@ -29741,7 +29741,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture-main.ts",
-      "sha256": "17b219831ef4b53ef5903c5fba95d0b123e1ed1d9ea7e29247309f0766c747e3"
+      "sha256": "c75136f07ffe488c6a043aa4749238caf7ab17167afed5709f74567bfe2279c7"
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture.ts",
@@ -30513,7 +30513,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "c22456b8f218f5c7a950314f490114694b1f820545caae4c1b6d5b38a8a51fc5"
+      "sha256": "206d65260de24f4ddf2fd1c087722c9f79eb28a87ff780d1701f7bef5d42c48d"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -30569,7 +30569,7 @@
     },
     {
       "path": "runtime/tests/connectors-publish.test.ts",
-      "sha256": "810b83971de6b76747ebbd2e491e30d5314ae716023c089d065881bdedd33d0c"
+      "sha256": "9f17218484c1b1409ae1bb10007d868328f4aee9bbbeed333224845a095e137e"
     },
     {
       "path": "runtime/tests/connectors.test.ts",
@@ -30881,7 +30881,7 @@
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "6c22172faa36bb4bbe7e948d6dc2ae022b373547a791591d822de071f8595837"
+      "sha256": "a2936faceb7a61e0a5b5e678518c92e986f40a585d52e0b4fd70f9a37e630cbc"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",
@@ -31017,7 +31017,7 @@
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",
-      "sha256": "0487e47ffdc19d23fac5bb9e0ebb010d7d4735e78f7f045101fbd2931d13b6e0"
+      "sha256": "7c2052c9a57d182612875bbb234defbd7c5245557d165a3dd66cc5ddb3399e2a"
     },
     {
       "path": "runtime/tests/version-files.test.ts",

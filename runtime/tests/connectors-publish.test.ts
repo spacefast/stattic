@@ -157,7 +157,12 @@ test("a published config role reads once for every viewer and writes only for a 
     audience: { kind: "public" },
     capabilities: ["page.view"],
   });
-  const space = await db.query.spaces.findFirst({ where: eq(spaces.id, seed.spaceId) });
+  const space = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   if (!space?.teamId) throw new Error("Seeded Space has no team");
 
   // A team connection to the tool, serving sites.
@@ -229,9 +234,12 @@ test("a published config role reads once for every viewer and writes only for a 
     .update(runtimeBoxes)
     .set({ boxHostname: runtime.baseUrl, engineRevision })
     .where(eq(runtimeBoxes.id, box.boxId));
-  const hostname = await db.query.spaceHostnames.findFirst({
-    where: eq(spaceHostnames.spaceId, seed.spaceId),
-  });
+  const hostname = await db
+    .select()
+    .from(spaceHostnames)
+    .where(eq(spaceHostnames.spaceId, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   if (!hostname) throw new Error("Seeded Space has no hostname");
   const host = hostname.hostname;
   // Publishing proves the live address serves the new version.
@@ -307,15 +315,21 @@ test("a published config role reads once for every viewer and writes only for a 
       }),
     })
     .parse(await versionRead.json()).data;
-  const live = await db.query.channels.findFirst({
-    where: and(eq(channels.spaceId, seed.spaceId), eq(channels.name, "live")),
-  });
+  const live = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.spaceId, seed.spaceId), eq(channels.name, "live")))
+    .limit(1)
+    .then((rows) => rows[0]);
   expect(live?.versionId).toBe(versionId);
   // Publish bound the team's one eligible account, and says the role is off
   // on a Space anyone can open until a team admin lets it serve there.
-  const binding = await db.query.spaceConnectorBindings.findFirst({
-    where: eq(spaceConnectorBindings.spaceId, seed.spaceId),
-  });
+  const binding = await db
+    .select()
+    .from(spaceConnectorBindings)
+    .where(eq(spaceConnectorBindings.spaceId, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   expect(binding?.connectionId).toBe(connected.connection.id);
   // The receipt's role lists, read from the diagnostics exactly as the receipt does.
   expect(
@@ -382,9 +396,7 @@ test("a published config role reads once for every viewer and writes only for a 
     .parse(await second.json());
   expect(secondBody.data).toEqual(firstBody.data);
   expect(upstreamReads).toEqual(["?stage=won"]);
-  const runs = await db.query.connectorRuns.findMany({
-    where: eq(connectorRuns.spaceId, seed.spaceId),
-  });
+  const runs = await db.select().from(connectorRuns).where(eq(connectorRuns.spaceId, seed.spaceId));
   expect(runs.map((run) => [run.origin, run.status])).toEqual([["page", "succeeded"]]);
 
   // A write from the same page: refused for an anonymous viewer, and run
@@ -423,12 +435,14 @@ test("a published config role reads once for every viewer and writes only for a 
   expect(z.object({ state: z.string() }).parse(await signedIn.json()).state).toBe(
     "approval_pending",
   );
-  const memberRun = await db.query.connectorRuns.findFirst({
-    where: and(
-      eq(connectorRuns.spaceId, seed.spaceId),
-      eq(connectorRuns.status, "awaiting_approval"),
-    ),
-  });
+  const memberRun = await db
+    .select()
+    .from(connectorRuns)
+    .where(
+      and(eq(connectorRuns.spaceId, seed.spaceId), eq(connectorRuns.status, "awaiting_approval")),
+    )
+    .limit(1)
+    .then((rows) => rows[0]);
   expect(memberRun?.visitorSubject).toBe(`account:${owner.userId}`);
   expect(upstreamWrites).toBe(0);
 }, 180_000);

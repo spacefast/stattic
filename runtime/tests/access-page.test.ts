@@ -3,6 +3,9 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:c
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 
+import { eq } from "drizzle-orm";
+
+import { spaces } from "../../apps/control-plane/src/db/schema/core.js";
 import { collabManifestSchema } from "../../packages/common/src/contracts/collab-manifest.ts";
 import { DEFAULT_PAGE_TEMPLATES, expandPageHtml } from "../../packages/common/src/utils/pages.ts";
 import {
@@ -2585,9 +2588,12 @@ test("X-SF-Authorization admits access, owner API, and centrally exchanged machi
       constraints: {},
     },
   });
-  const space = await db.query.spaces.findFirst({
-    where: (spaces, { eq }) => eq(spaces.id, seed.spaceId),
-  });
+  const space = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, seed.spaceId))
+    .limit(1)
+    .then((rows) => rows[0]);
   if (!space) throw new Error("machine header fixture Space is missing");
   const config = accessConfig({
     spaceId: seed.spaceId,

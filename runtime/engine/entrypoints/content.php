@@ -136,7 +136,8 @@ if (in_array($operation, ['content.knowledge.request', 'content.design-system.mu
 }
 if ($operation === 'content.authorization.apply') {
     $authorization = _stattic_content_admin_apply_authorization($privateRoot, $requestedAuthorization);
-    if ($authorization === null) {
+    _stattic_content_admin_authorization_outage($authorization);
+    if (!is_array($authorization)) {
         _stattic_problem_response(422, 'content_authorization_invalid', 'The content authorization could not be applied.');
     }
     _stattic_json_response(200, [
@@ -151,6 +152,7 @@ if ($operation === 'content.admin.launch') {
         $privateRoot,
         $requestedAuthorization
     );
+    _stattic_content_admin_authorization_outage($authorization);
     $access = _stattic_content_admin_access($request['access'] ?? null);
     // The editor frame is for humans holding a WordPress role: a service
     // actor, or anyone whose Grants earn no role, gets no ticket.

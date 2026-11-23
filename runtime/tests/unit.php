@@ -1886,8 +1886,375 @@ check(
         && (int) (_stattic_runtime_read_json(_stattic_runtime_platform_jwks_path($rotationRoot))['attempted_at'] ?? 0) >= time() - 5,
     'key rotation: a failed fetch keeps the last good set and records the attempt'
 );
+// Inside the floor, every request answers what the last read found. A read
+// that succeeded (and dropped a key) leaves no failure to report, whatever
+// refresh the request asks for.
+$rotationWrite([$rotationNextJwk], time());
+foreach (['unknown_kid', 'stale'] as $rotationRefresh) {
+    $rotationReason = null;
+    _stattic_runtime_platform_jwks($rotationRoot, $rotationRefresh, $rotationReason);
+    check(
+        $rotationReason === null,
+        "key rotation: a successful read inside the floor reports no failure ({$rotationRefresh})"
+    );
+}
+// A read that failed inside the floor reports that failure, with its own
+// reason, to an unknown-kid request and to a stale refresh alike.
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+    'fetched_at' => time() - 7200, 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+    'failed_reason' => 'api_base_url_missing',
+]);
+foreach (['unknown_kid', 'stale'] as $rotationRefresh) {
+    $rotationReason = null;
+    $rotationKept = _stattic_runtime_platform_jwks($rotationRoot, $rotationRefresh, $rotationReason);
+    check(
+        $rotationReason === 'api_base_url_missing'
+            && $rotationKids($rotationKept ?? []) === ['spacefast-runtime-next'],
+        "key rotation: a failed read inside the floor reports its reason and keeps the set ({$rotationRefresh})"
+    );
+}
+// An attempt with no outcome after the last good read (a worker stopped
+// mid-read, or an older engine recorded only the attempt) proves nothing:
+// an unknown kid stays retryable instead of reading as a missing key.
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+    'fetched_at' => time() - 120, 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+$rotationReason = null;
+_stattic_runtime_signing_jwks($rotationRoot, 'spacefast-runtime-unseen', true, $rotationReason);
+check(
+    $rotationReason === 'jwks_fetch_failed',
+    'key rotation: an attempt with no recorded outcome answers retryable, not a missing key'
+);
+// A fresh published set that holds the token's key verifies at once, even
+// while another worker holds the read reservation.
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+    'fetched_at' => time(), 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+// Another process holds the reservation (an flock in this process would be
+// reentrant and prove nothing), with a key only the published set has.
+$rotationLockFile = _stattic_runtime_platform_jwks_path($rotationRoot) . '.lock';
+$rotationHolder = proc_open(
+    [PHP_BINARY, '-r', '$h = fopen($argv[1], "c"); flock($h, LOCK_EX); echo "held\n"; fgets(STDIN);', $rotationLockFile],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w']],
+    $rotationPipes
+);
+$rotationHeld = is_resource($rotationHolder) && trim((string) fgets($rotationPipes[1])) === 'held';
+foreach (['spacefast-runtime-next'] as $rotationFreshKid) {
+    $rotationStarted = microtime(true);
+    $rotationFresh = _stattic_runtime_signing_jwks($rotationRoot, $rotationFreshKid, true);
+    $rotationElapsed = microtime(true) - $rotationStarted;
+}
+if (is_resource($rotationHolder)) {
+    fwrite($rotationPipes[0], "\n");
+    fclose($rotationPipes[0]);
+    fclose($rotationPipes[1]);
+    proc_close($rotationHolder);
+}
+check(
+    $rotationHeld
+        && $rotationKids($rotationFresh) === ['spacefast-runtime-next']
+        && $rotationElapsed < 1.0,
+    'key rotation: a key the fresh published set holds never waits on another process\'s read'
+);
+// A key the configured set has but the published set has dropped, after a
+// read with no recorded outcome: retryable, not missing.
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+    'fetched_at' => time() - 120, 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+$rotationReason = null;
+_stattic_runtime_signing_jwks($rotationRoot, 'runtime', true, $rotationReason);
+check(
+    $rotationReason === 'jwks_fetch_failed',
+    'key rotation: a dropped local key after a read with no outcome answers retryable'
+);
+// A recorded failure of the latest read answers that failure when no key
+// matches, whatever it was, never "key missing".
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($rotationRoot), [
+    'fetched_at' => time(), 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+    'failed_reason' => 'api_base_url_missing',
+]);
+$rotationReason = null;
+_stattic_runtime_signing_jwks($rotationRoot, 'runtime', true, $rotationReason);
+check(
+    $rotationReason === 'api_base_url_missing',
+    'key rotation: a recorded read failure is the answer when no key matches'
+);
 putenv('SPACEFAST_API_BASE_URL');
 _stattic_job_runner_unit_rm_recursive(dirname($rotationRoot, 2));
+
+// A box with no local anchors at all, whose fresh published set holds the
+// token's kid, verifies without the bootstrap read, even while another
+// process holds the read reservation.
+$bareRoot = _stattic_job_runner_unit_temp_private_root() . '/runtime-root/storage';
+@mkdir($bareRoot . '/runtime', 0700, true);
+$bareConfigured = getenv('SPACEFAST_RUNTIME_JWKS_B64');
+putenv('SPACEFAST_RUNTIME_JWKS_B64');
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($bareRoot), [
+    'fetched_at' => time(), 'attempted_at' => time() - 3600, 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+$bareHolder = proc_open(
+    [PHP_BINARY, '-r', '$h = fopen($argv[1], "c"); flock($h, LOCK_EX); echo "held\n"; fgets(STDIN);', _stattic_runtime_platform_jwks_path($bareRoot) . '.lock'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w']],
+    $barePipes
+);
+$bareHeld = is_resource($bareHolder) && trim((string) fgets($barePipes[1])) === 'held';
+$bareStarted = microtime(true);
+$bareKeys = _stattic_runtime_signing_jwks($bareRoot, 'spacefast-runtime-next', true);
+$bareElapsed = microtime(true) - $bareStarted;
+if (is_resource($bareHolder)) {
+    fwrite($barePipes[0], "\n");
+    fclose($barePipes[0]);
+    fclose($barePipes[1]);
+    proc_close($bareHolder);
+}
+if ($bareConfigured !== false) putenv('SPACEFAST_RUNTIME_JWKS_B64=' . $bareConfigured);
+check(
+    $bareHeld && $rotationKids($bareKeys) === ['spacefast-runtime-next'] && $bareElapsed < 1.0,
+    'key rotation: a box with no local anchors verifies a fresh published key without waiting'
+);
+_stattic_job_runner_unit_rm_recursive(dirname($bareRoot, 2));
+
+// Before its first published read completes, a box trusts its configured keys:
+// a token signed by one verifies at once, even while another process holds the
+// read reservation for that first read.
+$firstRoot = _stattic_job_runner_unit_temp_private_root() . '/runtime-root/storage';
+@mkdir($firstRoot . '/runtime', 0700, true);
+_stattic_runtime_write_json_atomic(_stattic_runtime_platform_jwks_path($firstRoot), ['attempted_at' => time()]);
+$firstHolder = proc_open(
+    [PHP_BINARY, '-r', '$h = fopen($argv[1], "c"); flock($h, LOCK_EX); echo "held\n"; fgets(STDIN);', _stattic_runtime_platform_jwks_path($firstRoot) . '.lock'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w']],
+    $firstPipes
+);
+$firstHeld = is_resource($firstHolder) && trim((string) fgets($firstPipes[1])) === 'held';
+$firstStarted = microtime(true);
+$firstKeys = _stattic_runtime_signing_jwks($firstRoot, 'runtime', true);
+$firstElapsed = microtime(true) - $firstStarted;
+if (is_resource($firstHolder)) {
+    fwrite($firstPipes[0], "\n");
+    fclose($firstPipes[0]);
+    fclose($firstPipes[1]);
+    proc_close($firstHolder);
+}
+check(
+    $firstHeld && $rotationKids($firstKeys) === ['runtime'] && $firstElapsed < 1.0,
+    'key rotation: a configured key verifies without waiting on the first published read'
+);
+_stattic_job_runner_unit_rm_recursive(dirname($firstRoot, 2));
+
+// A published set on disk this box can't read is neither "no set" nor a set
+// to fetch over: no key verifies (not even a local anchor the set may have
+// retired), the answer is retryable, and the file is left as it is.
+$unreadableRoot = _stattic_job_runner_unit_temp_private_root() . '/runtime-root/storage';
+@mkdir($unreadableRoot . '/runtime', 0700, true);
+$unreadablePath = _stattic_runtime_platform_jwks_path($unreadableRoot);
+file_put_contents($unreadablePath, '{not json');
+$unreadableReason = null;
+$unreadableKeys = _stattic_runtime_signing_jwks($unreadableRoot, 'runtime', true, $unreadableReason);
+check(
+    $unreadableKeys === []
+        && $unreadableReason === 'jwks_fetch_failed'
+        && file_get_contents($unreadablePath) === '{not json',
+    'key rotation: an unreadable published set verifies nothing, answers retryable, and is never overwritten'
+);
+$unreadableReason = null;
+check(
+    _stattic_runtime_reserved_jwks_fetch($unreadableRoot, $unreadableReason) === null
+        && $unreadableReason === 'jwks_fetch_failed'
+        && file_get_contents($unreadablePath) === '{not json',
+    'key rotation: the reserved read refuses to replace a set it cannot read'
+);
+// The serving and visitor lanes never fetch: an unreadable set reads as no
+// fetched set, as it always did, so a preview cookie under a configured key
+// is not cleared by a disk read that failed this instant.
+check(
+    _stattic_runtime_platform_jwks($unreadableRoot) === null,
+    'key rotation: a read-only lane sees an unreadable set as no fetched set'
+);
+// The same through the shared verifier: a serving lane (the blob gate, which
+// never fetches) still verifies a token under the configured key when the
+// published set can't be read, while the management lane, which may fetch,
+// answers retryable instead of trusting the local key.
+$unreadableToken = static function (array $claims) use ($artifactSecretKey): string {
+    $header = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES));
+    $body = _stattic_base64url_encode(json_encode($claims + ['exp' => time() + 300, 'nbf' => time() - 5], JSON_UNESCAPED_SLASHES));
+    return $header . '.' . $body . '.' . _stattic_base64url_encode(sodium_crypto_sign_detached($header . '.' . $body, $artifactSecretKey));
+};
+$blobClaims = _stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+    'aud' => 'spacefast-blob-gate', 'space_id' => 'spc_unit', 'version_id' => 'ver_unit', 'sha256' => str_repeat('a', 64),
+]), 'spacefast-blob-gate', ['instance_pinned' => false, 'allow_jwks_fetch' => false]);
+$managementRejection = null;
+$managementClaims = _stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+    'aud' => 'stattic-runtime-management', 'runtime_instance_id' => 'rti_test', 'jti' => 'jti-unreadable',
+]), 'stattic-runtime-management', ['allow_jwks_fetch' => true], $managementRejection);
+check(
+    is_array($blobClaims)
+        && $managementClaims === null
+        && ($managementRejection['reason'] ?? null) === 'jwks_fetch_failed',
+    'key rotation: with the published set unreadable, a serving token still verifies and a management token answers retryable'
+);
+// A record that says a read completed but holds no usable set is not a set:
+// a management lane answers retryable rather than trust a local key the
+// published set may have retired.
+_stattic_runtime_write_json_atomic($unreadablePath, ['fetched_at' => time(), 'attempted_at' => time(), 'jwks' => ['keys' => []]]);
+$damagedRejection = null;
+check(
+    _stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+        'aud' => 'stattic-runtime-management', 'runtime_instance_id' => 'rti_test', 'jti' => 'jti-damaged',
+    ]), 'stattic-runtime-management', ['allow_jwks_fetch' => true], $damagedRejection) === null
+        && ($damagedRejection['reason'] ?? null) === 'jwks_fetch_failed',
+    'key rotation: a completed-read record with no usable set never lets a local key verify'
+);
+// Nor does any other shape no engine writes: a JSON null, a list, an empty
+// object, or an attempt-only record that carries keys.
+$shortKey = json_encode(['kty' => 'OKP', 'crv' => 'Ed25519', 'kid' => 'runtime', 'x' => _stattic_base64url_encode('short')]);
+foreach ([
+    'null', '[]', '{}', '{"attempted_at":1,"jwks":{"keys":[]}}', '{"fetched_at":"now","jwks":{"keys":[]}}',
+    // An attempt-only record with a field no engine writes beside it.
+    '{"attempted_at":1,"jwk":{"keys":[]}}',
+    // A completed read whose only key's public part isn't an Ed25519 key.
+    '{"fetched_at":' . time() . ',"attempted_at":' . time() . ',"jwks":{"keys":[' . $shortKey . ']}}',
+    // A failure reason no read records: it would answer a 401 no read made.
+    '{"attempted_at":' . time() . ',"failed_reason":"key_missing"}',
+] as $damagedShape) {
+    file_put_contents($unreadablePath, $damagedShape);
+    $damagedRejection = null;
+    check(
+        _stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+            'aud' => 'stattic-runtime-management', 'runtime_instance_id' => 'rti_test', 'jti' => 'jti-' . md5($damagedShape),
+        ]), 'stattic-runtime-management', ['allow_jwks_fetch' => true], $damagedRejection) === null
+            && ($damagedRejection['reason'] ?? null) === 'jwks_fetch_failed',
+        "key rotation: a damaged record ({$damagedShape}) never lets a local key verify"
+    );
+}
+// An attempt-only record, from before the box's first read completed, is
+// valid: the local anchors decide, as before the first fetch.
+_stattic_runtime_write_json_atomic($unreadablePath, ['attempted_at' => time() - 3600, 'failed_reason' => 'jwks_fetch_failed']);
+check(
+    is_array(_stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+        'aud' => 'stattic-runtime-management', 'runtime_instance_id' => 'rti_test', 'jti' => 'jti-attempt-only',
+    ]), 'stattic-runtime-management', ['read_only' => true])),
+    'key rotation: an attempt-only record leaves the configured key to verify'
+);
+// A fresh published set that drops the configured key after a refresh that
+// failed: the answer is that failure, from the same read, retryable.
+_stattic_runtime_write_json_atomic($unreadablePath, [
+    'fetched_at' => time(), 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+    'failed_reason' => 'api_base_url_missing',
+]);
+$droppedRejection = null;
+check(
+    _stattic_runtime_token_claims($unreadableRoot, $unreadableToken([
+        'aud' => 'stattic-runtime-management', 'runtime_instance_id' => 'rti_test', 'jti' => 'jti-dropped',
+    ]), 'stattic-runtime-management', ['read_only' => true], $droppedRejection) === null
+        && ($droppedRejection['reason'] ?? null) === 'api_base_url_missing',
+    'key rotation: a dropped key after a failed refresh answers that failure on a read-only lane too'
+);
+
+// A published set its latest read fetched successfully decides alone: on a
+// box with no local anchors, a key it lacks is missing (401), never the
+// retryable failure of an earlier bootstrap attempt.
+$decidesConfigured = getenv('SPACEFAST_RUNTIME_JWKS_B64');
+putenv('SPACEFAST_RUNTIME_JWKS_B64');
+@unlink($unreadableRoot . '/runtime/jwks.json');
+_stattic_runtime_write_json_atomic($unreadablePath, [
+    'fetched_at' => time(), 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+$decidesReason = null;
+check(
+    _stattic_runtime_signing_jwks($unreadableRoot, 'spacefast-runtime-gone', true, $decidesReason) === []
+        && $decidesReason === 'key_missing',
+    'key rotation: a successfully fetched set that lacks the key answers key_missing on a bare box'
+);
+// The verdict when no key verifies. On a bare box the bootstrap read can see an
+// earlier failed attempt (its reason jwks_fetch_failed) and the published-set
+// read then succeed with a set that lacks the key: that set decides.
+check(
+    _stattic_runtime_signing_key_verdict([$rotationNextJwk], null, [], 'jwks_fetch_failed') === 'key_missing',
+    'key rotation: a successfully fetched set lacking the key decides key_missing over a stale bootstrap failure'
+);
+check(
+    _stattic_runtime_signing_key_verdict([$rotationNextJwk], 'api_base_url_missing', [], null) === 'api_base_url_missing'
+        && _stattic_runtime_signing_key_verdict([], 'jwks_fetch_failed', [], null) === 'jwks_fetch_failed',
+    'key rotation: a published-set read that did not succeed answers its failure, retryable'
+);
+check(
+    _stattic_runtime_signing_key_verdict(null, null, [], 'jwks_fetch_failed') === 'jwks_fetch_failed'
+        && _stattic_runtime_signing_key_verdict(null, null, [], null) === 'key_missing'
+        && _stattic_runtime_signing_key_verdict(null, null, [$rotationLocalJwk], 'jwks_fetch_failed') === 'key_missing',
+    'key rotation: with no fetched set, a bare box answers its bootstrap read, a box with the kid locally key_missing'
+);
+if ($decidesConfigured !== false) putenv('SPACEFAST_RUNTIME_JWKS_B64=' . $decidesConfigured);
+// A reserved read that fails answers the keys and the reason of the record it
+// left under the reservation, together: the last good set and that failure.
+_stattic_runtime_write_json_atomic($unreadablePath, [
+    'fetched_at' => time() - 7200, 'attempted_at' => time() - 120, 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+putenv('SPACEFAST_API_BASE_URL=https://127.0.0.1:1');
+$heldReason = null;
+$held = null;
+$heldFetched = _stattic_runtime_reserved_jwks_fetch($unreadableRoot, $heldReason, $held);
+putenv('SPACEFAST_API_BASE_URL');
+check(
+    $heldFetched === null
+        && $heldReason === 'jwks_fetch_failed'
+        && is_array($held)
+        && ($held['failed_reason'] ?? null) === 'jwks_fetch_failed'
+        && $rotationKids($held['jwks']['keys'] ?? []) === ['spacefast-runtime-next'],
+    'key rotation: a failed reserved read hands back the record it left, keys and reason together'
+);
+file_put_contents($unreadablePath, '{not json');
+// A waiter whose reread fails after another worker's read answers no keys,
+// never the copy it held before the wait (which the new read may have retired).
+// The other worker holds the read reservation in a separate process, waits for
+// this waiter's test-mode marker, then leaves the set unreadable and releases.
+_stattic_runtime_write_json_atomic($unreadablePath, [
+    'fetched_at' => time() - 7200, 'attempted_at' => time(), 'jwks' => ['keys' => [$rotationNextJwk]],
+]);
+@unlink($unreadablePath . '.waiting');
+$unreadableHolder = proc_open(
+    [PHP_BINARY, '-r', '$h = fopen($argv[1], "c"); flock($h, LOCK_EX); echo "held\n"; $deadline = microtime(true) + 10; while (!file_exists($argv[3]) && microtime(true) < $deadline) { usleep(10000); } file_put_contents($argv[2], "{not json"); flock($h, LOCK_UN);', $unreadablePath . '.lock', $unreadablePath, $unreadablePath . '.waiting'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w']],
+    $unreadablePipes
+);
+$unreadableHeld = is_resource($unreadableHolder) && trim((string) fgets($unreadablePipes[1])) === 'held';
+$unreadableTestMode = getenv('SPACEFAST_RUNTIME_TEST_MODE');
+putenv('SPACEFAST_RUNTIME_TEST_MODE=1');
+$unreadableWaiter = null;
+$unreadableWaitKeys = _stattic_runtime_platform_jwks($unreadableRoot, 'unknown_kid', $unreadableWaiter);
+putenv($unreadableTestMode === false ? 'SPACEFAST_RUNTIME_TEST_MODE' : 'SPACEFAST_RUNTIME_TEST_MODE=' . $unreadableTestMode);
+fclose($unreadablePipes[0]);
+fclose($unreadablePipes[1]);
+proc_close($unreadableHolder);
+check(
+    $unreadableHeld
+        && file_exists($unreadablePath . '.waiting')
+        && $unreadableWaitKeys === []
+        && $unreadableWaiter === 'jwks_fetch_failed',
+    'key rotation: a reread that fails after another read answers no keys, retryable'
+);
+_stattic_job_runner_unit_rm_recursive(dirname($unreadableRoot, 2));
+
+// A replay marker that exists but can't be read is never "unspent".
+$replayRoot = _stattic_job_runner_unit_temp_private_root() . '/runtime-root/storage';
+@mkdir($replayRoot . '/runtime', 0700, true);
+check(
+    _stattic_jwt_jti_spent($replayRoot, 'unit-ns', 'jti-a', time()) === 'unspent'
+        && _stattic_jwt_consume_jti($replayRoot, 'unit-ns', 'jti-a', time() + 60, time()) === 'ok'
+        && _stattic_jwt_jti_spent($replayRoot, 'unit-ns', 'jti-a', time()) === 'spent',
+    'replay guard: a token id reads unspent, then spent once claimed'
+);
+$replayMarker = _stattic_record_store_path(_stattic_jwt_replay_store($replayRoot), hash('sha256', 'unit-ns:jti-a'));
+file_put_contents($replayMarker, '{not json');
+check(
+    _stattic_jwt_jti_spent($replayRoot, 'unit-ns', 'jti-a', time()) === 'unavailable',
+    'replay guard: an unreadable marker reads unavailable, never unspent'
+);
+file_put_contents($replayMarker, '{}');
+check(
+    _stattic_jwt_jti_spent($replayRoot, 'unit-ns', 'jti-a', time()) === 'unavailable',
+    'replay guard: a marker with no expiry reads unavailable, never unspent'
+);
+_stattic_job_runner_unit_rm_recursive(dirname($replayRoot, 2));
 
 $mintBundleToken = static function (array $claims) use ($artifactSecretKey): string {
     $header = _stattic_base64url_encode(json_encode(['alg' => 'EdDSA', 'typ' => 'JWT', 'kid' => 'runtime'], JSON_UNESCAPED_SLASHES));

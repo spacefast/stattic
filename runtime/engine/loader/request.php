@@ -599,7 +599,9 @@ return static function (array $loader): void {
     }
     $entrypoint = match ($script) {
         'api.php' => 'entrypoints/management.php',
-        'content-admin.php' => 'entrypoints/content-admin.php',
+        // The editor door keeps its served path, so a box takes signed
+        // launches as soon as its engine does, before its site files change.
+        'content-admin.php' => 'entrypoints/sp-admin.php',
         'content.php' => 'entrypoints/content.php',
         'health.php' => 'entrypoints/health.php',
         'mail.php' => 'entrypoints/mail.php',

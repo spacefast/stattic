@@ -137,6 +137,19 @@ $staleProjection = _stattic_content_admin_apply_authorization('/private', [
   'spaceId' => 'spc_123',
   'accessGeneration' => 7,
 ]);
+// A record at this Space's path that names another Space, with the very
+// generation a session carries, is not this Space's record: the session and a
+// ticket minted at that generation no longer match it.
+$foreignSession = _stattic_content_admin_mint_session('/private', 'space.example', 42, $principal, $nextAuthorization, 'editor', 'https://my.spacefast.test', $zeroCollectionsAccess, 'https://public.example', 1000);
+$foreignTicket = _stattic_content_admin_mint_ticket('/private', 'space.example', $principal, $nextAuthorization, 'editor', 'https://my.spacefast.test', $wordpressAccess, 'https://public.example', 1000);
+$GLOBALS['authorizations'][_stattic_content_admin_authorization_path('/private', 'spc_123')] = [
+  'space_id' => 'spc_other',
+  'access_generation' => 8,
+];
+$foreignRecord = [
+  'session' => _stattic_content_admin_verify_session('/private', $foreignSession['token'], 'space.example', 1001),
+  'ticket_matches' => _stattic_content_admin_authorization_matches('/private', $nextAuthorization),
+];
 echo json_encode([
   'first' => $first,
   'again' => $again,
@@ -148,6 +161,7 @@ echo json_encode([
   'valid' => $valid,
   'revoked' => $revoked,
   'stale_projection' => $staleProjection,
+  'foreign_record' => $foreignRecord,
   'wrong_host_session' => _stattic_content_admin_verify_session('/private', $session['token'], 'other.example', 1001),
   'expired_session' => _stattic_content_admin_verify_session('/private', $session['token'], 'space.example', 5001),
   'expiry_boundary' => _stattic_content_admin_verify_session('/private', $session['token'], 'space.example', 4600),
@@ -275,6 +289,7 @@ echo json_encode([
     },
     revoked: null,
     stale_projection: { space_id: "spc_123", access_generation: 8 },
+    foreign_record: { session: null, ticket_matches: false },
     wrong_host_session: null,
     expired_session: null,
     expiry_boundary: null,

@@ -112,9 +112,16 @@ function _stattic_runtime_jwks(string $privateRoot, bool $allowFetch, ?string &$
         return null;
     }
 
-    $jwks = _stattic_runtime_fetch_platform_jwks($reason);
+    // The box's one outbound read, under its one reservation and floor.
+    $held = null;
+    $jwks = _stattic_runtime_reserved_jwks_fetch($privateRoot, $reason, $held);
     if ($jwks === null) {
-        return null;
+        // Throttled behind another worker's read: the record that read left,
+        // taken under the reservation, so its keys and its reason agree.
+        return is_array($held) && _stattic_runtime_jwks_usable($held['jwks'] ?? null)
+            && (time() - (int) ($held['fetched_at'] ?? 0)) < 300
+            ? $held['jwks']
+            : null;
     }
     if (_stattic_runtime_mkdir_soft(dirname($cachePath))) {
         _stattic_runtime_write_json_atomic($cachePath, ['fetched_at' => time(), 'jwks' => $jwks]);
@@ -183,15 +190,28 @@ function _stattic_runtime_platform_jwks_path(string $privateRoot): string
  * once it is an hour old; 'unknown_kid' reads it now. Either waits a minute
  * after any attempt.
  *
+ * A set on disk this box can't read, or a record of a completed read that
+ * holds no usable set, is never fetched over (the last good set would be
+ * lost). On a lane that may fetch (`$strict`, or `$refresh` other than
+ * 'none') it answers no keys and `jwks_fetch_failed`, retryable, so a key the
+ * set retired never verifies from the local anchors. A lane that never
+ * fetches (serving: visitor, blob gate, Functions) sees it as it always did,
+ * no fetched set yet, so its local keys still decide.
+ *
  * @return list<array>|null
  */
-function _stattic_runtime_platform_jwks(string $privateRoot, string $refresh = 'none', ?string &$reason = null): ?array
+function _stattic_runtime_platform_jwks(string $privateRoot, string $refresh = 'none', ?string &$reason = null, bool $strict = false): ?array
 {
     if ($privateRoot === '') {
         return null;
     }
     $path = _stattic_runtime_platform_jwks_path($privateRoot);
-    $cached = _stattic_runtime_read_json($path);
+    $cached = _stattic_runtime_platform_jwks_record($path);
+    $strict = $strict || $refresh !== 'none';
+    if ($cached === false && $strict) {
+        $reason = 'jwks_fetch_failed';
+        return [];
+    }
     $cached = is_array($cached) ? $cached : [];
     $keys = _stattic_runtime_jwks_usable($cached['jwks'] ?? null) ? array_values($cached['jwks']['keys']) : null;
     $now = time();
@@ -201,16 +221,187 @@ function _stattic_runtime_platform_jwks(string $privateRoot, string $refresh = '
             $refresh === 'unknown_kid'
             || ($keys !== null && $now - (int) ($cached['fetched_at'] ?? 0) >= STATTIC_PLATFORM_JWKS_REFRESH_SECONDS)
         );
-    if (!$due || !_stattic_runtime_mkdir_soft(dirname($path))) {
+    // A stale refresh of a key the box already trusts has nothing to wait
+    // for: before the first fetch the local anchors decide, and a fresh set
+    // still holding the key verifies it now. Only an hour-old set waits.
+    $mustWait = $refresh === 'unknown_kid'
+        || ($refresh === 'stale' && $keys !== null
+            && $now - (int) ($cached['fetched_at'] ?? 0) >= STATTIC_PLATFORM_JWKS_REFRESH_SECONDS);
+    if ($mustWait && $now - (int) ($cached['attempted_at'] ?? 0) < STATTIC_PLATFORM_JWKS_RETRY_FLOOR_SECONDS) {
+        // A read was made inside the floor, or is in flight now. Wait for its
+        // reservation, then answer what that read found: its keys, and its
+        // failure reason if it failed, so every worker agrees on one read.
+        if (getenv('SPACEFAST_RUNTIME_TEST_MODE') === '1') {
+            // Test fixtures release an in-flight read only once a waiter is here.
+            @touch($path . '.waiting');
+        }
+        $lock = _stattic_lock_acquire($path . '.lock', STATTIC_LOCK_WAIT);
+        if ($lock !== false) {
+            _stattic_lock_release($lock);
+        }
+        $reread = _stattic_runtime_platform_jwks_record($path);
+        if ($reread === false) {
+            // The read just landed may have retired a key the earlier copy held.
+            $reason = 'jwks_fetch_failed';
+            return [];
+        }
+        $reread = is_array($reread) ? $reread : [];
+        // Nothing proves a key is gone after a read that did not succeed, so
+        // the answer stays retryable.
+        $reason = _stattic_runtime_platform_jwks_failure($reread) ?? $reason;
+        return _stattic_runtime_jwks_usable($reread['jwks'] ?? null)
+            ? array_values($reread['jwks']['keys'])
+            : $keys;
+    }
+    if (!$due) {
+        // The read this answer comes from also says whether it succeeded, so
+        // a caller never needs a second read that might not match.
+        if ($strict && $cached !== []) {
+            $reason ??= _stattic_runtime_platform_jwks_failure($cached);
+        }
         return $keys;
     }
-    $fetched = _stattic_runtime_fetch_platform_jwks($reason);
-    if ($fetched === null) {
-        _stattic_runtime_write_json_atomic($path, [...$cached, 'attempted_at' => $now]);
-        return $keys;
+    // The reservation creates the directory, and answers its failure. Under
+    // it, the keys the set now holds and how its latest read went are one
+    // answer: a failed read keeps the last good set, and its reason.
+    $held = null;
+    $fetched = _stattic_runtime_reserved_jwks_fetch($privateRoot, $reason, $held);
+    if ($fetched !== null) {
+        return array_values($fetched['keys']);
     }
-    _stattic_runtime_write_json_atomic($path, ['fetched_at' => $now, 'attempted_at' => $now, 'jwks' => $fetched]);
-    return array_values($fetched['keys']);
+    if ($held === false) {
+        $reason ??= 'jwks_fetch_failed';
+        return [];
+    }
+    return is_array($held) && _stattic_runtime_jwks_usable($held['jwks'] ?? null)
+        ? array_values($held['jwks']['keys'])
+        : $keys;
+}
+
+/**
+ * The platform-key record as stored: null only when the file verifiably does
+ * not exist; false when it can't be read or isn't a record an engine writes;
+ * otherwise the record. Engines write exactly two shapes: a completed read
+ * (`fetched_at` and a usable `jwks`, maybe `attempted_at` / `failed_reason`)
+ * and an attempt with no read completed yet (`attempted_at`, maybe
+ * `failed_reason`, no `fetched_at` or `jwks`). Anything else, a JSON `null`,
+ * a list, `{}`, or a completed read with no usable set, is damage, and damage
+ * never reads as "no set" (that would let the local anchors decide, including
+ * a key the last set retired).
+ */
+function _stattic_runtime_platform_jwks_record(string $path): array|false|null
+{
+    if (!is_file($path) && _sf_path_verifiably_absent($path)) {
+        return null;
+    }
+    $record = _stattic_runtime_read_json($path);
+    if (!is_array($record) || array_is_list($record)) {
+        return false;
+    }
+    // A read fails only one of two ways (`_stattic_runtime_fetch_platform_jwks`).
+    if (
+        array_key_exists('failed_reason', $record)
+        && !in_array($record['failed_reason'], ['jwks_fetch_failed', 'api_base_url_missing'], true)
+    ) {
+        return false;
+    }
+    if (array_key_exists('fetched_at', $record)) {
+        return array_diff(array_keys($record), ['fetched_at', 'attempted_at', 'jwks', 'failed_reason']) === []
+            && is_int($record['fetched_at']) && _stattic_runtime_jwks_usable($record['jwks'] ?? null)
+            && (!array_key_exists('attempted_at', $record) || is_int($record['attempted_at']))
+            ? $record
+            : false;
+    }
+    return array_diff(array_keys($record), ['attempted_at', 'failed_reason']) === []
+        && is_int($record['attempted_at'] ?? null)
+        ? $record
+        : false;
+}
+
+/**
+ * Why the latest read of the published set, as `$record` shows it, did not
+ * succeed: its recorded reason, or `jwks_fetch_failed` for an attempt with no
+ * outcome after the last good read (a worker stopped mid-read, or an older
+ * engine recorded only the attempt). Null when the latest read succeeded.
+ */
+function _stattic_runtime_platform_jwks_failure(array $record): ?string
+{
+    if (is_string($record['failed_reason'] ?? null)) {
+        return $record['failed_reason'];
+    }
+    return (int) ($record['attempted_at'] ?? 0) > (int) ($record['fetched_at'] ?? 0) ? 'jwks_fetch_failed' : null;
+}
+
+/**
+ * The box's one outbound JWKS read. Every path that reads the published set
+ * (the bootstrap read and the platform-set refresh) takes the same
+ * reservation and the platform set's own attempt clock (`attempted_at` in
+ * platform-jwks.json), recorded before the network is touched: requests that
+ * all meet an unknown kid, on any lane, make one call to the API between them,
+ * and at most one a minute; the rest wait for that call and use its answer.
+ */
+/**
+ * `$held` receives the record the reservation leaves on disk when no set was
+ * fetched: the one it found inside the retry floor, the one it wrote after a
+ * failed read, false when the record can't be read, or null when there is
+ * none. It is read under the reservation, so it and `$reason` describe the
+ * same read.
+ */
+function _stattic_runtime_reserved_jwks_fetch(string $privateRoot, ?string &$reason = null, array|false|null &$held = null): ?array
+{
+    $held = null;
+    $path = _stattic_runtime_platform_jwks_path($privateRoot);
+    if (!_stattic_runtime_mkdir_soft(dirname($path))) {
+        $reason = 'jwks_fetch_failed';
+        return null;
+    }
+    // Wait, never refuse: a request that meets the new kid while another
+    // worker is reading the set must not answer its valid token with a
+    // permanent 401. The lock deadline (10 s) outlasts the fetch's own
+    // timeouts (2 s connect, 3 s total); a waiter then finds the attempt just
+    // made, and its caller rereads the set that worker wrote.
+    $lock = _stattic_lock_acquire($path . '.lock', STATTIC_LOCK_WAIT);
+    if ($lock === false) {
+        $reason = 'jwks_fetch_failed';
+        return null;
+    }
+    try {
+        $now = time();
+        $current = _stattic_runtime_platform_jwks_record($path);
+        if ($current === false) {
+            // Never overwrite a set this box can't read: it may be the last good one.
+            $reason = 'jwks_fetch_failed';
+            $held = false;
+            return null;
+        }
+        $current = is_array($current) ? $current : [];
+        if ($now - (int) ($current['attempted_at'] ?? 0) < STATTIC_PLATFORM_JWKS_RETRY_FLOOR_SECONDS) {
+            // Inside the floor the last read stands. It answers what it found:
+            // the keys it wrote, or its own failure reason (an attempt with no
+            // outcome is retryable, never proof a key is gone), never a
+            // refusal it didn't make.
+            $reason = _stattic_runtime_platform_jwks_failure($current) ?? $reason;
+            if (_stattic_runtime_jwks_usable($current['jwks'] ?? null) && $reason === null) {
+                return $current['jwks'];
+            }
+            $held = $current === [] ? null : $current;
+            return null;
+        }
+        _stattic_runtime_write_json_atomic($path, [...$current, 'attempted_at' => $now]);
+        $fetched = _stattic_runtime_fetch_platform_jwks($reason);
+        // The outcome stays beside the attempt, so a request waiting on this
+        // read, or retrying inside the floor, answers what the read found.
+        $outcome = $fetched === null
+            ? [...$current, 'attempted_at' => $now, 'failed_reason' => (string) ($reason ?? 'jwks_fetch_failed')]
+            : ['fetched_at' => $now, 'attempted_at' => $now, 'jwks' => $fetched];
+        _stattic_runtime_write_json_atomic($path, $outcome);
+        if ($fetched === null) {
+            $held = $outcome;
+        }
+        return $fetched;
+    } finally {
+        _stattic_lock_release($lock);
+    }
 }
 
 /**
@@ -274,7 +465,7 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
         && ($key['kty'] ?? null) === 'OKP'
         && ($key['crv'] ?? null) === 'Ed25519'
         && is_string($key['x'] ?? null)
-        && trim($key['x']) !== '');
+        && strlen(_stattic_base64url_decode($key['x'])) === SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES);
 }
 
 /**
@@ -286,20 +477,59 @@ function _stattic_runtime_jwks_usable(mixed $jwks): bool
  */
 function _stattic_runtime_signing_jwks(string $privateRoot, string $kid, bool $allowFetch, ?string &$reason = null, bool $readOnly = false): array
 {
+    // The fetched set first, read-only: a kid it already holds needs no read
+    // of the bootstrap source either, so nothing below waits for one.
+    // Management, upload and editor lanes are strict about an unreadable set
+    // (a management read included); a serving lane never fetches, and its
+    // local keys decide, as before the first fetch.
+    $strict = $allowFetch || $readOnly;
+    // Only a lane that may fetch needs it: it decides whether the bootstrap
+    // read may fetch. A lane that never fetches reads the set once, below.
+    $published = $allowFetch ? _stattic_runtime_platform_jwks($privateRoot, 'none', strict: $strict) : null;
+    $inPublished = $published !== null && _stattic_runtime_jwks_for_kid($published, $kid) !== [];
     $localReason = null;
-    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch, $localReason, $readOnly);
+    $jwks = _stattic_runtime_jwks($privateRoot, $allowFetch && !$inPublished, $localReason, $readOnly);
     $local = _stattic_runtime_jwks_for_kid(is_array($jwks['keys'] ?? null) ? $jwks['keys'] : [], $kid);
     $platformReason = null;
+    // A kid is unknown only if neither the local anchors nor the fetched set
+    // has it: a key the published set already holds needs no read.
+    $known = $local !== [] || $inPublished;
     $platform = _stattic_runtime_platform_jwks(
         $privateRoot,
-        !$allowFetch || $readOnly ? 'none' : ($local === [] && $kid !== '' ? 'unknown_kid' : 'stale'),
+        !$allowFetch || $readOnly ? 'none' : (!$known && $kid !== '' ? 'unknown_kid' : 'stale'),
         $platformReason,
+        strict: $strict,
     );
     $candidates = _stattic_runtime_trusted_keys($local, $platform, $kid);
+    // `$platformReason` comes from the same read as `$platform`: when the
+    // published set lacks the key but that read did not succeed, nothing
+    // proves the key is gone, so the answer is that read's failure, retryable.
+    // A published set its latest read fetched successfully decides alone: a
+    // key it lacks is missing, whatever an earlier bootstrap attempt saw.
     if ($candidates === []) {
-        $reason ??= $local === [] ? ($localReason ?? $platformReason ?? 'key_missing') : 'key_missing';
+        $reason ??= _stattic_runtime_signing_key_verdict($platform, $platformReason, $local, $localReason);
     }
     return $candidates;
+}
+
+/**
+ * Why no key verifies a token: the published-set read's failure when it did
+ * not succeed (retryable, never proof a key is gone); `key_missing` when a set
+ * its latest read fetched successfully lacks the key, whatever an earlier
+ * bootstrap attempt saw; else the bootstrap read's reason when the box has no
+ * local key for it; else `key_missing`.
+ *
+ * @param list<array>|null $platform
+ * @param list<array> $local
+ */
+function _stattic_runtime_signing_key_verdict(?array $platform, ?string $platformReason, array $local, ?string $localReason): string
+{
+    return match (true) {
+        in_array($platformReason, ['jwks_fetch_failed', 'api_base_url_missing'], true) => $platformReason,
+        $platform !== null && $platformReason === null => 'key_missing',
+        $local === [] => $localReason ?? $platformReason ?? 'key_missing',
+        default => 'key_missing',
+    };
 }
 
 // The ONE control-plane-token verifier, for every aud. It returns claims or
@@ -745,6 +975,28 @@ function _stattic_jwt_replay_storage_failure(string $phase, ?array $error): arra
     $failure = ['phase' => $phase, 'operation' => $operation, 'reason' => $reason];
     error_log('spacefast runtime replay_guard_unavailable ' . json_encode($failure, JSON_UNESCAPED_SLASHES));
     return $failure;
+}
+
+/**
+ * Whether a live replay marker already holds this token id: 'spent', 'unspent',
+ * or 'unavailable' when a marker exists but can't be read or carries no
+ * integer expiry (never read as unspent, or a spent token would pass the
+ * check). Writes nothing.
+ */
+function _stattic_jwt_jti_spent(string $privateRoot, string $namespace, string $jti, int $now): string
+{
+    $store = _stattic_jwt_replay_store($privateRoot);
+    $read = _stattic_record_store_read($store, hash('sha256', $namespace . ':' . $jti));
+    if ($read['state'] === 'unavailable') {
+        return 'unavailable';
+    }
+    if ($read['record'] === null) {
+        return 'unspent';
+    }
+    if (!is_int($read['record']['exp'] ?? null)) {
+        return 'unavailable';
+    }
+    return $read['record']['exp'] >= $now ? 'spent' : 'unspent';
 }
 
 // Returns 'ok' (first to claim), 'replayed' (live marker exists),

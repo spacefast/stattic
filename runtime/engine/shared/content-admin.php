@@ -131,24 +131,43 @@ function _stattic_content_admin_authorization_path(string $privateRoot, string $
     return rtrim($privateRoot, '/') . '/spaces/' . $spaceId . '/content-admin-authorization.json';
 }
 
+/**
+ * The access record stored for this Space, if it is this Space's: a record
+ * that doesn't parse, or names another Space, is nobody's.
+ */
+function _stattic_content_admin_stored_authorization(array $read, string $spaceId): ?array
+{
+    if ($read['kind'] !== 'present' || !is_string($read['value']['space_id'] ?? $read['value']['spaceId'] ?? null)) {
+        return null;
+    }
+    $stored = _stattic_content_admin_authorization($read['value']);
+    return $stored !== null && $stored['space_id'] === $spaceId ? $stored : null;
+}
+
 function _stattic_content_admin_read_authorization(string $privateRoot, string $spaceId): ?array
 {
     if (!_stattic_id_valid($spaceId)) {
         return null;
     }
-    $read = _sf_pointer_read(
-        'content-admin-authorization:' . $spaceId,
-        _stattic_content_admin_authorization_path($privateRoot, $spaceId)
+    return _stattic_content_admin_stored_authorization(
+        _sf_pointer_read(
+            'content-admin-authorization:' . $spaceId,
+            _stattic_content_admin_authorization_path($privateRoot, $spaceId)
+        ),
+        $spaceId
     );
-    return $read['kind'] === 'present'
-        ? _stattic_content_admin_authorization($read['value'] ?? null)
-        : null;
 }
 
+/**
+ * Apply an access generation under the Space's write lock. Returns the
+ * generation now on record, null for a value that is not an authorization,
+ * 'unavailable' when the lock can't be taken, or 'unreadable' when the stored
+ * record can't be read or isn't this Space's (it is left as it is).
+ */
 function _stattic_content_admin_apply_authorization(
     string $privateRoot,
     mixed $value
-): ?array {
+): array|string|null {
     $authorization = _stattic_content_admin_authorization($value);
     if ($authorization === null) {
         return null;
@@ -157,25 +176,56 @@ function _stattic_content_admin_apply_authorization(
         $privateRoot,
         $authorization['space_id'],
         STATTIC_LOCK_WAIT,
-        static fn (): null => null,
-        static function () use ($privateRoot, $authorization): ?array {
-            $current = _stattic_content_admin_read_authorization(
-                $privateRoot,
-                $authorization['space_id']
-            );
-            if (
-                $current !== null
-                && $current['access_generation'] >= $authorization['access_generation']
-            ) {
-                return $current;
-            }
-            _stattic_runtime_write_json_atomic(
-                _stattic_content_admin_authorization_path($privateRoot, $authorization['space_id']),
-                $authorization
-            );
-            return $authorization;
-        }
+        static fn (): string => 'unavailable',
+        static fn (): array|string|null => _stattic_content_admin_apply_authorization_locked($privateRoot, $authorization)
     );
+}
+
+/** Answer a box outage from `_stattic_content_admin_apply_authorization` as retryable. */
+function _stattic_content_admin_authorization_outage(array|string|null $applied): void
+{
+    if ($applied === 'unavailable') {
+        _stattic_problem_response(503, 'runtime_write_lock_unavailable', 'Runtime write lock is unavailable.', [
+            'details' => ['timeout_ms' => STATTIC_LOCK_DEADLINE_MS],
+        ]);
+    }
+    if ($applied === 'unreadable') {
+        _stattic_problem_response(503, 'content_admin_authorization_unavailable', 'The Space access record could not be read.');
+    }
+}
+
+/**
+ * Apply an access generation if it is newer than the one on record. Call only
+ * under the Space's write lock. Returns the generation now on record.
+ */
+function _stattic_content_admin_apply_authorization_locked(string $privateRoot, array $authorization): array|string|null
+{
+    // An access record that exists but can't be read is never overwritten:
+    // the newer generation it may hold would be lost.
+    $read = _sf_pointer_read(
+        'content-admin-authorization:' . $authorization['space_id'],
+        _stattic_content_admin_authorization_path($privateRoot, $authorization['space_id'])
+    );
+    if ($read['kind'] !== 'present' && $read['kind'] !== 'absent') {
+        return 'unreadable';
+    }
+    $current = _stattic_content_admin_stored_authorization($read, $authorization['space_id']);
+    // A record that doesn't parse, or names another Space, is not this
+    // Space's: never compared against, never overwritten.
+    if ($read['kind'] === 'present' && $current === null) {
+        return 'unreadable';
+    }
+    if (
+        $current !== null
+        && $current['access_generation'] >= $authorization['access_generation']
+    ) {
+        return $current;
+    }
+    _stattic_runtime_write_json_atomic(
+        _stattic_content_admin_authorization_path($privateRoot, $authorization['space_id']),
+        $authorization
+    );
+    return $authorization;
 }
 
 function _stattic_content_admin_authorization_matches(
@@ -316,6 +366,172 @@ function _stattic_content_admin_consume_ticket(
                 ];
         }
     );
+}
+
+/** The signed launch's audience: the editor door on one box, never a management call. */
+const SPACEFAST_CONTENT_ADMIN_LAUNCH_AUDIENCE = 'spacefast-content-admin-launch';
+
+/**
+ * The control plane's signed editor launch, verified on this box with no call
+ * back. The platform key signs it; it names this box (`runtime_instance_id`)
+ * and host, lives at most 60 s, and carries the same principal assertion
+ * `content.admin.launch` takes, checked by the same validator. Its `jti` is
+ * burned in the management lane's replay store, so one launch opens one
+ * editor: a second tab asks the control plane for a fresh launch.
+ *
+ * Returns what a redeemed ticket returns. `$verify` and `$now` are test seams;
+ * production passes neither, so the signature check is the platform verifier.
+ *
+ * @param string $requestAuthority the request's Host, port included: the
+ *        principal's audience is an origin
+ */
+function _stattic_content_admin_consume_launch(
+    string $privateRoot,
+    string $token,
+    string $host,
+    string $requestAuthority,
+    ?int $now = null,
+    ?callable $verify = null
+): ?array {
+    $now ??= time();
+    $rejection = null;
+    $verify ??= static function (string $candidate, array $profile) use ($privateRoot, &$rejection): ?array {
+        return _stattic_runtime_token_claims(
+            $privateRoot,
+            $candidate,
+            SPACEFAST_CONTENT_ADMIN_LAUNCH_AUDIENCE,
+            $profile,
+            $rejection
+        );
+    };
+    $claims = $token === '' ? null : $verify($token, [
+        // A launch signed under a key this box has not seen yet (a platform
+        // key rotation) reads the published set once; the platform key store
+        // waits a minute between reads, so a person's click is the most
+        // that ever waits on one.
+        'allow_jwks_fetch' => true,
+        // The platform signer names what the token is for and who issued it
+        // (runtime/auth.ts signRuntimeJwt); a platform token for anything
+        // else is not a launch, whatever its audience.
+        'claims' => [
+            'purpose' => ['equals' => 'content-admin-launch'],
+            'iss' => ['equals' => 'stattic-api'],
+            'jti' => ['present' => true],
+        ],
+        'scope_valid' => static fn (array $claims): bool => is_int($claims['exp'] ?? null)
+            && is_int($claims['iat'] ?? null)
+            && $claims['exp'] > $claims['iat']
+            && $claims['exp'] - $claims['iat'] <= SPACEFAST_CONTENT_ADMIN_TICKET_TTL
+            && is_string($claims['host'] ?? null)
+            && $host !== ''
+            && hash_equals(strtolower($claims['host']), $host),
+    ]);
+    if (!is_array($claims)) {
+        // The box couldn't read the platform keys: the launch may be valid,
+        // so answer retryable rather than call the link spent.
+        $unverifiable = [
+            'jwks_fetch_failed' => ['runtime_jwks_fetch_failed', 'Runtime JWT signing keys could not be fetched.'],
+            'api_base_url_missing' => ['runtime_api_base_url_missing', 'Runtime API base URL is not configured.'],
+        ][$rejection['reason'] ?? ''] ?? null;
+        if ($unverifiable !== null) {
+            _stattic_problem_response(500, $unverifiable[0], $unverifiable[1]);
+        }
+        return null;
+    }
+    $authorization = _stattic_content_admin_authorization($claims);
+    $principal = $authorization === null ? null : _stattic_content_principal_assertion(
+        $claims['principal'] ?? null,
+        $authorization['space_id'],
+        $requestAuthority,
+        $now
+    );
+    $wordpressRole = _stattic_content_wordpress_role($claims['wordpress_role'] ?? null);
+    $frameOrigin = _stattic_content_admin_frame_origin($claims['frame_origin'] ?? null);
+    $publicOrigin = _stattic_content_admin_frame_origin($claims['public_origin'] ?? null);
+    $access = _stattic_content_admin_access($claims['access'] ?? null);
+    // The editor frame is for a person holding a WordPress role, the one the
+    // principal itself names.
+    if (
+        ($principal['kind'] ?? null) !== 'user'
+        || $wordpressRole === null
+        || ($principal['wordpress_role'] ?? null) !== $wordpressRole
+        || $principal['access_generation'] !== $authorization['access_generation']
+        || $frameOrigin === null
+        || $publicOrigin === null
+        || $access === null
+    ) {
+        return null;
+    }
+    // A launch already spent is refused before anything is written.
+    // A marker that can't be read may be a spent launch's: answer retryable,
+    // writing nothing, rather than treat it as unspent.
+    $spent = _stattic_jwt_jti_spent($privateRoot, SPACEFAST_CONTENT_ADMIN_LAUNCH_AUDIENCE, (string) $claims['jti'], $now);
+    if ($spent === 'unavailable') {
+        _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable.', [
+            'details' => ['phase' => 'read', 'operation' => 'replay_marker', 'reason' => 'unreadable'],
+        ]);
+    }
+    if ($spent === 'spent') {
+        return null;
+    }
+    // The launch carries the platform's access generation: apply it and check
+    // this launch is the current one before the launch is spent, so an access
+    // change refuses it and a lock the box can't take leaves it redeemable.
+    $applied = _stattic_content_admin_apply_authorization($privateRoot, $authorization);
+    _stattic_content_admin_authorization_outage($applied);
+    if ($applied !== $authorization) {
+        return null;
+    }
+    // Last, after every other check, so a refused launch burns nothing. A
+    // replay is a spent link; a replay store that can't be written is the
+    // box's outage, answered retryable, as the management lane answers it.
+    $consumed = _stattic_jwt_consume_jti(
+        $privateRoot,
+        SPACEFAST_CONTENT_ADMIN_LAUNCH_AUDIENCE,
+        (string) $claims['jti'],
+        (int) $claims['exp'],
+        $now,
+        $failure
+    );
+    if ($consumed === 'storage_full') {
+        _stattic_problem_response(503, 'runtime_storage_full', "The site's disk is full.", ['details' => $failure]);
+    }
+    if ($consumed === 'unavailable') {
+        _stattic_problem_response(503, 'runtime_replay_guard_unavailable', 'Runtime token replay guard storage is unavailable.', ['details' => $failure]);
+    }
+    if ($consumed !== 'ok') {
+        return null;
+    }
+    // The lock and the key read may have waited: a launch that expired in the
+    // meantime does not open, even though its claim was the first.
+    if ((int) $claims['exp'] <= time() || (int) ($principal['expires_at'] ?? 0) <= time()) {
+        return null;
+    }
+    return [
+        'principal' => $principal,
+        'authorization' => $authorization,
+        'wordpress_role' => $wordpressRole,
+        'frame_origin' => $frameOrigin,
+        'public_origin' => $publicOrigin,
+        'access' => $access,
+    ];
+}
+
+/**
+ * Where a redeemed launch lands: an explicit classic path, a Zero screen, or
+ * the classic dashboard. Every one is a page the editor session opens on the
+ * box host the launch was redeemed at.
+ */
+function _stattic_content_admin_landing(array $access): string
+{
+    if (is_string($access['path'] ?? null)) {
+        $path = $access['path'];
+        return $path . (str_contains($path, '?') ? '&' : '?') . 'classic=1';
+    }
+    if ($access['surface'] === 'zero') {
+        return '/zero-admin' . ($access['initial_screen'] === 'users' ? '/users' : '/collections');
+    }
+    return '/wp-admin/index.php?classic=1';
 }
 
 function _stattic_content_admin_session_secret(string $privateRoot): ?string

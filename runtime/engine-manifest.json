@@ -31,6 +31,7 @@
     "engine/entrypoints/cron.php",
     "engine/entrypoints/content.php",
     "engine/entrypoints/content-admin.php",
+    "engine/entrypoints/sp-admin.php",
     "engine/entrypoints/content-media.php",
     "engine/entrypoints/health.php",
     "engine/entrypoints/invoke.php",

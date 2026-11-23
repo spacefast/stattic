@@ -45,9 +45,15 @@ final class Webhooks
         ];
     }
 
-    /** Extensions::onWritten: inside the write's transaction, so a rollback drops the event too. */
+    /**
+     * Extensions::onWritten: inside the write's transaction, so a rollback drops the event too. A
+     * preview's seed queues nothing ({@see \TypedPress\Preview::quiet()}).
+     */
     public static function written(string $op, string $collection, array $row, ?array $previous): void
     {
+        if (\TypedPress\Preview::quiet()) {
+            return;
+        }
         $db = db();
         $event = $collection . '.' . self::EVENTS[$op];
         $pk = $db->schema()->collection($collection)['primaryKey'];

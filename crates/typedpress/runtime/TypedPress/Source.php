@@ -17,12 +17,13 @@ final class Source
     ) {
     }
 
-    /** A plain table: every column is `{a}.<quoted col>`, kind from the schema type. */
+    /** A plain table: every column is `{a}.<quoted physical col>`, kind from the schema type. */
     public static function plain(Dialect $d, string $quotedTable, array $columnSpecs, bool $textBooleans = false): self
     {
         $refs = [];
         foreach ($columnSpecs as $name => $col) {
-            $expr = '{a}.' . $d->quote((string) $name);
+            $physical = (string) ($col['column'] ?? $name);
+            $expr = '{a}.' . $d->quote($physical);
             $cmp = $textBooleans && $col['type'] === 'boolean'
                 ? "CASE CAST($expr AS CHAR) WHEN 'true' THEN '1' WHEN 'false' THEN '0' ELSE CAST($expr AS CHAR) END"
                 : '';

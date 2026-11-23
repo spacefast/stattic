@@ -7,7 +7,7 @@ namespace TypedPress;
 /**
  * The global `fetch(url, init?)`: outbound HTTPS from handlers through the WordPress HTTP API.
  *
- * The policy matches the original Zero runtime's tenant fetch: HTTPS only, no URL credentials, no
+ * The policy: HTTPS only, no URL credentials, no
  * `localhost` names, and no address in a private, loopback, link-local, CGNAT, documentation,
  * multicast or other special-purpose range, for IPv4 and IPv6 (IPv4-mapped and 6to4 forms
  * unwrapped). Redirects are followed here, at most three, and every hop is resolved and checked
@@ -25,7 +25,7 @@ final class Fetch
     private const DROP_RESPONSE = ['connection', 'keep-alive', 'proxy-authenticate', 'set-cookie', 'set-cookie2', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
     /** Hosts the platform itself serves; a Space never reaches another Space through them. */
     private const INTERNAL = ['space.fast', 'view.fast', 'atomicsites.net'];
-    /** [network, prefix] pairs, from the original runtime's DENIED_IPV4_NETWORKS. */
+    /** [network, prefix] pairs of the IPv4 ranges fetch never connects to. */
     private const DENIED_V4 = [
         ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
         ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24], ['192.31.196.0', 24], ['192.52.193.0', 24],

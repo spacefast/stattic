@@ -1,7 +1,7 @@
 import {
   text, integer, boolean, date, timestamp, json,
-  defineConfig, action, job, jobs, db, HttpError,
-  table, select, ref,
+  defineConfig, job, db, HttpError,
+  table, select, ref, query, mutation,
 } from "typedpress";
 import { UNITS, LOW_STOCK, timestamps, slugify } from "./tp/lib/fields";
 
@@ -52,49 +52,43 @@ async function restock(itemId: number, name: string, quantity: number, lowStockA
   if (!existing) {
     await db.insert(shoppingList).values({ itemId, name });
     // Off the request: runs after this write commits (Action Scheduler delivers it).
-    await jobs.notifyLowStock.enqueue({ itemId }, { key: `low-${itemId}` });
+    await notifyLowStock.enqueue({ itemId }, { key: `low-${itemId}` });
   }
 }
 
 // A real pantry would push a notification here; this one stamps the list entry.
-export const notifyLowStock = job({
-  input: { itemId: integer() },
-  retries: 2,
-  handler: async ({ itemId }) => {
-    await db.update(shoppingList).set({ notifiedAt: new Date().toISOString() }).where({ itemId });
-  },
+export const notifyLowStock = job({ retries: 2 }, async ({ itemId }: { itemId: number }) => {
+  if (!Number.isInteger(itemId)) throw new HttpError(422, "invalid_input", "itemId must be an integer", "/itemId");
+  await db.update(shoppingList).set({ notifiedAt: new Date().toISOString() }).where({ itemId });
 });
 
-export const consume = action({
-  input: { itemId: integer(), amount: integer().default(1) },
-  async handler({ itemId, amount }) {
-    const item = await db.query.items.findFirst({ where: { id: itemId } });
-    if (!item) throw new HttpError(404, "not_found", `No item ${itemId}`);
-    const [updated] = await db
-      .update(items)
-      .set({ quantity: Math.max(0, item.quantity - amount) })
-      .where({ id: itemId })
-      .returning();
-    if (!updated) throw new HttpError(404, "not_found", `No item ${itemId}`);
-    return { item: updated, message: `${updated.name}: ${updated.quantity} ${updated.unit} left` };
-  },
+export const consume = mutation({}, async ({ itemId, amount = 1 }: { itemId: number; amount?: number }) => {
+  if (!Number.isInteger(itemId)) throw new HttpError(422, "invalid_input", "itemId must be an integer", "/itemId");
+  if (!Number.isInteger(amount)) throw new HttpError(422, "invalid_input", "amount must be an integer", "/amount");
+  const item = await db.query.items.findFirst({ where: { id: itemId } });
+  if (!item) throw new HttpError(404, "not_found", `No item ${itemId}`);
+  const [updated] = await db
+    .update(items)
+    .set({ quantity: Math.max(0, item.quantity - amount) })
+    .where({ id: itemId })
+    .returning();
+  if (!updated) throw new HttpError(404, "not_found", `No item ${itemId}`);
+  return { item: updated, message: `${updated.name}: ${updated.quantity} ${updated.unit} left` };
 });
 
-export const expiringSoon = action({
-  input: { days: integer().default(3) },
-  async handler({ days }) {
-    const cutoff = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
-    const soon = await db.query.items.findMany({
-      where: { expiresOn: { lte: cutoff }, quantity: { gt: 0 } },
-      orderBy: { expiresOn: "asc" },
-      with: { locationId: true },
-    });
-    return soon.map((i) => ({
-      name: i.name,
-      expiresOn: i.expiresOn,
-      where: i.locationId?.name ?? "somewhere",
-    }));
-  },
+export const expiringSoon = query({}, async ({ days = 3 }: { days?: number }) => {
+  if (!Number.isInteger(days)) throw new HttpError(422, "invalid_input", "days must be an integer", "/days");
+  const cutoff = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+  const soon = await db.query.items.findMany({
+    where: { expiresOn: { lte: cutoff }, quantity: { gt: 0 } },
+    orderBy: { expiresOn: "asc" },
+    with: { locationId: true },
+  });
+  return soon.map((i) => ({
+    name: i.name,
+    expiresOn: i.expiresOn,
+    where: i.locationId?.name ?? "somewhere",
+  }));
 });
 
 export default defineConfig({});

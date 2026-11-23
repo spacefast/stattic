@@ -82,6 +82,8 @@ fn lock(site: &str, fetched_at: &str, listed: &[Value], warnings: &mut Vec<Strin
                 "category": a["category"],
                 "input_schema": a["input_schema"],
                 "output_schema": a["output_schema"],
+                // A `query()` may call only abilities the site marks read-only.
+                "readonly": a["meta"]["annotations"]["readonly"] == Value::Bool(true),
                 "schemaHash": schema_hash(a),
             })
         })

@@ -129,11 +129,24 @@ fn run(args: &[String]) -> Result<(), String> {
             };
             std::fs::create_dir_all(dir.join("migrations")).map_err(|e| e.to_string())?;
             write(dir.join("snapshot.json"), &answer["snapshot"])?;
-            for (name, sql) in answer["migrations"].as_object().into_iter().flatten() {
-                if name.contains('/') || name.contains('\\') || name.starts_with('.') {
+            for (name, content) in answer["migrations"].as_object().into_iter().flatten() {
+                if name.contains('\\') || name.starts_with('.') || name.contains("..") {
                     return Err(format!("the site sent a migration with an unsafe name ({name})"));
                 }
-                write(dir.join("migrations").join(name), sql)?;
+                let Some((id, file)) = name.split_once('/') else {
+                    return Err(format!("the site sent a migration with an unsafe name ({name})"));
+                };
+                if file.contains('/')
+                    || !crate::migrate::is_migration_id(id)
+                    || !matches!(file, "ops.json" | "migration.sql")
+                {
+                    return Err(format!("the site sent a migration with an unsafe name ({name})"));
+                }
+                let dest = dir.join("migrations").join(id).join(file);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                write(dest, content)?;
             }
             Some((build.clone(), dir))
         }
@@ -349,7 +362,6 @@ fn step_line(step: &Value) -> String {
     let text = match step["kind"].as_str().unwrap_or("") {
         "system-tables" => "create or upgrade TypedPress's own tables".to_string(),
         "identity-schema" => "create or upgrade the sign-in tables".to_string(),
-        "names" => "rename data stored by a build from before TypedPress's rename".to_string(),
         "migration" => format!("run migration {detail}"),
         "front-page" => "set the site's front page".to_string(),
         "search-shape" => "rebuild the search index for the new searchable fields".to_string(),

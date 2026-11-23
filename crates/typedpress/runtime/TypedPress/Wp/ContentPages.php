@@ -410,7 +410,7 @@ final class ContentPages
             return;
         }
         $app = $this->plugin->schema->app();
-        if ($own === [] && rawurldecode($have) !== rawurldecode($want) && (AppRouter::match($app['routes'] ?? [], $path, $app['routeIndex'] ?? null)['route']['page'] ?? null) !== null) {
+        if ($own === [] && rawurldecode($have) !== rawurldecode($want) && (AppRouter::match($app['routes'], $path, $app['routeIndex'])['route']['page'] ?? null) !== null) {
             return;
         }
         if (rawurldecode($have) === rawurldecode($want) && $own === []) {

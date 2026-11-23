@@ -9,8 +9,8 @@ namespace TypedPress;
  * and random values, over PHP's `hash`, `hash_hmac`, `hash_equals` and `random_bytes`.
  *
  * Strings are hashed as their UTF-8 bytes, as Node's `update(string)` does. A MAC key read from
- * `process.env.NAME` is trimmed, and a missing or blank one is refused, as the original Zero
- * runtime's keyring did; any other key is used as given. Inputs are capped at 1 MiB.
+ * `process.env.NAME` is trimmed, and a missing or blank one is refused; any other key is used as
+ * given. Inputs are capped at 1 MiB.
  */
 final class Crypto
 {

@@ -1,7 +1,7 @@
 // Readability changes must retain single evaluation and lazy keys/fallbacks.
-import { action, defineConfig } from "typedpress";
+import { mutation, defineConfig } from "typedpress";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 export const optionalReads = run(() => {
   let reads = 0;

@@ -17,7 +17,7 @@ use TypedPress\HttpError;
  *   capability check there, so a published `customize_changeset` would apply theme and option
  *   settings with the check off, and a TypedPress kind's post type would skip its access rules.
  * - `existingTable`: a table on this site's prefix that is not WordPress's, TypedPress's or Action
- *   Scheduler's, or this Space's own Zero 0.8 table (`sf_<space>_…`), never another tenant's.
+ *   Scheduler's and does not belong to another tenant.
  */
 final class Guard
 {
@@ -116,43 +116,22 @@ final class Guard
 
     /**
      * Refuses an `existingTable` binding that isn't this site's to bind. `$prefix` is `$wpdb->prefix`,
-     * which the host sets before WordPress loads (docs/host-contract.md "Table prefix"). `$names` are
-     * the table names a Zero 0.8 table's digest may be over (see `names`).
-     *
-     * @param list<string> $names
+     * which the host sets before WordPress loads.
      */
-    public static function table(string $name, string $prefix, array $names = []): void
+    public static function table(string $name, string $prefix): void
     {
-        $key = $prefix . "\0" . $name . "\0" . implode("\0", $names);
+        $key = $prefix . "\0" . $name;
         if (isset(self::$tables[$key])) {
             return;
         }
-        // Only names the converter could have digested: identifiers, of any length (it cuts only the
-        // physical name). `casings` tries the keys a stored, lowercased name may stand for.
-        $names = array_values(array_unique(array_filter($names, static fn (string $n) => preg_match('/\A[A-Za-z][A-Za-z0-9_]*\z/', $n) === 1)));
-        $reason = self::tableRefusal($name, $prefix, $names);
+        $reason = self::tableRefusal($name, $prefix);
         if ($reason !== null) {
             throw new HttpError(409, 'existing_table_refused', "existingTable `" . self::shown($name) . "` is refused: $reason");
         }
         self::$tables[$key] = true;
     }
 
-    /**
-     * The 0.8 table names a collection's binding may carry the digest of: the key it was first
-     * adopted under (`adoptedAs`, which the compiler keeps across `was` renames), its key, and its
-     * table name. The converter names a collection after its 0.8 table.
-     *
-     * @return list<string>
-     */
-    public static function names(string $collection, array $spec): array
-    {
-        $names = array_filter([$spec['adoptedAs'] ?? null, $spec['key'] ?? null, $collection], static fn ($n) => is_string($n) && $n !== '');
-
-        return array_values(array_unique($names));
-    }
-
-    /** @param list<string> $names */
-    private static function tableRefusal(string $name, string $prefix, array $names): ?string
+    private static function tableRefusal(string $name, string $prefix): ?string
     {
         if (preg_match('/\A[A-Za-z][A-Za-z0-9_]{0,63}\z/', $name) !== 1) {
             return 'it is not an exact SQL identifier';
@@ -191,13 +170,7 @@ final class Guard
 
             return null;
         }
-        if (self::ownLegacyTable($lower, $own, $names)) {
-            return null;
-        }
-
-        return str_starts_with($lower, 'sf_')
-            ? "it is not this Space's Zero 0.8 table: on Spacefast the table prefix names the Space, elsewhere the host defines TP_SPACE_ID"
-            : "it is outside this site's table prefix `$prefix`; other prefixes belong to other sites sharing the database";
+        return "it is outside this site's table prefix `$prefix`; other prefixes belong to other sites sharing the database";
     }
 
     /**
@@ -244,122 +217,6 @@ final class Guard
         $tables = [...array_values($wpdb->tables('all')), ...array_values($wpdb->tables('old')), $wpdb->users, $wpdb->usermeta];
 
         return array_map('strtolower', array_filter($tables, 'is_string'));
-    }
-
-    /**
-     * Whether `$lower` is this site's own Zero 0.8 table, `sf_<space>_<table>_<10 hex>` as the converter
-     * writes it (src/config_migrate/app/transform.rs `physical`): `<space>` and `<table>` lowercased,
-     * other characters `_`, the base cut to 53 characters, and the digest SHA-256(space NUL table). The
-     * Space is the host's: Spacefast's `spacefast_content_space_id()`, else TP_SPACE_ID, and on a
-     * `sfz_<24 hex>_` prefix it must also be the Space that prefix was made from. The digest needs the
-     * real id and table name, so a table of another Space whose id starts with this one never matches.
-     * `$names` are the candidate 0.8 table names (`names`); a name not cut to 53 characters also
-     * holds its table name, lowercased.
-     *
-     * @param list<string> $names
-     */
-    private static function ownLegacyTable(string $lower, string $prefix, array $names): bool
-    {
-        if (preg_match('/\A(sf_[a-z0-9_]+)_([0-9a-f]{10})\z/', $lower, $m) !== 1) {
-            return false;
-        }
-        $space = '';
-        if (function_exists('spacefast_content_space_id')) {
-            try {
-                $space = \spacefast_content_space_id();
-            } catch (\Throwable) {
-                return false;
-            }
-            $space = is_string($space) ? $space : '';
-        }
-        if ($space === '' && defined('TP_SPACE_ID') && is_string(constant('TP_SPACE_ID'))) {
-            $space = (string) constant('TP_SPACE_ID');
-        }
-        if ($space === '') {
-            return false;
-        }
-        if (preg_match('/\Asfz_[0-9a-f]{24}_\z/', $prefix) === 1 && $prefix !== 'sfz_' . substr(hash('sha256', $space), 0, 24) . '_') {
-            return false;
-        }
-        $part = static function (string $s): string {
-            $s = substr(trim((string) preg_replace('/[^a-z0-9]+/', '_', strtolower($s)), '_'), 0, 48);
-
-            return $s === '' ? 'zero' : $s;
-        };
-        $head = 'sf_' . $part($space) . '_';
-        if (!str_starts_with($m[1], $head)) {
-            return false;
-        }
-        // The digest is over the 0.8 table's own name, case included. A stored name (`api_keys`, from
-        // a snapshot written before `adoptedAs`) has lost the key's case (`APIKeys`), so the keys it
-        // could have been made from are tried (`casings`). Every spelling still needs the digest of
-        // this Space's id, so only this Space's own 0.8 tables match.
-        $rest = substr($lower, strlen($head), -11);
-        foreach (array_unique(array_filter([...$names, $rest], static fn ($t) => $t !== '')) as $table) {
-            foreach (self::casings($table) as $spelling) {
-                $base = substr($head . $part($spelling), 0, 53);
-                if ($base === $m[1] && hash_equals($m[2], substr(hash('sha256', $space . "\0" . $spelling), 0, 10))) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * `$name` itself and, when it is a stored name (lowercase, as the compiler's `physical_name`
-     * writes a key), every key that name could have been made from: each `_`-separated part in
-     * lowercase, Capitalized or UPPER, each `_` kept or dropped, kept when it maps back to `$name`
-     * (`api_keys` → `apiKeys`, `APIKeys`, `api_keys`, ...). A name of up to 8 parts is expanded,
-     * a few hundred names at most; a longer one gets its `adoptedAs` from any build since it.
-     *
-     * @return iterable<string>
-     */
-    private static function casings(string $name): iterable
-    {
-        yield $name;
-        $parts = explode('_', $name);
-        if (count($parts) > 8 || in_array('', $parts, true) || preg_match('/\A[a-z][a-z0-9_]*\z/', $name) !== 1) {
-            return;
-        }
-        $keys = [''];
-        foreach ($parts as $i => $part) {
-            $next = [];
-            foreach ($keys as $key) {
-                foreach (array_unique([$part, ucfirst($part), strtoupper($part)]) as $form) {
-                    if ($i === 0) {
-                        $next[] = $form;
-                    } else {
-                        $next[] = $key . '_' . $form;
-                        $next[] = $key . $form;
-                    }
-                }
-            }
-            $keys = $next;
-        }
-        foreach (array_unique($keys) as $key) {
-            if ($key !== $name && self::physicalName($key) === $name) {
-                yield $key;
-            }
-        }
-    }
-
-    /** src/schema.rs `physical_name`: a registry key's stored name (`APIKeys` → `api_keys`). */
-    private static function physicalName(string $key): string
-    {
-        $out = '';
-        $n = strlen($key);
-        for ($i = 0; $i < $n; $i++) {
-            $c = $key[$i];
-            if (ctype_upper($c) && $i > 0 && $key[$i - 1] !== '_'
-                && (ctype_lower($key[$i - 1]) || ctype_digit($key[$i - 1]) || ($i + 1 < $n && ctype_lower($key[$i + 1])))) {
-                $out .= '_';
-            }
-            $out .= strtolower($c);
-        }
-
-        return $out;
     }
 
     /** A name as an error message shows it: printable, bounded. */

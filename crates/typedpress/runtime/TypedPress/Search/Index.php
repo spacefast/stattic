@@ -57,16 +57,6 @@ final class Index
         \TypedPress\SystemTables::register('__' . self::TABLE, [
             // `kind`, `item` and `field` are bytes: a row's id is matched exactly as stored (`a` is not
             // `A`), and comparing them involves no collation to clash with the connection's.
-            // A table from before ids were bytes is dropped and created again: it holds nothing that
-            // isn't rebuilt from the rows (the shape is cleared when tables are installed).
-            \TypedPress\SystemTables::step(1, static function (\TypedPress\Store $store): void {
-                global $wpdb;
-                $connection = new \TypedPress\Wp\Connection($wpdb);
-                if ($connection->run('SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? AND DATA_TYPE = ?',
-                    [$connection->prefix() . self::TABLE, 'item', 'varchar']) !== []) {
-                    $store->applySystemStatements(['DROP TABLE IF EXISTS `{prefix}' . self::TABLE . '`']);
-                }
-            }),
             'CREATE TABLE IF NOT EXISTS `{prefix}' . self::TABLE . '` (`kind` VARBINARY(64) NOT NULL, `item` VARBINARY(764) NOT NULL, `field` VARBINARY(64) NOT NULL, '
             . '`body` LONGTEXT NOT NULL, PRIMARY KEY (`kind`, `item`, `field`), FULLTEXT KEY `body` (`body`)) '
             . 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci',
@@ -125,20 +115,37 @@ final class Index
 
     // ================================================================ which fields
 
-    /** @return list<string> the kind's searchable fields: title, content, text and richText, never system ones */
+    /**
+     * The kind's searchable fields. A field marked `.searchable(false)` (`'searchable' => false`) is
+     * never one, even the title or content; one marked `.searchable()` always is. With no field
+     * marked `.searchable()`, they are the title, the content and every text or richText field
+     * without an `enum`; once one is marked, the title, the content and the marked fields. Never a
+     * hidden field, nor another system field.
+     *
+     * @return list<string>
+     */
     public static function fields(array $spec): array
     {
         if (($spec['taxonomy'] ?? false) || ($spec['commerce'] ?? '') === 'order') {
             return []; // `search` on a taxonomy isn't built yet
         }
+        $chosen = false;
+        foreach ($spec['columns'] as $col) {
+            if (($col['searchable'] ?? null) === true) {
+                $chosen = true;
+                break;
+            }
+        }
         $out = [];
         foreach ($spec['columns'] as $name => $col) {
             $name = (string) $name;
-            if (($col['hidden'] ?? false) || ($col['system'] ?? false) && $name !== ($spec['title'] ?? null) && $name !== ($spec['content'] ?? null)) {
+            $designated = $name === ($spec['title'] ?? null) || $name === ($spec['content'] ?? null);
+            if (($col['hidden'] ?? false) || ($col['system'] ?? false) && !$designated) {
                 continue;
             }
-            if ($name === ($spec['title'] ?? null) || $name === ($spec['content'] ?? null)
-                || in_array($col['type'], ['text', 'richText'], true) && !isset($col['enum'])) {
+            $searchable = $col['searchable']
+                ?? ($designated || !$chosen && in_array($col['type'], ['text', 'richText'], true) && !isset($col['enum']));
+            if ($searchable) {
                 $out[] = $name;
             }
         }

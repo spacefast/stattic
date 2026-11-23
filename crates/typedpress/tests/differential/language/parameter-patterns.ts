@@ -1,10 +1,10 @@
 // Destructured parameters in imported JavaScript, which npm libraries use for option bags (p-map's
 // `{ concurrency, backpressure = concurrency } = {}`). Every action runs under Node and as compiled
 // PHP; the JSON results must be byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { missing, nested, options, pair, rest, strings } from "./parameter-patterns-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 export const patternOptions = run(() => [options(1), options(2, { concurrency: 3 }), options(3, { backpressure: 1, preserveOrder: false }), options(4, { concurrency: undefined })]);
 

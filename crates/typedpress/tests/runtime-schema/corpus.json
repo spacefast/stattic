@@ -1732,11 +1732,8 @@
       "definition": {
         "type": "text"
       },
-      "runtime": "schema_reserved",
-      "compiler": "accept",
-      "stored": {
-        "type": "text"
-      }
+      "runtime": "F3001",
+      "compiler": "F3001"
     },
     {
       "name": "a name every kind has or will have: createdAt",
@@ -1745,11 +1742,8 @@
       "definition": {
         "type": "text"
       },
-      "runtime": "schema_reserved",
-      "compiler": "accept",
-      "stored": {
-        "type": "text"
-      }
+      "runtime": "F3001",
+      "compiler": "F3001"
     },
     {
       "name": "a name every kind has or will have: updatedAt",
@@ -1758,11 +1752,8 @@
       "definition": {
         "type": "text"
       },
-      "runtime": "schema_reserved",
-      "compiler": "accept",
-      "stored": {
-        "type": "text"
-      }
+      "runtime": "F3001",
+      "compiler": "F3001"
     },
     {
       "name": "a name every kind has or will have: url",

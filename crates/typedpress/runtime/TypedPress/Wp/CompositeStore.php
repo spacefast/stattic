@@ -105,6 +105,25 @@ final class CompositeStore implements Store, Links
         $this->for($collection)->delete($collection, $pk);
     }
 
+    public function softDelete(string $collection, int|string $pk, string $at, ?int $userId, ?string $group): void
+    {
+        $store = $this->for($collection);
+        if (method_exists($store, 'softDelete')) {
+            $store->softDelete($collection, $pk, $at, $userId, $group);
+            return;
+        }
+        $store->delete($collection, $pk);
+    }
+
+    public function restore(string $collection, int|string $pk): void
+    {
+        $store = $this->for($collection);
+        if (!method_exists($store, 'restore')) {
+            throw new \LogicException("Store for $collection does not support restore()");
+        }
+        $store->restore($collection, $pk);
+    }
+
     public function dialect(): Dialect
     {
         return $this->tables->dialect();
@@ -140,14 +159,27 @@ final class CompositeStore implements Store, Links
         return $this->for($collection)->revisions($collection, $pk);
     }
 
-    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId): void
+    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId, array $meta = []): void
     {
-        $this->for($collection)->revisionWrite($collection, $pk, $encodedRow, $userId);
+        if (($meta['op'] ?? null) === 'purge' && $this->isPostBacked($collection)) {
+            // Permanent wp_delete_post removes all WP child revisions, so persist the purge audit snapshot in tp__revisions.
+            if ($this->tables->hasRevisionsTable()) {
+                $this->tables->revisionWrite($collection, $pk, $encodedRow, $userId, $meta);
+            }
+
+            return;
+        }
+        $this->for($collection)->revisionWrite($collection, $pk, $encodedRow, $userId, $meta);
     }
 
-    public function revision(string $collection, int|string $pk, int $revisionId): ?array
+    public function revision(string $collection, int|string $pk, int $revisionId, bool $byVersion = false): ?array
     {
-        return $this->for($collection)->revision($collection, $pk, $revisionId);
+        return $this->for($collection)->revision($collection, $pk, $revisionId, $byVersion);
+    }
+
+    public function latestSchemaMigration(): ?string
+    {
+        return $this->tables->latestSchemaMigration();
     }
 
     public function promoteDue(string $collection, string $nowIso): array
@@ -173,9 +205,9 @@ final class CompositeStore implements Store, Links
         return $this->linksFor($join)->linkTable($join);
     }
 
-    public function links(string $join, string $by, array $ids): array
+    public function links(string $join, string $by, array $ids, bool $forUpdate = false): array
     {
-        return $this->linksFor($join)->links($join, $by, $ids);
+        return $this->linksFor($join)->links($join, $by, $ids, $forUpdate);
     }
 
     public function setLinks(string $join, int|string $owner, array $targets): void

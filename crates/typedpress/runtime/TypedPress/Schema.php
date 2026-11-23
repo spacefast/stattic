@@ -57,6 +57,13 @@ final class Schema
      */
     public function commerce(): ?array { return $this->raw['store'] ?? null; }
 
+    public function raw(): array { return $this->raw; }
+
+    public function retention(): ?array
+    {
+        return is_array($this->raw['retention'] ?? null) ? $this->raw['retention'] : null;
+    }
+
     public function runtimeSchema(): ?array
     {
         return $this->raw['runtimeSchema'] ?? null;
@@ -64,7 +71,7 @@ final class Schema
 
     public function version(): int
     {
-        return $this->raw['version'] ?? 5;
+        return $this->raw['version'];
     }
 
     public function runtime(): ?string
@@ -77,9 +84,6 @@ final class Schema
         return (string) ($this->raw['name'] ?? 'app');
     }
 
-    /** The compiler's list (src/kind_url.rs), for an app built before it was in every schema. */
-    private const RESERVED = ['wp-admin', 'wp-json', 'wp-content', 'wp-includes', 'wp-login.php', 'wp-signup.php', 'wp-cron.php', 'wp-sitemap.xml', 'xmlrpc.php', 'feed', '__tp', '__spacefast', 'llms.txt', 'robots.txt', 'favicon.ico', 'sitemap.xml', 'author', 'category', 'tag', 'search', 'page', 'comments', 'embed', 'type', 'attachment', 'trackback', 'wp-activate.php', 'wp-trackback.php', 'wp-comments-post.php', 'wp-mail.php', '.well-known', '__zero', 'identity', 'index.php', 'wp-config.php', 'typedpress-admin', 'auth'];
-
     /**
      * WordPress's and TypedPress's own first path segments (`wp-admin`, `wp-json`, `__tp`, `feed`, …),
      * lowercased: what the app's files never answer for.
@@ -88,8 +92,41 @@ final class Schema
      */
     public function reserved(): array
     {
-        // An app built before the list was in every schema: the app router's copy, else the runtime's.
-        return array_map('strtolower', (array) ($this->raw['reserved'] ?? $this->raw['app']['reserved'] ?? self::RESERVED));
+        return array_map('strtolower', $this->raw['reserved']);
+    }
+
+    /**
+     * Resolves `.alias(...)` field names in an input, patch, filter, or orderBy object to their
+     * canonical column names. Throws 422 if both a canonical field and its alias are provided.
+     *
+     * @param array<string, mixed> $data
+     * @return array<string, mixed>
+     */
+    public static function resolveAliases(array $spec, array $data, string $ptr = ''): array
+    {
+        $map = [];
+        foreach ($spec['columns'] ?? [] as $name => $col) {
+            foreach ($col['aliases'] ?? [] as $alias) {
+                $map[(string) $alias] = (string) $name;
+            }
+        }
+        if ($map === []) {
+            return $data;
+        }
+        $out = [];
+        foreach ($data as $k => $v) {
+            $key = (string) $k;
+            $canonical = $map[$key] ?? $key;
+            if ($canonical !== $key && array_key_exists($canonical, $data)) {
+                throw HttpError::invalidInput("Cannot provide both '$canonical' and its alias '$key'", $ptr . HttpError::seg($key));
+            }
+            if (array_key_exists($canonical, $out)) {
+                throw HttpError::invalidInput("Duplicate aliased field for '$canonical'", $ptr . HttpError::seg($key));
+            }
+            $out[$canonical] = $v;
+        }
+
+        return $out;
     }
 
     /** @return array<string, array> */
@@ -317,7 +354,7 @@ final class Schema
             return null;
         }
 
-        return ($spec['commentPolicy'] ?? []) + ['guests' => false, 'moderation' => 'first-time', 'threaded' => 3, 'closeAfterDays' => null, 'types' => []];
+        return $spec['commentPolicy'];
     }
 
     public function global(string $name): array
@@ -458,7 +495,7 @@ final class Schema
     /** True when a create must receive this column (no default, not generated). */
     public static function isRequired(array $col): bool
     {
-        return ($col['notNull'] ?? false) && !isset($col['default']) && !($col['autoIncrement'] ?? false) && !($col['readOnly'] ?? false)
+        return (($col['notNull'] ?? false) || ($col['required'] ?? false)) && !isset($col['default']) && !($col['omit'] ?? false) && !($col['autoIncrement'] ?? false) && !($col['readOnly'] ?? false)
             && !($col['type'] === 'slug' && isset($col['source'])); // derived when left out
     }
 
@@ -526,7 +563,8 @@ final class Schema
                 is_float($v) && Js::isInteger($v) && abs($v) <= 9007199254740991 => (int) $v,
                 default => throw $bad(),
             },
-            'real' => (is_int($v) || is_float($v)) && Js::isFinite($v) ? (float) $v : throw $bad(),
+            // A whole number stays an int, so an id from a `number` input reads back exactly.
+            'real' => is_int($v) ? $v : (is_float($v) && Js::isFinite($v) ? $v : throw $bad()),
             'text', 'richText' => is_string($v) ? $v : throw $bad(),
             'email' => is_string($v) && filter_var($v, FILTER_VALIDATE_EMAIL) !== false ? $v : throw $bad(),
             'url' => is_string($v) && preg_match('#^https?://#i', $v) && filter_var($v, FILTER_VALIDATE_URL) !== false ? $v : throw $bad(),
@@ -534,7 +572,7 @@ final class Schema
             'boolean' => is_bool($v) ? $v : throw $bad(),
             'timestamp' => self::timestamp($v) ?? throw $bad(),
             'date' => is_string($v) && self::isDate($v) ? $v : throw $bad(),
-            'json' => self::jsonValue($v) ?? throw $bad(),
+            'json' => isset($col['shape']) ? self::shaped($col['shape'], $v, $name, $pointer) : (self::jsonValue($v) ?? throw $bad()),
             'mediaList' => self::idList($v, $name, $pointer) ?? throw $bad(),
             'refList' => self::refList($v, $name, $pointer) ?? throw $bad(),
             'select' => self::selectList($col, $v, $name, $pointer) ?? throw $bad(),
@@ -582,10 +620,13 @@ final class Schema
         foreach ($fields as $name => $f) {
             $name = (string) $name;
             $ptr = $base . HttpError::seg($name);
-            if (!array_key_exists($name, $obj)) {
+            if (!array_key_exists($name, $obj) || (($f['omit'] ?? false) && $obj[$name] === JsUndefined::Value)) {
                 if (isset($f['default'])) {
                     $obj[$name] = self::generate($f['default'], $f);
-                } elseif ($f['notNull'] ?? false) {
+                } elseif ($f['omit'] ?? false) {
+                    // An optional field of a typed input (`limit?: number`): left out, it stays out.
+                    continue;
+                } elseif (($f['notNull'] ?? false) || ($f['required'] ?? false)) {
                     throw HttpError::invalidInput("$name is required", $ptr);
                 } else {
                     $out[$name] = null;
@@ -679,6 +720,14 @@ final class Schema
                 throw HttpError::invalidInput("$name has a duplicate value '$item'", "$pointer/$i");
             }
         }
+
+        return $v;
+    }
+
+    /** A typed input's structured value, checked against the shape its parameter type gives it. */
+    private static function shaped(array $shape, mixed $v, string $name, string $pointer): mixed
+    {
+        InputShape::check($shape, $v, $name, $pointer);
 
         return $v;
     }

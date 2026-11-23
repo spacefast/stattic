@@ -71,6 +71,9 @@ fn field(c: &Column, schema: &Schema) -> Value {
     flag("unique", c.unique && !c.primary_key);
     flag("multiline", c.multiline);
     flag("localized", c.localized);
+    if let Some(on) = c.searchable {
+        out.insert("searchable".into(), json!(on));
+    }
     match &c.default {
         Some(DefaultKind::Value(value)) => out.insert("default".into(), value.clone()),
         Some(DefaultKind::Now) => out.insert("default".into(), json!("now")),

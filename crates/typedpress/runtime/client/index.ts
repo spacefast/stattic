@@ -5,7 +5,7 @@
 // bundlers run it as-is. Wire format: design §4.8 / §7.
 
 import { SCHEMA } from "./schema.ts";
-import type { Actions, Collections, Globals, Locale, Media, PrivateFile, RevisionSummary, Status, User } from "./types.ts";
+import type { Actions, Collections, Globals, Locale, Media, PrivateFile, RevisionDiff, RevisionSummary, Status, User } from "./types.ts";
 
 export type * from "./types.ts";
 export { SCHEMA };
@@ -79,6 +79,8 @@ export type ListQuery<K extends CollectionKey, W = Collections[K]["with"]> = {
   limit?: number;
   offset?: number;
   with?: W;
+  /** Soft-delete filter: `"exclude"` (default), `"include"`, or `"only"`. Non-default modes require `restore` or `delete` access. */
+  deleted?: "exclude" | "include" | "only";
 } & StatusQuery<K> & LocaleQuery<K>;
 
 /**
@@ -125,6 +127,10 @@ export interface CollectionClient<K extends CollectionKey> {
    */
   update(id: IdOf<K>, patch: Collections[K]["patch"] & WriteConditions): Promise<Row<K>>;
   delete(id: IdOf<K>, options?: WriteConditions): Promise<Row<K>>;
+  /** Restores a soft-deleted row (and any cascade-deleted children sharing its deletion group). */
+  restore(id: IdOf<K>): Promise<Row<K>>;
+  /** Permanently removes the row from storage (default access `"system"`). */
+  purge(id: IdOf<K>): Promise<Row<K>>;
   /** `list(q).subscribe(onRows, onError)`. Returns a function that stops watching. */
   watch<const W extends Collections[K]["with"] = Extract<{}, Collections[K]["with"]>>(
     q: ListQuery<K, ExactWith<K, W>> | undefined,
@@ -135,6 +141,8 @@ export interface CollectionClient<K extends CollectionKey> {
     /** Newest first. Needs `update` access on the row. */
     list(id: IdOf<K>): Promise<RevisionSummary[]>;
     get(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
+    /** Diffs two revisions (by version or revision id) as this viewer may read them. */
+    diff(id: IdOf<K>, fromVersion: number, toVersion: number): Promise<RevisionDiff<Row<K>>>;
     /** Runs the update pipeline with the revision as the patch; returns the updated row. */
     restore(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
   };
@@ -453,6 +461,7 @@ function listParams(q: Json | undefined): URLSearchParams {
   if (q.where !== undefined) p.set("where", JSON.stringify(q.where));
   if (typeof q.status === "string") p.set("status", q.status);
   if (typeof q.locale === "string") p.set("locale", q.locale);
+  if (typeof q.deleted === "string") p.set("deleted", q.deleted);
   if (q.orderBy !== undefined) {
     const order = orderParam(q.orderBy);
     if (order) p.set("orderBy", order);
@@ -482,6 +491,7 @@ function liveArgs(q: Json | undefined): Json {
   if (typeof q.offset === "number") args.offset = q.offset;
   if (typeof q.cursor === "string") args.cursor = q.cursor;
   if (typeof q.locale === "string") args.locale = q.locale;
+  if (typeof q.deleted === "string") args.deleted = q.deleted;
   if (isObject(q.with) && Object.keys(withJson(q.with)).length > 0) args.with = withJson(q.with);
   return args;
 }
@@ -1377,6 +1387,8 @@ export function createClient(options: ClientOptions = {}): Client {
       create: (data: unknown) => wrote(request("POST", path, { json: data }), key),
       update: (id: string | number, patch: unknown) => wrote(request("PATCH", one(id), { json: patch }), key),
       delete: (id: string | number, options?: WriteConditions) => wrote(request("DELETE", one(id), { query: conditions(options) }), key),
+      restore: (id: string | number) => wrote(request("POST", `${one(id)}/restore`), key),
+      purge: (id: string | number) => wrote(request("DELETE", `${one(id)}/purge`), key),
       revisions: {
         // Every revision, newest first: the API pages them ({ data, cursor }), this follows the cursor.
         list: async (id: string | number) => {
@@ -1392,7 +1404,9 @@ export function createClient(options: ClientOptions = {}): Client {
           return all;
         },
         get: (id: string | number, rid: number) => request("GET", `${one(id)}/revisions/${seg(rid)}`),
-        restore: (id: string | number, rid: number) => request("POST", `${one(id)}/revisions/${seg(rid)}/restore`),
+        diff: (id: string | number, from: number, to: number) =>
+          request("GET", `${one(id)}/revisions/diff`, { query: new URLSearchParams({ from: String(from), to: String(to) }) }),
+        restore: (id: string | number, rid: number) => wrote(request("POST", `${one(id)}/revisions/${seg(rid)}/restore`), key),
       },
       stage: (id: string | number, patch: unknown) => request("PATCH", `${one(id)}/staged`, { json: patch }),
       staged: (id: string | number) => request("GET", `${one(id)}/staged`),

@@ -20,7 +20,7 @@ interface Links
      * @param list<int|string> $ids
      * @return list<array{owner_id: int, target_id: int, position: int}>
      */
-    public function links(string $join, string $by, array $ids): array;
+    public function links(string $join, string $by, array $ids, bool $forUpdate = false): array;
 
     /** Replace an owner's links with `$targets`, positions in list order. @param list<int> $targets */
     public function setLinks(string $join, int|string $owner, array $targets): void;

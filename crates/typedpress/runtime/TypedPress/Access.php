@@ -15,16 +15,19 @@ final class Access
     /** The built-in media collection's fixed rules (§4.6). */
     public const MEDIA = ['read' => ['role' => 'anyone'], 'create' => ['role' => 'author'], 'update' => ['role' => 'editor'], 'delete' => ['role' => 'editor']];
 
-    /** @return array{read: array, create: array, update: array, delete: array} */
+    /** @return array{read: array, create: array, update: array, delete: array, restore: array, purge: array} */
     public static function collectionRules(array $spec): array
     {
         $a = $spec['access'] ?? [];
+        $delete = $a['delete'] ?? self::DEFAULT_WRITE;
 
         return [
             'read' => $a['read'] ?? self::DEFAULT_READ,
             'create' => $a['create'] ?? self::DEFAULT_WRITE,
             'update' => $a['update'] ?? self::DEFAULT_WRITE,
-            'delete' => $a['delete'] ?? self::DEFAULT_WRITE,
+            'delete' => $delete,
+            'restore' => $a['restore'] ?? $delete,
+            'purge' => $a['purge'] ?? ['allow' => false],
         ];
     }
 

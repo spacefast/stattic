@@ -3,10 +3,10 @@
 // dependency) uses both forms. ToBoolean is false for 0, -0, NaN, "", null, undefined, false and
 // 0n, and true for everything else, including "0", "false", [], {} and functions. Every action
 // runs under Node and as compiled PHP; the JSON results must be byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { falsyAndTruthy, untypedBoolean } from "./boolean-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 function values(): unknown[] {
   return [0, -0, NaN, "", null, undefined, false, 0n, "0", "false", [], {}, 1, -1, "a", true, 1n, Infinity, () => 0];

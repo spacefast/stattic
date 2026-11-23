@@ -7,10 +7,10 @@
 // comparator sees Node's pairs in Node's order. The checksum cases record every call.
 // Every action runs under Node and as compiled PHP; module-level constants run in the build-time
 // evaluator. `sort-helpers.mjs` runs the same checks untyped.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation as server } from "typedpress";
 import { sortObjects as sortObjectsImpl, sortUntyped as sortUntypedImpl, sortUntypedSequences as sortUntypedSequencesImpl } from "./sort-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => server({}, handler);
 
 const STRINGS = ["b", "a", "B", "é", "e", "z", "🙂", "\uff61", "\ue000", "ä", "A", "aa", "", "a🙂", "a\uffff", "Z", "10", "9"];
 

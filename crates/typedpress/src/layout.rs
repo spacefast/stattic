@@ -38,19 +38,8 @@ pub const DIST: &str = "tp/dist";
 /// `typedpress build`'s default output: a `wp-content` directory.
 pub const WP_CONTENT: &str = "tp/dist/wp-content";
 
-/// Committed inputs that moved (into `tp/_generated/`, or app code into `tp/`): (old, new). A source bundle
-/// captured before the move names the old paths, and a host recompiles stored bundles, so the
-/// hosted compile reads them through [`current`]. (The hosted compile reads the ledger's old path
-/// itself; see `bundle::compile_tree`.)
-const MOVED: &[(&str, &str)] = &[
-    ("tp/abilities.json", "tp/_generated/abilities.json"),
-    ("tp/plugins.lock.json", "tp/_generated/plugins.lock.json"),
-    ("wp-hooks/", "tp/wp-hooks/"),
-];
-
 /// Committed files a live checkout may still have at their place before `tp/_generated/`: (old,
-/// new, what goes wrong if it is left there). A stored source bundle is frozen data and reads its
-/// old paths through [`current`]; a checkout is refused, so nothing is silently ignored or loaded.
+/// new, what goes wrong if it is left there). Refuse these paths before loading sources so stale generated files cannot be used.
 const OLD_IN_CHECKOUT: &[(&str, &str, &str)] = &[
     (
         "tp/plugins.lock.json",
@@ -127,35 +116,4 @@ pub fn old_in_checkout(
         moves.join(" && ")
     );
     Some((message, help))
-}
-
-/// A captured project path on this layout: an input that moved into `tp/_generated/` is renamed,
-/// everything else is unchanged.
-pub fn current(path: &str) -> String {
-    for (old, new) in MOVED {
-        if let Some(rest) = path.strip_prefix(old) {
-            return format!("{new}{rest}");
-        }
-    }
-    path.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn captured_paths_from_before_generated_read_on_this_layout() {
-        for (old, new) in [
-            ("tp/abilities.json", "tp/_generated/abilities.json"),
-            ("tp/plugins.lock.json", "tp/_generated/plugins.lock.json"),
-            ("wp-hooks/save_post.ts", "tp/wp-hooks/save_post.ts"),
-            ("wp-hooks/the_content/a.ts", "tp/wp-hooks/the_content/a.ts"),
-            // Already current, and unrelated paths, are unchanged.
-            ("tp/_generated/abilities.json", "tp/_generated/abilities.json"),
-            ("tp/lib/fields.ts", "tp/lib/fields.ts"),
-            ("tp/migrations-notes.md", "tp/migrations-notes.md"),
-            ("typedpress.config.ts", "typedpress.config.ts"),
-        ] {
-            assert_eq!(super::current(old), new, "{old}");
-        }
-    }
 }

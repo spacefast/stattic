@@ -2,7 +2,7 @@
 /**
  * Deleting the app plugin in wp-admin (or `wp plugin uninstall`) runs this without loading the plugin.
  *
- * Removed: the app's options (schema hash) and every capability WordPress derives from its post types
+ * Removed: the app's installation options and every capability WordPress derives from its post types
  * on every role (whatever granted them).
  * Kept: content (posts and their fields, `editor: false` tables, globals, media, private files), the
  * app's migration ledger rows, the site's runtime schema versions and its active one (spec §2.10:
@@ -21,6 +21,7 @@ if ($app === '') {
 }
 
 delete_option('tp_' . $app . '_schema');
+delete_option('tp_' . $app . '_post_types');
 delete_option('tp_' . $app . '_refused');
 delete_option('tp_' . $app . '_seed_refused');
 delete_option('tp_rewrite_rules');

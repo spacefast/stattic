@@ -29,6 +29,8 @@ final class Connection
      * comes from. A request that only reads then sends neither it nor COMMIT.
      */
     private bool $deferred = false;
+    private ?\Closure $pendingStorageCheck = null;
+    private ?\Closure $watch = null;
     private bool $rollbackOnly = false;
     /** Core writes in flight: editor-save hooks ignore posts TypedPress itself is writing (§4.9). */
     private int $busy = 0;
@@ -54,7 +56,8 @@ final class Connection
     /** @var (\Closure(string): void)|null sees every statement run() is given (tests and measurement); null otherwise */
     public static ?\Closure $observer = null;
 
-    public function __construct(private readonly \wpdb $wpdb)
+    /** @param (\Closure(): void)|null $checkWriteStorage checks the app's MySQL storage before a transaction writes */
+    public function __construct(private readonly \wpdb $wpdb, private readonly ?\Closure $checkWriteStorage = null)
     {
         if ($wpdb->dbh instanceof \PDO) {
             self::prepareSqlite($wpdb->dbh);
@@ -105,9 +108,7 @@ final class Connection
             $this->rollbackOnly = true;
             throw new DbError('the database connection was lost and replaced during the transaction', 2006);
         }
-        if ($this->deferred && !self::plainRead($sql)) {
-            $this->start();
-        }
+        $this->beforeStatement($sql);
         if (self::$observer !== null) {
             (self::$observer)($sql);
         }
@@ -528,26 +529,54 @@ final class Connection
         }
         $this->depth = 1;
         $this->deferred = true;
-        add_filter('query', $watch = function (mixed $sql): mixed {
-            if ($this->deferred && is_string($sql) && trim($sql) !== '' && !self::plainRead($sql)) {
-                $this->start();
-            }
-
-            return $sql;
-        }, PHP_INT_MAX);
+        $this->watchStatements();
         try {
-            try {
-                $result = $fn();
-            } catch (\Throwable $e) {
-                $this->rollback();
-                throw $e;
-            }
-            $this->commit();
-
-            return $result;
-        } finally {
-            remove_filter('query', $watch, PHP_INT_MAX);
+            $result = $fn();
+        } catch (\Throwable $e) {
+            $this->rollback();
+            throw $e;
         }
+        $this->commit();
+
+        return $result;
+    }
+
+    private function watchStatements(): void
+    {
+        $this->pendingStorageCheck = $this->sqlite() ? null : $this->checkWriteStorage;
+        if ($this->deferred || $this->pendingStorageCheck !== null) {
+            add_filter('query', $this->watch = function (mixed $sql): mixed {
+                if (is_string($sql) && trim($sql) !== '') {
+                    $this->beforeStatement($sql);
+                }
+
+                return $sql;
+            }, PHP_INT_MAX);
+        }
+    }
+
+    /** One compatibility check per write transaction, before either store or WordPress SQL can write. */
+    private function beforeStatement(string $sql): void
+    {
+        if ((!$this->deferred && $this->pendingStorageCheck === null) || self::plainRead($sql)) {
+            return;
+        }
+        if ($this->pendingStorageCheck !== null) {
+            ($this->pendingStorageCheck)();
+            $this->pendingStorageCheck = null;
+        }
+        if ($this->deferred) {
+            $this->start();
+        }
+    }
+
+    private function stopWatchingStatements(): void
+    {
+        if ($this->watch !== null) {
+            remove_filter('query', $this->watch, PHP_INT_MAX);
+            $this->watch = null;
+        }
+        $this->pendingStorageCheck = null;
     }
 
     /** A SELECT that takes no lock and writes nothing; anything else belongs inside the transaction. */
@@ -589,6 +618,7 @@ final class Connection
         $this->query('START TRANSACTION');
         $this->handle = $this->wpdb->dbh;
         $this->depth = 1;
+        $this->watchStatements();
     }
 
     /** Commit the outermost transaction, then run its afterCommit callbacks. A failed COMMIT rolls back. */
@@ -606,6 +636,7 @@ final class Connection
             if ($this->rollbackOnly) {
                 throw new \RuntimeException('Cannot commit: a joined transaction failed');
             }
+            $this->stopWatchingStatements();
             // A deferred transaction that only read never reached the server: there is nothing to commit.
             if (!$this->deferred) {
                 // wpdb reconnects and retries a query after a lost connection: the server rolled the transaction
@@ -640,6 +671,7 @@ final class Connection
     /** Roll the outermost transaction back, clean the caches it touched, run its onRollback callbacks. */
     public function rollback(): void
     {
+        $this->stopWatchingStatements();
         $this->depth = 0;
         $undo = $this->onRollback;
         try {

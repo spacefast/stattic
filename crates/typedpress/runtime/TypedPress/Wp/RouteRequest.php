@@ -62,7 +62,7 @@ final class RouteRequest
     private const ACCESS_PARAM = '__';
 
     /**
-     * `req.url`, as Zero 0.8 handed it to endpoints: `https://`, the hostname from `Host` (port and
+     * `req.url` uses `https://` and the hostname from `Host` (port and
      * trailing dots dropped, lowercase), then the request URI with share-link secrets redacted, so a
      * handler that echoes its own URL never echoes a share token: the `token=`, `purchaseToken=` and
      * `__=` query values and the `/__/<token>` path segment (the `/__/collab` shell is not a secret).

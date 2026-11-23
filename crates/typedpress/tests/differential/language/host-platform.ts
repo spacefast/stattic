@@ -4,10 +4,10 @@
 // (TypedPress\Host), never on the build machine. Every action runs under Node and as compiled PHP on the
 // same machine; the JSON results must be byte-identical. See
 // docs/decisions/2026-11-14-host-platform-detection.md.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { detection as detectionImpl, guarded as guardedImpl, members as membersImpl, picomatch as picomatchImpl, platforms as platformsImpl, shadowed as shadowedImpl, withEnv as withEnvImpl } from "./host-platform-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 function typedDetectionImpl(): string[] {
   return [typeof navigator, typeof process, typeof globalThis.navigator, typeof globalThis.process];

@@ -105,16 +105,16 @@ final class Module
     }
 
     /**
-     * Trusted rows for sync: every status and, for localized collections, every locale (lane H's
-     * `locale: "*"`), since each translation is its own record and file.
+     * Sync reads every locale, since each translation is its own record and file.
+     * A viewer limits native posts to the rows and fields they may read.
      */
-    public static function find(string $collection, array $opts): array
+    public static function find(string $collection, array $opts, ?Viewer $viewer = null): array
     {
         if (db()->schema()->collection($collection)['localized'] ?? false) {
             $opts['locale'] = '*';
         }
 
-        return db()->findMany($collection, $opts);
+        return db()->findMany($collection, $opts, $viewer);
     }
 
     /** This site's identity, minted once: base files are keyed by it (§5.4). */

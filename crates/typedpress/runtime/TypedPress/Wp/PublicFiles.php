@@ -761,19 +761,9 @@ final class PublicFiles
         if (!is_array($app) || $path === null) {
             return false;
         }
-        if (isset($app['routeIndex'])) {
-            $literalOnly = ['literal' => $app['routeIndex']['literal'], 'dynamic' => []];
+        $literalOnly = ['literal' => $app['routeIndex']['literal'], 'dynamic' => []];
 
-            return AppRouter::match($app['routes'], $path, $literalOnly) !== null;
-        }
-        foreach ($app['routes'] ?? [] as $route) {
-            $pattern = (string) ($route['pattern'] ?? '');
-            if (!str_contains($pattern, ':') && !str_contains($pattern, '*') && AppRouter::match([$route], $path) !== null) {
-                return true;
-            }
-        }
-
-        return false;
+        return AppRouter::match($app['routes'], $path, $literalOnly) !== null;
     }
 
     /** @param array<string, string> $headers */

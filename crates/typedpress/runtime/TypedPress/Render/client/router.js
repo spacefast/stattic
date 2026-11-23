@@ -9,6 +9,9 @@
 // handed to it (`html`, as client/live-region.js does): it diffs the region, so client components
 // and scroll stay, and nothing reloads. Without JavaScript the form posts as before.
 //
+// A form whose action succeeded starts over once its page is in, with the values the server
+// rendered, as a page load would leave it; a form whose submit was refused keeps what was typed.
+//
 // Once a post may have reached the server, it is never sent again: a failure after that shows a
 // message in the form. Only when the router module can't load (nothing was sent) does the browser
 // post the form itself.
@@ -145,6 +148,42 @@ const announce = () => {
   const text = (said?.textContent ?? "").trim() || document.title;
   region.textContent = "";
   setTimeout(() => { region.textContent = text; }, 50);
+};
+
+// After a success, each field of the form shows what the server rendered for it in `html`, as a
+// page load would: what the visitor typed goes. The router's diff sets a field's `value`, `checked`
+// and `selected` only where its own record of them changed, and never the attributes `reset()`
+// reads, so the state is copied from the answer itself. The form is found by its place among the
+// forms with the same `action`; a field by its place in the form.
+const settle = (form, html) => {
+  const action = attr(form, "action");
+  const live = [...document.querySelectorAll("form")].filter((f) => attr(f, "action") === action);
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const served = [...doc.querySelectorAll("form")].filter((f) => attr(f, "action") === action)[live.indexOf(form)];
+  if (!served) return;
+  const mine = [...form.querySelectorAll("input, textarea, select")];
+  const theirs = [...served.querySelectorAll("input, textarea, select")];
+  if (mine.length !== theirs.length) return;
+  mine.forEach((el, i) => {
+    const from = theirs[i];
+    if (el.tagName !== from.tagName || el.name !== from.name) return;
+    if (el instanceof HTMLSelectElement) {
+      const options = [...from.options];
+      [...el.options].forEach((o, j) => {
+        o.defaultSelected = options[j]?.defaultSelected ?? false;
+        o.selected = o.defaultSelected;
+      });
+    } else if (el instanceof HTMLTextAreaElement) {
+      el.defaultValue = from.defaultValue;
+      el.value = from.defaultValue;
+    } else if (el.type === "checkbox" || el.type === "radio") {
+      el.defaultChecked = from.defaultChecked;
+      el.checked = from.defaultChecked;
+    } else if (el.type !== "file" && el.type !== "hidden") {
+      el.defaultValue = from.defaultValue;
+      el.value = from.defaultValue;
+    }
+  });
 };
 
 const canPrefetch = (ref) => routerLink(ref) && sameTemplate(ref) && !getConfig("core/router")?.clientNavigationDisabled;
@@ -310,6 +349,9 @@ store("tp/router", {
           replace: pagePath(href) === from,
           screenReaderAnnouncement: false,
         });
+        // A form whose action succeeded starts over, as it does when the browser loads the page
+        // without this script (Forms::outcome marks the form).
+        if (form.isConnected && form.getAttribute("data-tp-form-state") === "success") settle(form, html);
         announce();
       } finally {
         if (!keepPending) done();

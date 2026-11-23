@@ -4,6 +4,7 @@
 
 mod app;
 mod exports;
+mod route_plan;
 use crate::diag::{Diag, Span};
 use crate::extract::Slot;
 use crate::schema::{Access, DefaultKind, Owner};
@@ -21,8 +22,8 @@ pub struct Built {
     pub schema: schema::Schema,
     pub functions_php: String,
     pub snapshot: serde_json::Value,
-    /// New migration files, `(name, SQL)`; empty when the schema did not change.
-    pub migrations: Vec<(String, String)>,
+    /// New migration folders (`<id>/{ops.json,migration.sql}`); empty when the SQL schema did not change.
+    pub migrations: Vec<migrate::MigrationEntry>,
     pub gen_ts: String,
     /// `tp/_generated/routes.d.ts`, when the app has `tp/app/` routes.
     pub routes_ts: Option<String>,
@@ -64,75 +65,42 @@ pub fn moved_ledger() -> Diag {
     ))
 }
 
-/// The last build, as the next one needs it: its snapshot and the number the next migration file gets.
+/// The previous migrations in the ledger, folded into the baseline schema state.
 #[derive(Debug)]
 pub struct Previous {
+    /// Existing migration IDs from `<ledger>/<id>/ops.json` in sorted order.
+    pub ids: Vec<String>,
+    /// Folded schema state produced by replaying every committed `ops.json`.
+    pub folded: migrate::FoldedState,
+    /// Snapshot view of the folded state.
     pub snapshot: serde_json::Value,
-    pub next_migration: u32,
     /// Refuse any plugin grant `tp/_generated/plugins.lock.json` doesn't already hold (CI, `--frozen`).
     pub frozen: bool,
 }
 
 impl Previous {
-    /// A typedpress build: nothing to diff against, `0001_init.sql`.
+    /// A first build: empty baseline, no prior migrations.
     pub fn none() -> Self {
-        Self::from_project(None, []).expect("an absent snapshot is valid")
+        let folded = migrate::FoldedState::empty();
+        let snapshot = folded.to_snapshot();
+        Previous {
+            ids: Vec::new(),
+            folded,
+            snapshot,
+            frozen: false,
+        }
     }
 
-    /// From a committed `snapshot.json` in [`LEDGER`] (absent on a first build) and the names of
-    /// everything beside it. The numbering follows the files whether or not the snapshot is there, so
-    /// a deleted snapshot never produces a second `0001_init.sql` over the first. An older snapshot is
-    /// refused rather than diffed: its shape would plan the wrong migration.
-    pub fn from_project<'a>(
-        snapshot: Option<serde_json::Value>,
-        migration_files: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Self, Diag> {
-        let migration_files: Vec<&str> = migration_files.into_iter().collect();
-        // A ledger from before the flat layout (`wp/` and `sqlite/` subdirectories, moved here as-is
-        // by `git mv`), or the old ledger moved inside this one (`git mv` into an existing
-        // directory), is refused rather than read as "no migrations yet", which would restart the
-        // numbering at 0001 and ship an app plugin without its earlier files.
-        if migration_files.contains(&"migrations") {
-            return Err(Diag::new(
-                Span::NONE,
-                format!("{LEDGER}/migrations/ is the old ledger moved one level too deep"),
-            )
-            .help(format!(
-                "move its contents up with `git mv {LEDGER}/migrations/* {LEDGER}/ && rmdir {LEDGER}/migrations`, then build again"
-            )));
-        }
-        for nested in ["wp", "sqlite"] {
-            if migration_files.contains(&nested) {
-                return Err(Diag::new(
-                    Span::NONE,
-                    format!(
-                        "{LEDGER}/{nested}/ is from an earlier layout; move {LEDGER}/wp/*.sql and {LEDGER}/wp/snapshot.json into {LEDGER}/, then delete the {LEDGER}/wp/ and {LEDGER}/sqlite/ directories"
-                    ),
-                ));
-            }
-        }
-        let snapshot = match snapshot {
-            None => serde_json::json!({ "version": 2, "tables": {} }),
-            Some(snapshot) if snapshot["version"] == 2 => snapshot,
-            Some(snapshot) => {
-                return Err(Diag::new(
-                    Span::NONE,
-                    format!(
-                        "{LEDGER}/snapshot.json is a version {} snapshot; this compiler writes version 2 (delete {LEDGER}/ to start over)",
-                        snapshot["version"]
-                    ),
-                ));
-            }
-        };
-        let next_migration = migration_files
-            .into_iter()
-            .filter_map(|name| name.get(..4)?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
+    /// Reconstructs the baseline by folding every `(id, ops_json)` folder entry in sorted ID order.
+    /// Incompatible parallel-branch edits fail here with a diagnostic naming both migration IDs.
+    pub fn from_entries(entries: Vec<(String, serde_json::Value)>) -> Result<Self, Diag> {
+        let folded = migrate::fold(&entries)?;
+        let snapshot = folded.to_snapshot();
+        let ids = folded.history.clone();
         Ok(Previous {
+            ids,
+            folded,
             snapshot,
-            next_migration,
             frozen: false,
         })
     }
@@ -149,7 +117,7 @@ pub fn build(
     runtime: impl Fn(&str) -> Option<&'static [u8]>,
 ) -> Result<Built, Diag> {
     // A checkout from before `tp/_generated/` would have its locks ignored (and replaced) and an old
-    // client loaded as app code. A stored source bundle maps those paths instead (`layout::current`).
+    // client loaded as app code.
     let root = program.modules[program.entry]
         .path
         .parent()
@@ -178,6 +146,15 @@ pub fn build(
     crate::content_page::register(program, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
     crate::commerce::pages(&ext.schema, config_span).map_err(|d| d.phase(diag::Code::Schema))?;
     crate::runtime_schema::apply(runtime_lock.as_ref(), &mut ev, &mut ext)?;
+    // A query's, mutation's or job's input is its handler's parameter type: read before anything
+    // reads inputs (admin screens, the compiled handlers, the client).
+    let inputs = {
+        let schema = ext.schema.clone();
+        let mut c = compile::Compiler::new(&schema, &mut ev, &ext, program);
+        c.infer_inputs(&ext.roots).map_err(|d| d.phase(diag::Code::Compile))?
+    };
+    compile::apply_inputs(&mut ext.schema, inputs);
+    extract::screens(&config, &mut ev, config_span, &mut ext).map_err(|d| d.phase(diag::Code::Schema))?;
     let mut schema = ext.schema.clone();
     let roots = std::mem::take(&mut ext.roots);
     let action_results;
@@ -185,6 +162,8 @@ pub fn build(
     let islands;
     let wordpress_uses;
     let queried;
+    let route_effects;
+    let route_calls;
     let catalog = crate::wordpress::abilities::Catalog::new(&schema, &read_lock(program)?);
     let theme = read_theme(program)?;
     // Each collection hook kind: its compiled functions, by owning plugin (None: the app).
@@ -286,6 +265,8 @@ pub fn build(
             c.output
                 .push_str(&format!("/**\n * Return the plugin's permitted outbound HTTP hosts.\n *\n * @return string[]|null\n */\nfunction {function}(): ?array {{\n\treturn {value};\n}}\n\n"));
         }
+        route_effects = std::mem::take(&mut c.route_effects);
+        route_calls = std::mem::take(&mut c.calls);
         (std::mem::take(&mut c.output), slots, settled)
     };
     for ((table, kind), list) in hooks {
@@ -389,6 +370,7 @@ pub fn build(
     if let Some(app) = &schema.app {
         self::app::viewer_calls(program, app, &wordpress_uses).map_err(|d| d.phase(diag::Code::Compile))?;
     }
+    route_plan::build(&mut schema, &route_effects, &route_calls);
     schema.wp_views =
         !wordpress_uses.is_empty() && wordpress_uses.iter().any(|u| u.kind != compile::WordPressKind::Ability);
     // Hooks run in a fixed order per collection; sort for stable output.
@@ -397,98 +379,56 @@ pub fn build(
             .sort_by_key(|k, _| schema::HookKind::ALL.iter().position(|h| h == k));
     }
 
-    let services =
-        crate::services_config::parse(&config, &ev, &schema, config_span).map_err(|d| d.phase(diag::Code::Schema))?;
-    let services_php = services.as_ref().map(crate::services_config::php).unwrap_or_default();
     let functions_php = format!(
         "<?php\n/**\n * Backend functions compiled from TypeScript sources.\n *\n * Generated by `typedpress build` from typedpress.config.ts. Do not edit.\n *\n * @package TypedPress\n */\n\ndeclare(strict_types=1);\n\nnamespace TypedPressApp;\n\n{}",
-        functions + &services_php + &crate::content_page::functions_php(&schema)
+        functions + &crate::content_page::functions_php(&schema)
     );
     let functions_php = crate::php_layout::format(&functions_php);
     let previous = previous_value;
-    adopted_names(&mut schema, &previous.snapshot);
-    // A 0.3.0 capture keeps the indexes its build had: recompiling a stored Space plans no migration.
-    let queried = if ev.legacy() { Default::default() } else { queried };
     let snapshot = migrate::snapshot_with(&schema, &queried);
-    if let Some(tables) = previous.snapshot.get("tables").and_then(serde_json::Value::as_object) {
-        for stored in tables.keys() {
-            // The table that keeps `stored`'s rows: the same name, or the one that declares `was: stored`.
-            let successor = snapshot["tables"].get(stored).or_else(|| {
-                snapshot["tables"]
-                    .as_object()?
-                    .values()
-                    .find(|t| t["was"].as_str() == Some(stored.as_str()))
-            });
-            if let Some(next) = successor
-                && tables[stored]["existingTable"] != next["existingTable"]
-            {
-                return Err(Diag::new(config_span, format!("existingTable binding for `{stored}` cannot change after the first snapshot, including through a `was` rename; move data explicitly before changing storage")).phase(diag::Code::Schema));
-            }
-            // Storage follows the builder: a SQL table in the ledger declared with collection() would
-            // plan the table's drop and read empty posts. Refused here, before any migration is written.
-            if let Some(next) = successor
-                && tables[stored]["editor"] == false
-                && tables[stored]["auth"] != true
-                && next["editor"] == true
-            {
-                let kind = ext
-                    .collections
-                    .iter()
-                    .find(|c| snapshot["tables"].get(c.table()) == Some(next));
-                let key = kind.map_or(stored.as_str(), |c| schema.collections[c.table()].key.as_str());
-                return Err(Diag::new(
-                    kind.map_or(config_span, |c| c.span),
-                    format!("`{key}` is stored as a SQL table, and collection() is always WordPress posts"),
-                )
-                .help("declare it with table() again: its rows stay where they are and no migration is written")
-                .phase(diag::Code::Schema));
-            }
-            // A commerce kind is Woo's storage and has no table in the next snapshot, so the planner
-            // would drop the SQL table that holds this name's rows.
-            if let Some(commerce) = schema.collections.get(stored).and_then(|c| c.commerce.as_deref()) {
-                let kind = ext.collections.iter().find(|c| c.table() == stored);
-                return Err(Diag::new(
-                    kind.map_or(config_span, |c| c.span),
-                    format!("`{stored}` is stored as a SQL table, and {commerce}() is always WooCommerce storage"),
-                )
-                .help("give the commerce kind another name, or remove the table in one deploy and add the commerce kind in the next")
-                .phase(diag::Code::Schema));
-            }
-            let canonical = crate::schema::physical_name(stored);
-            if &canonical != stored
-                && !schema.collections.contains_key(stored)
-                && schema.collections.contains_key(&canonical)
-            {
-                return Err(Diag::new(config_span, format!(
-                    "stored resource `{stored}` conflicts with canonical physical name `{canonical}`; an authoring change cannot rename persisted storage"
-                )).help(format!("keep the migration ledger and bind the existing resource with `storageName: \"{stored}\"`"))
-                    .phase(diag::Code::Schema));
-            }
-            // Old snapshots record physical names only. A removed and a new resource
-            // could be an authored alias becoming its storage name, even when both
-            // names are already snake_case. Never guess a destructive replacement.
-            // A table that declares `was: "<stored>"` renames it (spec §2.6); the planner moves it.
-            let renamed = snapshot["tables"]
-                .as_object()
-                .is_some_and(|next| next.values().any(|t| t["was"].as_str() == Some(stored.as_str())));
-            if !schema.collections.contains_key(stored)
-                && !renamed
-                && let Some(added) = schema.collections.keys().find(|name| !tables.contains_key(*name))
-            {
-                return Err(Diag::new(config_span, format!(
-                    "stored resource `{stored}` disappears while new resource `{added}` is added; an authoring change cannot rename persisted storage"
-                )).help(format!("to rename it, declare `was: \"{stored}\"` on the table; to drop it, remove it in one deploy and add the new one in the next"))
-                    .phase(diag::Code::Schema));
-            }
+    for (stored, prev_def) in &previous.folded.tables {
+        let successor = snapshot["tables"].get(stored);
+        if let Some(next) = successor
+            && prev_def["existingTable"] != next["existingTable"]
+        {
+            return Err(Diag::new(
+                config_span,
+                format!("existingTable binding for `{stored}` cannot change after the first migration; move data explicitly before changing storage"),
+            )
+            .phase(diag::Code::Schema));
+        }
+        if let Some(next) = successor
+            && prev_def["editor"] == false
+            && prev_def["auth"] != true
+            && next["editor"] == true
+        {
+            let kind = ext
+                .collections
+                .iter()
+                .find(|c| snapshot["tables"].get(c.table()) == Some(next));
+            let key = kind.map_or(stored.as_str(), |c| schema.collections[c.table()].key.as_str());
+            return Err(Diag::new(
+                kind.map_or(config_span, |c| c.span),
+                format!("`{key}` is stored as a SQL table, and collection() is always WordPress posts"),
+            )
+            .help("declare it with table() again: its rows stay where they are and no migration is written")
+            .phase(diag::Code::Schema));
+        }
+        if let Some(commerce) = schema.collections.get(stored).and_then(|c| c.commerce.as_deref()) {
+            let kind = ext.collections.iter().find(|c| c.table() == stored);
+            return Err(Diag::new(
+                kind.map_or(config_span, |c| c.span),
+                format!("`{stored}` is stored as a SQL table, and {commerce}() is always WooCommerce storage"),
+            )
+            .help("give the commerce kind another name, or retire the table in one deploy and add the commerce kind in the next")
+            .phase(diag::Code::Schema));
         }
     }
     let mut migrations = Vec::new();
-    let warnings = migrate::destructive(&previous.snapshot, &snapshot);
-    let statements = migrate::plan(&previous.snapshot, &snapshot);
-    if !statements.is_empty() {
-        let n = previous.next_migration;
-        let name = if n == 1 { "init" } else { "update" };
-        migrations.push((format!("{n:04}_{name}.sql"), migrate::render(&statements)));
+    let mut warnings = Vec::new();
+    if let Some((entry, notes)) = migrate::plan_forward_only(&previous.folded, &snapshot, &previous.ids)? {
+        migrations.push(entry);
+        warnings.extend(notes);
     }
     // Each action's Ability publishes its result type as an output schema (spec §3a).
     for (name, ty) in &action_results {
@@ -497,7 +437,7 @@ pub fn build(
         }
     }
     let client_files = client::files(&schema, &action_results, runtime);
-    let openapi = crate::openapi::document(&schema, services.as_ref());
+    let openapi = crate::openapi::document(&schema);
     let unsupported_plugins = ext.plugins.as_ref().map(wp_plugins::unsupported).unwrap_or_default();
     // Only a project that imports "php/wordpress" maps it in tsconfig, so only then is it augmented.
     let uses_wordpress = program.modules.iter().any(|m| {
@@ -545,33 +485,6 @@ pub fn build(
         plugin_report: settled.report,
         wordpress_uses,
     })
-}
-
-/// Sets `adopted_as` on every `existingTable` collection: the registry key its binding was first
-/// built under, carried in the snapshot (`adoptedAs`) across `was` renames. A Zero 0.8 table's name
-/// ends in a digest over that key, which the runtime checks (`TypedPress\Wp\Guard::names`). A table
-/// stored without `adoptedAs` (a snapshot from before it) gives its stored name, not the current
-/// key, which may be a later alias; only a binding new in this build takes its key.
-fn adopted_names(schema: &mut schema::Schema, previous: &serde_json::Value) {
-    let empty = serde_json::Map::new();
-    let stored = previous["tables"].as_object().unwrap_or(&empty);
-    for c in schema.collections.values_mut() {
-        if c.existing_table.is_none() {
-            continue;
-        }
-        let renamed = c
-            .was
-            .clone()
-            .filter(|old| !stored.contains_key(&c.table) && stored.contains_key(old));
-        let before = stored.get(renamed.as_deref().unwrap_or(&c.table));
-        c.adopted_as = Some(match before {
-            Some(t) => t["adoptedAs"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| renamed.unwrap_or_else(|| c.table.clone())),
-            None => c.key.clone(),
-        });
-    }
 }
 
 /// Each `tp/wp-hooks/` file becomes a root: its default export is the handler, an optional
@@ -848,52 +761,53 @@ impl Built {
 #[cfg(test)]
 mod tests {
     use super::Previous;
+    use serde_json::json;
 
     #[test]
-    fn the_next_migration_number_follows_the_highest_file_with_or_without_a_snapshot() {
-        let snapshot = serde_json::json!({ "version": 2, "tables": {} });
-        let files = ["0001_init.sql", "0003_update.sql", "snapshot.json"];
+    fn folds_committed_ops_entries_in_sorted_id_order() {
+        let m1 = (
+            "20261121180000_7k9m2x_init".to_string(),
+            json!({
+                "version": 1,
+                "id": "20261121180000_7k9m2x_init",
+                "ops": [{
+                    "op": "createTable",
+                    "table": "notes",
+                    "def": { "editor": false, "drafts": false, "columns": {
+                        "id": { "type": "integer", "notNull": true, "primaryKey": true, "autoIncrement": true, "unique": false, "max": null, "default": null, "references": null }
+                    }}
+                }]
+            }),
+        );
+        let m2 = (
+            "20261121180100_3p4q5r_add_notes_body".to_string(),
+            json!({
+                "version": 1,
+                "id": "20261121180100_3p4q5r_add_notes_body",
+                "ops": [{
+                    "op": "addColumn",
+                    "table": "notes",
+                    "column": "body",
+                    "def": { "type": "text", "notNull": false, "primaryKey": false, "autoIncrement": false, "unique": false, "max": null, "default": null, "references": null }
+                }]
+            }),
+        );
+        // Out-of-order input still folds chronologically by sortable ID.
+        let prev = Previous::from_entries(vec![m2, m1]).unwrap();
         assert_eq!(
-            Previous::from_project(Some(snapshot.clone()), files)
-                .unwrap()
-                .next_migration,
-            4
+            prev.ids,
+            vec!["20261121180000_7k9m2x_init", "20261121180100_3p4q5r_add_notes_body"]
         );
-        assert_eq!(Previous::from_project(None, files).unwrap().next_migration, 4);
-        assert_eq!(Previous::from_project(Some(snapshot), []).unwrap().next_migration, 1);
+        assert!(prev.folded.tables["notes"]["columns"]["body"].is_object());
     }
 
     #[test]
-    fn the_earlier_nested_layout_is_refused_before_the_snapshot_is_read() {
-        for nested in ["wp", "sqlite"] {
-            let error = Previous::from_project(None, [nested, "0001_init.sql"]).unwrap_err();
-            assert!(
-                error
-                    .message
-                    .starts_with(&format!("tp/_generated/migrations/{nested}/ is from an earlier layout")),
-                "{}",
-                error.message
-            );
-        }
-    }
-
-    #[test]
-    fn the_old_ledger_moved_one_level_too_deep_is_refused() {
-        let error = Previous::from_project(None, ["migrations"]).unwrap_err();
-        assert!(
-            error
-                .message
-                .ends_with("migrations/ is the old ledger moved one level too deep"),
-            "{}",
-            error.message
-        );
-    }
-
-    #[test]
-    fn a_snapshot_from_another_version_is_refused_not_diffed() {
-        let error = Previous::from_project(Some(serde_json::json!({ "version": 1, "tables": {} })), []).unwrap_err();
-        assert!(error.message.contains("version 1 snapshot"), "{}", error.message);
-        let error = Previous::from_project(Some(serde_json::json!({ "tables": {} })), []).unwrap_err();
-        assert!(error.message.contains("version null snapshot"), "{}", error.message);
+    fn unsupported_ops_version_is_refused() {
+        let err = Previous::from_entries(vec![(
+            "20261121180000_7k9m2x_init".to_string(),
+            json!({ "version": 99, "ops": [] }),
+        )])
+        .unwrap_err();
+        assert!(err.message.contains("unsupported version 99"), "{}", err.message);
     }
 }

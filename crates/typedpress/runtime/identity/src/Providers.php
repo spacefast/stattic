@@ -44,10 +44,36 @@ final class Providers
             $config["issuer"],
             $config["client_id"],
             $config["secret"],
-            home_url("/identity/provider/callback?provider=" . rawurlencode($name)),
+            self::callbackUrl($name),
             $config["discovery"] ?? null,
             $config["alg"] ?? "RS256",
         );
+    }
+    /**
+     * The redirect URI sent to a provider, below the issuer's route prefix (`SP_AUTH_PREFIX` /
+     * `sp_auth_prefix`, default `/identity`). The default stays `<issuer>/provider/callback?provider=<name>`,
+     * so a provider already registered with it keeps working. Both that and the path form
+     * `<issuer>/callback/<name>` are served; a host picks the one its provider is registered with
+     * through `sp_identity_callback_url`, which receives the default, the provider and the path form.
+     */
+    public static function callbackUrl(string $name): string
+    {
+        $base = Plugin::basePath();
+        $query = home_url($base . "/provider/callback?provider=" . rawurlencode($name));
+        $path = home_url($base . "/callback/" . rawurlencode($name));
+        $filtered = apply_filters("sp_identity_callback_url", $query, $name, $path);
+        return is_string($filtered) && $filtered !== "" ? $filtered : $query;
+    }
+    /** The provider a callback route names: `/callback/<name>`, or `/provider/callback` with `?provider=`. */
+    public static function callbackProvider(string $route, array $query): ?string
+    {
+        if ($route === "/provider/callback") {
+            return sanitize_key(is_string($query["provider"] ?? null) ? $query["provider"] : "");
+        }
+        if (preg_match('#\A/callback/([^/]+)\z#', $route, $match) === 1) {
+            return sanitize_key(rawurldecode($match[1]));
+        }
+        return null;
     }
     /** Where the hosted screen may continue after sign-in (issuer-relative): a pending authorization, nothing else. */
     public static function continuation(mixed $target): string

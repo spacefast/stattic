@@ -7,6 +7,8 @@ export interface WooCartState {
   loading: boolean;
   /** True while a write waits for Woo. */
   pending: boolean;
+  /** True after an order succeeds until Woo confirms the cart again. */
+  stale: boolean;
   /** The last failure. A refused write stays until the next write starts, so a later write that was
    * already queued and succeeds does not hide it. A failed read stays until Woo next answers with a cart. */
   error: Error | undefined;
@@ -38,7 +40,7 @@ export function createCartStore(client: WooCartClient | WooTokenCartClient = car
   const shared = wooCartStores.get(client);
   if (shared) return shared;
 
-  const initial: WooCartState = { cart: undefined, loading: true, pending: false, error: undefined };
+  const initial: WooCartState = { cart: undefined, loading: true, pending: false, stale: false, error: undefined };
   let state = initial;
   let confirmed: WooCart | undefined;
   const optimistic = new Set<(current: WooCart) => WooCart>();
@@ -73,7 +75,7 @@ export function createCartStore(client: WooCartClient | WooTokenCartClient = car
   /** Woo gave a cart. That answers a failed read; a refused write stays until the next write starts. */
   function answered(): Partial<WooCartState> {
     answeredAt = Date.now();
-    return state.error !== undefined && state.error === failedRead ? { loading: false, error: undefined } : { loading: false };
+    return { loading: false, stale: false, ...(state.error === failedRead ? { error: undefined } : {}) };
   }
 
   function describe(error: unknown): Error {
@@ -91,7 +93,7 @@ export function createCartStore(client: WooCartClient | WooTokenCartClient = car
     const next = enqueue(async () => {
       try {
         const cart = await client.get();
-        if (cart !== confirmed) receive(cart);
+        if (cart !== confirmed || state.stale) receive(cart);
         return cart;
       } catch (error) {
         failedRead = describe(error);
@@ -116,17 +118,22 @@ export function createCartStore(client: WooCartClient | WooTokenCartClient = car
       let changes: Partial<WooCartState> = { loading: false };
       try {
         const answer = await run();
-        confirmed = cartOf(answer) ?? receivedDuringWrite ?? confirmed;
-        changes = answered();
+        const current = cartOf(answer) ?? receivedDuringWrite;
+        if (current) {
+          confirmed = current;
+          changes = answered();
+        } else {
+          changes.stale = true;
+        }
         return answer;
       } catch (error) {
         // Woo sends the current cart with a 409. Any other refusal rolls back to the confirmed cart.
         const current = (error instanceof WooStoreError ? error.cart : undefined) ?? receivedDuringWrite;
         if (current) {
           confirmed = current;
-          answeredAt = Date.now();
+          changes = answered();
         }
-        changes = { loading: false, error: describe(error) };
+        changes.error = describe(error);
         throw error;
       } finally {
         writing = false;
@@ -176,20 +183,26 @@ export function createCartStore(client: WooCartClient | WooTokenCartClient = car
     })),
   };
 
-  // The order is queued behind the cart's writes and holds `pending`. The cart shown stays as it is
-  // until the read the client makes after the order answers.
+  const reread = () => { refresh().catch(() => undefined); };
   if ("checkout" in client) {
-    (actions as WooTokenCartActions).checkout = (input) => write(() => client.checkout(input), (current) => current, () => undefined);
+    (actions as WooTokenCartActions).checkout = async (input) => {
+      const order = await write(async () => {
+        // Observe the client's post-order read even if the store has no subscribers.
+        const stop = client.subscribe((cart) => { receivedDuringWrite = cart; });
+        try { return await client.checkout(input); } finally { stop(); }
+      }, (current) => current, () => undefined);
+      if (state.stale) reread();
+      return order;
+    };
   }
 
   // The cart can change while this page is not looked at: another tab, or an order placed before the
   // browser restores this page from its back/forward cache. Ask again when the page is shown.
   type Listens = { addEventListener?(type: string, run: (event: unknown) => void): void; removeEventListener?(type: string, run: (event: unknown) => void): void };
   const page = () => (globalThis as { document?: Listens & { visibilityState?: string } }).document;
-  const reread = () => { refresh().catch(() => undefined); };
   const shown = () => {
     // Switching tabs back and forth asks once per SHOWN_AGAIN_MS at most; a cart Woo just confirmed is current.
-    if (page()?.visibilityState === "visible" && Date.now() - answeredAt >= SHOWN_AGAIN_MS) reread();
+    if (page()?.visibilityState === "visible" && (state.stale || Date.now() - answeredAt >= SHOWN_AGAIN_MS)) reread();
   };
   const restored = (event: unknown) => {
     if ((event as { persisted?: boolean } | null)?.persisted === true) reread();

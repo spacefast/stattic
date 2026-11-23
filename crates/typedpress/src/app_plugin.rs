@@ -141,9 +141,14 @@ fn build_files(
             files.push((at(&format!("{}/{name}", crate::assets::DIR)), bytes.clone()));
         }
     }
-    for (name, sql) in migrations {
-        if name.ends_with(".sql") && !name.contains('/') {
-            files.push((at(&format!("tp/app/migrations/{name}")), sql));
+    for (rel, bytes) in migrations {
+        if let Some((id, file)) = rel.split_once('/')
+            && !id.is_empty()
+            && !id.contains("..")
+            && !file.contains('/')
+            && matches!(file, "migration.sql" | "ops.json")
+        {
+            files.push((at(&format!("tp/app/migrations/{id}/{file}")), bytes));
         }
     }
     let mut has_public = false;

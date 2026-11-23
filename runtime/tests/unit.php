@@ -4391,6 +4391,42 @@ check(
 _stattic_job_runner_unit_rm_recursive($loaderRoot);
 
 
+// --- Sign in with Spacefast redirect URI ---------------------------------------------
+// SpacePress Identity asks through `sp_identity_callback_url`; versions built
+// before it name `/identity/provider/callback` through `home_url()`. Both land
+// on the one callback a Space client accepts, and other providers keep theirs.
+$callbackProbe = sys_get_temp_dir() . '/sf-unit-callback-' . bin2hex(random_bytes(4)) . '.php';
+file_put_contents($callbackProbe, <<<'PHP'
+<?php
+$GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = 'spc_unit';
+$_SERVER['HTTP_HOST'] = 'space.example.test';
+require $argv[1];
+echo json_encode([
+    spacefast_sp_provider_callback_url('https://space.example.test/__spacefast/auth/provider/callback?provider=spacefast', 'spacefast'),
+    spacefast_sp_provider_callback_url('https://space.example.test/__spacefast/auth/provider/callback?provider=google', 'google'),
+    spacefast_tp_provider_callback_url('https://space.example.test/identity/provider/callback?provider=spacefast', '/identity/provider/callback?provider=spacefast'),
+    spacefast_tp_provider_callback_url('https://space.example.test/about', '/about'),
+]);
+PHP);
+$callbackOutput = [];
+$callbackStatus = 1;
+exec(
+    escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($callbackProbe) . ' '
+        . escapeshellarg(__DIR__ . '/../engine/wordpress/typedpress.php') . ' 2>&1',
+    $callbackOutput,
+    $callbackStatus
+);
+@unlink($callbackProbe);
+check(
+    $callbackStatus === 0 && json_decode(implode("\n", $callbackOutput), true) === [
+        'https://space.example.test/__spacefast/oauth/typedpress',
+        'https://space.example.test/__spacefast/auth/provider/callback?provider=google',
+        'https://space.example.test/__spacefast/oauth/typedpress',
+        'https://space.example.test/about',
+    ],
+    'Sign in with Spacefast: new and earlier SpacePress identity both send the Space callback; other providers keep theirs'
+);
+
 // --- Space Users session cookie ------------------------------------------------------
 // A sibling host under the same parent domain can plant a Domain-scoped bare
 // `sfi_session`; only the __Host- name may identify an app user over HTTPS.

@@ -215,7 +215,7 @@ impl Screen<'_, '_, '_> {
             }
             (None, None) => {
                 return Err(Diag::new(span, "adminScreen() needs a `view` (a list) or a `form`")
-                    .help("add `view: { action: listOrders, fields: { ... } }`, where the action is readonly and returns the rows"));
+                    .help("add `view: { action: listOrders, fields: { ... } }`, where listOrders is a query that returns the rows"));
             }
         };
         // `{item.x}` names a field the screen declares, or the list's item key.
@@ -442,7 +442,7 @@ impl Screen<'_, '_, '_> {
         }
     }
 
-    /// `view` or `form`: the readonly action that supplies the data, its fields and layout.
+    /// `view` or `form`: the query that supplies the data, its fields and layout.
     fn source(&self, v: &Value, span: Span, what: &str, keys: &[&str]) -> Result<(Json, Vec<String>)> {
         let o = options(v, span, &format!("`{what}`"), keys, self.ev)?;
         let aspan = self.at(v, "action", span);
@@ -450,10 +450,10 @@ impl Screen<'_, '_, '_> {
         if !action.readonly {
             return Err(Diag::new(
                 aspan,
-                format!("`{what}.action` runs `{}`, which isn't readonly", action.name),
+                format!("`{what}.action` runs `{}`, which isn't a query", action.name),
             )
             .help(format!(
-                "a screen reads its {} through a readonly action: add `readonly: true` to `{}`",
+                "a screen reads its {} through a query: make it `export const {} = query({{ ... }}, ...)`",
                 if what == "view" { "rows" } else { "values" },
                 action.name
             )));

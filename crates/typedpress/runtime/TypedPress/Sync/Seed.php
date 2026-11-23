@@ -127,7 +127,7 @@ final class Seed
         if ($entries === false) { throw new \RuntimeException('Cannot list seed records'); }
         $files = [];
         foreach ($entries as $entry) {
-            // Like the previous glob patterns, ignore hidden files and other extensions.
+            // Hidden files and other extensions are not seed input.
             if ($entry[0] !== '.' && (str_ends_with($entry, '.json') || str_ends_with($entry, '.php'))) {
                 $files[] = rtrim($directory, '/') . '/' . $entry;
             }
@@ -212,7 +212,7 @@ final class Seed
             if ($dry) { throw new SeedDryRun($receipt); }
             return $receipt;
         };
-        if (!$dry) { return $plan(); }
+        if (!$dry) { return \TypedPress\Preview::seeding($plan); }
         try { return $plugin->connection()->transaction($plan); }
         catch (SeedDryRun $rollback) { return $rollback->counts; }
     }

@@ -81,21 +81,14 @@ final class Routes
         return ['records' => array_column($items, 1), 'next' => $more ? $items[$first - 1][0] : null];
     }
 
-    /** Every status, trusted selection; then the viewer's read transforms (field access) as any read. */
+    /** Sync reads every status the viewer may export. */
     private static function rows(string $collection, array $opts, ?Viewer $viewer): array
     {
-        // WordPress's own posts: only what core lets this viewer read (drafts and private posts of
-        // others, password-protected bodies stay out), as the pipeline reads them.
-        $rows = Module::find($collection, $opts);
+        // Apply the native post visibility and collection read rule before the page limit.
         if ($viewer !== null && (db()->schema()->collection($collection)['native'] ?? false)) {
-            $pk = db()->schema()->collection($collection)['primaryKey'];
-            $readable = db()->permittedKeys($collection, 'read', $viewer);
-            if ($readable !== null) {
-                $readable = array_flip(array_map('strval', $readable));
-                $rows = array_values(array_filter($rows, static fn (array $row): bool => isset($readable[(string) $row[$pk]])));
-            }
+            return Module::ensureUids($collection, Module::find($collection, $opts, $viewer));
         }
-        $rows = Module::ensureUids($collection, $rows);
+        $rows = Module::ensureUids($collection, Module::find($collection, $opts));
 
         return Extensions::read($rows, $collection, $viewer);
     }
@@ -165,7 +158,10 @@ final class Routes
         $pk = $spec['primaryKey'];
         $current = self::current($collection, $uid, $viewer);
         $trashed = $current === null && $expect === 'absent' ? Trash::trashed($spec, $uid) : null;
-        $op = $current === null && $trashed === null ? 'create' : 'update';
+        $softDeleted = $current === null && $trashed === null && $expect === 'absent' && !Trash::postBacked($spec) && ($spec['softDelete'] ?? false)
+            ? (db()->findFirst($collection, ['where' => ['uid' => $uid], 'deleted' => 'only'])[$pk] ?? null)
+            : null;
+        $op = $current === null && $trashed === null && $softDeleted === null ? 'create' : 'update';
         // A rule that refuses this viewer whatever the values refuses before anything is looked up.
         if ($viewer !== null && Access::isShorthand(Access::collectionRules($spec)[$op]) && Access::evaluate(Access::collectionRules($spec)[$op], $viewer, $op) === false) {
             throw Access::deny($viewer->user, "$op $collection rows");
@@ -188,6 +184,14 @@ final class Routes
             $current = self::current($collection, $uid, $viewer);
             // Decode again against the restored row, so a body it already holds isn't rewritten (and a
             // read-only one doesn't refuse the restore).
+            $data = Wire::decode($collection, $record, false, $missing, $current['row'] ?? null, $viewer);
+        } elseif ($softDeleted !== null) {
+            if ($viewer !== null && Access::evaluate(Access::collectionRules($spec)['update'], $viewer, 'update', $data, $spec['columns'], $collection) !== true) {
+                throw Access::deny($viewer->user, "restore $collection rows");
+            }
+            self::raiseMissing($missing);
+            db()->restore($collection, [$pk => $softDeleted], false, $viewer);
+            $current = self::current($collection, $uid, $viewer);
             $data = Wire::decode($collection, $record, false, $missing, $current['row'] ?? null, $viewer);
         } elseif ($current === null) {
             if ($viewer !== null) {
@@ -251,7 +255,7 @@ final class Routes
         if ($expect !== self::digestOf($current)) {
             return self::stale($collection, $spec, $viewer, $current, "$collection $uid changed since it was read");
         }
-        if (!Trash::trash($collection, $spec, db()->editorRow($collection, $id))) {
+        if (!Trash::trash($collection, $spec, db()->editorRow($collection, $id), $viewer)) {
             db()->delete($collection, [$pk => $id], false, $viewer);
         }
 

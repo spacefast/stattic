@@ -53,17 +53,32 @@ fn read_tree(root: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-/// The ledger's `.sql` files, by name.
-fn read_sql(dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+/// The ledger's migration folders (`<id>/migration.sql` and `<id>/ops.json`), by relative path.
+fn read_migrations(dir: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::new();
     if dir.is_dir() {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.path().extension().is_some_and(|e| e == "sql") {
-                out.push((
-                    entry.file_name().to_string_lossy().into_owned(),
-                    std::fs::read(entry.path())?,
-                ));
+        let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                let id = entry.file_name().to_string_lossy().into_owned();
+                if !crate::migrate::is_migration_id(&id) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}: invalid migration folder name", path.display()),
+                    ));
+                }
+                for file in ["migration.sql", "ops.json"] {
+                    let f = path.join(file);
+                    if !f.is_file() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("{}: incomplete migration folder (missing {file})", path.display()),
+                        ));
+                    }
+                    out.push((format!("{id}/{file}"), std::fs::read(&f)?));
+                }
             }
         }
     }
@@ -220,12 +235,15 @@ pub(crate) type Files = Vec<(String, Vec<u8>)>;
 /// The app plugin's files (path below the plugins directory, bytes), and the `schema.php` they
 /// were made with.
 pub(crate) fn app_files(project: &Path, migrations: &Path, built: &Built) -> std::io::Result<(String, Files)> {
-    let (schema_php, mut files) = crate::app_plugin::package(built, read_sql(migrations)?, public_files(project)?);
+    let (schema_php, mut files) =
+        crate::app_plugin::package(built, read_migrations(migrations)?, public_files(project)?);
     if built.schema.ships_seed() {
         let seeds = crate::bundle::seed_records(&crate::loader::Disk, project, &built.schema, true)
             .map_err(|e| std::io::Error::other(e.message))?;
         use sha2::{Digest, Sha256};
         let mut hashes = serde_json::Map::new();
+        // Written as PHP. The web server serves the plugin directory, so a `.json` seed here could
+        // be downloaded, and a product's seed holds its paid download's file URL.
         for (name, records) in seeds {
             let php = format!("<?php\nreturn {};\n", crate::compile::php_json(&records));
             hashes.insert(format!("{name}.php"), crate::hex(Sha256::digest(php.as_bytes())).into());
@@ -255,6 +273,20 @@ pub(crate) fn public_files(project: &Path) -> std::io::Result<Files> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bundled_rowbot_excludes_upstream_development_files() {
+        let files: Vec<_> = super::embedded_runtime()
+            .filter_map(|(path, _)| path.strip_prefix("TypedPress/vendor-prefixed/rowbot/"))
+            .collect();
+        assert!(files.contains(&"url/src/URL.php"));
+        assert!(
+            files
+                .iter()
+                .all(|path| { !matches!(path.split('/').nth(1), Some("bin" | "tests" | ".github" | "PHPStan")) }),
+            "{files:?}"
+        );
+    }
+
     use super::write;
 
     #[test]

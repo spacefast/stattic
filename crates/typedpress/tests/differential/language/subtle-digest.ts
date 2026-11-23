@@ -4,9 +4,9 @@
 // files-sdk 3.1.2's sha256Hex is included verbatim. Every action runs under Node and as compiled
 // PHP; the JSON results must be byte-identical. Typed TypeScript refuses crypto.subtle
 // (tests/fixtures/reject-crypto-subtle).
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { digests as digestsImpl } from "./subtle-digest-helpers.mjs";
 
-export const digests = action({ input: {}, handler: async () => await digestsImpl() });
+export const digests = mutation({}, async () => await digestsImpl());
 
 export default defineConfig({ name: "language-subtle-digest" });

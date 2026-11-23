@@ -46,7 +46,8 @@ async function reads() {
 async function writes() {
   const created = await first.posts.create({ title: "Hello", tags: ["news"], sections: [{ layout: "quote", text: "hi" }] });
   expectType<Equal<typeof created, Post>>();
-  const updated = await first.comments.update(created.id, { approved: true });
+  const createdComment = await first.comments.create({ postId: created.id, name: "Reader", body: "Nice post" });
+  const updated = await first.comments.update(createdComment.id, { approved: true });
   expectType<Equal<typeof updated, Comment>>();
 
   const approved = await first.actions.approveComment({ id: 1 });

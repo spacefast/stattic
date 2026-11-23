@@ -62,6 +62,7 @@ const connectorCallBodySchema = z.object({
   tool: z.string(),
   args: z.object({ repo: z.string() }),
   acceptsSharedReads: z.boolean(),
+  requestId: z.string().optional(),
   visitor: z.object({
     subject: z.string(),
     email: z.string(),
@@ -101,15 +102,14 @@ const spPageBodySchema = z.object({
   assetsUrl: z.string().nullable(),
 });
 
-const connectorResponseSchema = z.object({
-  connector: z.object({
-    ok: z.boolean(),
-    state: z.string(),
-    data: z.object({
-      issues: z.array(z.object({ number: z.number(), title: z.string() })),
-    }),
+const connectorAnswerSchema = z.object({
+  ok: z.boolean(),
+  state: z.string(),
+  data: z.object({
+    issues: z.array(z.object({ number: z.number(), title: z.string() })),
   }),
 });
+const connectorResponseSchema = z.object({ connector: connectorAnswerSchema });
 
 const directLoaderResultSchema = z.object({
   prefix: z.string(),
@@ -236,6 +236,12 @@ if (!function_exists('add_filter')) {
         return $default;
     }
 }
+if (!class_exists('WP_Error')) {
+    class WP_Error {
+        public function __construct(public string $code = '', public string $message = '') {}
+        public function get_error_code(): string { return $this->code; }
+    }
+}
 if (!class_exists('WP_REST_Request')) {
     class WP_REST_Request {
         public array $query = [];
@@ -258,6 +264,22 @@ if (!class_exists('WP_REST_Request')) {
                 if ($req->route === '/spacepress/v1/actions/connector-test') {
                     $conn = apply_filters('sp_connectors_call', null, 'github', 'issues.list', ['repo' => 'spacefast']);
                     return new WP_REST_Response(['connector' => $conn], 200, ['X-SpacePress-Handled' => '1']);
+                }
+                if ($req->route === '/spacepress/v1/actions/connector-queued') {
+                    $queued = static fn (string $repo, string $jobId, int $attempt = 1): mixed => apply_filters(
+                        'sp_connectors_call', null, 'github', 'issues.list', ['repo' => $repo],
+                        ['mode' => 'queued', 'jobId' => $jobId, 'attempt' => $attempt]
+                    );
+                    $done = $queued('spacefast', 'job_7');
+                    $down = $queued('down', 'job_8');
+                    $waiting = $queued('approval', 'job_9');
+                    $approved = $queued('approval', 'job_9', 2);
+                    return new WP_REST_Response([
+                        'done' => $done,
+                        'retry' => $down instanceof WP_Error ? $down->get_error_code() : $down,
+                        'waiting' => $waiting instanceof WP_Error ? $waiting->get_error_code() : $waiting,
+                        'approved' => $approved,
+                    ], 200, ['X-SpacePress-Handled' => '1']);
                 }
                 return new WP_REST_Response([
                     'route' => $req->route,
@@ -339,6 +361,14 @@ beforeAll(async () => {
         versionId: request.headers.get("spacefast-version-id"),
         body,
       });
+      if (body.args.repo === "down") return new Response("unavailable", { status: 503 });
+      // The relay replays a request id's run: pending until it is approved, then its result.
+      const earlier = connectorCalls.filter((call) => call.body.requestId === body.requestId);
+      if (body.args.repo === "approval" && earlier.length === 1) {
+        return Response.json({
+          state: { code: "approval_pending", message: "Waiting for approval." },
+        });
+      }
       return Response.json({
         state: { code: "ok", message: "Connected." },
         result: { ok: true, data: { issues: [{ number: 1, title: "SpacePress core" }] } },
@@ -610,6 +640,37 @@ test("SpacePress sp_connectors_call filter calls Spacefast connector relay with 
       email: "viewer@example.test",
     },
   });
+});
+
+test("a queued SpacePress connector call replays by job id and asks for a retry while the relay is down or approval is pending", async () => {
+  connectorCalls.length = 0;
+  const res = await get(rt, HYBRID_HOST, "/wp-json/spacepress/v1/actions/connector-queued", {
+    headers: probeHeaders,
+  });
+  expect(res.status, await res.clone().text()).toBe(200);
+  const body = z
+    .object({
+      done: connectorAnswerSchema,
+      retry: z.string(),
+      waiting: z.string(),
+      approved: connectorAnswerSchema,
+    })
+    .parse(await res.json());
+  expect(body.done).toEqual({
+    ok: true,
+    state: "ok",
+    data: { issues: [{ number: 1, title: "SpacePress core" }] },
+  });
+  expect(body.retry).toBe("spacefast_connector_unavailable");
+  expect(body.waiting).toBe("spacefast_connector_approval_pending");
+  // The retry after approval sends the same request id and gets the run's result.
+  expect(body.approved).toEqual(body.done);
+  expect(connectorCalls.map((call) => call.body.requestId)).toEqual([
+    "spacepress-job:job_7",
+    "spacepress-job:job_8",
+    "spacepress-job:job_9",
+    "spacepress-job:job_9",
+  ]);
 });
 
 test("CF Workers relay spacepress broker forwards visitor cookies or Space service principal with zero deprecated includes", async () => {

@@ -131,7 +131,6 @@ final class Scf
         add_filter('acf/rest/get_field_schema', [self::class, 'restSchema'], 20, 2);
     }
 
-    /** The SCF field array for one column (the field-builder switch, adapted from the original Zero). */
     /** One generated SCF field (rules, validation metadata, field filters), for other field groups (user forms, §6.2). */
     public static function fieldFor(Schema $schema, string $key, string $name, string $col, array $def, array $spec): array
     {

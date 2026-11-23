@@ -211,8 +211,24 @@ pub struct Column {
     pub commerce_meta: bool,
     /// `json<T>()` annotation, module and call position.
     pub ts_type: Option<(crate::ir::TyAnn, usize, crate::diag::Span)>,
-    /// `.was("old")`: the stored name before a rename (spec §2.5).
+    /// `.was("old")`: only in frozen 0.3.0 captures.
     pub was: Option<String>,
+    /// `.column("physical_name")`: physical SQL column name when different from the logical field name.
+    pub storage_name: Option<String>,
+    /// `.alias("old_name")`: accepted API/filter aliases that map to this field.
+    pub aliases: Vec<String>,
+    /// `.searchable()` / `.searchable(false)`: whether `search` matches this field. None: the
+    /// default (`Search\Index::fields`).
+    pub searchable: Option<bool>,
+    /// An input field from an optional property (`limit?: number`): left out, it stays out, so the
+    /// handler reads `undefined` and its destructuring default applies.
+    pub omit: bool,
+    /// An input field typed by the handler's parameter type: the TypeScript type of a `json` field.
+    pub inferred: Option<crate::types::Ty>,
+    /// With `inferred`: that type as the JSON Schema the site validates the value against.
+    pub shape: Option<Json>,
+    /// A nullable input field that must still be sent (`name: string | null`, not `name?:`).
+    pub required: bool,
 }
 
 impl Column {
@@ -246,7 +262,19 @@ impl Column {
             commerce_meta: false,
             ts_type: None,
             was: None,
+            storage_name: None,
+            aliases: Vec::new(),
+            searchable: None,
+            omit: false,
+            inferred: None,
+            shape: None,
+            required: false,
         }
+    }
+
+    /// Physical SQL column name (from `.column(...)`, defaulting to the logical field name).
+    pub fn physical_name(&self) -> &str {
+        self.storage_name.as_deref().unwrap_or(&self.name)
     }
 
     /// §7.3: translated per locale when it or any sub-field is `.localized()`; otherwise synced.
@@ -278,7 +306,8 @@ impl Column {
     /// Writers may omit it on insert.
     pub fn optional_on_insert(&self) -> bool {
         self.read_only
-            || !self.not_null
+            || (!self.not_null && !self.required)
+            || self.omit
             || self.default.is_some()
             || self.auto_increment
             || self.ty == ColType::Slug && self.source.is_some()
@@ -313,19 +342,27 @@ pub enum HookKind {
     AfterUpdate,
     BeforeDelete,
     AfterDelete,
+    BeforeRestore,
+    AfterRestore,
+    BeforePurge,
+    AfterPurge,
     /// A post kind's item became published (created published, updated into it, or a scheduled
     /// item reached its time). Spec §2.8.
     AfterPublish,
 }
 
 impl HookKind {
-    pub const ALL: [HookKind; 7] = [
+    pub const ALL: [HookKind; 11] = [
         HookKind::BeforeCreate,
         HookKind::AfterCreate,
         HookKind::BeforeUpdate,
         HookKind::AfterUpdate,
         HookKind::BeforeDelete,
         HookKind::AfterDelete,
+        HookKind::BeforeRestore,
+        HookKind::AfterRestore,
+        HookKind::BeforePurge,
+        HookKind::AfterPurge,
         HookKind::AfterPublish,
     ];
 
@@ -337,6 +374,10 @@ impl HookKind {
             HookKind::AfterUpdate => "afterUpdate",
             HookKind::BeforeDelete => "beforeDelete",
             HookKind::AfterDelete => "afterDelete",
+            HookKind::BeforeRestore => "beforeRestore",
+            HookKind::AfterRestore => "afterRestore",
+            HookKind::BeforePurge => "beforePurge",
+            HookKind::AfterPurge => "afterPurge",
             HookKind::AfterPublish => "afterPublish",
         }
     }
@@ -379,7 +420,24 @@ impl Access {
 }
 
 /// Operations a collection's access config covers, in schema.php order.
-pub const ACCESS_OPS: [&str; 4] = ["read", "create", "update", "delete"];
+pub const ACCESS_OPS: [&str; 6] = ["read", "create", "update", "delete", "restore", "purge"];
+
+/// Retention policy for revisions (`keepLast` and/or `maxAge`). `None` = `"forever"`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RevisionRetention {
+    pub keep_last: Option<u32>,
+    pub max_age_seconds: Option<u64>,
+}
+
+/// Config-driven retention policy for soft-deleted rows and revisions.
+/// When absent (or `"forever"`), TypedPress never automatically purges deleted rows or revisions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Retention {
+    /// Seconds before soft-deleted rows / trashed posts are auto-purged. `None` = `"forever"`.
+    pub deleted_seconds: Option<u64>,
+    /// Revision retention limits. `None` = `"forever"`.
+    pub revisions: Option<RevisionRetention>,
+}
 
 /// How comments behave on a kind (spec §2.3). `comments: true` is these defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,14 +476,14 @@ pub struct Collection {
     pub existing_table: Option<String>,
     /// `was: "old"`: the stored name before a rename (spec §2.6).
     pub was: Option<String>,
-    /// The registry key an `existingTable` binding was first built under, kept across `was` renames
-    /// (the snapshot's `adoptedAs`). The converter names a Zero 0.8 table's collection after it, so
-    /// this is the name the 0.8 table's digest is over (`TypedPress\Wp\Guard`). Set by the pipeline.
-    pub adopted_as: Option<String>,
     pub label: String,
     pub editor: bool,
     pub drafts: bool,
     pub revisions: bool,
+    /// Native soft delete: default `true` on `collection()` and `table()` (without `existingTable`).
+    pub soft_delete: bool,
+    /// Per-kind retention override; inherits `Schema::retention` (default `"forever"`).
+    pub retention: Option<Retention>,
     /// `staged: false` turns staged versions off for a collection (they need its revisions).
     pub staged: bool,
     /// `comments: true`: the post type supports WordPress comments; every other kind has them off.
@@ -528,6 +586,30 @@ pub struct Action {
     /// from one call: a credential without the grant is not shown the action, and a call is refused
     /// where it reaches that read or ability.
     pub personal: bool,
+    /// With `typed_input`: the handler's first parameter type, which types the handler and its callers.
+    pub input_ty: Option<crate::types::Ty>,
+    /// `query()`: may not write; compiled code that writes fails the build where it writes.
+    pub query: bool,
+    /// `rateLimit`: at most this many calls per window, counted per user (per address when signed
+    /// out). None: unlimited.
+    pub rate_limit: Option<RateLimit>,
+    /// The input is the handler's first parameter type (`query`/`mutation`): resolved by the
+    /// compiler before anything reads `input` (see `compile::Compiler::infer_inputs`).
+    pub typed_input: bool,
+}
+
+/// `rateLimit: "10/min"`: `count` calls per `window` seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub count: u32,
+    pub window: u32,
+}
+
+/// When Action Scheduler runs a job by itself: `job({ every: "1h" }, fn)` or `cron("0 3 * * *", fn)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Schedule {
+    Every(u64),
+    Cron(String),
 }
 
 /// One `wp-hooks/` handler, registered with `add_filter`/`add_action`.
@@ -546,6 +628,12 @@ pub struct Job {
     pub handler: String,
     pub retries: u32,
     pub agents: bool,
+    /// Run by Action Scheduler on this schedule, scheduled once per build and unscheduled when it goes.
+    pub schedule: Option<Schedule>,
+    /// The input is the handler's first parameter type (see [`Action::typed_input`]).
+    pub typed_input: bool,
+    /// With `typed_input`: the handler's first parameter type.
+    pub input_ty: Option<crate::types::Ty>,
 }
 
 #[derive(Debug, Clone)]
@@ -646,6 +734,20 @@ pub struct Schema {
     /// `defineConfig({ runtimeSchema: true })` (spec §2.10): the site's content schema may change
     /// while it runs. Holds what the build read from the lock `typedpress pull` writes.
     pub runtime_schema: Option<RuntimeSchema>,
+    /// `defineConfig({ retention })`: global retention policy for soft-deleted rows and revisions.
+    /// `None` means `"forever"` (never automatically purge).
+    pub retention: Option<Retention>,
+    /// Opt-in migration providers registered by plugins (`use: [destructiveMigrations()]`).
+    pub migration_providers: Vec<MigrationProviderConfig>,
+}
+
+/// Configuration for a CLI-only opt-in migration provider declared by a plugin package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationProviderConfig {
+    pub id: String,
+    pub cli_only: bool,
+    pub require_archive: bool,
+    pub allow_raw_sql: bool,
 }
 
 /// `output` in `defineConfig`, Astro's word for it.
@@ -707,6 +809,8 @@ impl Default for Schema {
             pings: true,
             sealed: None,
             runtime_schema: None,
+            retention: None,
+            migration_providers: Vec::new(),
         }
     }
 }
@@ -818,9 +922,6 @@ pub struct App {
     pub files: IndexMap<String, AppFile>,
     /// Content-owned pages (`page.md`), by URL path: what the site stores as a WordPress Page.
     pub content: IndexMap<String, crate::content_page::Page>,
-    /// The table is a 0.3.0 capture's `routes` config (`extract::legacy::routes`), served as 0.3.0
-    /// served it: matched per method, reads trusted, the front end left to the theme.
-    pub legacy_routes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -841,9 +942,83 @@ pub struct AppRoute {
     pub preloads: Vec<crate::assets::FontPreload>,
     /// The page is prebuilt: its file says `prerender = true`, or the config says `output: "static"`.
     pub prerender: bool,
+    pub plan: Option<RoutePlan>,
     /// The kind whose `url` this page serves (spec §2.7), with each pattern placeholder's folder
     /// parameter: the page receives that kind's `item`, and a missing one is a 404.
     pub kind: Option<(String, Vec<(String, String)>)>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheClass {
+    Immutable,
+    AnonymousPublic,
+    RequestPrivate,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RouteDependency {
+    List {
+        collection: String,
+    },
+    Count {
+        collection: String,
+    },
+    Search {
+        collection: String,
+    },
+    Row {
+        collection: String,
+    },
+    RouteItem {
+        collection: String,
+        bindings: std::collections::BTreeMap<String, String>,
+    },
+    Relation {
+        collection: String,
+        field: String,
+        target: String,
+    },
+    Global {
+        name: String,
+        fields: Vec<String>,
+    },
+    Option {
+        name: String,
+    },
+    Opaque {
+        call: String,
+    },
+}
+
+impl RouteDependency {
+    pub fn opaque(call: impl Into<String>) -> Self {
+        Self::Opaque { call: call.into() }
+    }
+
+    pub fn purge_key(&self) -> Option<String> {
+        match self {
+            Self::List { collection } | Self::Count { collection } | Self::Search { collection } => {
+                Some(collection.clone())
+            }
+            Self::Relation { target, .. } => Some(target.clone()),
+            Self::Global { name, .. } => Some(format!("global:{name}")),
+            Self::Option { name } => Some(format!("option:{name}")),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutePlan {
+    pub class: CacheClass,
+    pub window: u32,
+    pub dependencies: Vec<RouteDependency>,
+    pub search: Vec<String>,
+    pub fixed_purge: bool,
 }
 
 #[derive(Debug, Clone, Default)]

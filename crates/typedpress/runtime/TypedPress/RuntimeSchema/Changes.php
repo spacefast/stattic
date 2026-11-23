@@ -41,7 +41,7 @@ final class Changes
      * and `system` and `staged`: their reference keys `_tp_system` and `_tp_staged` are where
      * TypedPress keeps a revision's snapshot and a post's staged version.
      */
-    private const RESERVED = ['id', 'author', 'createdAt', 'updatedAt', 'status', 'publishedAt', 'url', 'terms', 'uid', 'locale', 'translations', 'system', 'staged'];
+    private const RESERVED = ['id', 'author', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'deletedGroup', '_live', 'status', 'publishedAt', 'url', 'terms', 'uid', 'locale', 'translations', 'system', 'staged'];
     /** Kinds every site has (spec §2.1), and the names the API serves beside them. */
     public const BUILTIN_KINDS = ['users', 'comments', 'posts', 'pages', 'media', 'categories', 'tags', 'menus', 'settings', 'me', 'actions', 'globals', 'files', 'services', 'auth'];
 

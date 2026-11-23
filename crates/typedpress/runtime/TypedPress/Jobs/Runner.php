@@ -118,9 +118,8 @@ final class Runner
 
     /**
      * Waiting (pending or failed) jobs that have no `tp_job` action at all get one, at their runAt.
-     * A job and its action are written in one transaction, so this finds only jobs a runtime before
-     * this one left in `tp__outbox`, ones queued before Action Scheduler was ready in a request that
-     * died, and ones whose actions someone deleted. A job with any action, even one an administrator
+     * This finds jobs queued before Action Scheduler was ready in a request that died, and jobs
+     * whose actions someone deleted. A job with any action, even one an administrator
      * cancelled in Tools > Scheduled Actions, is left alone (`wp typedpress jobs cancel` cancels a job).
      * At most $max jobs per call, in pages of 100 in runAt order (the jobs table's `due` index).
      *
@@ -191,7 +190,7 @@ final class Runner
         $recovered = self::recover();
         $now = Js::now();
 
-        return db()->transaction(static function () use ($now, $recovered): array {
+        $result = db()->transaction(static function () use ($now, $recovered): array {
             $stuck = Storage::run('SELECT "id" FROM {jobs} WHERE "state" = \'running\' AND "lockedAt" < ?' . Storage::forUpdate(), [Js::iso($now - self::STUCK_MS)]);
             foreach ($stuck as $row) {
                 Storage::run('UPDATE {jobs} SET "state" = \'pending\', "lockedAt" = NULL, "runAt" = ? WHERE "id" = ?', [Js::iso($now), $row['id']]);
@@ -202,5 +201,11 @@ final class Runner
 
             return ['recovered' => $recovered, 'requeued' => count($stuck), 'swept' => (int) $old[0]['n']];
         });
+        $plugin = \TypedPress\Wp\Plugin::instance();
+        if ($plugin !== null) {
+            \TypedPress\Wp\Retention::sweep($plugin);
+        }
+
+        return $result;
     }
 }

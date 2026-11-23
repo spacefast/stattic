@@ -90,7 +90,7 @@ final class Extensions
         self::$hooks['execute'][] = $fn;
     }
 
-    /** @param callable(string $op, string $collection, array $row, ?array $previous): void $fn after the app hook, inside the transaction */
+    /** @param callable(string $op, string $collection, array $row, ?array $previous, ?Viewer $viewer): void $fn after the app hook, inside the transaction */
     public static function onWritten(callable $fn): void
     {
         self::$hooks['written'][] = $fn;
@@ -165,10 +165,10 @@ final class Extensions
         }
     }
 
-    public static function written(string $op, string $collection, array $row, ?array $previous): void
+    public static function written(string $op, string $collection, array $row, ?array $previous, ?Viewer $viewer = null): void
     {
         foreach (self::$hooks['written'] ?? [] as $fn) {
-            $fn($op, $collection, $row, $previous);
+            $fn($op, $collection, $row, $previous, $viewer);
         }
     }
 

@@ -2,9 +2,9 @@
 // model runs exactly: each element is a plain value or the settled result of a TypedPress call. Async
 // iterables and generators work in imported JavaScript (the job queue) and stay refused here.
 // Every action runs under Node and as compiled PHP; the JSON results must be byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 async function double(n: number): Promise<number> {
   return n * 2;

@@ -22,8 +22,6 @@ oxc_ast_visit = "=0.158.0"
 oxc_parser = "=0.158.0"
 oxc_span = "=0.158.0"
 oxc_syntax = "=0.158.0"
-# codegen, semantic and the transformer compile 0.8 client apps to browser modules, natively and in
-# the browser build (src/config_migrate/app/client.rs).
 oxc_codegen = "=0.158.0"
 oxc_isolated_declarations = { version = "=0.158.0", optional = true }
 oxc_semantic = "=0.158.0"

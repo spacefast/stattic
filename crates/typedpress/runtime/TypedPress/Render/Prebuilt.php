@@ -113,16 +113,7 @@ final class Prebuilt
                 as_enqueue_async_action(self::ACTION, [[]], 'typedpress');
             }
         }, 20);
-        // Site-wide settings every page shows, which no content write announces: every file goes.
-        foreach (['blogname', 'blogdescription', 'blog_public', 'blog_charset', 'WPLANG', 'permalink_structure', 'home', 'siteurl', 'site_icon', 'wpcom_public_coming_soon', 'wpcom_coming_soon', 'theme_mods_' . get_option('stylesheet')] as $option) {
-            // A first save creates the option (add_option_*), a later one updates it (update_option_*).
-            add_action("add_option_$option", self::forget(...), 10, 0);
-            add_action("update_option_$option", self::forget(...), 10, 0);
-        }
-        add_action('wp_update_nav_menu', static fn () => self::forget(), 10, 0);
-        add_action('wp_delete_nav_menu', static fn () => self::forget(), 10, 0);
         add_action('update_option_active_sitewide_plugins', static fn () => self::forget(), 10, 0);
-        add_action('switch_theme', self::forget(...), 10, 0);
         add_action('upgrader_process_complete', self::forget(...), 10, 0);
         add_action('activated_plugin', self::forget(...), 10, 0);
         add_action('deactivated_plugin', self::forget(...), 10, 0);
@@ -534,12 +525,8 @@ final class Prebuilt
         if (str_contains(strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? '')), 'text/markdown')) {
             return;
         }
-        if (Cache::viewerCookie()) {
-            return;
-        }
         $request = (string) ($_SERVER['REQUEST_URI'] ?? '/');
-        // `//x` is a scheme-relative URL to wp_parse_url(), not a path: not a prebuilt page's URL.
-        if (str_starts_with($request, '//')) {
+        if (Cache::viewerCookie() || !Cache::shareable($request, [])) {
             return;
         }
         $uri = (string) (wp_parse_url($request, PHP_URL_PATH) ?? '/');
@@ -590,8 +577,7 @@ final class Prebuilt
         // and the request reaches WordPress, where its gate runs as before.
         // Not served at all while the site hides itself from the public (a private or coming-soon
         // site), whatever plugin does the hiding later in the request.
-        $public = (int) get_option('blog_public', 1) >= 0 && !get_option('wpcom_public_coming_soon') && !get_option('wpcom_coming_soon');
-        if (!apply_filters('tp_prebuilt_serve', $public, $html)) {
+        if (!RoutePlan::publicRequest() || !apply_filters('tp_prebuilt_serve', true, $html)) {
             return;
         }
         // One open: the handle's content is tagged, measured and sent, so the ETag names exactly the
@@ -712,7 +698,7 @@ final class Prebuilt
         }
         $code = (int) wp_remote_retrieve_response_code($page);
         $refused = is_wp_error($page) ? '' : (string) wp_remote_retrieve_header($page, strtolower(self::REFUSED));
-        if ($code !== 200 || $refused !== '') {
+        if ($code !== 200 || $refused !== '' || wp_remote_retrieve_header($page, 'set-cookie') !== '') {
             @unlink($html);
             @unlink($md);
             if ($refused === self::UNRECORDED) {
@@ -737,7 +723,8 @@ final class Prebuilt
         // The twin is written only from an answer rendered for this prerender, as the page is.
         $twinOk = !is_wp_error($markdown) && (int) wp_remote_retrieve_response_code($markdown) === 200
             && wp_remote_retrieve_header($markdown, 'x-typedpress-prerendered') === '1'
-            && (string) wp_remote_retrieve_header($markdown, strtolower(self::REFUSED)) === '';
+            && wp_remote_retrieve_header($markdown, strtolower(self::REFUSED)) === ''
+            && wp_remote_retrieve_header($markdown, 'set-cookie') === '';
         if (!self::write($html, (string) wp_remote_retrieve_body($page), $path, $started)) {
             return true;
         }
@@ -850,7 +837,7 @@ final class Prebuilt
                 $path = substr($path, strlen($base)) ?: '/';
             }
             $path = $path === '/' ? '/' : rtrim($path, '/');
-            $match = AppRouter::match($app['routes'], $path, $app['routeIndex'] ?? null);
+            $match = AppRouter::match($app['routes'], $path, $app['routeIndex']);
             if ($match !== null && ($match['route']['prerender'] ?? false)) {
                 $hit[$path] = true;
             }

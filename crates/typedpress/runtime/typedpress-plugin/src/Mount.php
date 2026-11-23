@@ -54,6 +54,8 @@ final class Mount
             }
             self::$mounted = ['build' => $build, 'mode' => $mode, 'deployment' => $deployment];
             // Last, so a host's own transport answers first and this one only sends what nothing took.
+            // Current runtimes fall back to wp_mail themselves; a build compiled before that refuses mail
+            // in managed mode without a transport, and the plugin may still mount one (a rollback).
             add_filter('tp_mail_transport', [self::class, 'mail'], PHP_INT_MAX, 2);
         } catch (\Throwable $error) {
             // WordPress keeps serving without the app; the TypedPress screen and `typedpress push` show why.

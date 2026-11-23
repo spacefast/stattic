@@ -133,12 +133,19 @@ export async function lock(state) {
   }
 }
 
-async function migrationHistory(project) {
+export async function migrationHistory(project) {
   const directory = join(project, 'tp/_generated/migrations');
   if (!await exists(directory)) return {};
   const history = {};
-  for (const name of (await readdir(directory)).filter((name) => name.endsWith('.sql')).sort()) {
-    history[name] = createHash('sha256').update(await readFile(join(directory, name))).digest('hex');
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    if (!entry.isDirectory()) continue;
+    for (const file of ['ops.json', 'migration.sql']) {
+      const path = join(directory, entry.name, file);
+      if (await exists(path)) {
+        history[`${entry.name}/${file}`] = createHash('sha256').update(await readFile(path)).digest('hex');
+      }
+    }
   }
   return history;
 }
@@ -765,7 +772,7 @@ async function main() {
     if (revision === publishedRevision && !managed.owner.pending) return revision;
     managed.owner.pending = {
       migrations: await migrationHistory(project),
-      snapshot: await json(join(project, 'tp/_generated/migrations/snapshot.json')),
+      snapshot: (await json(join(content, 'typedpress-deployment.json'))).snapshot,
     };
     await atomicJson(managed.marker, managed.owner);
     return revision;
@@ -792,7 +799,7 @@ async function main() {
   const configure = async (allowDestructive = false) => {
     const previous = applied;
     applied = null;
-    const snapshot = await json(join(project, 'tp/_generated/migrations/snapshot.json'));
+    const snapshot = (await json(join(content, 'typedpress-deployment.json'))).snapshot;
     const manifest = await json(join(content, 'typedpress-manifest.json'));
     const prints = await pluginPrints(content, manifest);
     const schema = await fileHash(join(content, 'plugins', `typedpress-app-${manifest.app}`, 'tp/app/schema.php'));

@@ -18,8 +18,8 @@ pub struct Lowerer {
     pub function_this: std::cell::Cell<bool>,
     /// Set when the current ordinary function's body (or one of its arrows) reads `this`.
     pub reads_this: std::cell::Cell<bool>,
-    /// The `this.<key>` names the current ordinary function reads (`Func::this_reads`).
-    pub this_reads: std::cell::RefCell<Vec<String>>,
+    /// The receiver reads of the current ordinary function (`Func::this_reads`).
+    pub this_reads: std::cell::RefCell<Vec<ThisRead>>,
     /// Set when the current ordinary function's body, or one of its arrows, names `arguments`
     /// (`Func::uses_arguments`).
     pub uses_arguments: std::cell::Cell<bool>,
@@ -364,11 +364,22 @@ impl Lowerer {
             }
         };
         for d in &v.declarations {
+            let pat = self.pattern(&d.id)?;
+            let init = d
+                .init
+                .as_ref()
+                .map(|e| match (&pat, e.without_parentheses()) {
+                    (Pat::Obj { props, rest: None, .. }, a::Expression::ThisExpression(t)) => {
+                        self.this_expr(t.span, props.iter().map(|(key, _)| ThisRead::Field(key.clone())))
+                    }
+                    _ => self.expr(e),
+                })
+                .transpose()?;
             out.push(Stmt::Decl {
                 kind,
-                pat: self.pattern(&d.id)?,
+                pat,
                 ann: self.annotation(d.type_annotation.as_ref())?,
-                init: d.init.as_ref().map(|e| self.expr(e)).transpose()?,
+                init,
                 span: self.sp(d.span),
             });
         }
@@ -641,17 +652,18 @@ impl Lowerer {
     }
 
     fn function(&self, f: &a::Function<'_>) -> Result<Rc<Func>> {
-        let saved = self.class_context.replace(false);
-        let super_call = self.super_call.replace(false);
-        let function_this = self.function_this.replace(true);
-        let reads_this = self.reads_this.replace(false);
-        let this_reads = self.this_reads.replace(Vec::new());
         let this_ann = f
             .this_param
             .as_ref()
             .map(|t| self.annotation(t.type_annotation.as_ref()))
             .transpose()?
             .flatten();
+        let saved = self.class_context.replace(false);
+        let super_call = self.super_call.replace(false);
+        let before_super = self.before_super.replace(false);
+        let function_this = self.function_this.replace(true);
+        let reads_this = self.reads_this.replace(false);
+        let this_reads = self.this_reads.replace(Vec::new());
         let result = self.function_inner(f).map(|func| {
             // A `this` annotation alone (`this: void`, a common idiom) types nothing the body
             // reads, so only a body that reads `this` takes the hidden receiver.
@@ -674,6 +686,7 @@ impl Lowerer {
                         },
                     ),
                     ann: this_ann.clone(),
+                    declared: None,
                     default: None,
                     optional: false,
                     rest: false,
@@ -684,6 +697,7 @@ impl Lowerer {
         });
         self.class_context.set(saved);
         self.super_call.set(super_call);
+        self.before_super.set(before_super);
         self.function_this.set(function_this);
         self.reads_this.set(reads_this);
         self.this_reads.replace(this_reads);
@@ -823,6 +837,7 @@ impl Lowerer {
                                     },
                                 ),
                                 ann: None,
+                                declared: None,
                                 default: None,
                                 optional: false,
                                 rest: false,
@@ -927,6 +942,7 @@ impl Lowerer {
                                     },
                                 ),
                                 ann: None,
+                                declared: None,
                                 default: None,
                                 optional: false,
                                 rest: false,
@@ -1149,6 +1165,10 @@ impl Lowerer {
             out.push(Param {
                 pat: self.pattern(&item.pattern)?,
                 ann: self.annotation(item.type_annotation.as_ref())?,
+                declared: match &item.type_annotation {
+                    Some(t) if self.erase_types => self.ty(&t.type_annotation).ok(),
+                    _ => None,
+                },
                 default: item.initializer.as_ref().map(|e| self.expr(e)).transpose()?,
                 optional: item.optional,
                 rest: false,
@@ -1159,6 +1179,7 @@ impl Lowerer {
             out.push(Param {
                 pat: self.pattern(&r.rest.argument)?,
                 ann: self.annotation(r.type_annotation.as_ref())?,
+                declared: None,
                 default: None,
                 optional: false,
                 rest: true,
@@ -1875,29 +1896,7 @@ impl Lowerer {
                 s.span,
                 ExprKind::Sequence(s.expressions.iter().map(|e| self.expr(e)).collect::<Result<_>>()?),
             ),
-            E::ThisExpression(t) if self.class_context.get() => self.mk(t.span, ExprKind::Ident("this".into())),
-            // An ordinary function's `this` is the receiver it was called with (undefined for a
-            // plain call, as in strict mode); its arrows see the same `this`.
-            E::ThisExpression(t) if self.function_this.get() => {
-                self.reads_this.set(true);
-                self.mk(t.span, ExprKind::Ident("this".into()))
-            }
-            E::ThisExpression(t) if self.before_super.get() => {
-                return self.unsupported(
-                    t.span,
-                    "`this` outside a class body's initialized instance (before `super()` in a derived constructor)",
-                    "a derived constructor has no `this` until `super()` runs; compute the value from the parameters, or assign the field after `super()`",
-                );
-            }
-            // Node runs a CommonJS module with `this` bound to its initial `module.exports`.
-            E::ThisExpression(t) if self.commonjs_this => self.mk(t.span, ExprKind::Ident(COMMONJS_THIS.into())),
-            E::ThisExpression(t) => {
-                return self.unsupported(
-                    t.span,
-                    "`this` at module level or in a module-level arrow",
-                    "module code has no receiver (`this` is undefined there); pass the value as a parameter, or use a function or class method that is called on an object",
-                );
-            }
+            E::ThisExpression(t) => self.this_expr(t.span, [ThisRead::Whole])?,
             E::ClassExpression(c) => {
                 return self.unsupported(
                     c.span,
@@ -1945,6 +1944,32 @@ impl Lowerer {
         })
     }
 
+    fn this_expr(&self, span: oxc_span::Span, reads: impl IntoIterator<Item = ThisRead>) -> Result<Expr> {
+        let name = if self.class_context.get() {
+            "this"
+        } else if self.before_super.get() {
+            return self.unsupported(
+                span,
+                "`this` outside a class body's initialized instance (before `super()` in a derived constructor)",
+                "a derived constructor has no `this` until `super()` runs; compute the value from the parameters, or assign the field after `super()`",
+            );
+        } else if self.function_this.get() {
+            self.reads_this.set(true);
+            self.this_reads.borrow_mut().extend(reads);
+            "this"
+        } else if self.commonjs_this {
+            // Node binds a CommonJS module's `this` to its initial `module.exports`.
+            COMMONJS_THIS
+        } else {
+            return self.unsupported(
+                span,
+                "`this` at module level or in a module-level arrow",
+                "module code has no receiver (`this` is undefined there); pass the value as a parameter, or use a function or class method that is called on an object",
+            );
+        };
+        Ok(self.mk(span, ExprKind::Ident(name.into())))
+    }
+
     fn cast(&self, span: oxc_span::Span, e: &a::Expression<'_>, ty: &a::TSType<'_>) -> Result<Expr> {
         if self.erase_types {
             return self.expr(e);
@@ -1968,7 +1993,9 @@ impl Lowerer {
                 );
             }
             let saved = self.class_context.replace(false);
+            let before_super = self.before_super.replace(true);
             let args = self.args(&c.arguments);
+            self.before_super.set(before_super);
             self.class_context.set(saved);
             return Ok(self.mk(
                 c.span,
@@ -1996,32 +2023,34 @@ impl Lowerer {
     }
 
     fn member(&self, m: &a::MemberExpression<'_>) -> Result<Expr> {
+        let object = |e: &a::Expression<'_>, key: Option<&str>| match (e.without_parentheses(), key) {
+            (a::Expression::ThisExpression(t), Some(key)) => self.this_expr(t.span, [ThisRead::Field(key.into())]),
+            _ => self.expr(e),
+        };
         Ok(match m {
-            a::MemberExpression::StaticMemberExpression(s) => {
-                if matches!(s.object, a::Expression::ThisExpression(_))
-                    && self.function_this.get()
-                    && !self.class_context.get()
-                {
-                    self.this_reads.borrow_mut().push(s.property.name.to_string());
-                }
+            a::MemberExpression::StaticMemberExpression(s) => self.mk(
+                s.span,
+                ExprKind::Member {
+                    obj: Box::new(object(&s.object, Some(s.property.name.as_str()))?),
+                    prop: s.property.name.to_string(),
+                    optional: s.optional,
+                    prop_span: self.sp(s.property.span),
+                },
+            ),
+            a::MemberExpression::ComputedMemberExpression(c) => {
+                let key = match c.expression.without_parentheses() {
+                    a::Expression::StringLiteral(s) => s.value.as_str(),
+                    _ => None,
+                };
                 self.mk(
-                    s.span,
-                    ExprKind::Member {
-                        obj: Box::new(self.expr(&s.object)?),
-                        prop: s.property.name.to_string(),
-                        optional: s.optional,
-                        prop_span: self.sp(s.property.span),
+                    c.span,
+                    ExprKind::Index {
+                        obj: Box::new(object(&c.object, key)?),
+                        index: Box::new(self.expr(&c.expression)?),
+                        optional: c.optional,
                     },
                 )
             }
-            a::MemberExpression::ComputedMemberExpression(c) => self.mk(
-                c.span,
-                ExprKind::Index {
-                    obj: Box::new(self.expr(&c.object)?),
-                    index: Box::new(self.expr(&c.expression)?),
-                    optional: c.optional,
-                },
-            ),
             a::MemberExpression::PrivateFieldExpression(p) => self.mk(
                 p.span,
                 ExprKind::Member {
@@ -2984,6 +3013,26 @@ fn decode_jsx_entities(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn derived_constructors_cannot_read_this_from_the_enclosing_function_before_super() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("typedpress.config.ts");
+        for constructor in [
+            "constructor(value = this.x) { super(); }",
+            "constructor() { super(this.x); }",
+        ] {
+            let source = format!("class Base {{}} function f() {{ class Derived extends Base {{ {constructor} }} }}");
+            std::fs::write(&entry, &source).unwrap();
+            let Err(error) = crate::loader::load(&entry) else {
+                panic!("accepted this before super() in {constructor}");
+            };
+            assert!(error.message.contains("before `super()`"), "{error:?}");
+            assert_eq!(&source[error.span.start as usize..error.span.end as usize], "this");
+        }
+        std::fs::write(&entry, "class Base {} function f() { class Derived extends Base { constructor(read = function () { return this; }) { super(); } } }").unwrap();
+        crate::loader::load(&entry).unwrap();
+    }
+
     /// A JavaScript string can hold a lone UTF-16 surrogate and UTF-8 can't, so every place the
     /// source spells one is refused at that string, never replaced with U+FFFD. Tagged templates
     /// are refused when compiled, so `String.raw` can still read their raw text

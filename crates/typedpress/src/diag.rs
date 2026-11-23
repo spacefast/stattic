@@ -149,6 +149,14 @@ pub fn register_file(path: &Path, source: &str) -> u32 {
     })
 }
 
+pub(crate) fn source_text(span: Span) -> Option<String> {
+    FILES.with(|files| {
+        let files = files.borrow();
+        let (_, source) = files.get(span.file as usize)?;
+        source.get(span.start as usize..span.end as usize).map(str::to_owned)
+    })
+}
+
 /// `file:line:column` of a span's start, relative to the file name only, for runtime messages.
 pub fn site(span: Span) -> String {
     FILES.with(|files| {

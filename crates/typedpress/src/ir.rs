@@ -54,8 +54,8 @@ pub struct Func {
     /// the body reads `this`. Calls supply it; it is not an argument. Class methods also take
     /// `this` first but their callers pass it explicitly, so this is false for them.
     pub receives_this: bool,
-    /// The `this.<key>` names the body (or one of its arrows) reads, in source order.
-    pub this_reads: Vec<String>,
+    /// What the body (or one of its arrows) reads from its receiver, in source order.
+    pub this_reads: Vec<ThisRead>,
     /// The body, or an arrow function inside it, names `arguments`. Only then does an ordinary
     /// function get the `arguments` object (an arrow's `arguments` is its defining function's).
     pub uses_arguments: bool,
@@ -64,6 +64,21 @@ pub struct Func {
     pub span: Span,
     /// Module the function was declared in, for resolving types.
     pub module: usize,
+}
+
+#[derive(Debug)]
+pub enum ThisRead {
+    Field(String),
+    Whole,
+}
+
+impl ThisRead {
+    pub fn needs(&self, key: &str) -> bool {
+        match self {
+            Self::Field(name) => name == key,
+            Self::Whole => true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -76,6 +91,9 @@ pub enum FnBody {
 pub struct Param {
     pub pat: Pat,
     pub ann: Option<TyAnn>,
+    /// The written annotation where `ann` is erased (installed package TypeScript), kept only to
+    /// read a `query()`, `mutation()` or `job()` input from its handler's parameter type.
+    pub declared: Option<TyAnn>,
     pub default: Option<Expr>,
     pub optional: bool,
     pub rest: bool,
@@ -135,6 +153,7 @@ impl ClassField {
                     },
                 ),
                 ann: None,
+                declared: None,
                 default: None,
                 optional: false,
                 rest: false,

@@ -3,8 +3,8 @@
  * Deleting the TypedPress Runtime plugin runs this without loading it.
  *
  * Removed: the runtime's options (system-tables version, prepared job groups, private-files signing secret and probe
- * verdict) and its recurring maintenance action. Kept: the shared system tables (jobs, the outbox
- * that earlier runtimes wrote, receipts, private file records, revisions, the migration ledger) and private files on disk; they
+ * verdict) and its recurring maintenance action. Kept: the shared system tables (jobs, receipts,
+ * private file records, revisions, the migration ledger) and private files on disk; they
  * belong to the apps' content. A reinstalled runtime re-checks its tables on the first request.
  */
 declare(strict_types=1);

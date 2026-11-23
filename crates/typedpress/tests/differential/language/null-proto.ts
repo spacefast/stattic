@@ -4,10 +4,10 @@
 // JSON behave as on an ordinary object. Tables are built both at module scope (configuration
 // evaluation, captured into PHP) and inside handlers. Every action runs under Node and as
 // compiled PHP; the JSON results must be byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { picomatchLookups, thisNullProto, untypedNullProto } from "./null-proto-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 const INPUTS = ["***", "**/**", "**/**/**", "**", "alnum", "xdigit", "missing", "constructor", "toString", "valueOf", "hasOwnProperty", "__proto__", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"];
 

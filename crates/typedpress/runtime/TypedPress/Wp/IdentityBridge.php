@@ -9,13 +9,13 @@ use TypedPress\HttpError;
 
 /**
  * Feature 4 on WordPress (§6.2) when typedpress-identity is active: guests are `tp_guest` WordPress
- * users signed in through `Accounts::issueForUser` for the auto-registered `app_zero_guest`
+ * users signed in through `Accounts::issueForUser` for the auto-registered `app_typedpress_guest`
  * client; sign-in, refresh and upgrade belong to the issuer at `/identity`. Without typedpress-identity
  * the `/auth` routes answer 404 (WordPress cookies and application passwords still work).
  */
 final class IdentityBridge implements Issuer
 {
-    public const GUEST_CLIENT = 'app_zero_guest';
+    public const GUEST_CLIENT = 'app_typedpress_guest';
     private static bool $hooked = false;
 
     public function __construct(private readonly Connection $db)

@@ -48,7 +48,7 @@ pub fn column(c: &Column, output: bool) -> Value {
         ColType::Timestamp => json!({ "type": ["string", "integer"] }),
         ColType::Date if output => json!({ "type": "string", "format": "date" }),
         ColType::Date => json!({ "type": "string" }),
-        ColType::Json => json!({ "type": ANY }),
+        ColType::Json => c.shape.clone().unwrap_or_else(|| json!({ "type": ANY })),
         ColType::Media | ColType::File => media(),
         ColType::MediaList => json!({ "type": "array", "items": media() }),
         // `ref(kind).many()`: target ids; a `with` load puts the rows in their place.
@@ -116,9 +116,10 @@ pub fn row(c: &Collection) -> Value {
         .map(|col| (col.name.clone(), column(col, true)))
         .collect();
     let mut row = json!({ "type": "object", "properties": props });
-    // A kind with staged versions: every row the API and abilities give out carries its `_rev`
-    // (docs/staged.md), as `Wp\Abilities\Register` declares it.
-    if c.editor && c.revisions && c.staged {
+    // A kind with `_rev` optimistic concurrency (post kinds with staged versions, or SQL tables with
+    // revisions): every row the API and abilities give out carries its `_rev`, matching `Wp\Abilities\Register`.
+    let has_table = !c.editor && !c.auth && c.taxonomy.is_none();
+    if (c.editor && c.revisions && c.staged) || (has_table && c.revisions) {
         row["properties"]["_rev"] = json!({ "type": "string" });
     }
     row
@@ -254,17 +255,29 @@ fn blocks(layouts: Option<&IndexMap<String, IndexMap<String, Column>>>, output: 
     }
 }
 
-/// The fields `search` matches (`Search\Index::fields`): the title, the content, and every `text` or
-/// `richText` field without an `enum`; never a hidden or other system field.
+/// The fields `search` matches (`Search\Index::fields`). `.searchable(false)` leaves a field out,
+/// even the title or content; `.searchable()` puts one in. When no field of the kind is marked
+/// `.searchable()`, the title, the content and every `text` or `richText` field without an `enum` are
+/// matched; once one is, the title, the content and the marked fields are. Never a hidden field, nor
+/// another system field.
 pub fn searchable(c: &Collection) -> Vec<&str> {
+    let chosen = c.columns.values().any(|col| col.searchable == Some(true));
     c.columns
         .values()
         .filter(|col| {
             let designated =
                 c.title.as_deref() == Some(col.name.as_str()) || c.content.as_deref() == Some(col.name.as_str());
             !col.hidden
-                && (designated
-                    || !col.system && matches!(col.ty, ColType::Text | ColType::RichText) && col.enum_values.is_none())
+                && match col.searchable {
+                    Some(on) => on,
+                    None => {
+                        designated
+                            || !chosen
+                                && !col.system
+                                && matches!(col.ty, ColType::Text | ColType::RichText)
+                                && col.enum_values.is_none()
+                    }
+                }
         })
         .map(|col| col.name.as_str())
         .collect()

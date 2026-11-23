@@ -52,7 +52,7 @@ pub fn describe(schema: &Schema) -> Json {
         .map(|(key, def)| {
             (
                 key.clone(),
-                json!({ "table": format!("tp_{key}"), "owner": def["join"]["owner"], "target": def["join"]["target"],
+                json!({ "table": format!("tp__join_{key}"), "owner": def["join"]["owner"], "target": def["join"]["target"],
                     "columns": ["owner_id", "target_id", "position"], "indexes": indexes(key, &snapshot) }),
             )
         })
@@ -110,7 +110,7 @@ fn at(c: &Collection, place: &str, table: &str, name: &str, col: &Column) -> Jso
         "table" if col.ty == ColType::RefList => {
             json!({ "join": col.references.as_ref().and_then(|r| r.join.clone()) })
         }
-        "table" => json!({ "table": table, "column": name }),
+        "table" => json!({ "table": table, "column": col.physical_name() }),
         "posts" => {
             let core = |field: &str| json!({ "post": field });
             if col.ty == ColType::RefList {

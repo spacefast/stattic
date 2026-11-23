@@ -30,6 +30,6 @@ class JsError extends \Exception
 
     public function __unserialize(array $data): void
     {
-        $this->__construct($data[0], $data[1], $data[2] ?? true);
+        $this->__construct($data[0], $data[1], $data[2]);
     }
 }

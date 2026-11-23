@@ -278,7 +278,8 @@ final class Loader
                 if ($kind !== null) {
                     // The kind with its built-in fields (a collection's title and body), then its own
                     // fields under the same rules as fields added to any kind.
-                    $own = $section === 'globals' ? [] : array_intersect_key($kind['columns'], ['id' => 1, 'title' => 1, 'content' => 1, 'status' => 1, 'publishedAt' => 1]);
+                    $sysCols = ['status' => 1, 'publishedAt' => 1, 'author' => 1, 'createdAt' => 1, 'updatedAt' => 1, 'deletedAt' => 1, 'deletedBy' => 1, 'deletedGroup' => 1];
+                    $own = $section === 'globals' ? [] : array_intersect_key($kind['columns'], ['id' => 1, 'title' => 1, 'content' => 1] + $sysCols);
                     $fields = array_diff_key($kind[$inner], $own);
                     $kind[$inner] = $own;
                     $raw[$section][$name] = $kind;
@@ -286,7 +287,7 @@ final class Loader
                     if ($section === 'collections') {
                         // Columns in the order the compiler writes them: system ones last.
                         $columns = $raw[$section][$name]['columns'];
-                        $raw[$section][$name]['columns'] = array_diff_key($columns, ['status' => 1, 'publishedAt' => 1]) + array_intersect_key($columns, ['status' => 1, 'publishedAt' => 1]);
+                        $raw[$section][$name]['columns'] = array_diff_key($columns, $sysCols) + array_intersect_key($columns, $sysCols);
                     }
                 }
             }

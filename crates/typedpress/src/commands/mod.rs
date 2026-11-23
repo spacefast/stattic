@@ -1,6 +1,7 @@
 pub(crate) mod abilities;
 pub(crate) mod add;
 pub(crate) mod build;
+pub(crate) mod danger;
 pub(crate) mod deploy;
 mod describe;
 mod dev;

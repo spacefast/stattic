@@ -74,10 +74,21 @@ impl Compiler<'_, '_> {
     /// it names one.
     pub(super) fn action_named(&mut self, e: &Expr) -> Result<Option<String>> {
         let ExprKind::Ident(n) = &e.kind else { return Ok(None) };
-        Ok(match self.resolve(n, e.span)? {
+        let name = match self.resolve(n, e.span)? {
             Resolved::Value(Value::Action(a), _) => self.action_values.get(&(Rc::as_ptr(&a) as usize)).cloned(),
             _ => None,
-        })
+        };
+        // A form posts a write: a query reads, so it is no form's action.
+        if let Some(name) = &name
+            && self.schema.actions[name].query
+        {
+            return err_help(
+                e.span,
+                format!("`{name}` is a query, which a form can't post to"),
+                format!("a form runs a mutation: make it `export const {name} = mutation({{ ... }}, ...)`"),
+            );
+        }
+        Ok(name)
     }
 
     /// `useFormState(subscribe)`: what the last submit of that action's form left for
@@ -95,15 +106,24 @@ impl Compiler<'_, '_> {
             );
         };
         let result = self.action_results.get(&action).cloned().unwrap_or(Ty::Unknown);
+        // `error.fields` and `values` are keyed by the action's input fields: a name it doesn't
+        // take is a build error where it is read, not a value that is never there.
+        let by_field = Ty::Obj(
+            self.schema.actions[&action]
+                .input
+                .keys()
+                .map(|name| (name.clone(), (Ty::Str, true)))
+                .collect(),
+        );
         let mut error = IndexMap::new();
         error.insert("code".to_string(), (Ty::Str, false));
         error.insert("message".to_string(), (Ty::Str, false));
-        error.insert("fields".to_string(), (Ty::Map(Box::new(Ty::Str)), false));
+        error.insert("fields".to_string(), (by_field.clone(), false));
         let mut state = IndexMap::new();
         state.insert("pending".to_string(), (Ty::Bool, false));
         state.insert("error".to_string(), (Ty::union([Ty::Obj(error), Ty::Null]), false));
         state.insert("result".to_string(), (Ty::union([result, Ty::Null]), false));
-        state.insert("values".to_string(), (Ty::Map(Box::new(Ty::Str)), false));
+        state.insert("values".to_string(), (by_field, false));
         Ok(Out::atom(
             format!("\\TypedPress\\Render\\Forms::state({})", php_str(&action)),
             Ty::Obj(state),
@@ -274,6 +294,7 @@ impl Compiler<'_, '_> {
 
     /// `notFound()` and `redirect(url, status?)`: they never return.
     pub(super) fn app_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        self.route_opaque(name);
         match name {
             "useFormState" => self.use_form_state(args, span),
             "notFound" => {
@@ -340,6 +361,12 @@ impl Compiler<'_, '_> {
 
     /// `<Content value>`, `<Html value>` and `<Link href>`: the props object is the JSX's.
     pub(super) fn app_component(&mut self, name: &str, props: &Expr, span: Span) -> Result<Out> {
+        if name == "LoginForm" {
+            self.route_private();
+        }
+        if !matches!(name, "Link" | "Pagination" | "Search") {
+            self.route_opaque(name);
+        }
         let ExprKind::Object(fields) = &props.kind else {
             unreachable!("lowering builds a props object literal")
         };

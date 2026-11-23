@@ -20,7 +20,7 @@ final class Sessions
     }
     public function __construct(private DB $db, private Security $security) {
         // Session cookies on the scoped REST surface are opt-in: a host serving its own frontend
-        // (`tp_identity_rest_cookie_auth`) or a migrated host with legacy cookie aliases.
+        // (`tp_identity_rest_cookie_auth`).
         add_filter('rest_authentication_errors', function ($result) {
             if (is_wp_error($result) || is_user_logged_in() || ($result !== null && $result !== true)
                 || !self::restCookieAuth()) { return $result; }
@@ -61,8 +61,7 @@ final class Sessions
     }
     private static function restCookieAuth(): bool
     {
-        return (bool) apply_filters('tp_identity_rest_cookie_auth', false)
-            || apply_filters('tp_identity_session_cookie_aliases', []) !== [];
+        return (bool) apply_filters('tp_identity_rest_cookie_auth', false);
     }
     /**
      * Whether this request comes from the site's own pages: an `Origin` that is the site's, or
@@ -123,17 +122,7 @@ final class Sessions
     }
     public function find(string $secret): ?array
     {
-        $alias = false;
-        if ($secret === '') {
-            foreach (apply_filters('tp_identity_session_cookie_aliases', []) as $name) {
-                if (is_string($name) && is_string($_COOKIE[$name] ?? null) && $_COOKIE[$name] !== '') {
-                    $secret = $_COOKIE[$name];
-                    $alias = true;
-                    break;
-                }
-            }
-        }
-        if ($secret === "" || strlen($secret) > 512) {
+        if ($secret === "" || strlen($secret) > 512 || !Schema::ready()) {
             return null;
         }
         if (preg_match("/\\A[A-Za-z0-9_]{1,56}\\z/", $this->db->prefix) !== 1) {
@@ -148,7 +137,7 @@ final class Sessions
             $session = null;
         }
         // A secret {@see reopen()} replaced a moment ago (parallel first requests of one browser).
-        if (!$session && Schema::linksWordPressSessions()) {
+        if (!$session) {
             $session = $this->db->row(
                 "SELECT s.* FROM {$this->db->prefix}sessions s JOIN {$this->db->prefix}accounts a ON a.wp_user_id=s.wp_user_id WHERE s.previous_secret_hash=%s AND s.previous_until>%d AND s.revoked_at IS NULL AND s.expires_at>%d AND a.status='active'",
                 self::digest($secret),
@@ -165,12 +154,6 @@ final class Sessions
             $this->db->run("UPDATE {$this->db->prefix}tokens SET revoked=1 WHERE session_id=%s", $session["id"]);
             return null;
         }
-        $session ??= Legacy\SessionUpgrade::find($this->db, $secret);
-        $session ??= Legacy\ZeroSession::find($this->db, $secret);
-        if ($alias && $session) {
-            self::cookie($secret, (int) $session['expires_at']);
-            $_COOKIE[self::cookieName()] = $secret;
-        }
         return $session;
     }
     /**
@@ -184,7 +167,7 @@ final class Sessions
      */
     public static function linked(array $session): bool
     {
-        $verifier = Schema::linksWordPressSessions() ? ($session["wp_token"] ?? null) : null;
+        $verifier = $session["wp_token"] ?? null;
         if (!is_string($verifier) || $verifier === "") {
             return true;
         }
@@ -196,7 +179,7 @@ final class Sessions
      */
     public function reopen(int $uid, string $verifier): ?array
     {
-        if (!Schema::linksWordPressSessions()) {
+        if (!Schema::ready()) {
             return null;
         }
         return $this->db->transaction(function () use ($uid, $verifier) {
@@ -307,9 +290,7 @@ final class Sessions
                 );
                 return null;
             }
-            return Schema::linksWordPressSessions()
-                ? $this->db->row("SELECT wp_token FROM {$this->db->prefix}sessions WHERE id=%s AND wp_user_id=%d", $id, $uid)["wp_token"] ?? null
-                : null;
+            return $this->db->row("SELECT wp_token FROM {$this->db->prefix}sessions WHERE id=%s AND wp_user_id=%d", $id, $uid)["wp_token"] ?? null;
         });
         if ($id === null) {
             \WP_Session_Tokens::get_instance($uid)->destroy_all();

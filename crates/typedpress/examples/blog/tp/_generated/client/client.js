@@ -8,6 +8,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": { "posts": {
 				"kind": "many",
@@ -23,6 +24,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": {
 				"authorId": {
@@ -45,7 +47,8 @@ export const SCHEMA = {
 			"path": "comments",
 			"primaryKey": "id",
 			"drafts": false,
-			"revisions": false,
+			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": { "postId": {
 				"kind": "one",
@@ -61,6 +64,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": {},
 			"media": [],
@@ -154,6 +158,7 @@ function listParams(q) {
 	if (q.where !== undefined) p.set("where", JSON.stringify(q.where));
 	if (typeof q.status === "string") p.set("status", q.status);
 	if (typeof q.locale === "string") p.set("locale", q.locale);
+	if (typeof q.deleted === "string") p.set("deleted", q.deleted);
 	if (q.orderBy !== undefined) {
 		const order = orderParam(q.orderBy);
 		if (order) p.set("orderBy", order);
@@ -176,6 +181,7 @@ function liveArgs(q) {
 	if (typeof q.offset === "number") args.offset = q.offset;
 	if (typeof q.cursor === "string") args.cursor = q.cursor;
 	if (typeof q.locale === "string") args.locale = q.locale;
+	if (typeof q.deleted === "string") args.deleted = q.deleted;
 	if (isObject(q.with) && Object.keys(withJson(q.with)).length > 0) args.with = withJson(q.with);
 	return args;
 }
@@ -1096,6 +1102,8 @@ export function createClient(options = {}) {
 			create: (data) => wrote(request("POST", path, { json: data }), key),
 			update: (id, patch) => wrote(request("PATCH", one(id), { json: patch }), key),
 			delete: (id, options) => wrote(request("DELETE", one(id), { query: conditions(options) }), key),
+			restore: (id) => wrote(request("POST", `${one(id)}/restore`), key),
+			purge: (id) => wrote(request("DELETE", `${one(id)}/purge`), key),
 			revisions: {
 				// Every revision, newest first: the API pages them ({ data, cursor }), this follows the cursor.
 				list: async (id) => {
@@ -1114,7 +1122,11 @@ export function createClient(options = {}) {
 					return all;
 				},
 				get: (id, rid) => request("GET", `${one(id)}/revisions/${seg(rid)}`),
-				restore: (id, rid) => request("POST", `${one(id)}/revisions/${seg(rid)}/restore`)
+				diff: (id, from, to) => request("GET", `${one(id)}/revisions/diff`, { query: new URLSearchParams({
+					from: String(from),
+					to: String(to)
+				}) }),
+				restore: (id, rid) => wrote(request("POST", `${one(id)}/revisions/${seg(rid)}/restore`), key)
 			},
 			stage: (id, patch) => request("PATCH", `${one(id)}/staged`, { json: patch }),
 			staged: (id) => request("GET", `${one(id)}/staged`),

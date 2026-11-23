@@ -76,4 +76,9 @@ final class Dialect
     {
         return $this->quoteOpen . str_replace($this->quoteClose, $this->quoteClose . $this->quoteClose, $ident) . $this->quoteClose;
     }
+
+    public function writeLock(): string
+    {
+        return $this->translated ? '' : ' FOR UPDATE';
+    }
 }

@@ -851,7 +851,7 @@ test("guests refresh at <issuer>/token with the clientId they were issued, and u
     const base = `${origin}/wp-json/typedpress/v1`;
     const first = mod.createClient({ url: base, auth: { issuer: `${origin}/identity`, clientId: "app_blog", redirectUri: "https://blog.test/callback" } });
     reply = (s) => {
-      if (s.path === "/wp-json/typedpress/v1/auth/guest") return tokens(1, { id: 9, name: "Guest", role: "guest" }, { clientId: "app_zero_guest" });
+      if (s.path === "/wp-json/typedpress/v1/auth/guest") return tokens(1, { id: 9, name: "Guest", role: "guest" }, { clientId: "app_typedpress_guest" });
       if (s.path === "/identity/token") return { status: 200, body: JSON.stringify({ access_token: "at_2", refresh_token: "rt_2", expires_in: 3600 }) };
       if (s.path === "/identity/handoff") return { status: 200, body: JSON.stringify({ handoff: "h1.secret" }) };
       return s.headers.authorization === "Bearer at_2" ? ok({ id: 1 })() : problem(401, "unauthenticated");
@@ -864,7 +864,7 @@ test("guests refresh at <issuer>/token with the clientId they were issued, and u
       seen.map((s) => [s.path, s.headers.authorization ?? "-"]),
       [["/wp-json/typedpress/v1/posts", "Bearer za_1"], ["/identity/token", "-"], ["/wp-json/typedpress/v1/posts", "Bearer at_2"]],
     );
-    assert.deepEqual(form(seen[1]), { grant_type: "refresh_token", refresh_token: "zr_1", client_id: "app_zero_guest" });
+    assert.deepEqual(form(seen[1]), { grant_type: "refresh_token", refresh_token: "zr_1", client_id: "app_typedpress_guest" });
 
     seen = [];
     void first.auth.upgrade();

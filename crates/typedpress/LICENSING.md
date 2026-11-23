@@ -12,6 +12,7 @@ of WordPress. Everything else is MIT.
 
 | Path | What |
 |---|---|
+| `migrate/zero/wp/` | the offline WordPress importer, licensed under GPL-2.0-or-later |
 | `runtime/TypedPress/` | the PHP runtime, shipped as the `typedpress-runtime` plugin |
 | `runtime/identity/` | the `typedpress-identity` plugin and its screens |
 | `runtime/admin/` | the `typedpress-admin` plugin and its screens, emitted unless `admin: false` |
@@ -74,7 +75,8 @@ Third-party code keeps its own license and is not relicensed by this file:
 | `runtime/identity/build/` | the bundled identity screens |
 | `runtime/admin/build/` | the bundled admin screens |
 | `examples/emdash/` | examples adapted from EmDash (MIT, Copyright Cloudflare Inc.); each keeps its upstream license file |
-| `src/config_migrate/app/client08/preact/` | Preact (MIT), for migrated 0.8 client pages |
+| `migrate/src/zero/client08/preact/` | Preact (MIT), for imported client pages |
+
 | `runtime/client/commerce.ts`, `runtime/client/cart-store.ts`, `runtime/client/cart-react.ts` | the Woo cart client, its optimistic store and its React hooks, adapted from Spacefast's Woo Store SDK ([spacefast/woo-store-sdk](https://github.com/spacefast/woo-store-sdk), MIT): the cart contracts, the error handling and the optimistic quantity and removal updates follow `@woo/storefront-core` (`packages/core/src/contracts.ts`, `transport.ts` and `resources/cart.ts`). That repository has no root LICENSE file; each of its packages declares MIT in its `package.json`. |
 | `tests/fixtures/openapi-3.1.schema.json` | the OpenAPI Initiative's JSON Schema for OpenAPI 3.1 documents (Apache-2.0), unmodified; a test validates the generated `openapi.json` with it and no build ships it |
 

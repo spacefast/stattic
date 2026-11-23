@@ -213,20 +213,6 @@ final class WpFiles implements FileStorage
         $this->db->onRollback(static fn () => @unlink($dest));
     }
 
-    /** Guarded upgrade for tables created before rows carried their app. */
-    public static function upgrade(\TypedPress\Store $store): void
-    {
-        $db = $store instanceof CompositeStore ? $store->db : null;
-        if ($db === null) {
-            return;
-        }
-        $table = $db->prefix() . 'tp__files';
-        $have = $db->run('SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?', [$table, 'app']);
-        if ($have === []) {
-            $store->applySystemStatements(["ALTER TABLE `{prefix}tp__files` ADD COLUMN `app` VARCHAR(191) NOT NULL DEFAULT '' AFTER `id`, ADD KEY `app` (`app`)"]);
-        }
-    }
-
     public function insert(array $row): int
     {
         if (Uploads::active()) {

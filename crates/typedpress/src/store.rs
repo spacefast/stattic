@@ -347,22 +347,18 @@ fn write_baseline(store: &Store, build_id: &str, app: &Path) -> Result<(), Diag>
     for name in ["snapshot.json", crate::storage::FILE] {
         files.push((name.into(), fs::read(app.join(name)).map_err(io("read baseline"))?));
     }
-    let mut migrations: Vec<_> = fs::read_dir(app.join("migrations"))
-        .map_err(io("read baseline"))?
-        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect::<Result<_, _>>()
-        .map_err(io("read baseline"))?;
-    migrations.sort();
-    for name in migrations {
-        files.push((
-            format!("migrations/{name}"),
-            fs::read(app.join("migrations").join(&name)).map_err(io("read baseline"))?,
-        ));
+    let migration_files = tree_files(&app.join("migrations")).map_err(io("read baseline"))?;
+    for (rel, bytes) in migration_files {
+        files.push((format!("migrations/{rel}"), bytes));
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
     fs::create_dir_all(staged.join("migrations")).map_err(io("write baseline"))?;
     for (rel, bytes) in &files {
-        fs::write(staged.join(rel), bytes).map_err(io("write baseline"))?;
+        let path = staged.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io("write baseline"))?;
+        }
+        fs::write(&path, bytes).map_err(io("write baseline"))?;
         hashes.insert(rel.clone(), hex(Sha256::digest(bytes)).into());
     }
     let mut manifest = serde_json::to_vec_pretty(&serde_json::Value::Object(hashes)).expect("hashes serialize");

@@ -4,7 +4,7 @@
 use crate::diag::Span;
 use crate::ir::{Func, TyAnn};
 use crate::num::js_number_to_string;
-use crate::schema::{ColType, RefAction, RelKind};
+use crate::schema::{ColType, RefAction};
 use indexmap::IndexMap;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -130,14 +130,11 @@ pub enum Value {
     Bound(Rc<Value>, Rc<str>),
     Column(Rc<ColBuilder>),
     Collection(Rc<CollectionVal>),
-    Store(Rc<ActionVal>),
-    /// `locations.id` / `r.locations.id`
+    /// A build-time field reference, such as `badges.label` in a hook module.
     ColRef(Rc<ColRefVal>),
-    Relation(Rc<RelVal>),
+    Store(Rc<ActionVal>),
     Action(Rc<ActionVal>),
     Job(Rc<ActionVal>),
-    /// `route({ method, path, handler })`: read only from a 0.3.0 capture (`eval::legacy`).
-    Route(Rc<ActionVal>),
     /// `definePlugin({ name, hooks, actions, jobs })`, registered in `defineConfig({ use })`.
     Plugin(Rc<ActionVal>),
     /// `adminScreen({ ... })`: a TypedPress Admin screen, registered by its export (docs/admin-screens.md).
@@ -285,6 +282,8 @@ pub enum Builtin {
     DefineRelations,
     DefineConfig,
     DefinePlugin,
+    /// `destructiveMigrations(options?)` from `"typedpress/danger"`.
+    DestructiveMigrations,
     /// `adminScreen({ ... })` from "typedpress".
     AdminScreen,
     /// `adminWidget({ ... })` from "typedpress".
@@ -293,19 +292,22 @@ pub enum Builtin {
     AdminDashboard,
     /// `item(path)` from "typedpress": the `{item.<path>}` placeholder of a screen action's input.
     Item,
-    Action,
+    /// `job(options, handler)`.
     Job,
-    /// `route()`, exported only to a 0.3.0 capture (`eval::legacy`).
-    Route,
+    /// `query(options, handler)`.
+    Query,
+    /// `mutation(options, handler)`.
+    Mutation,
+    /// `cron(schedule, handler)`.
+    Cron,
     Files,
     Env,
     Once,
-    Jobs,
     /// `"node:crypto"`: the module namespace (`None`) or one of its supported functions.
     NodeCrypto(Option<&'static str>),
     /// `mail.send(message)` from "typedpress" / "spacepress", compiled to `TypedPress\Mail::send`.
     Mail,
-    /// `connectors.call(role, tool, args?)` from "spacepress" / "typedpress", compiled to `TypedPress\Connectors::call`.
+    /// `connectors.call(role, tool, args?)` and `connectors.enqueue(role, tool, args?, opts?)` from "spacepress" / "typedpress", compiled to `TypedPress\Connectors::call` / `::enqueue`.
     Connectors,
     /// `abilities.call(name, input)` from "php/wordpress", compiled to `TypedPress\Wp\Abilities\Call::run`.
     Abilities,
@@ -318,8 +320,6 @@ pub enum Builtin {
     Ref,
     /// `terms(taxonomy)` from "typedpress": an item's terms of one taxonomy.
     Terms,
-    /// `r.one.<key>` / `r.many.<key>` inside defineRelations.
-    RelFn(RelKind, Rc<str>),
     /// `wp` from "typedpress": WordPress's own kinds.
     Wp,
     /// `wp.posts`: core's posts, whose `.extend()` and `.clone()` make kinds.
@@ -378,10 +378,16 @@ pub struct ColBuilder {
     pub show_if: Option<Value>,
     pub ui: Option<Value>,
     pub localized: bool,
-    /// `file(decks)`: the bucket, by value; a 0.3.0 capture names it (`file({ bucket: "decks" })`).
-    pub bucket: Option<BucketRef>,
+    /// `file(decks)`: the exported bucket.
+    pub bucket: Option<Rc<FileBucketVal>>,
     /// `.was("old")`: the stored name this field had before a rename.
     pub was: Option<String>,
+    /// `.column("physical_name")`: decouples the TypeScript field name from the physical SQL column name.
+    pub storage_name: Option<String>,
+    /// `.alias("old_name")`: accepted API/filter aliases that map to this field.
+    pub aliases: Vec<String>,
+    /// `.searchable()` / `.searchable(false)`: whether `search` matches this field.
+    pub searchable: Option<bool>,
     pub span: Span,
     /// Where each modifier was applied (`unique`, `references`, ...), for precise errors.
     pub mods: Vec<(&'static str, Span)>,
@@ -401,7 +407,7 @@ impl ColBuilder {
 
 #[derive(Debug)]
 pub struct GlobalVal {
-    /// Bound once from the export name (or the `globals` key); a 0.3.0 capture names it in the call.
+    /// Bound once from the export name.
     pub name: OnceCell<String>,
     pub fields: IndexMap<String, Rc<ColBuilder>>,
     pub options: Option<Value>,
@@ -418,8 +424,6 @@ pub enum RefTarget {
     Kind(Value),
     /// `ref(() => kind)`, for a kind declared later or the kind itself.
     Thunk(Rc<Closure>),
-    /// `.references(() => kind.column)`: only the 0.3.0 reading (`eval::legacy`).
-    Column(Rc<Closure>),
 }
 
 #[derive(Debug, Clone)]
@@ -518,32 +522,8 @@ pub struct ColRefVal {
 }
 
 #[derive(Debug)]
-pub struct RelVal {
-    pub kind: RelKind,
-    pub target: Rc<str>,
-    pub config: Option<Value>,
-}
-
-/// The bucket a `file()` field holds ids from.
-#[derive(Debug, Clone)]
-pub enum BucketRef {
-    Value(Rc<FileBucketVal>),
-    Name(String),
-}
-
-impl BucketRef {
-    /// The registered bucket name, once registration has named it.
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            BucketRef::Value(b) => b.name.get().map(String::as_str),
-            BucketRef::Name(n) => Some(n),
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct FileBucketVal {
-    /// Bound once from the export name (or the `files` key); a 0.3.0 capture names it in the call.
+    /// Bound once from the export name.
     pub name: OnceCell<String>,
     pub options: Value,
     pub span: Span,
@@ -551,8 +531,52 @@ pub struct FileBucketVal {
 
 #[derive(Debug)]
 pub struct ActionVal {
+    /// The options object (`query(options, handler)`), or the whole definition of a form that has
+    /// no separate handler (`adminScreen` or `definePlugin`).
     pub config: Value,
     pub span: Span,
+    /// What built it, which decides how extraction reads it.
+    pub form: FnForm,
+    /// The handler passed after the options; `Value::Undef` for the one-object forms.
+    pub handler: Value,
+}
+
+/// The builder behind an [`ActionVal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FnForm {
+    /// `query(options, handler)`: reads only.
+    Query,
+    /// `mutation(options, handler)`: may write, in one transaction.
+    Mutation,
+    /// `job(options, handler)`.
+    Job,
+    /// `cron("0 3 * * *", handler)`: a job Action Scheduler runs on the schedule.
+    Cron,
+    /// One configuration object, for builders like `adminScreen` and `definePlugin`.
+    Object,
+    /// A built-in plugin shipped inside TypedPress itself (e.g. `destructiveMigrations()` from
+    /// `"typedpress/danger"`). Skips npm package isolation because it has no user-authored code.
+    BuiltinPlugin,
+}
+
+impl ActionVal {
+    pub fn object(config: Value, span: Span) -> Self {
+        ActionVal {
+            config,
+            span,
+            form: FnForm::Object,
+            handler: Value::Undef,
+        }
+    }
+
+    pub fn builtin_plugin(config: Value, span: Span) -> Self {
+        ActionVal {
+            config,
+            span,
+            form: FnForm::BuiltinPlugin,
+            handler: Value::Undef,
+        }
+    }
 }
 
 /// Lexical scope. Function values keep their defining scope alive, so the
@@ -652,7 +676,6 @@ impl Value {
             Value::Str(_) => "string",
             Value::Builtin(
                 Builtin::Db
-                | Builtin::Jobs
                 | Builtin::Global("Math" | "JSON" | "console" | "globalThis" | "navigator" | "process")
                 | Builtin::ObjectPrototype,
             ) => "object",
@@ -680,10 +703,8 @@ impl Value {
             Value::Column(c) => format!("a {} column", c.ty.name()),
             Value::Collection(c) => format!("collection \"{}\"", c.table()),
             Value::ColRef(r) => format!("column {}.{}", r.collection.table(), r.column),
-            Value::Relation(_) => "a relation".into(),
             Value::Action(_) => "an action".into(),
             Value::Job(_) => "a job".into(),
-            Value::Route(_) => "a route".into(),
             Value::Plugin(_) => "a plugin".into(),
             Value::Screen(_) => "an admin screen".into(),
             Value::Widget(_) => "an admin widget".into(),

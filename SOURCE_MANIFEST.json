@@ -1,7 +1,7 @@
 {
-  "revision": "0dfb67af57c676757b7445fb5628bfb355fb98e4",
-  "sourceHash": "e3217744a802cf81d6357c00ff3e2fab06b98236641bbf82f0e105b3af46cc1f",
-  "manifestSha256": "62598d2d0480406feb696a079cc64d949f31aaacc46ab09815bcf5688074e0d9",
+  "revision": "b9da4dc3b55e832bb62c43f9ac5bf114bc318cba",
+  "sourceHash": "c9335ca944277fa048be9bb283de70d41419552fcdf9f2714efa077134a37d2d",
+  "manifestSha256": "27469ce573d8fd1213b18b46b9035a3f33562da76c9de695d8086bf29d28186f",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "7b9bc713f8c672b41735b537b5ac89bbe296e2009c04b4d1fa902e193533450d"
+      "sha256": "f0671ffbce488819900b8721041e5be3b9da64580db382630089572809ea82bd"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "bb55c1029a399e53d1e652a50392ceef26c87cb01f220bd7891c5f2e3606a12e"
+      "sha256": "59d1c05f8513c087fc80a7f882866e0d3d9dd35361c9eaf687b8d16c0736a5cb"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -233,11 +233,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "818dcd03b313bb2db4a7014eb936eef73d948735b62eb1ed394b0255af3114cc"
+      "sha256": "a534e04446c7ebdce5c7bca84f52669f67ae22c0d5299d247ce437a42051253c"
     },
     {
       "path": "crates/stattic-runtime-core/src/spacepress.rs",
-      "sha256": "c009c0970394a0f959baa05a43ca8d719cb51121c65d7c4621bc5f785cc6fa7c"
+      "sha256": "dfc167b7087a4c99ef7b911c08ebf5e339646241bcf38b6a95a5f5fe64564765"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -413,7 +413,7 @@
     },
     {
       "path": "crates/typedpress/Cargo.toml",
-      "sha256": "18caffa441ae3823fc13b92d5c22420254b7c934c42c8935839eceaecc5fa09f"
+      "sha256": "2ac7eeb5587e58fdaeea91e213b80ca60829ae1f3661b1aa6a22e574fbdde5f2"
     },
     {
       "path": "crates/typedpress/LICENSE",
@@ -421,11 +421,11 @@
     },
     {
       "path": "crates/typedpress/LICENSING.md",
-      "sha256": "19ff7a5bdfaf59b62f71bec008f8658d50be8c542043d6e708123a01462e1700"
+      "sha256": "9ad62336a1555a8e5f6dc016db171a6d7a2019b14321c91e8b63741c5234ae71"
     },
     {
       "path": "crates/typedpress/SOURCE.json",
-      "sha256": "955bc15ecc6b3524d959c1058982611b41e979128688ead8da8915d3e88a5dc7"
+      "sha256": "0d6c2952c9b23660123988ebc43776306c6d5385b7ae1e9a017a134e4399bc02"
     },
     {
       "path": "crates/typedpress/build.rs",
@@ -449,7 +449,7 @@
     },
     {
       "path": "crates/typedpress/examples/blog/client-tests/client.ts",
-      "sha256": "e69664aad253e19f4c8e5b9e665804fe25e19f4d66529671a7a1bb724174dc5a"
+      "sha256": "83f22424f63fbd5c0f832c7bcc065b0cd98021045f00a4d98e1e4e88a7f81c66"
     },
     {
       "path": "crates/typedpress/examples/blog/client-tests/tsconfig.json",
@@ -485,15 +485,15 @@
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/client.d.ts",
-      "sha256": "51627a71d4f3e198fd543e52067373fec77941c0f9bbc96d2c4f54ff142a5de2"
+      "sha256": "18b419deb1bb0b5e91cda9cafd055f45fb68f8dbc5568acd433298773efa4abe"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/client.js",
-      "sha256": "4ba90c6fb7848ea933be481cc078689a76c0ce2a58261068fe8153a8d8eefce4"
+      "sha256": "1e24a3d68f612096e8a1331e02fc6d9cb585fa1622d5e4be886827c254e26315"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/index.ts",
-      "sha256": "01c7943e9ff0548e80e353187b9a728c015855d74f7a01ce8ac8869896a2c088"
+      "sha256": "a663aca3abc3a1f7316e68ace5d7a795f1d75720b75bfd0eddcd7d2867f20060"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/react.ts",
@@ -501,35 +501,27 @@
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/schema.ts",
-      "sha256": "f46e54468035485a397be8b91dcc56db3f296e4efb8c67a9e08fabe3e70e6e80"
+      "sha256": "43822c2e2c86abf039206f36f45adf4821c95a78afcda5a8484e9c33747758b0"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/client/types.ts",
-      "sha256": "cd03d165ce1e5d87ff151ed64e046542deb45f4b8bdd86923a712dd70cd427f6"
+      "sha256": "44694af7fa3e0583e67ee22e6f337400c52efa0da7e5b509ef5f8277b0956d0a"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/db.d.ts",
-      "sha256": "dae21df88e945c81481f3b8779d680c95066b75f17849bcf31cb41c3b9159bc7"
+      "sha256": "974edb386c9a7bb9b2b11da9dc66ebb6552b8a62621a91e88dba2ddf92a9e750"
     },
     {
-      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/0001_init.sql",
-      "sha256": "e1e60c053a4131b0d1d023614c033107f8dffc41a9b73965cb70a8f9857d25c6"
+      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/20261121201802_regqey_init/migration.sql",
+      "sha256": "4de562b5fb9ff1f6050fa2fee5e83c3cefc3afda1a38c23f3026db8c30bf4256"
     },
     {
-      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/0002_update.sql",
-      "sha256": "87433b54709c8a73a2a05372de4db2d5f4e562fbabe5c55a058a88e2f1b9406d"
-    },
-    {
-      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/0003_update.sql",
-      "sha256": "66d232a0dc49c67024ce094124160de3877f2ffb20fde95bf61239dc5c6a5730"
-    },
-    {
-      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/snapshot.json",
-      "sha256": "24c6fed3e506e588bb0c0501e580e8745372fc0440a6d1d1f3db462029e874f9"
+      "path": "crates/typedpress/examples/blog/tp/_generated/migrations/20261121201802_regqey_init/ops.json",
+      "sha256": "61332d3e602f0cf244a6284432f3fc46c9048c1ad003c71dbc453c7bf7d2be47"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/openapi.json",
-      "sha256": "6ca59b884a8bf4e0b2dc09fb519f2280345286593a25b82331c5917d2ff526b9"
+      "sha256": "e454471a8a86a21501eafba7fce83cae6681d6ea0ff490b99760839ed62570af"
     },
     {
       "path": "crates/typedpress/examples/blog/tp/_generated/theme.css",
@@ -545,7 +537,7 @@
     },
     {
       "path": "crates/typedpress/examples/blog/typedpress.config.ts",
-      "sha256": "3e2edd3d8198a2a3cf6aa4d353234e45e38d3d092207c323f4b8e3fd4b910015"
+      "sha256": "8dcf7f378be02b89fc5ef1159c769df3702a19d761ce745dae56c901b8e69cd5"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/.gitignore",
@@ -597,15 +589,15 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/cart-store.ts",
-      "sha256": "5b3156d97117cd422e22e9791f478c776ca9d2fd3d0ba0658a692760a05f6a2e"
+      "sha256": "957c8162fd3513473fe6e39d61c64edffe05d13bfb54bc8000a92814bd2aa31c"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/client.d.ts",
-      "sha256": "2d205c4a40f39220fced6b162549ac48b9cbea1045563015263bcd6c6de22a82"
+      "sha256": "077977648ad52733ad9ecf7c4b3c8c388834b96cd4580241e2739bd4345b0ccb"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/client.js",
-      "sha256": "58adcb0ea2b8eefa4079999f3538634667ac92cb943b33e70bad1990abfd972d"
+      "sha256": "9efbf77e7cb5d99f112a378b2f0848516d3a9d814a5f19c2517d23908dc984fe"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/commerce.ts",
@@ -613,7 +605,7 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/index.ts",
-      "sha256": "cb6e89cabd77e19c4a2f202a13440b92fc26d79d4e5171e34e6e41345c49e4ef"
+      "sha256": "69724f289d157467f65552720e1a94ecf3f10d6f361fecd41a3f2ede8be3cf93"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/react.ts",
@@ -621,35 +613,31 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/schema.ts",
-      "sha256": "f11bc3c18cce8507b9f0dc5523e08fa251442291c9794456efb1def413925926"
+      "sha256": "e7bba4b07c9ee58d4db5b50fd72cc2ed8a5f78a1e36368e51eb17d3e00a2166c"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/client/types.ts",
-      "sha256": "3c6a81c6c1c4a1bbf1e6108c365260c151db2183151203a4596b3a1480fd8051"
+      "sha256": "6c389fe959d4d6b60ce6f0f16aa90f726ebedf0740eb8238effc86a2c9ae44ee"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/db.d.ts",
-      "sha256": "01555a49955040c11b551cbe58d97d181d319ddf9394ccfef1c9f13a6198bee4"
+      "sha256": "a015221bd1f75c2c2ffe2945502471b26b93329bb7b5da278f18cf582ea3311a"
     },
     {
-      "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/migrations/0001_init.sql",
-      "sha256": "c8338e89cbcce7b3b838bcf982cd0add39bd45f740c7092a5fa908f575de913b"
+      "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/migrations/20261121201832_y6t2t9_init/migration.sql",
+      "sha256": "e47fc63189285b22623fdbb38676e6d8526e173eef706533be9164668ae59548"
     },
     {
-      "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/migrations/0002_update.sql",
-      "sha256": "df96d4bff55d965a19c9503c0c89994203e007d565e5d704df141c87b99c8110"
-    },
-    {
-      "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/migrations/snapshot.json",
-      "sha256": "f487d8f8016bad5632c4e6e255147b6654d24be476013a6284b185c707d7a08b"
+      "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/migrations/20261121201832_y6t2t9_init/ops.json",
+      "sha256": "458ec12c37ea4556217dff7bb001357b3688c8e9becffeb3b33e4c228ba9502d"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/openapi.json",
-      "sha256": "6f129c83e70f0ca36d0aec6aebda8e55e5535455612e71a7c2febcb5bd43309e"
+      "sha256": "9f58b399a8f661602b6b21c958b0b1afe59b7e0f1ad0f520e4bb103b73b843b7"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/plugins.lock.json",
-      "sha256": "ae0bcf4e47570fc5eceba68ed0521db08e0c2d9e827c2d883de2a9c0ec92e24b"
+      "sha256": "c546e362c95898afa5aaf9a6071793d4e4d0cf76a4b305f9d7e4bd708c5190c2"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/_generated/routes.d.ts",
@@ -685,7 +673,7 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/app/contact/page.tsx",
-      "sha256": "0f88885f8ef989cb4411abc8f174aa9aa95564f99c1e162f720c65c7d8ad6e1c"
+      "sha256": "3f32d23a7b5059b6be5f734a94101ed31f4959cd897e297e45b08d66a99d0657"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/app/error.tsx",
@@ -772,10 +760,6 @@
       "sha256": "deaf581cbdf9a7d695178bf161b4e7842b171437d83413fab5ff0e1b4a7fde82"
     },
     {
-      "path": "crates/typedpress/examples/kitchen-sink/tp/components/ContactForm.tsx",
-      "sha256": "17ed2de4976c5dddba3e995af78c1fe386f1b0ac062bdfba6d9748166354c742"
-    },
-    {
       "path": "crates/typedpress/examples/kitchen-sink/tp/components/WorkshopBoard.module.css",
       "sha256": "54c61b9a3702e976dfc7509d0f7dcb0ba1cd5e7dd56fb47eb70a458338e341e7"
     },
@@ -793,11 +777,11 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/schema.ts",
-      "sha256": "35d319c2f88a58e207f353216902990331705bfc75cece2c48e173cfae614aaf"
+      "sha256": "1a30d9f40ba8fdfc6fb6a77b67078d6725f2cad0e120231c7dff60f60d15977a"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/server.ts",
-      "sha256": "ddd919f7d6b53e02a811404bdca62fc368c935d0f14b54b3f23c4442d6298081"
+      "sha256": "95eb749cdd8ca4cb92b53f0ea98cbafcf5e664abeee0686a762c515b5319c21e"
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/tp/shop.ts",
@@ -817,7 +801,7 @@
     },
     {
       "path": "crates/typedpress/examples/kitchen-sink/typedpress.config.ts",
-      "sha256": "b08975551749b91f0c76daa4ca668ed2000e261e0a41eb1bb6107bb82261d9dc"
+      "sha256": "b366be32dd8aa29a52a4e0144a4938780776e62d50f5414c7359e4de73af854d"
     },
     {
       "path": "crates/typedpress/examples/pantry/playground-seed.php",
@@ -837,15 +821,15 @@
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/client.d.ts",
-      "sha256": "887603401e29ed2d23f73afdab077a95337a4e9b17c8c527af6dbe7e78c0ac53"
+      "sha256": "cdc08a668f496bff6858fd356c4278356f1d883a8d8420db77cb43006e5b473a"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/client.js",
-      "sha256": "d99699062193ee305044aa39838c59fbfdfc04c7ae7a7900a799f9922ba2f1c0"
+      "sha256": "120ec1bcab8593f81efc5a2a63a98100ffa407c81195c59b03cdd664e06a76d8"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/index.ts",
-      "sha256": "01c7943e9ff0548e80e353187b9a728c015855d74f7a01ce8ac8869896a2c088"
+      "sha256": "a663aca3abc3a1f7316e68ace5d7a795f1d75720b75bfd0eddcd7d2867f20060"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/react.ts",
@@ -853,35 +837,27 @@
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/schema.ts",
-      "sha256": "265ef0eceb562913cd546c6289883c6c4049cbac79d51c48fce615cfaf6dcc9a"
+      "sha256": "d0c843d1d43587552b030a0c40bb01b8238e496236a95c11f82c1e9d2f1a98ce"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/client/types.ts",
-      "sha256": "d25a88a3a03f94c0e278e8b97724b8d5921f51348cd562d24f905f3ad209d064"
+      "sha256": "de5f5355036df5275e0ff589922fe0c366efcbb657b46acfae7eb8e686991c87"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/db.d.ts",
-      "sha256": "bab598f90cb491c699ef6b4e8b45576a753fa1d3c0e2ada3c8a8083ec08a1fea"
+      "sha256": "42aa1bab1e49687b8e6f72e985498265c722cc098897e11dbd586d1f0fa48b33"
     },
     {
-      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/0001_init.sql",
-      "sha256": "54da884848002d16cea8426e863a1796f5d300033cc05141daaba62dcfc9c6c2"
+      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/20261121201839_4czn3y_init/migration.sql",
+      "sha256": "532b9279f5c7ad2a7a3dfa8d057470685fd33d6c67af5b554aa5b45ed843ae86"
     },
     {
-      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/0002_update.sql",
-      "sha256": "723aceb0575f4ea99e55abb8876a03b71be506a93f7d1592240454e8430957da"
-    },
-    {
-      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/0003_update.sql",
-      "sha256": "ebc43404fa83e3da15f0690e6d6b1a4b25cf3f65661c0c6e36a38e72e41141ae"
-    },
-    {
-      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/snapshot.json",
-      "sha256": "e754cdb1e6bff527d7b6e817aa194f90e65e2848a128a3fe89b319d1e479dffc"
+      "path": "crates/typedpress/examples/pantry/tp/_generated/migrations/20261121201839_4czn3y_init/ops.json",
+      "sha256": "f71e60a92e0c7fcd7d135c82833780fd94c47d5613fef0752b48d7fbf5dcbeda"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/openapi.json",
-      "sha256": "fdd0efdd3317b7526437819bc3ad5df6a27bc203c85258adfad3ec936911d06f"
+      "sha256": "88d9ac73444b7a6e45af25988d1303fd01ceab4604bef5794289d8980265b966"
     },
     {
       "path": "crates/typedpress/examples/pantry/tp/_generated/theme.css",
@@ -896,12 +872,16 @@
       "sha256": "7cdc03b2e51627d7d9aa4a297a7256ad6bc31ae3fed2ae388d1772839e67722d"
     },
     {
+      "path": "crates/typedpress/examples/pantry/tp/schedule.ts",
+      "sha256": "07341d097d0c45b3c25f8d3ce51ae000724d8b36396bbfba7dd5cb4df7604c79"
+    },
+    {
       "path": "crates/typedpress/examples/pantry/tsconfig.json",
       "sha256": "79a4a204dd2cec95401db9261837eb24156fb45dad11a03c561518830265f5ec"
     },
     {
       "path": "crates/typedpress/examples/pantry/typedpress.config.ts",
-      "sha256": "d61b4c2950aebc0d74c9c14f45516d2b15be75e863b11f8cd9c3df3a8b701a27"
+      "sha256": "5ef4d51467dbd6c319e329ca5eee12521c6919cbbcea57f957ba5297fbeca610"
     },
     {
       "path": "crates/typedpress/licenses/GPL-2.0-or-later.txt",
@@ -913,11 +893,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Access.php",
-      "sha256": "b943daa49cf1b5b675e3f2e3dd6d0489e72e2190fcce16172a3ba977586f9fad"
+      "sha256": "431c7c224084d836b0e0c301b77b6e7ae61cc8c200eed1032bd11fc1fd731aa6"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/App.php",
-      "sha256": "363ddad252040b9d938eb37eaf7bb251e0bdc4504b9b5820c0f27638c36c41fc"
+      "sha256": "82ffd1e4dee80f3e8ce2f466a05d076c3532636b33c0f7cee757b1ae24ef2b31"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Assets.php",
@@ -937,7 +917,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Builtins.php",
-      "sha256": "f64a4994fc04dae24bb72258ca43b239a35046cbabc9e6e86a9cbbfdf1c3a3b4"
+      "sha256": "8a4064ac549a84c90846e9a52b3471b2b3180eea2417abc31d9b4ca9630284e3"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/BulkUpdate.php",
@@ -945,15 +925,19 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Cli/commands.json",
-      "sha256": "ac2a30b33896fb695ff631cec88ea0682d13d97ef575b07111998c33133bcac4"
+      "sha256": "a0fcaf4dabe39f04cf60ba9f6831d5b4003e01945286ca31f18cf27c19f0b407"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/ColumnRef.php",
       "sha256": "279de9e5c60579ee17fb5305275cd563db80af78eaea937f6a2fa5f304ed75ac"
     },
     {
+      "path": "crates/typedpress/runtime/TypedPress/Commerce/CartHandoff.php",
+      "sha256": "68f61878735b1eb69b9b5e0c37fa1e4c94dab47a23377728b97e468ecf018455"
+    },
+    {
       "path": "crates/typedpress/runtime/TypedPress/Commerce/Module.php",
-      "sha256": "53ed2c88017cb40127d056f4893fc6f6e8f699f0a2d0a96cad8a193db9309be9"
+      "sha256": "d1b993973d3c49576b795b2cbd9ad50c26864cb3d5b20d6db079fb8f4fb3167e"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Commerce/Operations.php",
@@ -961,7 +945,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Commerce/Store.php",
-      "sha256": "08e948cb3f5a0c30b41b4fa0a1a04b5f06bd5cbfc91d928b57b5617ab23386b8"
+      "sha256": "21f5b3a7539db340e6dacc89301c13decb0d14a2485f4c347d6aaf12ccca2fef"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/Commerce/StoreApiPolicy.php",
+      "sha256": "bf9b4d429d5b3e82e7b0d6127f37bcaee595258349337a6d6483e51a210ba7c0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Commerce/operations.json",
@@ -969,7 +957,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Connectors.php",
-      "sha256": "235addf6f013857cc4b3c79d05751ef419f350522d2a72e559e3ed5708b768d2"
+      "sha256": "41472408bf28fbbc534f675a4099dc5d4cbae055a4a1e5bbc62bdb411fb4414d"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Content/ApiReference.php",
@@ -997,23 +985,23 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Crypto.php",
-      "sha256": "5ef085527109cb7bd13c3b646dd4920828226a9ce321927541643dcc8f7f7330"
+      "sha256": "69d9ef978111454542d6ded0ccb5aebecb3b49667565bdea71ded7f3880a43f1"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Db.php",
-      "sha256": "a983aab20d99a30c5ca504fd9471deda89114defa1f51902e7601229dccf3420"
+      "sha256": "ace4a04301cabcd4df7331f4fe69caf21d98b9f0094a1ed7263c3633e3e30f6f"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Deployment/Artifact.php",
-      "sha256": "be59001be49d009e7252080efb5f6d4ddd28232193a27172945ea0c3367a010f"
+      "sha256": "8fc54a4684bc85b0f3373f02bafe0a785145a035a0613a57cbad71b41a0619b1"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Deployment/Local.php",
-      "sha256": "7040d04757077c17bad5158e8ef56e66f460ddad19b3d160ab4ee68db2a87b17"
+      "sha256": "4dcbf4c062b078022fb50d3d35888cedecd6b4ee0405210d314f5c3c21e80621"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Dialect.php",
-      "sha256": "1a9c6faae27e8424f1706d1599afef1c2fd4b2df41da7727a6faf20cc7ae055d"
+      "sha256": "67818ed976a5109dc0ef84548fff4425da85f3888d4cb5fd49234dd901d78785"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Env.php",
@@ -1021,15 +1009,15 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Extensions.php",
-      "sha256": "1cb3a6a6bdc2fb5298bf783ba2ef38b5927ed20f2fed14b953d91739e7002dd0"
+      "sha256": "73503467ef2bdc27bb6f556ef9b5f2bc80120434d2eb6734dc27173d1e040837"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Features.php",
-      "sha256": "81d3dabc3f138f1f60aaee37b82d01dc0233be490dbcc892ec1fc10d1c4ad3c9"
+      "sha256": "ec204518467ead9a0e09b39fe2f18d80008f27ba52c057701ce18a14e4816da9"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Fetch.php",
-      "sha256": "4aec563fbb33663054d1df9887c72ee9e1a744613c893057e753f734ca6ac4cb"
+      "sha256": "b59b18e2137b093b456d0c3792db9a70764230ab07102b715f9517b7827b9aa0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/FetchHeaders.php",
@@ -1060,12 +1048,16 @@
       "sha256": "aa5e7eb7ebfe684ca877e3421f35e51930a471890d3d519ee3735ec85d67dadc"
     },
     {
+      "path": "crates/typedpress/runtime/TypedPress/InputShape.php",
+      "sha256": "02ac0717588bc09e6fe411bd357f01caf126b63ada2b860122a0d12e7ecd9c67"
+    },
+    {
       "path": "crates/typedpress/runtime/TypedPress/Islands.php",
       "sha256": "c3a2895e639784461da86f3f7db7b10b941f07e50c844864ab32dc46e82bc4a0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Jobs.php",
-      "sha256": "c57e44c9f8e1170a940a207eabc0882ee504810626832b2e730d313f40d8242b"
+      "sha256": "ee23ea24ccc96f756765f9e107de0c054b8da09d2ff0dbef085dfc5ba407e5a9"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Module.php",
@@ -1077,19 +1069,19 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Runner.php",
-      "sha256": "b70ab1738387b9de4cda237af416d778d1debd5c2eedcf22843216502dd0c016"
+      "sha256": "c0a221de8f3a79d4bca87e9b5d5e7b75733b175c8e2238bced8c18d74f4ad508"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Storage.php",
-      "sha256": "af668e5c7572158cf4226cd58c59f228eb6da48f3e4162abc39d451da805aedc"
+      "sha256": "e0240a5c1aa0d81eb1587b6e017c67c0e68797e6b05e40f3030a8616c0034a92"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Tick.php",
-      "sha256": "c0cf5c3ba1274f80c3596e78a135a7e91194bd38af21d680f9a289c0447b522c"
+      "sha256": "1209f114b9aa10b435ce8a93b0560b88d8443195ff1214752b9f534d8e74c84c"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Jobs/Webhooks.php",
-      "sha256": "e5e04a6a00ba232473819709c421c4d8fbb536aa7876e83c2dc5538334b631f2"
+      "sha256": "741d48ca8f135ee3d49e75e45ff60cab4c11fa2cdfe4ae1daf4845fd183bf322"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Js.php",
@@ -1157,7 +1149,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/JsError.php",
-      "sha256": "9fa2101134d7746e5914882c973fd601d26522ad32bbde262e3156d32d381f94"
+      "sha256": "5857f4d445b1d602f7471e47bf76c156fdde87cd05b62257b84e0d0aad396af5"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/JsGenerator.php",
@@ -1269,7 +1261,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Links.php",
-      "sha256": "620d5c96feddca2713b75b366daa7bf8299e1380f8ed616e099b7baa59970a01"
+      "sha256": "590a6c249033a502c0e2bc6510426d119df943e9e673dbc02d7785d49da966f7"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Live/Module.php",
@@ -1289,7 +1281,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Locale/GroupSync.php",
-      "sha256": "1e64a073153eb04cc4f1a6755b2554972d9653d410fd759344747de43e19784c"
+      "sha256": "38673a5a18a0b91c8b41ea25bda40c8e9d339913d079dba71672641cc0f3f908"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Locale/Lock.php",
@@ -1305,7 +1297,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Mail.php",
-      "sha256": "e10f8250c17f3278043623c290ca435732356fb6bbb746b7cc131943671afd61"
+      "sha256": "28a6938df0b3f4f0316679ea123d91a6813220f514354b709baa62266d17d35b"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Media.php",
@@ -1321,7 +1313,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Media/Files.php",
-      "sha256": "6b4de540473973467901422285f06c036b32a9f8e4c96c3c05c5bb456d5b139b"
+      "sha256": "008adbb8bc6da67cccde08981c971affb351169402e5c4a41d127b7b909737a0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Media/Images.php",
@@ -1340,8 +1332,16 @@
       "sha256": "2ee2db3e6fa264dfadc9f2b9cefd8e17ef911fb246100ce3ed9824de6ac76b9f"
     },
     {
+      "path": "crates/typedpress/runtime/TypedPress/Preview.php",
+      "sha256": "57084da5fa3abb15368510db1da0f56d5a6f86e913b53c9ca9b0c05d2fac08e6"
+    },
+    {
       "path": "crates/typedpress/runtime/TypedPress/QueryString.php",
       "sha256": "cbc77420ac3910808662254d033ee9d62945b54950566b2c67fc57d6f6dbd7b2"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/RateLimit.php",
+      "sha256": "cf2c38b336a8c8d992df50af971a7f0f09f78f5bc081a91cc7bb36ed8290e4d1"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Realtime/Module.php",
@@ -1353,11 +1353,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RegExp.php",
-      "sha256": "4ad68534fffb61f23e0df9780250ac4a3031bb56f62a5d644fe9eed7185be1fb"
+      "sha256": "8fc2735fb17da0c4e04617d10da9040f700518382916f46ca7fb6ad62eb7ff11"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/Cache.php",
-      "sha256": "21e0dd7ba0f08c14e416739dbf7b59800f825aa78aad87b2544347126dd1cf5b"
+      "sha256": "6ffeab4b45bf20b0c0c627a2dc4c936b596f3f5ad619a64bf61e01d671356056"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/CommentsView.php",
@@ -1369,7 +1369,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/Forms.php",
-      "sha256": "1d49755617eb58108e9d7481b8f5d7143318c4b1c7a98d8e6b8f7eb85d62bfc5"
+      "sha256": "d1e2e2733ff1c53d07d8bef1ede64d8daa6d86900660120886fca31788a9da9b"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/Halt.php",
@@ -1397,11 +1397,15 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/Prebuilt.php",
-      "sha256": "f05e3b565391ff5db1b722eccf9a5e28762d93a292346c111acc227d9dc40702"
+      "sha256": "b943d3355341258bb51f2db72609f8099363d63b5a56dcf68d9c468b61421ca1"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/Reads.php",
-      "sha256": "03cf62e87f06b398943776be87bdbf726a47e43d45b614a677c8d6b677aa794f"
+      "sha256": "bffec858c849cd9b9d9870db4196312fe1eb5f1575ce7a41652a7e2a8d905625"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/Render/RoutePlan.php",
+      "sha256": "6466b5457af4e23cd7725342c6441d49818f24f0b25dded0f08f1b6cd5dd89a4"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/SearchView.php",
@@ -1409,7 +1413,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/client/live-region.js",
-      "sha256": "7436baf97883397f88a80b9627042b5670da4c40fa88c78dacd5c8182bbf175c"
+      "sha256": "4782f43b978eb4906838da89cf42ed0dfc93f938cc3052177610eedf88c8d09f"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/client/live.js",
@@ -1417,7 +1421,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Render/client/router.js",
-      "sha256": "aa2c4b1ed13bc3f9b31318267b603150a1c6c6d34cdbc55883d241ffbe2d8f4e"
+      "sha256": "b667b98401565f6a2919bdd042cb05cea5dc98ae09a708baaf2ea20109c597f4"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Response.php",
@@ -1425,7 +1429,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/Changes.php",
-      "sha256": "37121366e74e85fbe594538181f8b9cfd5397d5cc063125ff8841a0d054be299"
+      "sha256": "824702615226e5ea925fc1d6217ae93848b2bc250af6e1d04a8670b410c24668"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/Deploy.php",
@@ -1433,11 +1437,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/Kinds.php",
-      "sha256": "563d97dad7c2d6ae6618a915f4a1d201d29951ec38e3d1f86619232b4f496901"
+      "sha256": "205d265b239df6fcfe20f24e66d0d6dd9dcd4f61d2d058e5b92b70c70e3ce0b0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/Loader.php",
-      "sha256": "084c6a39cae3bad21c88a0da361bdd7ccf3d4be5fc2d23ffd1faacb07af05334"
+      "sha256": "b39408cecaaf1024e9ecbfbc14dbde272fc27969b6eccd2884851ffd6ad2d458"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/Module.php",
@@ -1449,7 +1453,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/ReservedNames.php",
-      "sha256": "6a7063588e62770f0f65c6e45702be87e25c2b36aecd68863566241373892e96"
+      "sha256": "560a76d3044eb869aff43d5e01ceea08caf747f7d4fb34ecade84c4dad154747"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/RuntimeSchema/StorageKeys.php",
@@ -1465,15 +1469,15 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Schema.php",
-      "sha256": "1f78cde821870f1d629877c0f3a55243bb542f26bc18ccfa34cce16e3f4eb325"
+      "sha256": "1575c279704526a275777a49553cce05724b83c8f494c5c4319819e91040a033"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Seam.php",
-      "sha256": "ab4b10dceaf7ed9e57114f9924c6c27af4aa51aa8d1565a8067a5cb49ed463a2"
+      "sha256": "e38ed1363b5bae1df009a5f483b3c6d9fcb44f88c271d338a6c3d06bf3213eac"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Search/Index.php",
-      "sha256": "477106593c58fb57b363519fef88b7a962a5cd6c371bbef7091c349e66149740"
+      "sha256": "c92be8efff431bb0d53fd28d61b922470aa0b3760a8a1cf668f7d9f4101a292e"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Search/Module.php",
@@ -1484,44 +1488,16 @@
       "sha256": "75ba93619f26fcea787e60973546bf0a3ad3ba06c9a8da2159b257a0d8c5352c"
     },
     {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Definition.php",
-      "sha256": "0a28c23bcdb554d0f0da158575c542d48cb62720d985f8ddb8cfed2f4dbb094f"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Mail.php",
-      "sha256": "a0822fc1e57d08b624a3743289ed76908ecd2ea87839e490e5005ca89fbd6a8a"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Module.php",
-      "sha256": "a9d20be29e5244cbd7489df24c0817a48d8c5c1e7da02bec1bdf325f065025e5"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Payments.php",
-      "sha256": "03cffc45c62aa871d55839968d8a9d0888490ba01a9ceca00ace07593fb41cd4"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Search.php",
-      "sha256": "7838efe09a37caa63973a97d1968b229e94e9951c9db3d8295fa7320e90cc23c"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Spam.php",
-      "sha256": "475fab5e391e328adad24394d34bf04a28423df4bf8c5bf06bc1ed9253eb6f55"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Services/Storage.php",
-      "sha256": "b36a85a0445f725790965f7878254808d38e56a3c058ac4dd9e0f666a057a6b6"
-    },
-    {
       "path": "crates/typedpress/runtime/TypedPress/Signer.php",
       "sha256": "481745aadb0d59d64bffa92935c304fbe56d2ecb465f46a2affffd63be97384e"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Source.php",
-      "sha256": "599bbaa55f5097f4c511c9132c81bb115f3b9a5b0ca7b441c2f1bdb56896e9e3"
+      "sha256": "1267b6d43b45d4a72e019c7632b80fb0897d0cbbba4220deec6a803a6d4105ec"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sql.php",
-      "sha256": "9076a9e8d46f08b22b8a6efdf5f5a4b3657f8b630df0bd45075e92d49f5871c1"
+      "sha256": "ddbe9fef33dcea04776fb32df5b8848223fd2af834ddba1cc449b53fc36d4871"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/SqlPredicate.php",
@@ -1529,7 +1505,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Store.php",
-      "sha256": "7e8afe958fe63de28b71245c07e2eec280c8ed42f1355c059a6c66bd3cd9ef02"
+      "sha256": "902200917effa74fe22b7da2d705737e03329a512ffe0114b4069f36dc62a286"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Blocks.php",
@@ -1557,7 +1533,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Markdown.php",
-      "sha256": "ea3cb5b55df88c6e78a782e480b7dd843ecbb521960c9251ef90756edf167c24"
+      "sha256": "db536e9bfb0cf86aa9730615cfeb69f6a0466eabe2704a17f337ebcbbbd313ed"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Merge.php",
@@ -1565,19 +1541,19 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Module.php",
-      "sha256": "8f57dc161c55e931dd7d77f69ea2f1998d84e19a18300ef34ae45d33a392a0c4"
+      "sha256": "28dec6e713e599368bafdf62f70c33dcb3e352b573ecca24bf223fb4bc48e1ee"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Routes.php",
-      "sha256": "03b41e14d0297d27ad78d0d892249eb7f43b3a7df59f6bb975f3ade3122ddc65"
+      "sha256": "cd12bf743cb74d9bcccb65826b6c081568c2f792e3ceef4a61821af8f2079879"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Seed.php",
-      "sha256": "671e27f66d184dfdd1375290ed1e5ba377f5fbb813af1ceb9da6e4d037de3a1d"
+      "sha256": "5b08c9a1cdb603f0ae00ec2fa33747531d50ff241a5e0166ea5374c2c714e592"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Trash.php",
-      "sha256": "1b336b7a14ee6f0c6fd305024543ab6cec4f67de0b2d3f82607ae1b5a865cfa8"
+      "sha256": "386cd8ed02c63bce609c9aec31b605660b4b3549a75c605542350a1a9a43bb63"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Sync/Uid.php",
@@ -1589,7 +1565,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/SystemTables.php",
-      "sha256": "5edd728f74128119ff28f5709a727e06279e30eb0128cd0c664cb4b1857623ef"
+      "sha256": "bf1922194acaeec9ac33db9003bd150f0105e5eedd8f211c7076ef205975ffc8"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Timers.php",
@@ -1617,11 +1593,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Abilities/JsonSchema.php",
-      "sha256": "9a1f4a12ff43f96ed271a616fc560497319c13876272abec8f6e69a50c337d80"
+      "sha256": "7544775600c6bb0eb93ecebd538b4358fc58cd67e6b742f2500e66afa4854ef0"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Abilities/Register.php",
-      "sha256": "570a74ce7e0e48d4e879aa74f33d3ffe72fdfe25e95dd0a85832a5b75aad906a"
+      "sha256": "077cf71cd0741bf42644562b41682d25035979d1448e51e6af265e980992b394"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Abilities/TypedPressAbility.php",
@@ -1629,11 +1605,11 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/AgentScope.php",
-      "sha256": "dfcb52acdefae37b6f1e5ff9dd1e91c3f8b3a9b56f6ac531ee5c4a1638585ff5"
+      "sha256": "d5dd35b511229ec82c6e58b50762328ef31e9bdc3f4e8706acb3c774bff0d209"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/AppRouter.php",
-      "sha256": "88514476e71fc371b8e304f98c8992503d384b6d5ea6d1a91115be161a5676d3"
+      "sha256": "5ea4e170430de434ef8336c6d6440b7bb239655940689673a4fcc5cd2b13a01d"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Authors.php",
@@ -1641,11 +1617,19 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/BlockTemplates.php",
-      "sha256": "fa75bc1246bf609a40017562e4c5b2ef1e9010d787cf58957705e783b4e9dbac"
+      "sha256": "757ed38f1c828e0678e9ff4fe1726f969482a1dd3e75e148a5fd3462fca0a6c6"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Bytes.php",
       "sha256": "e837829a2a20bfc1d0b21b2a31fe038320f36bc32f9ef174935e53c34763ff2c"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/Wp/Coediting.php",
+      "sha256": "5131ecc691a7739dc2e18fb5e23a89f0ee58c0be941f8a3d841c8348ab2202b3"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/Wp/CoeditingStorage.php",
+      "sha256": "22fe24276f57e68a47adf91e89a2571feb45af1b37c071e0c4b5b3fd3f9d7285"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Comments.php",
@@ -1653,23 +1637,27 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/CompositeStore.php",
-      "sha256": "33daa79ab5d30453465f3cf98d3df35c6952b61eb64b5e7df901f9d32e226c0e"
+      "sha256": "36e7a8efd9dd400ded96cf6fc5dc335bb2e8ea53912b42a01e4e302ee350fb54"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Connection.php",
-      "sha256": "a86757abf097148c4927de188ab0aaf3abd721908ce3970556b85d5c1475998d"
+      "sha256": "fb44c04e68f1ea2ea4e516c3f5c4c827a8ab5d291c189bbcf066aa061f569db9"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/ContentPages.php",
-      "sha256": "1f0df070fbc3230bd15c29c24db94041b3d44ef105973f906f505eff0ad9f50a"
+      "sha256": "d9ad37fb8a4d44d33e056282003679bd4b20020e0d683343d0ae3fa29fc92ecb"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/CoreAccess.php",
-      "sha256": "6fe2d03b4a97cfc59e13a467536c3f75e3b7db5546a765da87b9362521e4c31f"
+      "sha256": "9d187beb9477c2d73366d1bf17017f353b6d0fa0ef3892652b60fe0de9cd062f"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/DbError.php",
       "sha256": "a7e091b1bf3b9d40b0cb8c5648fa1d6a2e3b3cc321b195abc0cb4be32ad6a9ec"
+    },
+    {
+      "path": "crates/typedpress/runtime/TypedPress/Wp/DestructiveMigrations.php",
+      "sha256": "dbca3fb11928bd64b92491458208fcbbdc5086b90561478219d9e46d1c634f5a"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/EditorSave.php",
@@ -1677,15 +1665,15 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Facade.php",
-      "sha256": "6d5f01f787fc037d0e10aafce9132811697a5e7f5c53d0a1073cd9953bdf0070"
+      "sha256": "1f7e082cfb54552a922ad53801940627b5c92a7e2af28462c279d97ecd51632b"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Functions.php",
-      "sha256": "7492219178bbf537d04fcb655e561d741afbd0191d43de85d8da41b14169913d"
+      "sha256": "1b816b7a10b96bff6bbcdc37075431901bc0f4df13777d415c489cfaa9905168"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Guard.php",
-      "sha256": "5bbeac93d7d056a0beba8c3946b611066f73196d636498ee8b3fb50688977a40"
+      "sha256": "606b3580ad253f8911dcb86ef7a4b5aa61438a05977d850ac01d765596993a0b"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Guests.php",
@@ -1701,15 +1689,15 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/IdentityBridge.php",
-      "sha256": "5abe5e8831d7bd2b3a3a9a00b882ae40244c6d63adba8fc42b53a25e0f79af0d"
+      "sha256": "92e03465a393d75ed53dc596df9478d97311088d02cd8e2278024257ed61ef87"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/InstallMarker.php",
-      "sha256": "6a170124b18e0e4ffd3e7ede557bf1fe4d0d3baecf65da07259bb7d227b00e8e"
+      "sha256": "83d00b1651d3a191c71128a75692de1e96d406db10fae214974bc8a7708159ac"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Jobs/ActionSchedulerQueue.php",
-      "sha256": "7fdb705da64df9a711efbd0c6e23a3f7ea121c3bb950eb6eac75b7c4e71d6640"
+      "sha256": "d985f3fbc274eeea30f49d9323dc23c0572950543ba0800758cacfbf9e67224c"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/KindUrls.php",
@@ -1718,30 +1706,6 @@
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Kinds.php",
       "sha256": "12a4df534f5df4747ec9e208ec6a4295a01605aa45ec8bb40120dbe21abd347f"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/DryRun.php",
-      "sha256": "e316b50e2eca2d9db25febb651220c1add1aa1b5e718d4d386b9f6111906dc70"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/Migrate.php",
-      "sha256": "49ce6fccb943d2300c332ee7342d1981e12e220775806d8e577df85b6ade3edf"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/Model.php",
-      "sha256": "897a9bdf6b4278d8ca60528b1dbb8e32d13022366f018b5f10c954e20718d00c"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/Module.php",
-      "sha256": "eb07af6d72f7a8b3827982b4e99594d9249c98655c85c899895d42ea5e429e3c"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/Spacefast.php",
-      "sha256": "7672551a978b915752d5b9b31f8e8be9639bdbd76e2e6d20d8d395b4b7afbcaa"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/Legacy/Users.php",
-      "sha256": "b90238642274011f79408ab6046a0f1973ab708cd5b0651155aa3664864b85c2"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/LockBusy.php",
@@ -1764,12 +1728,16 @@
       "sha256": "91f8fe6d56377f5aaea173fe3c0ef9a4227332def4b6a05ca63076e2dbaf5fef"
     },
     {
+      "path": "crates/typedpress/runtime/TypedPress/Wp/MigrationProvider.php",
+      "sha256": "4b8be84343960b369db552505a62c52e36920affc1f957505eb5f749af7305b3"
+    },
+    {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Migrator.php",
-      "sha256": "e00b6d4acba159db259192707d78bf902d383cd1438b05df31b6ccc27cd8c3b4"
+      "sha256": "c1c3f441387f83719451811b2244c4497b0427aed6fb146d61e178508f517c64"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/NativePosts.php",
-      "sha256": "10ff4ca90fa1904c0246251c065176518fbb3da857981a17e274c2ece43d4da2"
+      "sha256": "c939f92194734c71f4bb03085082d8994ae6843aba03e1e3b0c8024737b3daca"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/PageCaches.php",
@@ -1785,7 +1753,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Plugin.php",
-      "sha256": "b6e0aa31ec62f84f93bfaa11d9dcbdce30fbbb8fb40a367e2b913ee51e8d9332"
+      "sha256": "fa25c75509d73e13c08c32f059e433489489334324c8d44f825171c107d52a5a"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Polylang.php",
@@ -1797,7 +1765,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/PostsController.php",
-      "sha256": "cb50eb86f90c7cac781d3cd3be96a6a76987e21d589167e2c04d50b8976938fe"
+      "sha256": "0da6df4aeca7bc7c18287c19f8aeda64481d47a3567a8683f75fcb9ce29504ae"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/ProfileForm.php",
@@ -1805,35 +1773,39 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/PublicFiles.php",
-      "sha256": "3aae26416616418477c72edc09df15f08d1dbfd69e4f9a7c5421ae47d8ec5daa"
+      "sha256": "271d771caeb68dddadf53236ce3b823ce8aa4cfb7cb070c42407b03605863b13"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Purges.php",
-      "sha256": "a94086edbdea9bd6d6fa608a65151a0fd541763a3c9ff390b58257f90e7f8b4e"
+      "sha256": "766090e69404108516916084e3755d4150ddb8989ad52ac3ab4c7320dfbbfd68"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Refused.php",
       "sha256": "f1fd1d72710946069e37f4852ad9f01dab5b90d5de024a663bba586dea57803d"
     },
     {
+      "path": "crates/typedpress/runtime/TypedPress/Wp/Retention.php",
+      "sha256": "83d49d36902a089ef743eb1a7aeebfc89a9d8cb18bacbd8b2172926a2c2dacf0"
+    },
+    {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Rev.php",
-      "sha256": "052c157005894ad7783ebcb7a8909b2a51c9a8fc3b8f36c6eb94181d865a3d8c"
+      "sha256": "a78970c064fa0528c64c4b4e9aa835610cfa2da2427b837be6ab0e4431c19805"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/RoutePages.php",
-      "sha256": "7b4b6cb19efbf1942bd51b4076c1b4b8f729c81d90bd5d86ebcbcb47a35500bb"
+      "sha256": "f94cea8fb33cd31a8398407e3aecc2b82745ad397c1cc6daac3d3e993c2d58f7"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/RouteRequest.php",
-      "sha256": "dee2d643d73731ba95c7c3299b41302d7011c2fd87ed7bb728ae2f7e239cf7c6"
+      "sha256": "715392a3ac640fef5a1ea4cdc309653bcc5e2918dd2bc6efebeebe4591eee5f3"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Runtime.php",
-      "sha256": "f6d093ab622dd293925a5d50897bfe9d8f1493158eba0df7300729d0868c7f4d"
+      "sha256": "025a7000e2c5ca729693f40e8cd9a5795c947ad6de409ea0af06335f37a91ea3"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Scf.php",
-      "sha256": "80572be6779b699c1f855c2b8b5ae7df9ba95e7a734dfd1c53b29dee93cdba08"
+      "sha256": "5688baf0871bf5b5a1819bb4a3c0c214228dca21a27599924e0baaf8896ee3aa"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/Scf/ConditionalLogic.php",
@@ -1841,7 +1813,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/SchemaCheck.php",
-      "sha256": "7230fb77fa423b71f0563f107b0fadaa50856ba743c7ae0ff566c0d5398e64d7"
+      "sha256": "635315569793e9b167381601496b426f31750b4caec362fe612a6d6ccf3cd910"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/SchemaLock.php",
@@ -1877,7 +1849,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/TableController.php",
-      "sha256": "4fa406b936d3e4420d2c94cd94babb202b91d123fe0ca7c4efdc9aa14f61796f"
+      "sha256": "5708cef906849f1ff20015b6a8ff7eb03b696de2b1afee2990464876f3129dd2"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/TermMeta.php",
@@ -1909,31 +1881,27 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpFiles.php",
-      "sha256": "d146d8e0e5dcaa0a10c8a742fcb69c7160f334c6f75022f511a1f1a49eb3c677"
+      "sha256": "e05f585dd30ac4a964065918947ef1123ad8387d989f315e28cb58c0a2d59ff1"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpMedia.php",
-      "sha256": "7440761e81ba73a1fd67c5e87574415dbc5b535fe02358da0e98967b64e18847"
+      "sha256": "eb0b0ecd498acedaf3f27afc9932a55da5fa6130087d3c28ccca7f6c3ae3e279"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpPostStore.php",
-      "sha256": "f8cc8dcc99a96101b8e7293e54642f65ce83a82a670907fc0c42652a1b81b6c6"
+      "sha256": "006bc7b3bd09f75cce5fb1cc225b13c4d6dbbc0903938bb10caecdb256cf8af9"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpTableStore.php",
-      "sha256": "67601fff6103a82e9c859f4813d48ca08b52aac041b3bbe77b70d1969a1878b8"
+      "sha256": "4d293fb2f273f987479d9488af91a9265492d9b177178daee4305a83aafeadd5"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpTermStore.php",
-      "sha256": "18f745c07548c7b3e2996f5f8435f3381adc555fcab0b07f9a403d65b79461ee"
+      "sha256": "46a541e7e68c9aa74668e799014071542c83ff4846b70220c195e1a419f1f5ba"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/WpUserStore.php",
-      "sha256": "7ff722d8ef4aa0e2bd7c76c4088108c898e4c19f3255b4dd0daddf769d84e773"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/Wp/ZeroNames.php",
-      "sha256": "bcbd92ce5b0efa363876c8debe4a339b2ce1bf3d7871d417642305eb7ae4d3b7"
+      "sha256": "229f06aaf476ee3a137cf67ef450e04e1a8cdd54613c78762333ad2d3140f2da"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/Wp/guard.json",
@@ -1973,7 +1941,7 @@
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/.manifest.json",
-      "sha256": "63c5408ed9a1cca46bb8cc8f4ec176330758bfe5cc47a2c1601cc325743add16"
+      "sha256": "002d63b796f7a427dc2954aa1cd686456ccdc869a899e49c75b919170a9e2d4f"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/THIRD-PARTY-LICENSES.txt",
@@ -3256,26 +3224,6 @@
       "sha256": "067e9ea6499a1f9ad033f2d5e3909c83be51d55fa416d4bab913894f19ab68d3"
     },
     {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/bin/Builder.php",
-      "sha256": "ea0ac32a05511268f53e0cff51ba25282fc3ad1bf30be31a3a24deaa49c791ab"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/bin/IdnaDataBuilder.php",
-      "sha256": "b1f7850d5c39f871e3d0bec0b397a2fba98b7986fd85413a77aee4cba33446b1"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/bin/RegexBuilder.php",
-      "sha256": "d2b6d65dc1069bf755d49b190adefd3495b7faaff9fabf515e2452f6cf709b08"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/bin/ViramaDataBuilder.php",
-      "sha256": "7fe55282f0b5839aeed09af7c0752d97bca93842a5490e149fce6e9b81906aa1"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/bin/generateDataFiles.php",
-      "sha256": "7ec90282e0452814b3608cfe2c857495378de2acbe6d3a1e15b881b9ee35efc1"
-    },
-    {
       "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/idna/phpstan.neon",
       "sha256": "61ae623a25fc0ff0274468f96757a358dcc160da2bb4534d9de900d920f7ddbc"
     },
@@ -3370,14 +3318,6 @@
     {
       "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/url/LICENSE",
       "sha256": "90f958e9fde24d0278db4b49a68facf5e14d9eb8d3f5e05a4e6e58bab078da05"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/url/PHPStan/PregMatchParameterOutExtension.php",
-      "sha256": "937abd48a024a346d5ae1acb113d2d67ba79c68f61c6842d3824dd234fe118c2"
-    },
-    {
-      "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/url/PHPStan/PregMatchTypeSpecifyingExtension.php",
-      "sha256": "779a7fd899078c8b406c46324c8779ef0646a0016f9c429cab231fa6996e7f1d"
     },
     {
       "path": "crates/typedpress/runtime/TypedPress/vendor-prefixed/rowbot/url/phpstan.neon",
@@ -7341,7 +7281,7 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/build/.manifest.json",
-      "sha256": "636b36469e458591757fd6628b9aa41c9fca9e5b7e1c2d6599c8689f9300c093"
+      "sha256": "78c9fb7b9451640c192ce58c6595e3f28701f6e5a53d947692428b9bc8d4be37"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/THIRD-PARTY-LICENSES.txt",
@@ -7761,11 +7701,11 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/boot/index.asset.php",
-      "sha256": "a9344d93444b3f8d90144beaddac9db0927f777f2bfd92dd8d225a0c9691d3de"
+      "sha256": "21b0ed5582e4aaf2a113f4ccdf65f9e2ca19796dd2bae2a35cf039ac8044986c"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/boot/index.js",
-      "sha256": "c737061dc47293092aba2a1268295c375518e5a60fb14532ad22f8ec4889ec6d"
+      "sha256": "14869197dbf507c9a5668b9e2db47b00945db1816e6fa62663828b6b3dd85476"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/boot/package.json",
@@ -7893,11 +7833,11 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/schema/index.asset.php",
-      "sha256": "b5566e1d851acdd8f6d80696e0c6a6a78d3069d4822249ba1428f8d4d9c89b84"
+      "sha256": "9823a4be65e2dec22f44223c9801521b41ddfd4b3fbb50915fa1995c6b4c426b"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/schema/index.js",
-      "sha256": "d034d7ec2f9bbaf8658db733df7a35bf226b0f5c861158de162ae746970340d0"
+      "sha256": "3c8cf1ede11f46b27ad149c19757aa4302526f05c968ff37fe20a86c5ab58263"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/packages/schema/package.json",
@@ -7965,11 +7905,11 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/build/routes/classic-admin/content.asset.php",
-      "sha256": "491879bc1ea1baeb284b6807f0f90d28023f2e3c6123b67f754884bf0f4a1f83"
+      "sha256": "4a68349da82d27e7f72e2437fa7ff2419ce09d5d2b00ca797b070564b9bdbce3"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/routes/classic-admin/content.js",
-      "sha256": "711a06277541775ce4cd73361917788bdcd8997789683597ff31139799b312d0"
+      "sha256": "1ffe2a3372c9f6dc9180a11609e9528078deeab2a6cec4356096ce9898837b90"
     },
     {
       "path": "crates/typedpress/runtime/admin/build/routes/classic-admin/package.json",
@@ -8617,7 +8557,7 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/lib/classic-route.php",
-      "sha256": "40ee16c37dc925162c961d7fd4012d79c0d76383befbb3ea0cc4eff928ae01b4"
+      "sha256": "fcd42e9b29ab7a85ce556de70129e86ca06222cbd8274a705f781240f454f8de"
     },
     {
       "path": "crates/typedpress/runtime/admin/lib/dashboards.php",
@@ -8637,7 +8577,7 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/lib/pages/admin.php",
-      "sha256": "a03bbea6048f15a91d1ddeef1686b5061d936648cf56d36bbdb00389b352777f"
+      "sha256": "df27b64d0f3fc9319aa9452ae4f6a0c9ab8552a75a22965b8a2d691841f469cf"
     },
     {
       "path": "crates/typedpress/runtime/admin/lib/post.php",
@@ -8713,11 +8653,11 @@
     },
     {
       "path": "crates/typedpress/runtime/admin/typedpress-admin.php",
-      "sha256": "8d49c8ce5cf2168a6e7155cf8512d42fde310d596e8a9a110ab9f0c3d192b6a4"
+      "sha256": "447027e2c6ce08b8e0e2732c5407105c0ede935c0c98c2c90a7c1ed1efb0acd7"
     },
     {
       "path": "crates/typedpress/runtime/admin/upstream-inventory.json",
-      "sha256": "c834da7c4f3ed921f371c4b3e8c3aa4d03c7cba1be37b1f9221b333079260626"
+      "sha256": "8ea8c0c4e3272ae5bd31536e95c96b667c101ea487deab9da7f4c9c37fe354b4"
     },
     {
       "path": "crates/typedpress/runtime/admin/upstream-metadata/adapter-originals/dashboard-widgets/core-quick-stats/package.json",
@@ -9877,7 +9817,7 @@
     },
     {
       "path": "crates/typedpress/runtime/client/cart-react.test.ts",
-      "sha256": "41e6f53a757f3ed65064f27bf6f5d6cbe59fece507c883597c83f2a668967523"
+      "sha256": "4a6038c4880c32ee0aa36febdff7cb01887f3238ba0105a5ab03aaa9c9bfb4c0"
     },
     {
       "path": "crates/typedpress/runtime/client/cart-react.ts",
@@ -9885,7 +9825,7 @@
     },
     {
       "path": "crates/typedpress/runtime/client/cart-store.ts",
-      "sha256": "5b3156d97117cd422e22e9791f478c776ca9d2fd3d0ba0658a692760a05f6a2e"
+      "sha256": "957c8162fd3513473fe6e39d61c64edffe05d13bfb54bc8000a92814bd2aa31c"
     },
     {
       "path": "crates/typedpress/runtime/client/commerce.test.ts",
@@ -9901,11 +9841,11 @@
     },
     {
       "path": "crates/typedpress/runtime/client/index.test.ts",
-      "sha256": "96a11aa21dc6de212bc070fd9d2c4ee16cd6d08eab8a5a48f7577fc98dccccfc"
+      "sha256": "b9c3a0c6cd9902cde30aea8eb59ef94afc40608443a8928e2fccd187f1a42b7b"
     },
     {
       "path": "crates/typedpress/runtime/client/index.ts",
-      "sha256": "01c7943e9ff0548e80e353187b9a728c015855d74f7a01ce8ac8869896a2c088"
+      "sha256": "a663aca3abc3a1f7316e68ace5d7a795f1d75720b75bfd0eddcd7d2867f20060"
     },
     {
       "path": "crates/typedpress/runtime/client/react.ts",
@@ -9945,7 +9885,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Accounts.php",
-      "sha256": "3440cc7d796f5a50bd0528a04c9ae9d5c7a9d7b4064669453e5176e91e7e72fe"
+      "sha256": "61a2feec2c02a152bed4efa7713199f3f82df5cabd6bd1b425b7c2b11f8a4745"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Api.php",
@@ -9965,7 +9905,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/DB.php",
-      "sha256": "d2ae563549f52d899cecc774788ecf5b18ccef2ba741082d122222a111894884"
+      "sha256": "efba40326ac3f19fe8c7ff8ed9b631285723b6d8e579d409f48daec8d7c44e50"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Failure.php",
@@ -9974,18 +9914,6 @@
     {
       "path": "crates/typedpress/runtime/identity/src/Keys.php",
       "sha256": "2557ec9a5f81b9b8b2dbaf1cc56b1e0b2070e73bba7a9f7ae48b08ae69f89d6e"
-    },
-    {
-      "path": "crates/typedpress/runtime/identity/src/Legacy/SessionUpgrade.php",
-      "sha256": "c66eca0d476e349f2ef37fcda235ca5042182ae4a5a2e214433243863a2294b0"
-    },
-    {
-      "path": "crates/typedpress/runtime/identity/src/Legacy/ZeroNames.php",
-      "sha256": "aaaca1ba344c74c34727c9244e63b66f87641052f0892093d5b4b61ae56e943f"
-    },
-    {
-      "path": "crates/typedpress/runtime/identity/src/Legacy/ZeroSession.php",
-      "sha256": "ed7920ff6d165bf9bb38b11c981616ec684acf5ec0d29a656c68a981bcdf9f85"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Maintenance.php",
@@ -9997,11 +9925,11 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/OAuth.php",
-      "sha256": "2fa7f68cbfefc7e09228bd75062736a0e63256b489bdd68df10a7dd406df5aba"
+      "sha256": "a6f83edee6fab8785bf463ae3a4c6ff93b047c9ad28d2fd6becdd2b60d3be399"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Organizations.php",
-      "sha256": "932af5b2e1beb79e563b3955d1afb0c2fac55c0c5faf5a8f95e8ffbfede33762"
+      "sha256": "4872bf8dd5e9fbdf236fa677b17409b35941b46d93c4f645a292b0093a432937"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Passkeys.php",
@@ -10009,7 +9937,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Plugin.php",
-      "sha256": "3705721c453fd83e4fd61ad0bfd5ab6671fd5e752e0c67b983bd39b3d0fffd28"
+      "sha256": "d6a85a9a301d628067faf9f42aca06d0dd3b732f6d20a7e4688f8a834cf8d7d4"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Privacy.php",
@@ -10025,7 +9953,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Providers.php",
-      "sha256": "78aec6036e8beba54bf407d3a66d4202ea4bf6005cfaf93d43927e06abb2c083"
+      "sha256": "7e032cd180c193302415063e5b125346b1a804b9107b90ef5f3779b8dcbe453a"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Providers/OidcClient.php",
@@ -10033,7 +9961,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Schema.php",
-      "sha256": "27a121a220ada083c747a887a5457fa4dff18eb9a7ca84927f3945a7dda277cf"
+      "sha256": "f8296175146bae6e17a780d526b5d45f455dbe583a3ffe04d7da9ba25a3c2362"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Security.php",
@@ -10041,7 +9969,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/src/Sessions.php",
-      "sha256": "5eec3fc720626b0c50a577bd2fdd90e0bfdba6fd327f97261c8442dbb7d1513b"
+      "sha256": "f761f2b75bad38de6f1d2cab98da487bf0929eee9a261e6857ee68d2401d251e"
     },
     {
       "path": "crates/typedpress/runtime/identity/src/TwoFactorProvider.php",
@@ -10061,7 +9989,7 @@
     },
     {
       "path": "crates/typedpress/runtime/identity/typedpress-identity.php",
-      "sha256": "160e928133c8058edc379df42896bd1894b9a0d86865152855e04b2682c0c77e"
+      "sha256": "e62f54716d8781e13faf78aefeee928731de0f118d87561348f2dc1708fe072a"
     },
     {
       "path": "crates/typedpress/runtime/identity/uninstall.php",
@@ -15637,11 +15565,11 @@
     },
     {
       "path": "crates/typedpress/runtime/typedpress-plugin/src/Mount.php",
-      "sha256": "1de5ff67456f57c5a68ca995a2633d06c66951b1bc0553cf0df130af31766081"
+      "sha256": "a79f5f641db8eaa6b60314f9d906d2fd80b3918f5de2e789859744e86c64e268"
     },
     {
       "path": "crates/typedpress/runtime/typedpress-plugin/src/Receiver.php",
-      "sha256": "a37eba92bedd67a995bdcf9369b2b2960e9d336e45b6e46678789e6295bd77d6"
+      "sha256": "dab1bdf070a0deb8fa0e0fea0017609963781c875b665b84c6d8b2c07394b08b"
     },
     {
       "path": "crates/typedpress/runtime/typedpress-plugin/src/Requirements.php",
@@ -15665,7 +15593,7 @@
     },
     {
       "path": "crates/typedpress/runtime/wp-plugin/typedpress-app-uninstall.php",
-      "sha256": "ecdc1c651340af7b3e7591721c55675e08195edef2b8d4f0af3b5f739a044845"
+      "sha256": "8e2bb7ee0ab3a41133cf58eedc9c41fb50cadf5c60d7921852a23bcba597f117"
     },
     {
       "path": "crates/typedpress/runtime/wp-plugin/typedpress-app.php",
@@ -15677,11 +15605,11 @@
     },
     {
       "path": "crates/typedpress/runtime/wp-plugin/typedpress-loader.php",
-      "sha256": "fedb255dd779b0de7ecbea8c14c6064bb458a3703685413c638a668ca83a5f05"
+      "sha256": "bac507b9a0598dde0a46c674192819d38c290373fdcee0830d9fc75f3197efb5"
     },
     {
       "path": "crates/typedpress/runtime/wp-plugin/typedpress-runtime-uninstall.php",
-      "sha256": "e02837dc1a7e20bb7ff0c18b498df4f247b0d71d84b0415479283174ec0f092a"
+      "sha256": "bedb950115f4e155a94a5572e7b566825431a9bb15be86b56a2f502741b14ddb"
     },
     {
       "path": "crates/typedpress/runtime/wp-plugin/typedpress-runtime.php",
@@ -15713,7 +15641,7 @@
     },
     {
       "path": "crates/typedpress/scripts/dev/studio.mjs",
-      "sha256": "c4072c93e7fa367e17f2c7e27d268509252aa1647871f8b832723cf2749372c8"
+      "sha256": "e71b1f80ca28876108f7fa1ef1ef203385a21d368b4448b0e8fb030ca7c5e734"
     },
     {
       "path": "crates/typedpress/src/admin_dashboard.rs",
@@ -15721,7 +15649,7 @@
     },
     {
       "path": "crates/typedpress/src/admin_screen.rs",
-      "sha256": "71b5bfbf82ba4b56ef3cd81a76ddfcb2874c53c057d562cb65485fc10189984a"
+      "sha256": "f6c7838a9491b3347c4349c51106eed8c71979f0bd551728f787174153f8c605"
     },
     {
       "path": "crates/typedpress/src/app.rs",
@@ -15729,7 +15657,7 @@
     },
     {
       "path": "crates/typedpress/src/app_plugin.rs",
-      "sha256": "059377dfeec695fb282e2a886bb2254b74ef73393bf858ef687291455ba76e83"
+      "sha256": "0dff8999ec3d0b8dda56d0a63b98ac0973ee0b1ad3ea1aa6bf164f51eb7b8eb0"
     },
     {
       "path": "crates/typedpress/src/assets.rs",
@@ -15741,19 +15669,19 @@
     },
     {
       "path": "crates/typedpress/src/builtins.rs",
-      "sha256": "7cdb3e85ee242fcb0fcfd1c0e3d1b80fd95de10e33fb32470b99a93c341e80ff"
+      "sha256": "0f30280f793a56a1b4c33ae0732230976f1c6c3f1fa08c5f5837e86f1337b7d3"
     },
     {
       "path": "crates/typedpress/src/bundle.rs",
-      "sha256": "008b789b89defb001c48dd82a74836f0260047c69d5cd709366d2fa200aed929"
+      "sha256": "0fe32bc20fc0f5c5fa2cb4e1700ea0865e69c103880007639aba03d7169af29b"
     },
     {
       "path": "crates/typedpress/src/cli.rs",
-      "sha256": "3bfead8af452d0e9b46856c2f53d207fe4ef9e2739d3ab98ddef6c276b26770e"
+      "sha256": "814ac8bfde1ed014dee5db4189168ba947e2fba2638593fa74566af60fd10ab3"
     },
     {
       "path": "crates/typedpress/src/client.rs",
-      "sha256": "c77d040f45f0fc29b64f538fcc91270252cdba3b4e5b5b880b5a9262cff96d3d"
+      "sha256": "fbe2daa3ac2dc8dcbb4f9f130aee7ebb866a5482f157efb0960dde1ac51d4bac"
     },
     {
       "path": "crates/typedpress/src/client_component.rs",
@@ -15761,7 +15689,7 @@
     },
     {
       "path": "crates/typedpress/src/commands/abilities.rs",
-      "sha256": "49e2a3da2a14211331da97074f89cc795b67ef15a7796a6a9d2854e733104a17"
+      "sha256": "b00411069c8e2ccd178249bdf2f63c3257fcee771d671a3f197cc66f6571ff6f"
     },
     {
       "path": "crates/typedpress/src/commands/add.rs",
@@ -15857,7 +15785,11 @@
     },
     {
       "path": "crates/typedpress/src/commands/build.rs",
-      "sha256": "931f6ab6f1e7e2124dd954a619f48f1c6a508339b619858313ce9292bbcab3ae"
+      "sha256": "82a1eab3c71e2a111566fc1535185c759e1760655fff25857c51aabee468ef6a"
+    },
+    {
+      "path": "crates/typedpress/src/commands/danger.rs",
+      "sha256": "8b973f8aacc2533b25a9092f0988bb36f74a1c0138144f68e54863852c638614"
     },
     {
       "path": "crates/typedpress/src/commands/deploy.rs",
@@ -15865,7 +15797,7 @@
     },
     {
       "path": "crates/typedpress/src/commands/describe.rs",
-      "sha256": "9c1822a5ad23d1230a3a78095770640e3a9530d49b3783c4214217acc49f5152"
+      "sha256": "208dd4b244db13e279560236005eea87c5b759380b45bfd60d061028907ae6cc"
     },
     {
       "path": "crates/typedpress/src/commands/dev.rs",
@@ -15881,7 +15813,7 @@
     },
     {
       "path": "crates/typedpress/src/commands/init.rs",
-      "sha256": "fddc5aacac5bcc9de99696e75e94278430849ff085ac621e3b0f3a868161b98c"
+      "sha256": "1208c116513818157c7c6920238c563c37b7084af1cdd2688be38cd950834c0d"
     },
     {
       "path": "crates/typedpress/src/commands/init_github.rs",
@@ -15913,7 +15845,7 @@
     },
     {
       "path": "crates/typedpress/src/commands/mod.rs",
-      "sha256": "993816433c4250ed621d83030d0318a4b46a3b92b929a087c444482b6d3d3126"
+      "sha256": "deb648d419c9bd37721bbcdec965a4cf6ec370b543198a5370a5b7623c2bbc1d"
     },
     {
       "path": "crates/typedpress/src/commands/plugin.rs",
@@ -15925,7 +15857,7 @@
     },
     {
       "path": "crates/typedpress/src/commands/push.rs",
-      "sha256": "5d593b926a9b983c665a330cb3620fb979e23ea33dd045a569b6b99360c9fe05"
+      "sha256": "dec17ba301fa9cd90bb5143902d773a7fae439fcec8c3ee9c5c52317251bbf1e"
     },
     {
       "path": "crates/typedpress/src/commands/remote.rs",
@@ -15949,7 +15881,7 @@
     },
     {
       "path": "crates/typedpress/src/compile.rs",
-      "sha256": "612fa18ebac119df68c9d7880d714bfdb190fe4f4ad4d382fc54b4dde6f33219"
+      "sha256": "52f5c6e06a6abd8e276bdedc9f9e6b67059f58adc3ba6fc8155d9620cc2c6fc6"
     },
     {
       "path": "crates/typedpress/src/compile/annotations.rs",
@@ -15957,11 +15889,11 @@
     },
     {
       "path": "crates/typedpress/src/compile/app.rs",
-      "sha256": "c49f439c5a7c897a62cc442de0d6c2c8ff6feb3b7950d91b4c30ab720c00344c"
+      "sha256": "7757f4b63d7e56074810b68f22758d05d50524d652c80504e5927ccdc9c026d8"
     },
     {
       "path": "crates/typedpress/src/compile/classes.rs",
-      "sha256": "c1de471935743b93a691bfa46261ec485ea7a68c56fa6c4754745eda219f1077"
+      "sha256": "735f191617ea8eb588fe4847270055b1190c844dc5bf166b9dab506f88180c8c"
     },
     {
       "path": "crates/typedpress/src/compile/client.rs",
@@ -15977,91 +15909,23 @@
     },
     {
       "path": "crates/typedpress/src/compile/host.rs",
-      "sha256": "e539679ab90a1409d68f3a3ff59b446b9b31b59bed13554999d0f9fa206a5c79"
+      "sha256": "e4d628f5b7701c61019dc394b58ca7c2e1ed8c5d5be51b6d251df0832e0d91d4"
     },
     {
       "path": "crates/typedpress/src/compile/html.rs",
       "sha256": "6e6a87c1b243950558d6b38dec58dc1faed31b3deca40fb72a96a0bda29b0294"
     },
     {
+      "path": "crates/typedpress/src/compile/inputs.rs",
+      "sha256": "8700bad97ebc8d1fc83f83bc12e03f7c57f0a5d2a2a4cb7ba4422a941d64fd3d"
+    },
+    {
       "path": "crates/typedpress/src/compile/javascript.rs",
       "sha256": "09bff428524e676831eaea2c3438b1bd477827e167b7cad8f0e421387aa33448"
     },
     {
-      "path": "crates/typedpress/src/config_migrate/app.rs",
-      "sha256": "878758e9083062dd9c881fbc6100ad77643962255b7f6f715563f4209b45e62c"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client.rs",
-      "sha256": "f940b79ff7413327148f261541db22fff47b2145514558ade4caf75da51d4a67"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/LICENSE",
-      "sha256": "1fe6958409c8c257a70c587a18b6f7f412b179b456630790d30b2ec9a8e4b7d4"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/compat-client.js",
-      "sha256": "67896c6fd07da726120a63ddd862030418f96121fa81a01b606f8e0133d2c31f"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/compat.js",
-      "sha256": "6ea5d08227ee2c279f451fa9c0116837ff004507597da75856895669e63ab87c"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/hooks.js",
-      "sha256": "ae6ec58592683ca64fa4d65b20d40b103df62a673bcc4712515cf165950b07f3"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/jsx-runtime.js",
-      "sha256": "89e3d19112015c7de7c923608754a8051ad34785f8d690789e0e88fca0cb8632"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/preact/preact.js",
-      "sha256": "712517dd2a42c3c22b5ab0264ad7e9a2b1e8be6cf97fa00dbedd98203617e616"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/client08/zero-client.js",
-      "sha256": "81771dc95c36f0b4f1a39cb02ba5207bded3ce79d0d417344eb2751fe6ad2522"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/codes.rs",
-      "sha256": "532463dfe4a3115764737ee73d7d6f662a9e6436eea2379965456a5fbf5cc1a0"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/endpoints.rs",
-      "sha256": "21598999643bf269f22c65ed7722585d2e88535946dc6c2b25b7f438ff598e1f"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/manifest.rs",
-      "sha256": "32b5251a40209aa7c91e7afe20b54504ae57ca3714f82449c1c0f248fcf5aea0"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/omitted.rs",
-      "sha256": "795b1623f7955aec49f31d13faaa61ed2c430eab5ea411b2eb3af1741f7f57ee"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/pages.rs",
-      "sha256": "d9f36b1d969719965bf8a5efe246688e334b3b3b422e0d82b578da3cc7bb2ac4"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/spacefast.rs",
-      "sha256": "36aab80c03df5e8ce304179ad4f7e2fe8cea60a94d450518508c0c5f96a417da"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/app/transform.rs",
-      "sha256": "8886f9c139459deb9e85f7b68fb421749b7e0c809ea4f18a540df999a48e2a7b"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/input.rs",
-      "sha256": "4e3f5dd7b2894cd9fc7bfd52b94c46590d96dc45e5fd7346698a1eaa85472521"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/mod.rs",
-      "sha256": "997ddda1af3ea7baadf2ec2f0d0c9041d9f691bd6828560b02afb36fc4b705ef"
-    },
-    {
-      "path": "crates/typedpress/src/config_migrate/translate.rs",
-      "sha256": "d349a604e59eb169fa95d5e4ce85fa3bf27c8775bbb6c8d656c1473430585fb6"
+      "path": "crates/typedpress/src/compile/projection.rs",
+      "sha256": "06662d9b8446af6133484510fdfb13678d85af06229a1cf948f1b5aad594d783"
     },
     {
       "path": "crates/typedpress/src/content_blocks.rs",
@@ -16077,19 +15941,19 @@
     },
     {
       "path": "crates/typedpress/src/diag.rs",
-      "sha256": "60379a4ad3221d4ce26f879c646c93382d4e22317df3c0969b2148a02b9d6c9e"
+      "sha256": "d33eccd5718f9885052c7909c431dec639fcda5034a75b544560590ac7bb198f"
     },
     {
       "path": "crates/typedpress/src/emit.rs",
-      "sha256": "caf311ed36159850cce2806a70afac34366dba1fc9ec296f7b612a03ed71c440"
+      "sha256": "3a84bda09d938e9de971ed816f4b748b95e8a917a36eb4de5879a28d59600ada"
     },
     {
       "path": "crates/typedpress/src/eval.rs",
-      "sha256": "9d61d63d1ce4bf7fb8311027245690d4d6fbe021e294c50bd46708c0d6c6e878"
+      "sha256": "0a1e3d10304d7d960aa8afba333768390a7de94c486dd5e4f295774ebe66c16d"
     },
     {
       "path": "crates/typedpress/src/extract.rs",
-      "sha256": "1ee5faf3167cfd54c498baec3d9735e7976e5d28b56dfa65e7a1ba36b76d5c56"
+      "sha256": "7589148606359dd4578558274d5a344b651d73b6c5abba250126d382dd987ab7"
     },
     {
       "path": "crates/typedpress/src/frontend.rs",
@@ -16097,31 +15961,31 @@
     },
     {
       "path": "crates/typedpress/src/host.rs",
-      "sha256": "306fbd2aaa7a0c93ac4927fd04593aeede4fd776ab95d943081ba10efb9bfb85"
+      "sha256": "3f81362a0a2f4bf85799a3a6928558e3f302aae43b8fe53f483791f027103a54"
     },
     {
       "path": "crates/typedpress/src/host_contract.rs",
-      "sha256": "c5fc708494c46d453d8573c762ff6890c877943c50c3beaf1b100b06ac2a6613"
+      "sha256": "28872e49133e0bc0cfca2d2bb68697646c7d65cbcf2c9ec705b1ffa11ff5f5b7"
     },
     {
       "path": "crates/typedpress/src/ir.rs",
-      "sha256": "ff4a2a471fa48ca61273596386da7e1640b80f097ae5decbed398411a058bb72"
+      "sha256": "1eb76c7c2ae79647f1ac05a17e189b473f7e901a81d44823b06b2dbb0ff499ac"
     },
     {
       "path": "crates/typedpress/src/json_schema.rs",
-      "sha256": "6aeecb0c32bbcd03e9deb0a36b8f67ebf400e93dc5f4bd874ce7f4160806113f"
+      "sha256": "f5c7baca5028cbd332e64e38d3aa7d25b5357af1fdbbb5762c098948b547f813"
     },
     {
       "path": "crates/typedpress/src/kind_url.rs",
-      "sha256": "e4eb2c98cb5266442549b5233e6e986891f2ed6089aa010dd2254872a8359a54"
+      "sha256": "058bc6211120f3a6306acdee83805a452266e93f06dc2dab243f07fd46ca5f74"
     },
     {
       "path": "crates/typedpress/src/layout.rs",
-      "sha256": "76ace71a75ef6b9af31f8974a2727bad16b77f3a1644f63f341ba9d5f857c5c3"
+      "sha256": "da0f8ccf97cc1a936196f1255eb0ed2a959d29d2d3ff3b7364211b4b23489425"
     },
     {
       "path": "crates/typedpress/src/lib.rs",
-      "sha256": "f5da1272c16729038e26a4553366d1efc0f146ba1ecd5a891833b017ba85abc7"
+      "sha256": "ce6c9fe33a59537c83f5abee582f7e4de4669db0517a809d1993555c560ca885"
     },
     {
       "path": "crates/typedpress/src/lint.rs",
@@ -16129,11 +15993,11 @@
     },
     {
       "path": "crates/typedpress/src/loader.rs",
-      "sha256": "4d87b97221991253645ef1a1941884e03f7979d831d293b0433687b3a7936ffd"
+      "sha256": "7ad27fc533884964fb5b02f488c3499ec7c731a0dd504b74a1b1be631fab2679"
     },
     {
       "path": "crates/typedpress/src/lower.rs",
-      "sha256": "25a0b0d4410d7e097bfb4852ecb329008d004c1ebe0a618141486bbde1e40440"
+      "sha256": "ff42b507ba1f1182a1253e071da51458f9553efc2d69b780f110d2efe4a92b65"
     },
     {
       "path": "crates/typedpress/src/main.rs",
@@ -16141,7 +16005,7 @@
     },
     {
       "path": "crates/typedpress/src/migrate.rs",
-      "sha256": "20db9073a11ac5a44ddfa1ddb221d8e070d93a8fa99c23f31de6d8cf601f6721"
+      "sha256": "fe03f00e082f2e7b2ac5da4c1e00e08897de524ee2ff19bc12575356c04d68ff"
     },
     {
       "path": "crates/typedpress/src/minify.rs",
@@ -16153,7 +16017,7 @@
     },
     {
       "path": "crates/typedpress/src/openapi.rs",
-      "sha256": "993ec451cf549df6071f0682cee74d218df7d6fbb489f163880627907aef0001"
+      "sha256": "bd395a1a95033bb7b23be85415752b25b8a4ab82847aa67fa8790572dde22323"
     },
     {
       "path": "crates/typedpress/src/php_layout.rs",
@@ -16161,15 +16025,19 @@
     },
     {
       "path": "crates/typedpress/src/pipeline.rs",
-      "sha256": "7126ec2f06f999af188c5329e321857f07f704db8b06198dace6cb51b916ebb3"
+      "sha256": "e511fb11375e123a2acdc8dc6b3073bb094d2f98e3cffd09e6af210b0c0ec685"
     },
     {
       "path": "crates/typedpress/src/pipeline/app.rs",
-      "sha256": "5668072fb108bd733f04f93a94bb2f2601d3aabaceb400bf1f2ba6d428df01d3"
+      "sha256": "6779cb59bdf48a79ebb119651a8f44968dab25d00e908d7d63f13b8c10c47d66"
     },
     {
       "path": "crates/typedpress/src/pipeline/exports.rs",
-      "sha256": "064868edce1010ebb9096b32270c8bb28c87983c1fbc7337dd7cb8e860c31f1d"
+      "sha256": "2f62bbffa193319a845dd7f59dca0012b495477e49cb629ec3c0a5ec19caa1e2"
+    },
+    {
+      "path": "crates/typedpress/src/pipeline/route_plan.rs",
+      "sha256": "f55e8db81b78302fc31fc75f8a4b0d71b9a3f649191a60f72e8b40ef62498efe"
     },
     {
       "path": "crates/typedpress/src/platform.rs",
@@ -16181,19 +16049,15 @@
     },
     {
       "path": "crates/typedpress/src/runtime_schema.rs",
-      "sha256": "c7088eb2fe283eee8af02c2d356939e2e58cd1a3ec668e735bc58e8031897960"
+      "sha256": "4f021199934d845e84a88259ea648bb9ff642bf75e4896ea84d06620092aca28"
     },
     {
       "path": "crates/typedpress/src/schema.rs",
-      "sha256": "fa7c2fc865843f2f0c6002110b3f772de846a348321dcd1e267de8c853f3928b"
+      "sha256": "9a6fc2b7f45c44d761553231ace4df9f560cd27558f1baa25ed89fabfe924e9f"
     },
     {
       "path": "crates/typedpress/src/schema_php.rs",
-      "sha256": "b1ddee546a3d71216040f122a7bb34cf328bcd0e412752c42c7cd80c1e2ee1af"
-    },
-    {
-      "path": "crates/typedpress/src/services_config.rs",
-      "sha256": "ef31587aad91116d0f4d98cb310b7e77d096cb0d0e03b7e5e29efc7eda5a7eb2"
+      "sha256": "51194cdcc7a0a915d3846caeec6c8b7ef540d36169e77f9c07d6f790268842b5"
     },
     {
       "path": "crates/typedpress/src/sort.rs",
@@ -16201,11 +16065,11 @@
     },
     {
       "path": "crates/typedpress/src/storage.rs",
-      "sha256": "e6d9d77b054c898b4c6752416f9b8f7904d3e21dc68ee499243fc686ac165dfc"
+      "sha256": "9213d1aab7d2dd6f5d49444b295031f7d52b718053f90179de3b0b0af1e4e58b"
     },
     {
       "path": "crates/typedpress/src/store.rs",
-      "sha256": "79b31806dd00f93234785f691beb876230661ab53d4fe6ab4f791996644c797d"
+      "sha256": "94b1d885e8bbe9a41290bd3ad9fd29b82702375d323794f8946c7790935d430d"
     },
     {
       "path": "crates/typedpress/src/sync/apply.rs",
@@ -16273,7 +16137,7 @@
     },
     {
       "path": "crates/typedpress/src/types.rs",
-      "sha256": "c7fd04f5b8602fb978900fc3cecc4ad340268875b9a79672e0af70b9484ff5db"
+      "sha256": "71b797c136b16192c8c00e01b816e94c757671d3b2060b25047c65c9e228e051"
     },
     {
       "path": "crates/typedpress/src/uri.rs",
@@ -16281,11 +16145,11 @@
     },
     {
       "path": "crates/typedpress/src/value.rs",
-      "sha256": "ac73943aab8edbf9300206c65685327acc61a5380a72feb7c833ce89e24d6c9c"
+      "sha256": "79f2ca524a5d8be85cfbf72676b79c6d39f0ab625161a3ee9a06766460b8f5e6"
     },
     {
       "path": "crates/typedpress/src/wasm.rs",
-      "sha256": "27b750bd28656441006f863aed52d1056dbf89ad38c49e6ee2d25628c4288cc2"
+      "sha256": "86adcd6b367a109f35dedba8bddce72d99715d7fcc13de54d4912f85c0291a1f"
     },
     {
       "path": "crates/typedpress/src/wasm_host_fs.rs",
@@ -16293,7 +16157,7 @@
     },
     {
       "path": "crates/typedpress/src/wordpress/abilities.rs",
-      "sha256": "1e5e20499a0f06248e27654b010560069aad0ba4bc710521c470efefcad74ec5"
+      "sha256": "077e4b18c998dd4ca84a8126a9d745befe84c9534c4318d84255260c89d998a1"
     },
     {
       "path": "crates/typedpress/src/wordpress/catalog.json",
@@ -16321,7 +16185,7 @@
     },
     {
       "path": "crates/typedpress/src/wp_plugins/supported.json",
-      "sha256": "55e67de1e03af9937a322e89d1b64a9190ed5e919af0339869e8a4c52beb01a0"
+      "sha256": "54159cd8f7fee2abd0d89cafc752b259ae2f7f82d6215d3dfd5954ca7aa4d2cf"
     },
     {
       "path": "crates/typedpress/src/wp_plugins/version.rs",
@@ -16332,12 +16196,8 @@
       "sha256": "e6ea9339e4c9a5ef8e2575bb86f500fdfdaa13e83bf9389f57d53b286f942ba5"
     },
     {
-      "path": "crates/typedpress/src/zero_bundle.rs",
-      "sha256": "c1aeea61570681466f51cd3772143cefd45b242a20613798843677d25364b90c"
-    },
-    {
       "path": "crates/typedpress/tests/compatibility/registry.json",
-      "sha256": "2fbe6eaabc7d7adb5614fd1a210d65ee5416facf0ac843dcb31a7b9f1e59f927"
+      "sha256": "1c966212b2feeeec5ece36a67c7002003744d0e26738b2fa28303e0e54233a79"
     },
     {
       "path": "crates/typedpress/tests/differential/language/bigint-helpers.mjs",
@@ -16345,7 +16205,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/bigint.ts",
-      "sha256": "49520c43402cb81d1cf47d0d8e683395b10fd25bf337bd43d72cdaf2181577f3"
+      "sha256": "db0db8f5aac84251a7d29a7aef84bd176ba4777f8115ee4e4f80eba80dcdbb6e"
     },
     {
       "path": "crates/typedpress/tests/differential/language/bitwise-helpers.mjs",
@@ -16353,7 +16213,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/bitwise.ts",
-      "sha256": "a778a16fe12b7b8e21c48a727197e2634361bbff719ffd5f698b867c604b72fd"
+      "sha256": "7889a2eb4bf23b10e6959162ef8143cdab86e2abf3b9ba07da2b4de8cc9462be"
     },
     {
       "path": "crates/typedpress/tests/differential/language/boolean-helpers.mjs",
@@ -16361,7 +16221,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/boolean.ts",
-      "sha256": "0bd59638cfbe1693d78fec98e423207c8342fb6b38cc530652e29b232a5ed064"
+      "sha256": "7b97460963eb74d45fff197ede712b2816f2fa1a8c8f388f50a57837986b9638"
     },
     {
       "path": "crates/typedpress/tests/differential/language/builtin-instanceof-helpers.mjs",
@@ -16369,7 +16229,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/builtin-instanceof.ts",
-      "sha256": "819732b6c9eb9bbf74ad919a1b43197e62b62001169a9f6882b4403040f5c544"
+      "sha256": "28a76cdf04c4aa633f2649d7318a89e66fb57f2d88a1e1d559205b933a3dae2c"
     },
     {
       "path": "crates/typedpress/tests/differential/language/char-codes-helpers.mjs",
@@ -16377,7 +16237,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/char-codes.ts",
-      "sha256": "9c196edfcffca118fdcf35522bcc9b4a46d9320998c85a26b39847114c661ee3"
+      "sha256": "58831d8c46f1b24a753ebd77affd6a7e0bcffae35f12f7fab97588390398b00d"
     },
     {
       "path": "crates/typedpress/tests/differential/language/class-symbols-helpers.mjs",
@@ -16385,7 +16245,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/class-symbols.ts",
-      "sha256": "7b3f065035020b6ce2c732fd237b24f4918b43ea1ea744e62de9b5145c2a36ff"
+      "sha256": "80da1d580f2d43db68902949f66149edcd0764c5c397aef04b9e831038010477"
     },
     {
       "path": "crates/typedpress/tests/differential/language/commonjs-descriptors.cjs",
@@ -16409,7 +16269,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/commonjs-interop.ts",
-      "sha256": "25309c251d4b1e9e2aff3421b548a91a2cdaf2941492dcf43059f2649206dd37"
+      "sha256": "72b8f2250e7cec4f5fb481b69ebeb70e3c1065ed6e57a3228d175e3a3e9a20f3"
     },
     {
       "path": "crates/typedpress/tests/differential/language/control-flow-helpers.mjs",
@@ -16417,7 +16277,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/control-flow.ts",
-      "sha256": "78ad5e1ec502d0c776477fa96e94593876099ba7939154f4a1cc60678ffafd52"
+      "sha256": "dca29ebec6e58003bcb3046701767f886ddfd78e71254a4e0c86533c5fd25ab0"
     },
     {
       "path": "crates/typedpress/tests/differential/language/delete-helpers.mjs",
@@ -16425,7 +16285,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/delete.ts",
-      "sha256": "7afddd6a2bc248d9bad33eb6b5b760808a053768ae2cbe3e68a8af5874af606a"
+      "sha256": "b36fefc7a8cb1f89c8a0879ec1e427d2829ab87a15d21574432cefab59ffb8eb"
     },
     {
       "path": "crates/typedpress/tests/differential/language/destructuring-assignment-helpers.mjs",
@@ -16433,11 +16293,11 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/destructuring-assignment.ts",
-      "sha256": "44615ebbc507d98c4527a13474189354a940d87950c22a92e5f38db6a2e89db7"
+      "sha256": "de1ae74eba278a904ebb4bca1c58baba876f6a8f8b9b7cf95c89130b1a244717"
     },
     {
       "path": "crates/typedpress/tests/differential/language/for-await.ts",
-      "sha256": "ec2a435afcb679eb2c223755bda996ce263e97a0fa9b9bbe7c2f70552bd33037"
+      "sha256": "3653da2cb0a5076fd489ce0bc8f5aa67e6084bc6bb96ae73cb5fc413c0461c9f"
     },
     {
       "path": "crates/typedpress/tests/differential/language/function-expressions-helpers.mjs",
@@ -16445,7 +16305,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/function-expressions.ts",
-      "sha256": "57efb162f36ea93168cdf6860633117bb85f26c52d639692c29d6828039b81d2"
+      "sha256": "dcdf7df386229217ddb30ea314012788f0c0117555b5b65604fb9703ed4eff5b"
     },
     {
       "path": "crates/typedpress/tests/differential/language/host-platform-helpers.mjs",
@@ -16453,7 +16313,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/host-platform.ts",
-      "sha256": "39a19a2ac15d0124c45b4b67da515f1832c16320b497686c7ab409c99e64b564"
+      "sha256": "427fac1d27eb1a78b3f2d903f5f85bd5a4443fe76fc6b7959c462f06cacaa2f2"
     },
     {
       "path": "crates/typedpress/tests/differential/language/in-helpers.mjs",
@@ -16461,7 +16321,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/in.ts",
-      "sha256": "6779b16d69d7ae29ff1c177fa1351fb2ab0076f8227df399690f1c8409fc69a0"
+      "sha256": "663894728ccc666931faca868f23093599b7eb286eb0ad7ee42717be8dfbf1b8"
     },
     {
       "path": "crates/typedpress/tests/differential/language/null-proto-helpers.mjs",
@@ -16469,7 +16329,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/null-proto.ts",
-      "sha256": "ed2f6b15c7e50c9f5e9798b7bf531091bf848584fd57821161a367156093bbff"
+      "sha256": "454990fc8e1a7be388f0c731f965ad2393f9ece2ee3e9093cc3d28541d948125"
     },
     {
       "path": "crates/typedpress/tests/differential/language/object-reflect-helpers.mjs",
@@ -16477,7 +16337,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/object-reflect.ts",
-      "sha256": "0fc99ef4ee8534b217bd5e821aa9aedc3c2ab76b62fbe59090d68dd7bb9e9ae4"
+      "sha256": "77d970b6da05dfab3c612894e5ce01b89275f99d43a5bdf56912f0e6912f266b"
     },
     {
       "path": "crates/typedpress/tests/differential/language/optional-calls-helpers.mjs",
@@ -16485,7 +16345,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/optional-calls.ts",
-      "sha256": "95c79f881c2507f0383bbf4789fc183886ddf448956a218e875fb4e51eba33b4"
+      "sha256": "bea6bd34cb666b13d3e27ac7cef31f84a345ccfea784e820cdede47fb7e73464"
     },
     {
       "path": "crates/typedpress/tests/differential/language/parameter-patterns-helpers.mjs",
@@ -16493,15 +16353,15 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/parameter-patterns.ts",
-      "sha256": "8620308e0b22c7c4a94013919ed3edfb60abc9ad699bd9ed0b6a496e07686352"
+      "sha256": "638fe731ae7894b6e854b7ede2ddef7ba335af369c000bddfa7a8ac7ce3f1c7a"
     },
     {
       "path": "crates/typedpress/tests/differential/language/php-expressions.ts",
-      "sha256": "4633eba3a712982cea9d23087390fce824d42c2d4a3335431a4330a161a75a6a"
+      "sha256": "67f2b39ecf4a6d1493c44b34071cc16b02dd915428ed551ebdc431dc9f156122"
     },
     {
       "path": "crates/typedpress/tests/differential/language/php-names.ts",
-      "sha256": "b2b1922bb4db62bc87965f95be3d6f87b341262e09c48bb82ad02f4a6f178a06"
+      "sha256": "e57c00eabd1527e1487a4316f48359f874afb50d50268f5b71d61fe2b31a6c89"
     },
     {
       "path": "crates/typedpress/tests/differential/language/sort-helpers.mjs",
@@ -16509,7 +16369,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/sort.ts",
-      "sha256": "31739c81e7eecb9dc6564c83c4c6cf06ed7bab16aa278d5c7b552828505c05be"
+      "sha256": "c7f4b227b63e6c9421d17f77e6c99cb973ad9f20a412519e13daaeea8c4f91d7"
     },
     {
       "path": "crates/typedpress/tests/differential/language/subtle-digest-helpers.mjs",
@@ -16517,7 +16377,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/subtle-digest.ts",
-      "sha256": "4bdd23ed1608194116665b8eede7a9ab29172afbbfa67fbc85d25dc498372b50"
+      "sha256": "dc1fdd1a876a7c8a45ffac67cd78e40f20457a89ce7f8b01f96841cb40dbdbb4"
     },
     {
       "path": "crates/typedpress/tests/differential/language/tagged-templates-helpers.mjs",
@@ -16525,7 +16385,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/tagged-templates.ts",
-      "sha256": "3697182fd53656816b302e75e8470010034b71db4349c99304bb2c246b7a0967"
+      "sha256": "728c5e4b312de9182c29c207de1ad0b793731508281d2b5057d92f01965fd4b4"
     },
     {
       "path": "crates/typedpress/tests/differential/language/this-helpers.mjs",
@@ -16533,7 +16393,7 @@
     },
     {
       "path": "crates/typedpress/tests/differential/language/this.ts",
-      "sha256": "13fec01e606967d0f2b141bb6248a1520e6d3c7b3b179d666b976f58e9cfc69b"
+      "sha256": "3b7a1df7dc0aab682fd43c5cb99539c3d87e95535cabeea5cc3ba5306fee30cf"
     },
     {
       "path": "crates/typedpress/tests/fixtures/canon/README",
@@ -16597,7 +16457,7 @@
     },
     {
       "path": "crates/typedpress/tests/runtime-schema/base.schema.php",
-      "sha256": "214ec4199451f29c333c7aa0877b2714cb1969eb0f1f6c2ec7725f6fac74209b"
+      "sha256": "11a59cd58b6599f8c854aa458a9111c53f6ddf3898b12959da47207680f24cde"
     },
     {
       "path": "crates/typedpress/tests/runtime-schema/base/tp/schema.ts",
@@ -16609,7 +16469,7 @@
     },
     {
       "path": "crates/typedpress/tests/runtime-schema/corpus.json",
-      "sha256": "fe108cce64e32a942a8782043a6875d90e05e172dc60b04f3bfe22e0b0efc0ff"
+      "sha256": "490d248d9dccaf32f7480a15c78a66a3b03475e1b9437fb0ac42b1fe08a3eb1f"
     },
     {
       "path": "crates/typedpress/tests/runtime-schema/kinds.lock.json",
@@ -16617,7 +16477,7 @@
     },
     {
       "path": "crates/typedpress/tests/runtime-schema/kinds.schema.php",
-      "sha256": "51b58ed2a5ac518186552930a4e748c2a11a0b09a278a34615e3e3b3813d58ea"
+      "sha256": "f3ebd6478bb275cf0bc5c9b3995249457fc8d662e5627d4778bda88a3a519226"
     },
     {
       "path": "crates/zero/Cargo.toml",
@@ -30405,7 +30265,7 @@
     },
     {
       "path": "runtime/engine/shared/spacepress.php",
-      "sha256": "d2ab87e9278bad5cb56bff774622707a06c58736e69f0fb1d9b580fe78240496"
+      "sha256": "96f70605ba3ef9f5333fc522f26b9ddd0fca1dd26437cdb42955b406e1b1da34"
     },
     {
       "path": "runtime/engine/shared/storage-policy.generated.php",
@@ -30489,7 +30349,7 @@
     },
     {
       "path": "runtime/engine/wordpress/typedpress.php",
-      "sha256": "e315ecc331584fd1c4e28968b9270d5352ddce76c24a731f34158c5b136c9217"
+      "sha256": "5860180635c26a33c741bd6cfccc3e6b200e020f1ed2e695580e75400affed25"
     },
     {
       "path": "runtime/identity/NOTICE.md",
@@ -31013,7 +30873,7 @@
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
-      "sha256": "1a163b547b88286bcb37a820d67812a286e198d1be4d198fb9e2505989293b48"
+      "sha256": "2d7f4e42bcbb303299d40d8654a5a764767d68fbc2f67f8c8e2e245c378f877d"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",
@@ -31033,15 +30893,15 @@
     },
     {
       "path": "runtime/tests/typedpress-publish.test.ts",
-      "sha256": "9d710719a0a7b0932f897a13db74dba5fd8d301d2cad352cf055a2120f569f0d"
+      "sha256": "b7b57d9ae7e96fd9edf35ff00fc765ae3c737cf8edd30e687fbf91beb7ed031d"
     },
     {
       "path": "runtime/tests/typedpress-space-role.test.ts",
-      "sha256": "ba490ab8198957348a3318b86c97757b73dd9e3cb765596bca7faa25f6b3ff08"
+      "sha256": "736c82a13e605b8b576653a5d8bce5ec6808f88f66124cf458a9705b4dd45f82"
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "4ea01a7c6271c7e7e886c2e018dcb82b4a0f8c7feaf3c65cca4e82006b7adb3e"
+      "sha256": "e793518b9f1c784826446d929ffabb5cbc945dfca83dabc3c0362d07290201ac"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

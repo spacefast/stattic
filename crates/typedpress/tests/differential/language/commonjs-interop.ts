@@ -4,12 +4,12 @@
 // as module.exports, and properties on a function module.exports. The modules follow ret 0.5
 // and safe-regex2 5.1 (files-sdk dependencies) statement for statement. Every action runs under
 // Node and as compiled PHP; the JSON results must be byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import safeRegex from "./commonjs-interop-safe.cjs";
 import { results } from "./commonjs-descriptors.cjs";
 import ret from "./commonjs-interop-ret.cjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 // Called while the config is evaluated.
 const BUILD_TIME = [safeRegex("a+b"), safeRegex("a+b+c+", { limit: 2 }), safeRegex.isRegExp(/x/), safeRegex.isRegExp("x")];

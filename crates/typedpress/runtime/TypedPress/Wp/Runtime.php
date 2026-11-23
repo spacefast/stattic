@@ -29,9 +29,6 @@ final class Runtime
         }
         self::$booted = true;
         self::$runtimeFile = $runtimeFile;
-        // A guarded upgrade step, not a table: staged revisions written before they had their own
-        // status get it (WpPostStore::upgradeStagedStatus), once per site with the other steps.
-        \TypedPress\SystemTables::register('__tp_staged_status', [\TypedPress\SystemTables::step(1, WpPostStore::upgradeStagedStatus(...))]);
         RouteRequest::register();
         AgentScope::trackCookie();
         // Application passwords sign in where core accepts them and nowhere else: on a request WordPress
@@ -42,29 +39,10 @@ final class Runtime
         add_filter('rest_authentication_errors', [AgentScope::class, 'unenforced'], 95);
         register_activation_hook($runtimeFile, [self::class, 'activate']);
         PageCaches::register();
-        // A site that ran a build from before the rename to TypedPress moves its stored names first, before
-        // any table, option or post type of TypedPress's exists (ZeroNames). Managed apps do it in initialize().
-        add_action('init', static function (): void {
-            if (self::installs() && ZeroNames::pending() && Platform::problems() === []) {
-                global $wpdb;
-                try {
-                    ZeroNames::upgrade(new Connection($wpdb));
-                } catch (\Throwable $e) {
-                    // WordPress keeps serving; TypedPress refuses until the next request retries.
-                    self::$unavailable = $e->getMessage();
-                    error_log('[typedpress] ' . self::$unavailable);
-                    self::notice(self::$unavailable);
-                }
-            }
-            // The notice shows in wp-admin only, so only wp-admin reads what the upgrade kept.
-            foreach (is_admin() ? ZeroNames::kept() : [] as $type) {
-                self::notice("posts of type $type were kept under that name: WordPress limits post types to 20 characters, and its TypedPress name would be longer. Rename the collection to at most 17 characters and move its posts to tp_<name>");
-            }
-        }, PHP_INT_MIN);
         // As with app migrations: a runtime updated by copying files in sets up its tables on the
         // first request of any kind, once, under a lock.
         add_action('init', static function (): void {
-            if (!self::installs() || ZeroNames::pending() || get_option('tp_runtime_tables') === self::tablesVersion() || Platform::problems() !== []) {
+            if (!self::installs() || get_option('tp_runtime_tables') === self::tablesVersion() || Platform::problems() !== []) {
                 return;
             }
             global $wpdb;
@@ -89,19 +67,13 @@ final class Runtime
                 if (self::$plugin === null) {
                     \WP_CLI::error('No compatible TypedPress app is active.');
                 }
-                // While storage is behind, only `migrate` runs; every other command (legacy migration
-                // included) would write against tables that don't match the build.
+                // While storage is behind, only `migrate` can run.
                 if (($args[0] ?? '') !== 'migrate' && self::$plugin->unavailable() !== null) {
                     \WP_CLI::line((string) \TypedPress\Js::jsonStringify(['error' => \TypedPress\App::problem(new \TypedPress\HttpError(503, 'unavailable', (string) self::$plugin->unavailable()))]));
                     \WP_CLI::halt(1);
                 }
                 if (($args[0] ?? '') === 'seed') {
                     $code = \TypedPress\Sync\Seed::wpCli(self::$plugin, $args, $flags);
-                    $code === 0 || \WP_CLI::halt($code);
-                    return;
-                }
-                if (\TypedPress\Wp\Legacy\Module::handles($args)) {
-                    $code = \TypedPress\Wp\Legacy\Module::wpCli(self::$plugin, $args, $flags);
                     $code === 0 || \WP_CLI::halt($code);
                     return;
                 }
@@ -185,7 +157,6 @@ final class Runtime
             throw new \RuntimeException(implode('; ', $problems));
         }
         global $wpdb;
-        ZeroNames::upgrade(new Connection($wpdb));
         Migrator::locked(new Connection($wpdb), 'tp_runtime_tables', [self::class, 'applySystemTables']);
         $applied = self::$plugin->initialize($drops);
         self::install();
@@ -319,13 +290,12 @@ final class Runtime
 
     /**
      * What {@see initialize()} would run on this site for the mounted managed build, computed without
-     * writing anything: the shared system steps when the site recorded another set, the stored-name
-     * upgrade from before the rename, the identity schema, the app's migrations and the runtime-schema
+     * writing anything: the shared system tables, the identity schema, the app's migrations and the runtime-schema
      * comparison. Refusals (platform, schema check with `$drops`, runtime schema) are listed, all at
      * once; nothing is thrown for them.
      *
      * @param array<string, int> $drops
-     * @return array{steps: list<array{kind: string, id: string, state: string}>, platform: list<string>, legacyNames: bool, systemTables: ?array{from: mixed, to: string, steps: array<string, list<string>>}, identitySchema: ?array{from: int, to: int}, migrations: list<array>, install: list<array>, runtimeSchema: ?array, refusals: list<array>}
+     * @return array{steps: list<array{kind: string, id: string, state: string}>, platform: list<string>, systemTables: ?array{from: mixed, to: string, steps: array<string, list<string>>}, identitySchema: ?array{from: int, to: int}, migrations: list<array>, install: list<array>, runtimeSchema: ?array, refusals: list<array>}
      */
     public static function inspect(array $drops = []): array
     {
@@ -344,27 +314,13 @@ final class Runtime
         $identity = null;
         if (class_exists(\TypedPress\Identity\Schema::class)) {
             $from = (int) ($option('tp_identity_schema_version') ?? 0);
-            $identity = $from < \TypedPress\Identity\Schema::VERSION ? ['from' => $from, 'to' => \TypedPress\Identity\Schema::VERSION] : null;
+            $identity = $from !== \TypedPress\Identity\Schema::VERSION ? ['from' => $from, 'to' => \TypedPress\Identity\Schema::VERSION] : null;
         }
         $app = self::$plugin->inspect($drops);
         $install = self::installPlan();
-        $legacy = ZeroNames::pending();
         // Every step initialize would run, in order, as one open set: whatever reads it (the deployment
         // that decides whether a plan is empty) counts kinds it doesn't know too.
         $steps = [];
-        // The one-time moves of a site that ran 0.3 (before the rename): identity's names first, as
-        // initialize runs them, then the runtime's. `state` is `started` for a run that was interrupted.
-        $connection = new Connection($wpdb);
-        $names = [];
-        if (class_exists(\TypedPress\Identity\Legacy\ZeroNames::class)) {
-            $names['identity'] = \TypedPress\Identity\Legacy\ZeroNames::state($wpdb);
-        }
-        $names['runtime'] = ZeroNames::state($connection);
-        foreach ($names as $which => $state) {
-            if ($state === 'pending' || $state === 'started') {
-                $steps[] = array_replace(self::step('names', "names:$which"), ['state' => $state]);
-            }
-        }
         if ($recorded !== self::tablesVersion()) {
             $steps[] = self::step('system-tables', 'system-tables', ['to' => self::tablesVersion()]);
         }
@@ -378,7 +334,6 @@ final class Runtime
         return [
             'steps' => [...$steps, ...$install],
             'platform' => $platform,
-            'legacyNames' => $legacy,
             'systemTables' => $recorded === self::tablesVersion() ? null : ['from' => $recorded, 'to' => self::tablesVersion(), 'steps' => \TypedPress\SystemTables::plan()],
             'identitySchema' => $identity,
             'migrations' => $app['migrations'],
@@ -396,11 +351,10 @@ final class Runtime
         }
         global $wpdb;
         InstallMarker::forget();
-        ZeroNames::upgrade(new Connection($wpdb));
         Migrator::locked(new Connection($wpdb), 'tp_runtime_tables', [self::class, 'applySystemTables']);
     }
 
-    /** Shared system tables (jobs, outbox, receipts, …): idempotent DDL, recorded by tablesVersion(). */
+    /** Shared system tables (jobs, receipts, …): idempotent DDL, recorded by tablesVersion(). */
     public static function applySystemTables(): void
     {
         global $wpdb;

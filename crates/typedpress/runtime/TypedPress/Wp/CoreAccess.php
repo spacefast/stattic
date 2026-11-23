@@ -134,15 +134,13 @@ final class CoreAccess
                 return $caps;
             }
             $allowed = self::postAllowed($collection, $cap, $post, $userId);
-            // WordPress's own posts: core's capabilities decide first, and the app's rule can only narrow
-            // them. A published post's read is the rule's alone: core asks for `read`, which a visitor
-            // doesn't have, and the store already confines unpublished posts to whom core lets read them
-            // ({@see NativePosts::readGuard}).
+            // The store already checked the post's visibility, including password proof. WordPress
+            // maps a published post's read to `read`, which anonymous visitors lack.
             if (self::schema()->collection($collection)['native'] ?? false) {
                 if (!$allowed) {
                     return ['do_not_allow'];
                 }
-                return $cap === 'read_post' && $post->post_status === 'publish' && $post->post_password === '' ? ['exist'] : $caps;
+                return $cap === 'read_post' && $post->post_status === 'publish' && $caps === ['read'] ? ['exist'] : $caps;
             }
 
             return self::grant($allowed);
@@ -211,6 +209,11 @@ final class CoreAccess
         }
         $op = ['read_post' => 'read', 'edit_post' => 'update', 'publish_post' => 'update', 'delete_post' => 'delete'][$cap];
         if ($post->post_status === 'trash') {
+            $spec = self::schema()->collection($collection);
+            if ($op === 'delete' && ($spec['softDelete'] ?? false)) {
+                return self::keys($collection, 'restore', $viewer) === null || self::keys($collection, 'purge', $viewer) === null;
+            }
+
             return self::keys($collection, $op, $viewer) === null;
         }
 
@@ -411,6 +414,9 @@ final class CoreAccess
             return $response;
         }
         $spec = self::schema()->collection($collection);
+        if (is_array($data['meta'] ?? null) && !Coediting::readable($collection, (int) ($data['id'] ?? 0))) {
+            unset($data['meta'][Coediting::DOCUMENT]);
+        }
         if (is_array($data['meta'] ?? null) && $stored !== null) {
             // TypedPress values, judged on the same row: a revision's `meta` is its own snapshot, not the
             // raw postmeta core's revisions controller would read.

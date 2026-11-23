@@ -1,1 +1,1 @@
-<?php return array('name' => 'classic-admin', 'dependencies' => array('react', 'wp-compose'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/boot', '@wordpress/route'), 'version' => 'c9eb8a5212acf8a2a679');
+<?php return array('name' => 'classic-admin', 'dependencies' => array('react'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/boot', '@wordpress/route'), 'version' => '8cfd37305dd7abf48f75');

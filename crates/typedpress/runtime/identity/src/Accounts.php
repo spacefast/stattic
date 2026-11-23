@@ -34,10 +34,18 @@ final class Accounts
             time(),
         );
     }
-    /** SQLite's MySQL adapter stores VARBINARY as bytes and compares a string literal as text. */
+    /**
+     * A binary column compared with a string. SQLite's MySQL adapter stores BINARY and VARBINARY as
+     * bytes and compares a string literal as text, so the plain comparison never matches there.
+     */
+    private function binaryColumn(string $column): string
+    {
+        return defined('DB_ENGINE') && DB_ENGINE === 'sqlite' ? "CAST($column AS CHAR)" : $column;
+    }
+
     private function emailColumn(): string
     {
-        return defined('DB_ENGINE') && DB_ENGINE === 'sqlite' ? 'CAST(normalized AS CHAR)' : 'normalized';
+        return $this->binaryColumn('normalized');
     }
 
     public function owner(string $email): int
@@ -541,7 +549,7 @@ final class Accounts
                 }
             }
             $existing = $this->db->row(
-                "SELECT * FROM {$this->db->prefix}providers WHERE identity_key=%s",
+                "SELECT * FROM {$this->db->prefix}providers WHERE {$this->binaryColumn('identity_key')}=%s",
                 $key,
             );
             if ($existing) {

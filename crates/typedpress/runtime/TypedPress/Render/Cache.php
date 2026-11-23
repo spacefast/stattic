@@ -8,6 +8,7 @@ use TypedPress\Extensions;
 use TypedPress\SystemTables;
 use TypedPress\Wp\CompositeStore;
 use TypedPress\Wp\LockBusy;
+use TypedPress\Wp\Plugin;
 
 use function TypedPress\db;
 
@@ -82,7 +83,7 @@ final class Cache
      *
      * @return array{string, bool}
      */
-    public static function policy(int $status, bool $anonymous, bool $guarded): array
+    public static function policy(int $status, bool $anonymous, bool $guarded, int $window = self::WINDOW): array
     {
         // A prerender (Prebuilt) is recorded like a cacheable render, and kept by no shared cache:
         // the file it becomes is the copy that is served.
@@ -90,7 +91,7 @@ final class Cache
             return [self::PRIVATE, true];
         }
         if ($status === 200 && $anonymous && !$guarded) {
-            $window = max(0, (int) apply_filters('tp_app_cache_window', self::WINDOW));
+            $window = max(0, (int) apply_filters('tp_app_cache_window', $window));
             return ["public, max-age=0, s-maxage=$window, must-revalidate", true];
         }
         return [self::PRIVATE, false];
@@ -114,6 +115,25 @@ final class Cache
         if (!str_starts_with($cacheControl, 'public') && function_exists('batcache_cancel')) {
             batcache_cancel();
         }
+    }
+
+    /** Recheck headers after wp_head, block templates, wp_body_open and wp_footer. */
+    public static function finishPage(string $cacheControl, int $status): void
+    {
+        foreach (headers_list() as $header) {
+            if (stripos($header, 'Cache-Control:') === 0) {
+                $policy = trim(substr($header, strlen('Cache-Control:')));
+                if (preg_match('/(?:private|no-store|no-cache)/i', $policy) === 1) {
+                    $cacheControl = self::PRIVATE;
+                    break;
+                }
+                $cacheControl = $policy;
+            }
+        }
+        if (http_response_code() !== $status || Forms::marked() || LoginView::private() || SearchView::marked()) {
+            $cacheControl = self::PRIVATE;
+        }
+        self::send($cacheControl);
     }
 
     /** The WP Cloud edge's per-response cache switch. */
@@ -311,8 +331,24 @@ final class Cache
         if (!self::listening()) {
             return;
         }
-        $found = self::run('SELECT DISTINCT "url" FROM {reads} WHERE "kind" = ? AND "item" = ?', ['global:' . $name, '*']);
-        \TypedPress\Wp\Purges::recorded(array_map(static fn (array $r): string => self::address((string) $r['url']), $found));
+        self::dependencyWritten('global:' . $name);
+    }
+
+    /** A compiled WordPress option was added, changed or deleted. */
+    public static function optionWritten(string $name): void
+    {
+        if (self::listening()) {
+            self::dependencyWritten('option:' . $name);
+        }
+    }
+
+    private static function dependencyWritten(string $key): void
+    {
+        $found = self::run('SELECT DISTINCT "url" FROM {reads} WHERE "kind" = ? AND "item" = ?', [$key, '*']);
+        \TypedPress\Wp\Purges::recorded([
+            ...RoutePlan::urls(Plugin::instance(), $key),
+            ...array_map(static fn (array $r): string => self::address((string) $r['url']), $found),
+        ]);
     }
 
     /** Extensions::onWritten: inside the write's transaction; Wp\Purges announces after commit. */
@@ -331,7 +367,10 @@ final class Cache
             'SELECT DISTINCT "url" FROM {reads} WHERE "kind" = ? AND ("item" = ? OR "item" = ?)',
             [$collection, '*', (string) $id],
         );
-        \TypedPress\Wp\Purges::recorded(array_map(static fn (array $r): string => self::address((string) $r['url']), $found));
+        \TypedPress\Wp\Purges::recorded([
+            ...RoutePlan::urls(Plugin::instance(), $collection),
+            ...array_map(static fn (array $r): string => self::address((string) $r['url']), $found),
+        ]);
     }
 
     /**

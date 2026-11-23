@@ -290,12 +290,15 @@ final class OAuth
      */
     public function access(string $raw): ?array
     {
+        if (!Schema::ready()) {
+            return null;
+        }
         $claims = Keys::verify($raw);
         if ($claims === null || !is_string($claims["jti"] ?? null) || !is_string($claims["sub"] ?? null)) {
             return null;
         }
         $row = $this->db->row(
-            "SELECT t.*" . (Schema::linksWordPressSessions() ? ", s.wp_token AS session_wp_token" : "") . " FROM {$this->db->prefix}tokens t JOIN {$this->db->prefix}sessions s ON s.id=t.session_id JOIN {$this->db->prefix}accounts a ON a.wp_user_id=t.wp_user_id JOIN {$this->db->prefix}applications c ON c.id=t.client_id WHERE t.id=%s AND t.kind='access' AND t.revoked=0 AND t.expires_at>%d AND s.revoked_at IS NULL AND a.status='active' AND c.enabled=1",
+            "SELECT t.*, s.wp_token AS session_wp_token FROM {$this->db->prefix}tokens t JOIN {$this->db->prefix}sessions s ON s.id=t.session_id JOIN {$this->db->prefix}accounts a ON a.wp_user_id=t.wp_user_id JOIN {$this->db->prefix}applications c ON c.id=t.client_id WHERE t.id=%s AND t.kind='access' AND t.revoked=0 AND t.expires_at>%d AND s.revoked_at IS NULL AND a.status='active' AND c.enabled=1",
             $claims["jti"],
             time(),
         );
@@ -505,7 +508,7 @@ final class OAuth
             $uid,
         );
         $session = $this->db->row(
-            "SELECT id, wp_user_id" . (Schema::linksWordPressSessions() ? ", wp_token" : "") . " FROM {$this->db->prefix}sessions WHERE id=%s AND wp_user_id=%d AND revoked_at IS NULL FOR UPDATE",
+            "SELECT id, wp_user_id, wp_token FROM {$this->db->prefix}sessions WHERE id=%s AND wp_user_id=%d AND revoked_at IS NULL FOR UPDATE",
             $sessionId,
             $uid,
         );

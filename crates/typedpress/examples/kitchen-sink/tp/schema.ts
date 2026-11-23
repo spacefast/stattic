@@ -1,9 +1,17 @@
 import {
-  blocks, boolean, collection, date, email, file, files, global, HttpError, integer, json,
-  media, number, ref, repeater, richText, select, slug, table, taxonomy, terms, text, timestamp,
-  url, userProjection, wp, group, jobs, db,
+  blocks, boolean, collection, date, email, file, files, global, HttpError, integer, job, json,
+  media, number, once, ref, repeater, richText, select, slug, table, taxonomy, terms, text, timestamp,
+  url, userProjection, wp, group, db,
 } from "typedpress";
-import { delete_option } from "php/wordpress";
+import { delete_option, update_option } from "php/wordpress";
+
+// Queued by the workshops' afterCreate hook, run by Action Scheduler after the request commits.
+export const recordEvent = job({ retries: 3 }, async ({ eventId }: { eventId: number }, ctx) => {
+  if (!Number.isInteger(eventId)) throw new HttpError(422, "invalid_input", "eventId must be an integer", "/eventId");
+  // A retried run writes the option once.
+  await once(ctx.jobId, () => update_option("kitchen_has_workshops", true));
+  await db.insert(activity).values({ eventId, summary: "Workshop created" });
+});
 
 export const topics = taxonomy(
   { color: text().pattern(/^#[0-9a-f]{6}$/).optional() },
@@ -19,7 +27,7 @@ export const events = collection({
   slug: slug({ source: "title" }).optional(),
   description: richText().optional(),
   startsOn: date(),
-  venue: text().default("Teaching kitchen"),
+  venue: text().default("Teaching kitchen").searchable(false),
   poster: media({ accept: "image" }).optional(),
   gallery: media({ accept: "image" }).many().default([]),
   handout: file(handouts).optional(),
@@ -37,14 +45,14 @@ export const events = collection({
 }, {
   label: "Workshops", title: "title", content: "description", comments: true,
   sync: "content/events/*.md", url: "/events/:slug",
-  access: { read: "anyone", create: "editor", update: "editor", delete: "admin" },
+  access: { read: "anyone", create: "editor", update: "editor", delete: "admin", restore: "admin", purge: "admin" },
 }).on({
   beforeCreate(data) {
     data.title = data.title.trim();
     if (data.title === "") throw new HttpError(422, "invalid_input", "Enter a workshop title.");
   },
   async afterCreate(event): Promise<void> {
-    await jobs.recordEvent.enqueue({ eventId: event.id }, { key: `event-${event.id}` });
+    await recordEvent.enqueue({ eventId: event.id }, { key: `event-${event.id}` });
   },
   beforeUpdate(patch, existing) {
     if (patch.registrationOpen === true && existing.startsOn < new Date().toISOString().slice(0, 10)) {
@@ -67,6 +75,19 @@ export const events = collection({
     await db.insert(activity).values({ summary: `Workshop deleted: ${event.title}` });
     const remaining = await db.query.events.findFirst({ columns: { id: true } });
     if (!remaining) delete_option("kitchen_has_workshops");
+  },
+  beforeRestore(event): void {
+    if (event.title.trim() === "") throw new HttpError(409, "invalid_workshop", "Cannot restore an untitled workshop.");
+  },
+  async afterRestore(event): Promise<void> {
+    await db.insert(activity).values({ eventId: event.id, summary: `Workshop restored: ${event.title}` });
+  },
+  async beforePurge(event): Promise<void> {
+    const booked = await db.query.registrations.findFirst({ where: { eventId: event.id } });
+    if (booked) throw new HttpError(409, "has_registrations", "Cannot purge a workshop that still has reservations.");
+  },
+  async afterPurge(event): Promise<void> {
+    await db.insert(activity).values({ summary: `Workshop purged: ${event.title}` });
   },
 });
 
@@ -112,9 +133,9 @@ export const registrations = table({
 export const activity = table({
   // Optional, so the log keeps its rows after a workshop is deleted (the reference is set to null).
   eventId: ref(events).optional(),
-  // `.was()` only does something between two builds: the first build of this app stored the column
-  // as `message`, and tp/_generated/migrations/0002 renames it and keeps its values.
-  summary: text().was("message"),
+  // `.column()` decouples the TypeScript field name from the physical SQL column with zero DDL,
+  // and `.alias()` keeps accepting the old API/filter name during transitions.
+  summary: text().column("message").alias("message"),
   createdAt: timestamp().defaultNow(),
 }, { agents: false, access: { read: "editor", create: "admin", update: "admin", delete: "admin" } });
 

@@ -85,6 +85,7 @@ function spacefast_tp_install(): void
     add_filter('sp_identity_provider_account', 'spacefast_tp_identity_provider_account', 10, 3);
     add_filter('tp_identity_providers', 'spacefast_tp_identity_providers');
     add_filter('tp_identity_provider_account', 'spacefast_tp_identity_provider_account', 10, 3);
+    add_filter('sp_identity_callback_url', 'spacefast_sp_provider_callback_url', 10, 2);
     add_filter('home_url', 'spacefast_tp_provider_callback_url', 20, 2);
     // The lent role, from the live Space session on this request.
     add_filter('user_has_cap', 'spacefast_space_role_capabilities', 20, 4);
@@ -132,15 +133,26 @@ function spacefast_tp_identity_providers(mixed $providers): mixed
 }
 
 /**
- * TypedPress Identity names its provider callback with `home_url()`; for the
- * Spacefast provider that is the Space's reserved app callback on the host
- * this request arrived on, the one address a Space client accepts.
+ * The Spacefast provider's redirect URI is the Space's reserved app callback on
+ * the host this request arrived on, the one address a Space client accepts.
+ * SpacePress Identity asks through `sp_identity_callback_url`.
+ */
+function spacefast_sp_provider_callback_url(mixed $url, mixed $provider = ''): mixed
+{
+    if ($provider !== SPACEFAST_TP_PROVIDER) return $url;
+    $origin = spacefast_content_request_origin();
+    return $origin === '' ? $url : $origin . SPACEFAST_TP_PROVIDER_CALLBACK_PATH;
+}
+
+/**
+ * Versions built before `sp_identity_callback_url` name the callback with
+ * `home_url('/identity/provider/callback?provider=spacefast')`; they keep
+ * their own runtime, so this rewrite stays until none serve.
  */
 function spacefast_tp_provider_callback_url(mixed $url, mixed $path = ''): mixed
 {
     if ($path !== '/identity/provider/callback?provider=' . SPACEFAST_TP_PROVIDER) return $url;
-    $origin = spacefast_content_request_origin();
-    return $origin === '' ? $url : $origin . SPACEFAST_TP_PROVIDER_CALLBACK_PATH;
+    return spacefast_sp_provider_callback_url($url, SPACEFAST_TP_PROVIDER);
 }
 
 /** The Space's Sign in with Spacefast issuer, as its route config names it, or null without one. */

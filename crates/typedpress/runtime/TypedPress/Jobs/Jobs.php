@@ -69,16 +69,16 @@ final class Jobs
         return $row === null ? null : (string) $row['id'];
     }
 
-    /** App-defined jobs take precedence over the runtime's native service and webhook jobs. */
+    /** App-defined jobs take precedence over the runtime's built-in jobs. */
     public static function spec(string $name): array
     {
         return db()->schema()->jobs()[$name]
-            ?? \TypedPress\Services\Definition::jobs()[$name]
             ?? match ($name) {
                 Webhooks::JOB => Webhooks::spec(),
                 \TypedPress\Mail::JOB => \TypedPress\Mail::spec(),
                 \TypedPress\Sync\GitDispatch::JOB => \TypedPress\Sync\GitDispatch::spec(),
                 \TypedPress\Search\Index::JOB => \TypedPress\Search\Index::jobSpec(),
+                \TypedPress\Connectors::JOB => \TypedPress\Connectors::spec(),
                 default => throw new \LogicException("Unknown job '$name'"),
             };
     }

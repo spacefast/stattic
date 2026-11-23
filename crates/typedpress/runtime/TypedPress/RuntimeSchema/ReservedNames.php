@@ -11,7 +11,7 @@ namespace TypedPress\RuntimeSchema;
 final class ReservedNames
 {
     public const CLIENT_TYPES = [
-        'Role', 'User', 'Media', 'PrivateFile', 'RevisionSummary', 'Status', 'Locale', 'Collections',
+        'Id', 'Role', 'User', 'Media', 'PrivateFile', 'RevisionSummary', 'RevisionDiff', 'Status', 'Locale', 'Collections',
         'Globals', 'Actions', 'Record', 'Partial', 'Pick', 'Omit', 'Extract', 'Exclude',
         'PropertyKey', 'Promise', 'Error', 'Blob', 'URLSearchParams', 'FormData', 'Uint8Array', 'Headers',
         'Request', 'RequestInit', 'Response', 'SchemaDescriptor', 'Descriptor', 'CollectionDescriptors', 'CollectionKey', 'Row',

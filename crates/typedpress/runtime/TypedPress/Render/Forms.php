@@ -34,6 +34,11 @@ final class Forms
     public const RETURN = '_tp_return';
     /** The query parameter naming this visitor's flash. */
     public const MARKER = '_flash';
+    /**
+     * The hidden field naming which of a page's forms for one action posted (its place among
+     * them, from 1): a page with a form per row gets the state back on that row's form only.
+     */
+    public const FORM = '_tp_form';
     /** Seconds a flash lives. */
     public const TTL = 120;
     /** A flash larger than this drops the submitted values, then shortens messages. */
@@ -44,6 +49,8 @@ final class Forms
     private static ?array $flash = null;
     /** The flash cookie this request read, which its response expires. */
     private static ?string $name = null;
+    /** @var array<string, int> how many forms of each action this render has opened so far */
+    private static array $opened = [];
 
     /**
      * Expires the flash cookie this request read (AppRouter::document, before its headers go, with
@@ -69,10 +76,84 @@ final class Forms
         header('Set-Cookie: ' . $name . '=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax' . (is_ssl() ? '; Secure' : ''), false);
     }
 
-    /** The attributes `<form action={name}>` gets. */
+    /** A page render starts counting its forms again (AppRouter::render, each `<Live>` region's render). */
+    public static function reset(): void
+    {
+        self::$opened = [];
+    }
+
+    /**
+     * The attributes `<form action={name}>` gets. It opens the next form of the action: the fields
+     * compiled inside it (`control`) and its hidden fields (`fields`) are that form's, as PHP
+     * evaluates the element's attributes, then its children, then the hidden fields.
+     */
     public static function attributes(string $action): array
     {
-        return ['method' => 'post', 'action' => \TypedPress\Wp\Facade::url('/actions/' . rawurlencode($action))] + self::enhanced();
+        self::$opened[$action] = (self::$opened[$action] ?? 0) + 1;
+
+        return ['method' => 'post', 'action' => \TypedPress\Wp\Facade::url('/actions/' . rawurlencode($action))] + self::enhanced() + self::outcome($action);
+    }
+
+    /** The flash of the last submit when it came from the form of $action open now, else null. */
+    private static function mine(string $action): ?array
+    {
+        $flash = self::read()[$action] ?? null;
+        if ($flash === null) {
+            return null;
+        }
+        // A flash of a post without the field (a form rendered before it existed) is the first form's.
+        $form = (int) ($flash['form'] ?? 1);
+
+        return $form === (self::$opened[$action] ?? 0) ? $flash : null;
+    }
+
+    /**
+     * `data-tp-form-state="success"` or `"error"` on a form whose action's last submit this render
+     * shows, for styling and for the JavaScript submit, which resets a form that succeeded
+     * (client/router.js), as a fresh page load would. Nothing on a render without a flash.
+     *
+     * @return array<string, string>
+     */
+    public static function outcome(string $action): array
+    {
+        $flash = self::mine($action);
+
+        return $flash === null ? [] : ['data-tp-form-state' => is_array($flash['error'] ?? null) ? 'error' : 'success'];
+    }
+
+    /**
+     * The attributes the compiler adds to a named field inside `<form action={name}>` (the form of
+     * that action open now, so a page with one form per row marks the row that posted):
+     * `aria-invalid` when the last submit's error names the field, and, after an error, the value
+     * that was typed (`$mode` `value`) or whether this box was among those sent (`checked`,
+     * `$option` its value), over the page's `defaultValue` or `defaultChecked`. `none` only marks
+     * the field. A password, a hidden or a file field, a text field of a list input, and one whose
+     * `value` or `checked` the page sets, get `none` from the compiler.
+     *
+     * @return array<string, mixed>
+     */
+    public static function control(string $action, string $name, string $mode, ?string $option = null): array
+    {
+        $flash = self::mine($action);
+        $error = $flash['error'] ?? null;
+        if (!is_array($error)) {
+            return [];
+        }
+        $key = str_ends_with($name, '[]') ? substr($name, 0, -2) : $name;
+        $out = array_key_exists($key, (array) ($error['fields'] ?? [])) ? ['aria-invalid' => 'true'] : [];
+        $values = (array) ($flash['values'] ?? []);
+        if ($mode === 'value' && isset($values[$key]) && is_string($values[$key])) {
+            // `value`, which `Html::element` reads before a `defaultValue` the page wrote; a `value`
+            // the page sets itself comes later in the attributes and wins.
+            $out['value'] = $values[$key];
+        } elseif ($mode === 'checked') {
+            $sent = (array) ($flash['lists'][$key] ?? (isset($values[$key]) ? [$values[$key]] : []));
+            // `checked`, which `Html::element` reads before a `defaultChecked` the page wrote: the
+            // boxes the visitor sent are the checked ones, as before the submit.
+            $out['checked'] = in_array($option ?? 'on', $sent, true);
+        }
+
+        return $out;
     }
 
     /**
@@ -94,6 +175,9 @@ final class Forms
     {
         $uri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
         $out = [Html::element('input', ['type' => 'hidden', 'name' => self::RETURN, 'value' => self::withoutMarker($uri)])];
+        if (isset(self::$opened[$action])) {
+            $out[] = Html::element('input', ['type' => 'hidden', 'name' => self::FORM, 'value' => (string) self::$opened[$action]]);
+        }
         if (function_exists('is_user_logged_in') && is_user_logged_in()) {
             // A signed-in render is `private, no-store`: its nonce never reaches another visitor.
             $out[] = Html::element('input', ['type' => 'hidden', 'name' => '_wpnonce', 'value' => wp_create_nonce('wp_rest')]);
@@ -114,7 +198,8 @@ final class Forms
      * A form post's body as the action's JSON input. Each field reads as its type reads in a URL
      * (`integer`: digits; `real`: a number; `boolean`: a checkbox, absent is false); an empty value
      * is absent. A value that doesn't parse is passed as text, so the action's own validation names
-     * the field. Repeated names are lists, only for list fields. Uploads aren't read.
+     * the field. Repeated names are lists, only for list fields (`select().many()`, many-refs and
+     * media lists, and a handler's `string[]`). Uploads aren't read.
      *
      * @param array<string, array<string, mixed>> $fields the action's input fields
      */
@@ -125,7 +210,7 @@ final class Forms
         }
         $given = [];
         foreach (\TypedPress\QueryString::parse($body) as [$name, $value]) {
-            if ($name === self::RETURN || $name === '_wpnonce' || $name === '_locale' || $name === '_method') {
+            if ($name === self::RETURN || $name === self::FORM || $name === '_wpnonce' || $name === '_locale' || $name === '_method') {
                 continue;
             }
             $name = str_ends_with($name, '[]') ? substr($name, 0, -2) : $name;
@@ -135,13 +220,18 @@ final class Forms
         foreach ($given as $name => $values) {
             $field = $fields[$name] ?? null;
             $type = $field['type'] ?? 'text';
-            $list = in_array($type, ['select', 'refList', 'mediaList'], true);
+            // A handler typed `tags: string[]` (or a list of literals) has a json field shaped as a
+            // list of strings: its values are a list too.
+            $shape = $field['shape'] ?? null;
+            $strings = $type === 'json' && is_array($shape) && ($shape['type'] ?? null) === 'array'
+                && in_array('string', (array) ($shape['items']['type'] ?? []), true);
+            $list = $strings || in_array($type, ['select', 'refList', 'mediaList'], true);
             if (!$list && count($values) > 1) {
                 throw HttpError::invalidInput("$name is sent more than once", HttpError::seg($name));
             }
             $values = array_values(array_filter($values, static fn (string $v): bool => $v !== ''));
             if ($list) {
-                $item = $type === 'select' ? 'text' : 'integer';
+                $item = $type === 'select' || $strings ? 'text' : 'integer';
                 $input[$name] = array_map(static fn (string $v) => self::scalar($item, $v), $values);
                 continue;
             }
@@ -197,16 +287,33 @@ final class Forms
             $back = '/' . ltrim(substr($back, strlen($base)), '/');
         }
         $values = [];
+        // Every value of a name sent more than once (a group of checkboxes for a list field).
+        $lists = [];
+        $form = 1;
+        foreach (\TypedPress\QueryString::parse($body) as [$name, $value]) {
+            if ($name === self::FORM && preg_match('/\A[1-9]\d{0,5}\z/', $value) === 1) {
+                $form = (int) $value;
+            }
+        }
         if ($problem !== null) {
-            // What the visitor typed, to fill the form again. Never a password.
+            // What the visitor typed, to fill the form again, by field name (`tags[]` is `tags`).
+            // Never a password.
             foreach (\TypedPress\QueryString::parse($body) as [$name, $value]) {
-                if ($name[0] !== '_' && !preg_match('/pass(word)?|secret|token/i', $name) && !isset($values[$name])) {
+                $name = str_ends_with($name, '[]') ? substr($name, 0, -2) : $name;
+                if ($name === '' || $name[0] === '_' || preg_match('/pass(word)?|secret|token/i', $name)) {
+                    continue;
+                }
+                if (isset($values[$name])) {
+                    $lists[$name] ??= [$values[$name]];
+                    $lists[$name][] = $value;
+                } else {
                     $values[$name] = $value;
                 }
             }
         }
         $flash = [
             'action' => $action,
+            'form' => $form,
             'at' => time(),
             'result' => $problem === null ? $result : null,
             'error' => $problem === null ? null : [
@@ -217,10 +324,12 @@ final class Forms
                     : new \stdClass(),
             ],
             'values' => $values === [] ? new \stdClass() : $values,
+            'lists' => $lists === [] ? new \stdClass() : $lists,
         ];
         $sealed = self::seal($flash);
         if (strlen($sealed) > self::MAX_BYTES) {
             $flash['values'] = new \stdClass();
+            $flash['lists'] = new \stdClass();
             $sealed = self::seal($flash);
         }
         if (strlen($sealed) > self::MAX_BYTES && $flash['error'] !== null) {

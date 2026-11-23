@@ -13,7 +13,6 @@ defined("ABSPATH") || exit();
 require __DIR__ . '/src/autoload.php';
 register_activation_hook(__FILE__, static function (): void {
     global $wpdb;
-    \TypedPress\Identity\Legacy\ZeroNames::upgrade(new \TypedPress\Identity\DB($wpdb));
     \TypedPress\Identity\Schema::migrate(new \TypedPress\Identity\DB($wpdb));
     \TypedPress\Identity\Keys::current();
     if (!wp_next_scheduled("tp_identity_maintenance")) {

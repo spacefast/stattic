@@ -884,6 +884,7 @@ pub fn definition_of(column: &Column) -> Option<Json> {
         || column.rules.pattern.is_some()
         || column.rules.validate.is_some()
         || column.show_if.is_some()
+        || column.searchable.is_some()
         || column.bucket.is_some()
         || column.was.is_some()
         || !column.access.is_empty()
@@ -1193,6 +1194,12 @@ mod tests {
                 "page",
                 "status",
                 "publishedAt",
+                "author",
+                "createdAt",
+                "updatedAt",
+                "deletedAt",
+                "deletedBy",
+                "deletedGroup",
                 "subtitle"
             ]
         );
@@ -1339,8 +1346,13 @@ mod tests {
             "{}",
             after.gen_ts
         );
-        // A collection's field is post meta: the SQL the two builds plan is the same.
-        assert_eq!(before.migrations, after.migrations);
+        // A collection's field is post meta: the SQL and operations the two builds plan are the same
+        // (migration IDs carry wall-clock timestamps, so compare SQL + ops payloads).
+        assert_eq!(before.migrations.len(), after.migrations.len());
+        for (a, b) in before.migrations.iter().zip(after.migrations.iter()) {
+            assert_eq!(a.sql, b.sql);
+            assert_eq!(a.ops["ops"], b.ops["ops"]);
+        }
     }
 
     #[test]

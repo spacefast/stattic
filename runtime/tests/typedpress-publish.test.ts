@@ -33,7 +33,7 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
     );
     writeFileSync(
       path.join(project, "tp/actions.ts"),
-      'import {action} from "spacepress"; export const ping = action({access:"anyone",handler(){return {message:"pong"};}});',
+      'import {mutation} from "spacepress"; export const ping = mutation({access:"anyone"}, async () => ({message:"pong"}));',
     );
     writeFileSync(
       path.join(project, "tp/app/page.tsx"),

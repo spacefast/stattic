@@ -10,7 +10,7 @@ namespace TypedPress\Wp;
  *
  * - `drop` (a kind or a field): a table or column that holds rows is dropped only when the deploy
  *   names it with its exact live count, `--drop=likes=1204` or `--drop=likes.note=12`. A table TypedPress
- *   didn't create (`existingTable`, e.g. one adopted from Zero 0.8) needs `--drop` even when empty.
+ *   didn't create (`existingTable`) needs `--drop` even when empty.
  * - `required`: a field that becomes required refuses while rows have no value for it.
  * - `narrow`: a field whose stored type or length narrows refuses while values wouldn't fit
  *   (WordPress runs MySQL without strict mode, which would truncate or coerce them).

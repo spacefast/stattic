@@ -75,7 +75,7 @@
           {
             "name": "orderBy",
             "in": "query",
-            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `name`, `email`, `bio`, `avatar`, `userId`, `status`, `publishedAt`, `uid`.",
+            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `name`, `email`, `bio`, `avatar`, `userId`, `status`, `publishedAt`, `author`, `createdAt`, `updatedAt`, `deletedAt`, `deletedBy`, `uid`.",
             "schema": { "type": "string" }
           },
           { "$ref": "#/components/parameters/limit" },
@@ -92,6 +92,12 @@
             "in": "query",
             "description": "Only rows with this status; shorthand for a filter on `status`.",
             "schema": { "type": "string", "enum": ["draft", "published", "scheduled"] }
+          },
+          {
+            "name": "deleted",
+            "in": "query",
+            "description": "Soft-deleted rows filter: `exclude` (default), `include`, or `only`.",
+            "schema": { "type": "string", "enum": ["exclude", "include", "only"] }
           },
           {
             "name": "with",
@@ -316,13 +322,52 @@
         }
       }
     },
+    "/authors/{id}/restore": {
+      "post": {
+        "tags": ["Authors"],
+        "operationId": "authors.restore",
+        "summary": "Restore a soft-deleted authors",
+        "x-typedpress-access": "admin",
+        "description": "Restores a soft-deleted authors row and returns it.\n\nAccess: Users with the `admin` role or a higher one may do this.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The restored row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/Author" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "409": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
     "/authors/{id}/revisions": {
       "get": {
         "tags": ["Authors"],
         "operationId": "authors.revisions.list",
         "summary": "Revisions of authors",
         "x-typedpress-access": "admin",
-        "description": "Each saved version of the row, newest first, with its time and who saved it, one page at a time. `limit` is 50 unless given, and at most 100; `cursor` is null on the last page.\n\nAccess: Users with the `admin` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "description": "Each saved version of the row, newest first, with its version, op, time, author, schemaMigration, and changed fields, one page at a time. `limit` is 50 unless given, and at most 100; `cursor` is null on the last page.\n\nAccess: Users with the `admin` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
         "parameters": [
           {
             "name": "id",
@@ -362,6 +407,57 @@
         }
       }
     },
+    "/authors/{id}/revisions/diff": {
+      "get": {
+        "tags": ["Authors"],
+        "operationId": "authors.revisions.diff",
+        "summary": "Diff two revisions of authors",
+        "x-typedpress-access": "admin",
+        "description": "Field-by-field before/after diff between two revision ids or versions.\n\nAccess: Users with the `admin` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "The starting revision id or version (optional).",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "The target revision id or version.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The changed fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/RevisionDiff" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
     "/authors/{id}/revisions/{revision}": {
       "get": {
         "tags": ["Authors"],
@@ -381,7 +477,7 @@
             "name": "revision",
             "in": "path",
             "required": true,
-            "description": "The revision's id.",
+            "description": "The revision's id or version.",
             "schema": { "type": "integer" }
           }
         ],
@@ -426,7 +522,7 @@
             "name": "revision",
             "in": "path",
             "required": true,
-            "description": "The revision's id.",
+            "description": "The revision's id or version.",
             "schema": { "type": "integer" }
           }
         ],
@@ -916,7 +1012,7 @@
           {
             "name": "orderBy",
             "in": "query",
-            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `title`, `slug`, `body`, `excerpt`, `cover`, `tags`, `authorId`, `seo`, `deck`, `gallery`, `sections`, `createdAt`, `updatedAt`, `status`, `publishedAt`, `uid`.",
+            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `title`, `slug`, `body`, `excerpt`, `cover`, `tags`, `authorId`, `seo`, `deck`, `gallery`, `sections`, `createdAt`, `updatedAt`, `status`, `publishedAt`, `author`, `deletedAt`, `deletedBy`, `uid`.",
             "schema": { "type": "string" }
           },
           { "$ref": "#/components/parameters/limit" },
@@ -933,6 +1029,12 @@
             "in": "query",
             "description": "Only rows with this status; shorthand for a filter on `status`.",
             "schema": { "type": "string", "enum": ["draft", "published", "scheduled"] }
+          },
+          {
+            "name": "deleted",
+            "in": "query",
+            "description": "Soft-deleted rows filter: `exclude` (default), `include`, or `only`.",
+            "schema": { "type": "string", "enum": ["exclude", "include", "only"] }
           },
           {
             "name": "with",
@@ -1182,6 +1284,50 @@
         }
       }
     },
+    "/posts/{id}/restore": {
+      "post": {
+        "tags": ["Posts"],
+        "operationId": "posts.restore",
+        "summary": "Restore a soft-deleted posts",
+        "x-typedpress-access": "editor",
+        "description": "Restores a soft-deleted posts row and returns it.\n\nAccess: Users with the `editor` role or a higher one may do this.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id, or `slug:<slug>` for the row with that slug.",
+            "schema": {
+              "anyOf": [
+                { "type": "integer" },
+                { "type": "string", "pattern": "^slug:." }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The restored row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/Post" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "409": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
     "/posts/{id}/revisions": {
       "get": {
         "tags": ["Posts"],
@@ -1194,7 +1340,7 @@
           { "applicationPassword": [] },
           { "bearer": [] }
         ],
-        "description": "Each saved version of the row, newest first, with its time and who saved it, one page at a time. `limit` is 50 unless given, and at most 100; `cursor` is null on the last page.\n\nAccess: A rule in the app's code decides who may do this, and for which rows.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "description": "Each saved version of the row, newest first, with its version, op, time, author, schemaMigration, and changed fields, one page at a time. `limit` is 50 unless given, and at most 100; `cursor` is null on the last page.\n\nAccess: A rule in the app's code decides who may do this, and for which rows.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
         "parameters": [
           {
             "name": "id",
@@ -1239,6 +1385,68 @@
         }
       }
     },
+    "/posts/{id}/revisions/diff": {
+      "get": {
+        "tags": ["Posts"],
+        "operationId": "posts.revisions.diff",
+        "summary": "Diff two revisions of posts",
+        "x-typedpress-access": "rule",
+        "security": [
+          {},
+          { "cookie": [], "nonce": [] },
+          { "applicationPassword": [] },
+          { "bearer": [] }
+        ],
+        "description": "Field-by-field before/after diff between two revision ids or versions.\n\nAccess: A rule in the app's code decides who may do this, and for which rows.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id, or `slug:<slug>` for the row with that slug.",
+            "schema": {
+              "anyOf": [
+                { "type": "integer" },
+                { "type": "string", "pattern": "^slug:." }
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "The starting revision id or version (optional).",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "The target revision id or version.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The changed fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/RevisionDiff" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
     "/posts/{id}/revisions/{revision}": {
       "get": {
         "tags": ["Posts"],
@@ -1269,7 +1477,7 @@
             "name": "revision",
             "in": "path",
             "required": true,
-            "description": "The revision's id.",
+            "description": "The revision's id or version.",
             "schema": { "type": "integer" }
           }
         ],
@@ -1325,7 +1533,7 @@
             "name": "revision",
             "in": "path",
             "required": true,
-            "description": "The revision's id.",
+            "description": "The revision's id or version.",
             "schema": { "type": "integer" }
           }
         ],
@@ -2225,7 +2433,7 @@
           {
             "name": "orderBy",
             "in": "query",
-            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `postId`, `name`, `body`, `approved`, `notifiedAt`, `createdAt`.",
+            "description": "Fields to sort by, comma-separated; `-` before a field sorts it descending (`-createdAt,title`). Fields: `id`, `postId`, `name`, `body`, `approved`, `notifiedAt`, `createdAt`, `author`, `updatedAt`, `deletedAt`, `deletedBy`.",
             "schema": { "type": "string" }
           },
           { "$ref": "#/components/parameters/limit" },
@@ -2236,6 +2444,12 @@
             "in": "query",
             "description": "Words to find, each at the start of a word, in the title, the content and every text field the caller may read. Only rows the caller may read are found, in the list's own order.",
             "schema": { "type": "string", "maxLength": 200 }
+          },
+          {
+            "name": "deleted",
+            "in": "query",
+            "description": "Soft-deleted rows filter: `exclude` (default), `include`, or `only`.",
+            "schema": { "type": "string", "enum": ["exclude", "include", "only"] }
           },
           {
             "name": "with",
@@ -2433,6 +2647,12 @@
             "required": true,
             "description": "The row's id.",
             "schema": { "type": "integer" }
+          },
+          {
+            "name": "_rev",
+            "in": "query",
+            "description": "The `_rev` of your read: the delete is refused with `409 stale_revision` if the row changed since.",
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -2454,6 +2674,234 @@
           "403": { "$ref": "#/components/responses/Problem" },
           "404": { "$ref": "#/components/responses/Problem" },
           "409": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
+    "/comments/{id}/restore": {
+      "post": {
+        "tags": ["Comments"],
+        "operationId": "comments.restore",
+        "summary": "Restore a soft-deleted comments",
+        "x-typedpress-access": "editor",
+        "description": "Restores a soft-deleted comments row and returns it.\n\nAccess: Users with the `editor` role or a higher one may do this.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The restored row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/Comment" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "409": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
+    "/comments/{id}/revisions": {
+      "get": {
+        "tags": ["Comments"],
+        "operationId": "comments.revisions.list",
+        "summary": "Revisions of comments",
+        "x-typedpress-access": "editor",
+        "description": "Each saved version of the row, newest first, with its version, op, time, author, schemaMigration, and changed fields, one page at a time. `limit` is 50 unless given, and at most 100; `cursor` is null on the last page.\n\nAccess: Users with the `editor` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          },
+          { "$ref": "#/components/parameters/limit" },
+          { "$ref": "#/components/parameters/offset" },
+          { "$ref": "#/components/parameters/cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/RevisionSummary" }
+                    },
+                    "cursor": { "type": ["string", "null"] }
+                  },
+                  "required": ["data", "cursor"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
+    "/comments/{id}/revisions/diff": {
+      "get": {
+        "tags": ["Comments"],
+        "operationId": "comments.revisions.diff",
+        "summary": "Diff two revisions of comments",
+        "x-typedpress-access": "editor",
+        "description": "Field-by-field before/after diff between two revision ids or versions.\n\nAccess: Users with the `editor` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "The starting revision id or version (optional).",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "The target revision id or version.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The changed fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/RevisionDiff" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
+    "/comments/{id}/revisions/{revision}": {
+      "get": {
+        "tags": ["Comments"],
+        "operationId": "comments.revisions.get",
+        "summary": "Get a revision of comments",
+        "x-typedpress-access": "editor",
+        "description": "The row as this revision saved it.\n\nAccess: Users with the `editor` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "revision",
+            "in": "path",
+            "required": true,
+            "description": "The revision's id or version.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row as it was.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/Comment" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      }
+    },
+    "/comments/{id}/revisions/{revision}/restore": {
+      "post": {
+        "tags": ["Comments"],
+        "operationId": "comments.revisions.restore",
+        "summary": "Restore a revision of comments",
+        "x-typedpress-access": "editor",
+        "description": "Makes the revision the current row, as an update of the row.\n\nAccess: Users with the `editor` role or a higher one may do this.\n\nNeeds the kind's update rule on the row; a row outside it is a 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The row's id.",
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "revision",
+            "in": "path",
+            "required": true,
+            "description": "The revision's id or version.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The row after the restore.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": { "$ref": "#/components/schemas/Comment" }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Problem" },
+          "403": { "$ref": "#/components/responses/Problem" },
+          "404": { "$ref": "#/components/responses/Problem" },
+          "409": { "$ref": "#/components/responses/Problem" },
+          "422": { "$ref": "#/components/responses/Problem" },
           "default": { "$ref": "#/components/responses/Problem" }
         }
       }
@@ -2996,7 +3444,7 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "id": { "type": "integer" }
+                  "id": { "type": "number" }
                 },
                 "required": ["id"]
               }
@@ -3020,9 +3468,25 @@
                         "body": { "type": "string" },
                         "approved": { "type": "boolean" },
                         "notifiedAt": { "type": ["string", "null"] },
-                        "createdAt": { "type": "string" }
+                        "createdAt": { "type": "string" },
+                        "author": { "type": ["number", "null"] },
+                        "updatedAt": { "type": "string" },
+                        "deletedAt": { "type": ["string", "null"] },
+                        "deletedBy": { "type": ["number", "null"] }
                       },
-                      "required": ["id", "postId", "name", "body", "approved", "notifiedAt", "createdAt"]
+                      "required": [
+                        "id",
+                        "postId",
+                        "name",
+                        "body",
+                        "approved",
+                        "notifiedAt",
+                        "createdAt",
+                        "author",
+                        "updatedAt",
+                        "deletedAt",
+                        "deletedBy"
+                      ]
                     }
                   },
                   "required": ["data"]
@@ -3060,6 +3524,56 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "The action's result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "count": { "type": ["number", "null"] }
+                      },
+                      "required": ["count"]
+                    }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Problem" },
+          "422": { "$ref": "#/components/responses/Problem" },
+          "default": { "$ref": "#/components/responses/Problem" }
+        }
+      },
+      "get": {
+        "tags": ["Actions"],
+        "operationId": "actions.publishedCount.read",
+        "summary": "Call publishedCount with GET",
+        "x-typedpress-access": "anyone",
+        "security": [
+          {},
+          { "cookie": [], "nonce": [] },
+          { "applicationPassword": [] },
+          { "bearer": [] }
+        ],
+        "description": "Runs the read-only `publishedCount` action. The input is `?input=<json>`; without it, the other query arguments are the input, as strings.\n\nAccess: Anyone may do this, signed in or not.",
+        "parameters": [
+          {
+            "name": "input",
+            "in": "query",
+            "description": "The action's input, as JSON.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The action's result.",
@@ -4835,6 +5349,8 @@
         "type": "object",
         "properties": {
           "id": { "type": "integer" },
+          "version": { "type": "integer" },
+          "op": { "type": "string", "enum": ["create", "update", "delete", "restore", "purge"] },
           "at": { "type": "string", "format": "date-time" },
           "user": {
             "type": ["object", "null"],
@@ -4842,9 +5358,34 @@
               "id": { "type": "integer" },
               "name": { "type": "string" }
             }
+          },
+          "schemaMigration": { "type": ["string", "null"] },
+          "changed": {
+            "type": ["array", "null"],
+            "items": { "type": "string" }
           }
         },
-        "required": ["id", "at", "user"]
+        "required": ["id", "version", "op", "at", "user", "schemaMigration", "changed"]
+      },
+      "RevisionDiff": {
+        "type": "object",
+        "properties": {
+          "from": { "type": ["integer", "null"] },
+          "to": { "type": "integer" },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": { "type": "string" },
+                "from": {},
+                "to": {}
+              },
+              "required": ["field", "from", "to"]
+            }
+          }
+        },
+        "required": ["from", "to", "changes"]
       },
       "Media": {
         "type": "object",
@@ -4911,6 +5452,11 @@
           "userId": { "type": ["integer", "null"] },
           "status": { "type": "string", "enum": ["draft", "published", "scheduled"] },
           "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+          "author": { "type": ["integer", "null"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "deletedAt": { "type": ["string", "null"], "format": "date-time" },
+          "deletedBy": { "type": ["integer", "null"] },
           "uid": { "type": ["string", "null"] },
           "_rev": {
             "type": "string",
@@ -5032,6 +5578,11 @@
           "userId": { "$ref": "#/components/schemas/IntegerFilter" },
           "status": { "$ref": "#/components/schemas/StringFilter" },
           "publishedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "author": { "$ref": "#/components/schemas/IntegerFilter" },
+          "createdAt": { "$ref": "#/components/schemas/StringFilter" },
+          "updatedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "deletedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "deletedBy": { "$ref": "#/components/schemas/IntegerFilter" },
           "uid": { "$ref": "#/components/schemas/StringFilter" },
           "posts": { "type": "object", "description": "A filter on the related rows." },
           "AND": {
@@ -5120,6 +5671,9 @@
           "updatedAt": { "type": "string", "format": "date-time" },
           "status": { "type": "string", "enum": ["draft", "published", "scheduled"] },
           "publishedAt": { "type": ["string", "null"], "format": "date-time" },
+          "author": { "type": ["integer", "null"] },
+          "deletedAt": { "type": ["string", "null"], "format": "date-time" },
+          "deletedBy": { "type": ["integer", "null"] },
           "uid": { "type": ["string", "null"] },
           "_rev": {
             "type": "string",
@@ -5318,6 +5872,9 @@
           "updatedAt": { "$ref": "#/components/schemas/StringFilter" },
           "status": { "$ref": "#/components/schemas/StringFilter" },
           "publishedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "author": { "$ref": "#/components/schemas/IntegerFilter" },
+          "deletedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "deletedBy": { "$ref": "#/components/schemas/IntegerFilter" },
           "uid": { "$ref": "#/components/schemas/StringFilter" },
           "comments": { "type": "object", "description": "A filter on the related rows." },
           "AND": {
@@ -5350,7 +5907,15 @@
           "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
           "approved": { "type": "boolean" },
           "notifiedAt": { "type": ["string", "null"], "format": "date-time" },
-          "createdAt": { "type": "string", "format": "date-time" }
+          "createdAt": { "type": "string", "format": "date-time" },
+          "author": { "type": ["integer", "null"] },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "deletedAt": { "type": ["string", "null"], "format": "date-time" },
+          "deletedBy": { "type": ["integer", "null"] },
+          "_rev": {
+            "type": "string",
+            "description": "A token of the row as read: send it back with a write to refuse the write if the row changed since."
+          }
         }
       },
       "CommentInsert": {
@@ -5373,7 +5938,11 @@
           "body": { "type": "string", "minLength": 1, "maxLength": 2000 },
           "approved": { "type": "boolean" },
           "notifiedAt": { "type": ["string", "integer", "null"] },
-          "createdAt": { "type": ["string", "integer"] }
+          "createdAt": { "type": ["string", "integer"] },
+          "_rev": {
+            "type": "string",
+            "description": "The `_rev` of your read: the write is refused with `409 stale_revision` if the row changed since."
+          }
         }
       },
       "BooleanFilter": {
@@ -5404,6 +5973,10 @@
           "approved": { "$ref": "#/components/schemas/BooleanFilter" },
           "notifiedAt": { "$ref": "#/components/schemas/StringFilter" },
           "createdAt": { "$ref": "#/components/schemas/StringFilter" },
+          "author": { "$ref": "#/components/schemas/IntegerFilter" },
+          "updatedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "deletedAt": { "$ref": "#/components/schemas/StringFilter" },
+          "deletedBy": { "$ref": "#/components/schemas/IntegerFilter" },
           "AND": {
             "type": "array",
             "items": { "$ref": "#/components/schemas/CommentFilter" }

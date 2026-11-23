@@ -34,6 +34,8 @@ pub const APP_MODULE: &str = "typedpress/app";
 pub const CONTENT_MODULE: &str = "typedpress/content";
 /// Hooks for `"use client"` components (docs/decisions/2026-11-08-tsx-to-php.md, generator B).
 pub const CLIENT_MODULE: &str = "typedpress/client";
+/// Opt-in CLI-only destructive migration escape hatch (ADR 2026-11-21 §3).
+pub const DANGER_MODULE: &str = "typedpress/danger";
 /// WordPress core from TypeScript: abilities, hook types and functions (docs/decisions/2026-11-07-wordpress-from-typescript.md).
 pub const WORDPRESS_MODULE: &str = "php/wordpress";
 /// The app's kinds, by registered name (docs/spec/spec.md §2.1); typed by `tp/_generated/db.d.ts`.
@@ -48,6 +50,7 @@ pub fn builtin_module(spec: &str) -> bool {
         || spec == APP_MODULE
         || spec == CONTENT_MODULE
         || spec == CLIENT_MODULE
+        || spec == DANGER_MODULE
         || crate::builtins::module(spec).is_some()
 }
 
@@ -63,20 +66,8 @@ pub trait Fs {
     fn allow_packages(&self) -> bool {
         true
     }
-    /// A stored source bundle: frozen data captured by some earlier compiler, so layout rules that
-    /// came later (the `tp/` import fence) don't apply to it. A live project is never frozen.
-    fn frozen_capture(&self) -> bool {
-        false
-    }
-    /// Another name these sources import `"first"` by: a stored bundle captured before the rename
-    /// imports `"zero"` (`crate::zero_bundle`). Read on parsed import statements, never source text.
-    fn module_alias(&self) -> Option<&'static str> {
-        None
-    }
-    /// The 0.3.0 field reading (docs/decisions/2026-11-11-authoring-surface.md, ruling 21): a capture
-    /// in the pre-rename format holds source written when a plain builder was nullable and
-    /// `.notNull()` made it required, so it is read that way. Only `crate::zero_bundle` sets it.
-    fn legacy_fields(&self) -> bool {
+    /// Whether frontend outputs were recorded with the sources.
+    fn captured(&self) -> bool {
         false
     }
     fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
@@ -107,14 +98,8 @@ impl Fs for Generated<'_> {
     fn allow_packages(&self) -> bool {
         self.inner.allow_packages()
     }
-    fn frozen_capture(&self) -> bool {
-        self.inner.frozen_capture()
-    }
-    fn module_alias(&self) -> Option<&'static str> {
-        None
-    }
-    fn legacy_fields(&self) -> bool {
-        self.inner.legacy_fields()
+    fn captured(&self) -> bool {
+        self.inner.captured()
     }
     fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
         if path == self.path {
@@ -277,8 +262,8 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
     let manifest = root.join(FRONTEND_STYLES);
     // A live project that names the package builds its plain stylesheets with it, and has no
     // manifest before its first build (a fresh clone). A stored capture took its manifest along.
-    let frontend = !fs.frozen_capture() && frontend_enabled(&*fs, &root).map_err(|diag| vec![diag])?;
-    let frontend_styles = if !discover_styles && fs.is_file(&manifest) && (fs.frozen_capture() || frontend) {
+    let frontend = !fs.captured() && frontend_enabled(&*fs, &root).map_err(|diag| vec![diag])?;
+    let frontend_styles = if !discover_styles && fs.is_file(&manifest) && (fs.captured() || frontend) {
         fs.read_to_string(&manifest)
             .and_then(|text| {
                 serde_json::from_str::<StylesManifest>(&text)
@@ -316,10 +301,8 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
     }
     // A checkout from before `tp/_generated/` (a leftover `tp/client/`, an old lock) is refused
     // before any module under `tp/` loads, so its message is the move, not whatever the stale
-    // files fail on. A stored bundle reads those paths on the new layout instead.
-    if !fs.frozen_capture()
-        && let Some((message, help)) = crate::layout::old_in_checkout(|p| fs.exists(p), &program.root)
-    {
+    // files fail on.
+    if let Some((message, help)) = crate::layout::old_in_checkout(|p| fs.exists(p), &program.root) {
         return Err(vec![Diag::new(Span::NONE, message).help(help).code(diag::Code::Import)]);
     }
     match app_files(&*fs, &program.root.join(crate::layout::ROOT)) {
@@ -350,8 +333,8 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         Err(d) => diagnostics.push(d),
     }
     // Pages beside typedpress.config.ts are from before `tp/app/`: refuse them rather than build a
-    // site without them. (A converted 0.8 capsule's `pages/` is read by `typedpress migrate`, not here.)
-    if !fs.frozen_capture() && fs.is_dir(&program.root.join("pages")) {
+    // site without them.
+    if fs.is_dir(&program.root.join("pages")) {
         let pages = program.root.join("pages");
         let file = diag::register_file(&pages, "");
         diagnostics.push(
@@ -727,9 +710,6 @@ fn load_module(
         });
     }
     normalize_spacepress_modules(&mut body, commonjs.as_mut());
-    if let Some(alias) = fs.module_alias() {
-        rename_module(&mut body, commonjs.as_mut(), alias);
-    }
     // `"typedpress:db"` gives this app's kinds to the module that imports them; re-exporting it would hand
     // them on under another module's name, which no evaluator path resolves.
     // Locals bound by `import { x } from "typedpress:db"`: exporting one again is the same re-export.
@@ -837,13 +817,7 @@ fn load_module(
         let target = if query != crate::assets::Query::Default {
             let (bare, _) = crate::assets::Query::split(&spec).expect("validated query");
             resolve_query_asset(fs, path, bare, span)
-                .and_then(|target| {
-                    if fs.frozen_capture() && !is_email {
-                        Ok(target)
-                    } else {
-                        fence(&program.root, path, bare, target, span)
-                    }
-                })
+                .and_then(|target| fence(&program.root, path, bare, target, span))
                 .and_then(|target| load_query_asset(fs, &target, query, program, by_path, span))
         } else {
             let resolved = if required {
@@ -851,13 +825,7 @@ fn load_module(
             } else {
                 resolve(fs, path, &spec, span)
             }
-            .and_then(|target| {
-                if fs.frozen_capture() && !is_email {
-                    Ok(target)
-                } else {
-                    fence(&program.root, path, &spec, target, span)
-                }
-            });
+            .and_then(|target| fence(&program.root, path, &spec, target, span));
             resolved.and_then(|target| match crate::assets::kind(&target) {
                 Some(kind) => load_asset(fs, &target, kind, program, by_path, span),
                 None => load_module(fs, &target, program, by_path, diagnostics),
@@ -1197,11 +1165,7 @@ fn bundle_css(
         let canonical = fs
             .canonicalize(&candidate)
             .map_err(|e| Diag::new(imp_span, e.to_string()).code(diag::Code::Import))?;
-        let target = if fs.frozen_capture() {
-            canonical
-        } else {
-            fence(&program.root, path, &imp.href, canonical, imp_span)?
-        };
+        let target = fence(&program.root, path, &imp.href, canonical, imp_span)?;
         if !matches!(
             crate::assets::kind(&target),
             Some(crate::assets::Kind::Css | crate::assets::Kind::CssModule)
@@ -1339,16 +1303,12 @@ fn bundle_css(
         let canonical = fs
             .canonicalize(&candidate)
             .map_err(|e| Diag::new(url_span, e.to_string()).code(diag::Code::Import))?;
-        let target = if fs.frozen_capture() {
-            canonical
+        let spec = if decoded.starts_with('.') {
+            decoded.clone()
         } else {
-            let spec = if decoded.starts_with('.') {
-                decoded.clone()
-            } else {
-                format!("./{decoded}")
-            };
-            fence(&program.root, path, &spec, canonical, url_span)?
+            format!("./{decoded}")
         };
+        let target = fence(&program.root, path, &spec, canonical, url_span)?;
         if crate::assets::kind(&target) != Some(crate::assets::Kind::File) {
             css_stack.pop();
             return Err(Diag::new(
@@ -1492,28 +1452,6 @@ fn normalize_spacepress_modules(body: &mut [Stmt], commonjs: Option<&mut CommonJ
         }
     }
 }
-
-/// Reads every import, re-export and `require` of `alias` as one of `"first"`.
-fn rename_module(body: &mut [Stmt], commonjs: Option<&mut CommonJs>, alias: &str) {
-    for stmt in body {
-        match stmt {
-            Stmt::Import { source, .. }
-            | Stmt::ExportNames { from: Some(source), .. }
-            | Stmt::ExportAll { from: source, .. }
-                if source == alias =>
-            {
-                *source = TP_MODULE.to_owned();
-            }
-            _ => {}
-        }
-    }
-    for (spec, _) in commonjs.into_iter().flat_map(|c| c.requires.iter_mut()) {
-        if spec == alias {
-            *spec = TP_MODULE.to_owned();
-        }
-    }
-}
-
 fn import_source(s: &Stmt) -> Option<(String, Span)> {
     match s {
         Stmt::Import {
@@ -1900,42 +1838,37 @@ impl CommonJsScope<'_> {
         Ok(())
     }
 
-    /// A function parameter may rebind `module`, `exports` or `require`; inside the function it
-    /// is a local (see `shadowed`). Other wrapper names stay refused.
-    fn parameter(self, pattern: &Pat) -> Result<()> {
-        match pattern {
-            Pat::Id(name, _) if matches!(name.as_str(), "module" | "exports" | "require") => Ok(()),
-            Pat::Default(pattern, value) => {
-                self.parameter(pattern)?;
-                self.expression(value)
+    fn pattern(self, pattern: &Pat, parameter: bool) -> Result<()> {
+        // Any binding in a parameter can shadow these wrapper names, including a rest binding.
+        let validate = |name: &str, span| {
+            if parameter && matches!(name, "module" | "exports" | "require") {
+                Ok(())
+            } else {
+                validate_commonjs_name(name, span)
             }
-            other => self.pattern(other),
-        }
-    }
-
-    fn pattern(self, pattern: &Pat) -> Result<()> {
+        };
         match pattern {
-            Pat::Id(name, span) => validate_commonjs_name(name, *span),
+            Pat::Id(name, span) => validate(name, *span),
             Pat::Obj { props, rest, .. } => {
                 for (_, pattern) in props {
-                    self.pattern(pattern)?;
+                    self.pattern(pattern, parameter)?;
                 }
                 if let Some((name, span)) = rest {
-                    validate_commonjs_name(name, *span)?;
+                    validate(name, *span)?;
                 }
                 Ok(())
             }
             Pat::Arr { elems, rest, .. } => {
                 for pattern in elems.iter().flatten() {
-                    self.pattern(pattern)?;
+                    self.pattern(pattern, parameter)?;
                 }
                 if let Some((name, span)) = rest {
-                    validate_commonjs_name(name, *span)?;
+                    validate(name, *span)?;
                 }
                 Ok(())
             }
             Pat::Default(pattern, value) => {
-                self.pattern(pattern)?;
+                self.pattern(pattern, parameter)?;
                 self.expression(value)
             }
         }
@@ -1953,7 +1886,7 @@ impl CommonJsScope<'_> {
             ..self
         };
         for parameter in &function.params {
-            scope.parameter(&parameter.pat)?;
+            scope.pattern(&parameter.pat, true)?;
             if let Some(value) = &parameter.default {
                 scope.expression(value)?;
             }
@@ -1967,7 +1900,7 @@ impl CommonJsScope<'_> {
     fn statement(self, statement: &Stmt) -> Result<()> {
         match statement {
             Stmt::Decl { pat, init, .. } => {
-                self.pattern(pat)?;
+                self.pattern(pat, false)?;
                 if let Some(value) = init {
                     self.expression(value)?;
                 }
@@ -2014,7 +1947,7 @@ impl CommonJsScope<'_> {
                     arguments_bound: self.arguments_bound || (*kind != DeclKind::Var && binds_arguments(pat)),
                     ..self
                 };
-                scope.pattern(pat)?;
+                scope.pattern(pat, false)?;
                 scope.expression(iter)?;
                 scope.block(body)?;
             }
@@ -2562,7 +2495,7 @@ mod tests {
     /// `app_files` loads every module under `tp/` but the reserved folders, declaration files and
     /// colocated tests, which the test runner owns (they import `vitest` and the like).
     #[test]
-    fn app_modules_are_every_ts_file_under_zero_but_reserved_ones() {
+    fn app_modules_are_every_ts_file_under_tp_but_reserved_ones() {
         let fs = memory(&[
             ("/p/typedpress.config.ts", ""),
             ("/p/tp/index.ts", ""),
@@ -2614,7 +2547,7 @@ mod tests {
 
     /// App code loads only from `tp/` (`F1210`); installed packages keep their own relative imports.
     #[test]
-    fn app_imports_stay_inside_the_zero_root() {
+    fn app_imports_stay_inside_the_tp_root() {
         let load = |files: &[(&str, &str)]| load_from(Rc::new(memory(files)), Path::new("/p/typedpress.config.ts"));
         let refused = |files: &[(&str, &str)]| {
             let diagnostics = load(files).err().expect("refused");
@@ -3124,6 +3057,21 @@ mod tests {
             ),
         ]);
         assert_eq!(json(&result), r#"["b,a","target,copied",1,2,"m!"]"#);
+    }
+
+    #[test]
+    fn commonjs_destructured_parameters_can_shadow_wrapper_names() {
+        let result = evaluate(&[
+            (
+                "/p/typedpress.config.ts",
+                "import api from './tp/api.cjs'; export default [api.f({ exports: 3 }), api.g([{}, 4, 5]), api.g([{}])];",
+            ),
+            (
+                "/p/tp/api.cjs",
+                "exports.f = ({ exports }) => exports; exports.g = ([{ named: module = 6 }, require = 7, ...exports]) => module + require + exports.length;",
+            ),
+        ]);
+        assert_eq!(json(&result), "[3,11,13]");
     }
 
     #[test]

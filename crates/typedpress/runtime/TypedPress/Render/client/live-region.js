@@ -42,6 +42,19 @@ async function apply(id, region, again) {
   const doc = document.documentElement.cloneNode(true);
   const target = doc.querySelector(`[data-tp-live="${CSS.escape(id)}"]`);
   if (!target) return;
+  // Fields outside the region keep what they hold now (typed text, a form refilled after an
+  // error): the copy's attributes are what the router's diff compares, and the browser keeps a
+  // field's current value only in its properties.
+  const kept = document.querySelector(`[data-tp-live="${CSS.escape(id)}"]`);
+  const now = [...document.querySelectorAll("input, textarea, option")];
+  [...doc.querySelectorAll("input, textarea, option")].forEach((copy, i) => {
+    const el = now[i];
+    if (!el || el.tagName !== copy.tagName || target.contains(copy) || kept?.contains(el)) return;
+    if (el instanceof HTMLOptionElement) copy.toggleAttribute("selected", el.selected);
+    else if (el instanceof HTMLTextAreaElement) copy.textContent = el.value;
+    else if (el.type === "checkbox" || el.type === "radio") copy.toggleAttribute("checked", el.checked);
+    else if (el.type !== "file" && el.type !== "password") copy.setAttribute("value", el.value);
+  });
   target.innerHTML = region;
   for (const el of doc.querySelectorAll("[data-tp-pending]")) {
     el.removeAttribute("data-tp-pending");

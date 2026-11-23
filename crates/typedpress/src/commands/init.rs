@@ -88,11 +88,11 @@ fn section(project: &Value) -> String {
          plugins. Server code is TypeScript compiled to PHP: a documented subset, not Node.js.\n\n\
          ### Rules\n\n\
          - Server TypeScript compiles to PHP — never import Node.js built-ins (`fs`, `path`, `crypto`, `process`) or arbitrary npm packages in `typedpress.config.ts`, `tp/app/`, actions, hooks, or jobs.\n\
-         - Keep import boundaries exact: schema & server builders (`collection`, `table`, `global`, `wp`, `action`, `job`, `jobs`, `db`, `HttpError`, `defineConfig`) come from `\"typedpress\"`; visitor-scoped kind queries come from `\"typedpress:db\"`; server page helpers (`Link`, `Content`, `useFormState`) come from `\"typedpress/app\"`; interactive hooks (`useState`, `useLive`) come from `\"typedpress/client\"` inside `\"use client\"` components only.\n\
+         - Keep import boundaries exact: schema & server builders (`collection`, `table`, `global`, `wp`, `query`, `mutation`, `job`, `cron`, `db`, `HttpError`, `defineConfig`) come from `\"typedpress\"`; visitor-scoped kind queries come from `\"typedpress:db\"`; server page helpers (`Link`, `Content`, `useFormState`) come from `\"typedpress/app\"`; interactive hooks (`useState`, `useLive`) come from `\"typedpress/client\"` inside `\"use client\"` components only.\n\
          - Headful WordPress is the default: pages in `tp/app/` compile to server-rendered PHP and `\"use client\"` components compile to WordPress Interactivity API islands. Only reach for `tp/_generated/client/` or `@typedpress/astro` when building a separate external frontend.\n\
          - Pick `collection()` for editorial content (Gutenberg, drafts, revisions, comments, `sync: \"content/**/*.md\"`) and `table()` for relational app data in SQL tables.\n\
-         - Always pass `.was(\"oldName\")` when renaming a field or column so `typedpress build` emits a safe rename migration instead of dropping data.\n\
-         - Set explicit `access` rules on every kind, action, and route; prefer `typedpress:db` for user-facing reads, and annotate actions with `readonly: true` or `destructive: true` for WordPress Abilities.\n\
+         - Use `.column(\"old_name\")` when renaming a field and `storageName: \"old_table\"` when renaming a table export to keep its physical SQL name.\n\
+         - Set explicit `access` rules on kinds and server functions and a `guard` on routes. Use `typedpress:db` for user-facing reads and `destructive: true` on mutations that perform destructive work.\n\
          - Run `typedpress check` after every edit to `typedpress.config.ts` or `tp/` (`typedpress check --fix` applies lint fixes such as `capital_P_dangit`).\n\
          - Never edit `tp/_generated/` or `tp/dist/`: `typedpress build` writes them. Commit `tp/_generated/`.\n\
          - Look an API up before using it: the `docs_search` and `docs_read` tools of the `typedpress` MCP server \

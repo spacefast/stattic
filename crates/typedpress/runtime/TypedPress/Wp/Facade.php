@@ -242,7 +242,7 @@ final class Facade
             return self::global($plugin, $method, $name, $body);
         }
         if (\TypedPress\Extensions::routeHandler($name) !== null && ($name !== 'media' || ($segments[2] ?? null) === 'file')) {
-            // TypedPress's own features with no core route (sign-in, sync, services, private files and the
+            // TypedPress's own features with no core route (sign-in, sync, private files and the
             // streams of uploads kept off the web root): their one implementation, under the facade's
             // prefix. Media rows themselves are the built-in kind, served by core's media route.
             [$status, $headers, $out] = $plugin->app()->handle($method, '/' . implode('/', array_map('rawurlencode', $segments)), $query, $body, self::headers(), $_FILES, $_POST);
@@ -282,7 +282,7 @@ final class Facade
 
             return self::list($kind, $query);
         }
-        if ($kind['type'] === 'post' && ($segments[2] ?? null) === 'revisions' && count($segments) <= 5) {
+        if (in_array($kind['type'], ['post', 'table'], true) && ($segments[2] ?? null) === 'revisions' && count($segments) <= 5) {
             self::gate($kind, 'update');
 
             return self::revisions($kind, $method, self::id($kind, $segments[1]), array_slice($segments, 3), $query, $body);
@@ -294,6 +294,28 @@ final class Facade
 
             return self::json($status, ['data' => $data]);
         }
+        if (Kinds::first($kind) && count($segments) === 3 && in_array($segments[2], ['restore', 'purge'], true)) {
+            $id = self::id($kind, $segments[1]);
+            $op = $segments[2];
+            \TypedPress\App::allow($method, $op === 'restore' ? ['POST'] : ['DELETE']);
+            self::gate($kind, 'delete');
+            $viewer = CoreAccess::viewer() ?? throw new HttpError(403, 'suspended', 'This account is suspended');
+            $db = $plugin->db();
+            $pk = $kind['spec']['primaryKey'];
+            $row = $db->transaction(static function () use ($db, $viewer, $kind, $pk, $id, $op): ?array {
+                $previous = $db->actor();
+                $db->setActor($viewer->user);
+                try {
+                    return $op === 'restore'
+                        ? ($db->restore((string) $kind['name'], [$pk => $id], true, $viewer)[0] ?? null)
+                        : ($db->purge((string) $kind['name'], [$pk => $id], true, $viewer)[0] ?? null);
+                } finally {
+                    $db->setActor($previous);
+                }
+            }) ?? throw HttpError::notFound("No {$kind['name']} row with id $id");
+
+            return self::json(200, ['data' => self::rev($kind, PostMeta::values((string) $kind['name'], $row, array_map('strval', array_keys($row))))]);
+        }
         if (count($segments) !== 2) {
             throw HttpError::notFound("No route for $path");
         }
@@ -303,14 +325,34 @@ final class Facade
         $item = "$base/" . rawurlencode((string) $id);
         if ($method === 'PATCH') {
             // `_rev` and `takeover` are the write's conditions ({@see Rev}), not fields.
-            [$patch, $rev, $takeover] = $kind['type'] === 'post' ? Rev::split(self::body($body)) : [self::body($body), null, false];
+            [$patch, $rev, $takeover] = in_array($kind['type'], ['post', 'table'], true) ? Rev::split(self::body($body)) : [self::body($body), null, false];
             $row = Rev::guarded((string) $kind['name'], $id, $rev, $takeover, CoreAccess::viewer(),
                 fn () => self::outside($kind, 'update', $id, fn () => self::dispatch('POST', $item, self::context($kind), Kinds::input($kind, $patch)), $patch), $patch);
 
             return self::json(200, ['data' => self::rev($kind, Kinds::row($kind, $row))]);
         }
         if ($method === 'DELETE') {
-            // TypedPress's delete is permanent: core trashes posts without `force`, and refuses users without it.
+            // Soft-deletable First kinds go through TypedPress's soft-delete pipeline (Trash for posts,
+            // _live = NULL for SQL tables). Non-soft-deletable kinds keep permanent core delete (`force: true`).
+            if (Kinds::first($kind) && ($kind['spec']['softDelete'] ?? false)) {
+                $viewer = CoreAccess::viewer() ?? throw new HttpError(403, 'suspended', 'This account is suspended');
+                $db = $plugin->db();
+                $pk = $kind['spec']['primaryKey'];
+                $row = Rev::guarded((string) $kind['name'], $id, $query[Rev::FIELD] ?? null, ($query[Rev::TAKEOVER] ?? '') === '1', $viewer,
+                    static fn () => $db->transaction(static function () use ($db, $viewer, $kind, $pk, $id): array {
+                        $previous = $db->actor();
+                        $db->setActor($viewer->user);
+                        try {
+                            return $db->delete((string) $kind['name'], [$pk => $id], true, $viewer)[0]
+                                ?? throw HttpError::notFound("No {$kind['name']} row with id $id");
+                        } finally {
+                            $db->setActor($previous);
+                        }
+                    }));
+
+                return self::json(200, ['data' => PostMeta::values((string) $kind['name'], $row, array_map('strval', array_keys($row)))]);
+            }
+            // Non-soft-deletable delete is permanent: core trashes posts without `force`, and refuses users without it.
             $params = match ($kind['type']) {
                 'post', 'wp-post', 'comments', 'media', 'term' => ['force' => true],
                 'users' => ['force' => true, 'reassign' => false], // the member's posts are kept, unowned
@@ -390,8 +432,20 @@ final class Facade
         if (Kinds::first($kind)) {
             // `where` is always TypedPress's (an empty filter when none was given): TypedPress's pipeline picks the
             // rows, so its read rule and draft visibility decide, not core's default status filter.
-            $params = array_intersect_key($query, array_flip(['where', 'orderBy', 'with', 'search', 'locale']))
+            $params = array_intersect_key($query, array_flip(['where', 'orderBy', 'with', 'search', 'locale', 'deleted']))
                 + ['where' => '{}'] + $paging + self::context($kind);
+            if ($kind['type'] === 'post' && isset($query['deleted']) && $query['deleted'] !== 'exclude') {
+                // Soft-deleted post reads go straight through TypedPress's pipeline (core's WP_Query hides trash).
+                $plugin = Plugin::instance() ?? throw new \LogicException('No TypedPress app');
+                $viewer = CoreAccess::viewer() ?? throw new HttpError(403, 'suspended', 'This account is suspended');
+                $db = $plugin->db();
+                $opts = \TypedPress\App::listOptions(array_intersect_key($query, array_flip(['where', 'orderBy', 'with', 'search', 'locale', 'deleted'])));
+                $total = $db->count((string) $kind['name'], $opts['where'] ?? null, $viewer, array_intersect_key($opts, ['locale' => true, 'search' => true, 'deleted' => true]));
+                $rows = $db->findMany((string) $kind['name'], ['limit' => $limit, 'offset' => $offset] + $opts, $viewer);
+                $rows = array_map(static fn (array $r) => self::rev($kind, PostMeta::values((string) $kind['name'], $r, array_map('strval', array_keys($r)))), $rows);
+
+                return self::json(200, ['data' => $rows, 'cursor' => self::cursor($offset + $limit, $total)]);
+            }
             if (isset($query['status'])) {
                 // `status` is shorthand for a filter on `status`, ANDed with `where`.
                 $where = Js::decodeJson((string) $params['where']);
@@ -408,8 +462,8 @@ final class Facade
         $cursor = self::cursor($offset + $limit, (int) ($response->get_headers()['X-WP-Total'] ?? 0));
 
         $rows = array_values(array_filter(Kinds::rows($kind, $rows), static fn ($r) => $r !== null));
-        // A post kind's rows carry their live `_rev` ({@see Rev}), read for the whole page at once.
-        $rows = $kind['type'] === 'post' ? Rev::attachAll((string) $kind['name'], $rows) : $rows;
+        // Post and SQL table kinds with revisions carry their live `_rev` ({@see Rev}), read for the whole page at once.
+        $rows = in_array($kind['type'], ['post', 'table'], true) ? Rev::attachAll((string) $kind['name'], $rows) : $rows;
 
         return self::json(200, ['data' => $rows, 'cursor' => $cursor]);
     }
@@ -806,7 +860,7 @@ final class Facade
     /** An item of a post kind as the API answers it: with its live `_rev` ({@see Rev}). */
     private static function rev(array $kind, mixed $row): mixed
     {
-        return $kind['type'] === 'post' ? Rev::attach((string) $kind['name'], $row) : $row;
+        return in_array($kind['type'], ['post', 'table'], true) ? Rev::attach((string) $kind['name'], $row) : $row;
     }
 
     /**
@@ -902,6 +956,65 @@ final class Facade
         if ($viewer === null) {
             throw HttpError::notFound("No $collection row $id");
         }
+        $formatUser = static function (?int $uid): ?array {
+            if ($uid === null || $uid <= 0) {
+                return null;
+            }
+            $user = get_userdata($uid);
+
+            return $user instanceof \WP_User ? ['id' => (int) $user->ID, 'name' => (string) $user->display_name] : null;
+        };
+        if ($kind['type'] === 'table') {
+            if ($rest === []) {
+                \TypedPress\App::allow($method, ['GET', 'HEAD']);
+                [$limit, $offset] = self::paging($query);
+                $all = $db->revisions($collection, $id, $viewer);
+                $slice = array_slice($all, $offset, $limit);
+                $out = array_map(static fn (array $r): array => [
+                    'id' => $r['id'],
+                    'version' => $r['version'],
+                    'op' => $r['op'],
+                    'at' => $r['at'],
+                    'user' => $formatUser($r['userId']),
+                    'schemaMigration' => $r['schemaMigration'],
+                    'changed' => $r['changed'],
+                ], $slice);
+
+                return self::json(200, ['data' => $out, 'cursor' => self::cursor($offset + $limit, count($all))]);
+            }
+            if ($rest[0] === 'diff' && count($rest) === 1) {
+                \TypedPress\App::allow($method, ['GET', 'HEAD']);
+                $from = isset($query['from']) && preg_match('/^\d{1,18}$/D', (string) $query['from']) ? (int) $query['from'] : throw HttpError::invalidQuery('from must be a revision version or id', '/from');
+                $to = isset($query['to']) && preg_match('/^\d{1,18}$/D', (string) $query['to']) ? (int) $query['to'] : throw HttpError::invalidQuery('to must be a revision version or id', '/to');
+
+                return self::json(200, ['data' => $db->diffRevisions($collection, $id, $from, $to, $viewer, byVersion: true)]);
+            }
+            if (!preg_match('/^\d{1,18}$/D', $rest[0])) {
+                throw HttpError::notFound("No revision {$rest[0]}");
+            }
+            $rid = (int) $rest[0];
+            if (count($rest) === 1) {
+                \TypedPress\App::allow($method, ['GET', 'HEAD']);
+
+                return self::json(200, ['data' => $db->revision($collection, $id, $rid, $viewer)]);
+            }
+            if ($rest[1] !== 'restore' || count($rest) !== 2) {
+                throw HttpError::notFound('No such revisions route');
+            }
+            \TypedPress\App::allow($method, ['POST']);
+            [, $rev, $takeover] = Rev::split(self::body($body));
+            $restored = Rev::guarded($collection, $id, $rev, $takeover, $viewer, static fn (): array => $db->transaction(static function () use ($db, $collection, $id, $rid, $viewer): array {
+                $previous = $db->actor();
+                $db->setActor($viewer->user);
+                try {
+                    return $db->restoreRevision($collection, $id, $rid, $viewer);
+                } finally {
+                    $db->setActor($previous);
+                }
+            }));
+
+            return self::json(200, ['data' => self::rev($kind, PostMeta::values($collection, $restored, array_map('strval', array_keys($restored))))]);
+        }
         if ($rest === []) {
             \TypedPress\App::allow($method, ['GET', 'HEAD']);
             // A page of core's revisions route, newest first, as `{ data, cursor }` like every list.
@@ -922,14 +1035,34 @@ final class Facade
             } finally {
                 remove_filter('rest_revision_query', $noAutosaves);
             }
+            $coreRows = (array) $hidden(static fn () => self::unwrap($response));
+            $metaById = [];
+            foreach ($db->revisions($collection, $id, $viewer) as $entry) {
+                $metaById[$entry['id']] = $entry;
+            }
             $out = [];
-            foreach ((array) $hidden(static fn () => self::unwrap($response)) as $r) {
-                $user = (int) ($r['author'] ?? 0) > 0 ? get_userdata((int) $r['author']) : null;
-                $out[] = ['id' => (int) $r['id'], 'at' => self::isoGmt((string) ($r['date_gmt'] ?? '')),
-                    'user' => $user instanceof \WP_User ? ['id' => (int) $user->ID, 'name' => (string) $user->display_name] : null];
+            foreach ($coreRows as $r) {
+                $rid = (int) $r['id'];
+                $m = $metaById[$rid] ?? null;
+                $out[] = [
+                    'id' => $rid,
+                    'version' => $m['version'] ?? 1,
+                    'op' => $m['op'] ?? 'update',
+                    'at' => self::isoGmt((string) ($r['date_gmt'] ?? '')),
+                    'user' => $formatUser((int) ($r['author'] ?? 0) ?: null),
+                    'schemaMigration' => $m['schemaMigration'] ?? null,
+                    'changed' => $m['changed'] ?? null,
+                ];
             }
 
             return self::json(200, ['data' => $out, 'cursor' => self::cursor($offset + $limit, (int) ($response->get_headers()['X-WP-Total'] ?? 0))]);
+        }
+        if ($rest[0] === 'diff' && count($rest) === 1) {
+            \TypedPress\App::allow($method, ['GET', 'HEAD']);
+            $from = isset($query['from']) && preg_match('/^\d{1,18}$/D', (string) $query['from']) ? (int) $query['from'] : throw HttpError::invalidQuery('from must be a revision version or id', '/from');
+            $to = isset($query['to']) && preg_match('/^\d{1,18}$/D', (string) $query['to']) ? (int) $query['to'] : throw HttpError::invalidQuery('to must be a revision version or id', '/to');
+
+            return self::json(200, ['data' => $db->diffRevisions($collection, $id, $from, $to, $viewer, byVersion: true)]);
         }
         if (!preg_match('/^\d{1,18}$/D', $rest[0])) {
             throw HttpError::notFound("No revision {$rest[0]}");

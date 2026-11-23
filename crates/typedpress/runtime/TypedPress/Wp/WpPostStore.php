@@ -23,6 +23,11 @@ final class WpPostStore implements Store
 {
     /** The sync uid (§5.3): hidden meta, not an SCF field. */
     public const UID_META = '_tp_uid';
+    public const CREATED_AT_META = '_tp_created_at';
+    public const UPDATED_AT_META = '_tp_updated_at';
+    public const DELETED_AT_META = '_tp_deleted_at';
+    public const DELETED_BY_META = '_tp_deleted_by';
+    public const DELETED_GROUP_META = '_tp_deleted_group';
 
     /** @var array<string, Source> */
     private array $sources = [];
@@ -76,7 +81,8 @@ final class WpPostStore implements Store
 
     public function source(string $collection): Source
     {
-        $source = $this->sources[$collection] ??= $this->buildSource($collection);
+        $key = $this->db->prefix() . ':' . $collection . ($this->trashVisible ? ':trash' : '');
+        $source = $this->sources[$key] ??= $this->buildSource($collection, $this->trashVisible);
         if (!$this->trashVisible) {
             return $source;
         }
@@ -139,7 +145,7 @@ final class WpPostStore implements Store
             $this->visibility = [];
             $this->visibilityGeneration = CoreAccess::generation();
         }
-        $key = serialize([$collection, $viewer->user, $_COOKIE['wp-postpass_' . COOKIEHASH] ?? null, $this->readPassword, $forSelect]);
+        $key = serialize([$collection, $viewer->user, $_COOKIE['wp-postpass_' . COOKIEHASH] ?? null, $this->readPassword, $forSelect, $this->trashVisible]);
         if (array_key_exists($key, $this->visibility)) {
             return $this->visibility[$key];
         }
@@ -158,6 +164,9 @@ final class WpPostStore implements Store
     /** @return list<array|\TypedPress\SqlPredicate> the password-protection guards of a post kind for $viewer */
     private function passwordGuards(string $collection, \TypedPress\Viewer $viewer, array $spec, bool $forSelect): array
     {
+        $statusFilter = $this->trashVisible
+            ? "post_status NOT IN ('auto-draft', 'inherit')"
+            : "post_status NOT IN ('trash', 'auto-draft', 'inherit')";
         $type = (string) $spec['wp']['postType'];
         if ($viewer->user === null) {
             $guard = $this->passwordGuard($collection, $viewer, $spec);
@@ -166,7 +175,7 @@ final class WpPostStore implements Store
             }
             // An empty scope certifies that even consumers which run their own query can see every row.
             $hidden = $this->db->run(
-                'SELECT 1 FROM `' . $this->db->wpdb()->posts . '` p WHERE p.post_type = ? AND NOT ('
+                'SELECT 1 FROM `' . $this->db->wpdb()->posts . '` p WHERE p.post_type = ? AND p.' . $statusFilter . ' AND NOT ('
                 . str_replace('{a}', 'p', $guard->sql) . ') LIMIT 1',
                 [$type, ...$guard->params],
             );
@@ -189,7 +198,7 @@ final class WpPostStore implements Store
         $editable = [];
         $acceptedPasswords = [];
         $posts = $this->db->run(
-            'SELECT ID, post_password FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND HEX(post_password) NOT IN (?, ?)',
+            'SELECT ID, post_password FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND ' . $statusFilter . ' AND HEX(post_password) NOT IN (?, ?)',
             [$type, ...$public->params],
         );
         if ($posts === [] && $stamp !== null) {
@@ -246,7 +255,7 @@ final class WpPostStore implements Store
             $hasher = new \PasswordHash(8, true);
             $passwords = $this->db->run(
                 'SELECT DISTINCT HEX(post_password) AS password FROM `' . $this->db->wpdb()->posts . '` WHERE post_type = ? AND HEX(post_password) NOT IN (?, ?)'
-                . ($scope === null ? '' : ' AND ID IN (' . $scope['sql'] . ')'),
+                . ($scope === null ? '' : ' AND ID IN (' . $scope['sql'] . ')' . $this->dialect->writeLock()),
                 [$spec['wp']['postType'], '', '30', ...($scope['params'] ?? [])],
             );
             foreach ($passwords as $row) {
@@ -295,7 +304,7 @@ final class WpPostStore implements Store
         return (new \PasswordHash(8, true))->CheckPassword($password, $hash);
     }
 
-    private function buildSource(string $collection): Source
+    private function buildSource(string $collection, bool $includeDeleted = false): Source
     {
         $spec = $this->schema->collection($collection);
         $postmeta = $this->db->wpdb()->postmeta;
@@ -318,6 +327,43 @@ final class WpPostStore implements Store
                 $system && $col === 'order' && ($spec['hierarchical'] ?? false) => new ColumnRef('{a}.menu_order', '', '{a}.menu_order', 'scalar'),
                 $system && $col === 'status' => new ColumnRef("CASE {a}.post_status WHEN 'publish' THEN 'published' WHEN 'future' THEN 'scheduled' ELSE 'draft' END", '', '', 'scalar'),
                 $system && $col === 'uid' => new ColumnRef($v, "LEFT JOIN `$postmeta` {j} ON {j}.post_id = {a}.ID AND {j}.meta_key = '" . self::UID_META . "'", $v, 'scalar'),
+                $system && $col === 'author' => new ColumnRef('NULLIF({a}.post_author, 0)', '', 'NULLIF({a}.post_author, 0)', 'scalar'),
+                $system && $col === 'createdAt' => new ColumnRef(
+                    "CASE WHEN {a}.post_date_gmt <> '0000-00-00 00:00:00' THEN " . $this->dialect->isoTimestamp('{a}.post_date_gmt') . ' ELSE ' . $this->dialect->isoTimestamp('{a}.post_date') . ' END',
+                    '',
+                    "CASE WHEN {a}.post_date_gmt <> '0000-00-00 00:00:00' THEN {a}.post_date_gmt ELSE {a}.post_date END",
+                    'scalar',
+                ),
+                $system && $col === 'updatedAt' => new ColumnRef(
+                    "CASE WHEN {a}.post_modified_gmt <> '0000-00-00 00:00:00' THEN " . $this->dialect->isoTimestamp('{a}.post_modified_gmt') . ' ELSE ' . $this->dialect->isoTimestamp('{a}.post_modified') . ' END',
+                    '',
+                    "CASE WHEN {a}.post_modified_gmt <> '0000-00-00 00:00:00' THEN {a}.post_modified_gmt ELSE {a}.post_modified END",
+                    'scalar',
+                ),
+                $system && $col === 'deletedAt' => $includeDeleted
+                    ? new ColumnRef(
+                        $v,
+                        "LEFT JOIN `$postmeta` {j} ON {j}.post_id = {a}.ID AND {j}.meta_key = '" . self::DELETED_AT_META . "'",
+                        '',
+                        'scalar',
+                    )
+                    : new ColumnRef('NULL', '', '', 'scalar'),
+                $system && $col === 'deletedBy' => $includeDeleted
+                    ? new ColumnRef(
+                        $v,
+                        "LEFT JOIN `$postmeta` {j} ON {j}.post_id = {a}.ID AND {j}.meta_key = '" . self::DELETED_BY_META . "'",
+                        "CAST($v AS SIGNED)",
+                        'scalar',
+                    )
+                    : new ColumnRef('NULL', '', '', 'scalar'),
+                $system && $col === 'deletedGroup' => $includeDeleted
+                    ? new ColumnRef(
+                        $v,
+                        "LEFT JOIN `$postmeta` {j} ON {j}.post_id = {a}.ID AND {j}.meta_key = '" . self::DELETED_GROUP_META . "'",
+                        '',
+                        'scalar',
+                    )
+                    : new ColumnRef('NULL', '', '', 'scalar'),
                 $system && $col === 'publishedAt' => new ColumnRef(
                     "CASE WHEN {a}.post_date_gmt = '0000-00-00 00:00:00' THEN NULL ELSE " . $this->dialect->isoTimestamp('{a}.post_date_gmt') . ' END',
                     '',
@@ -405,6 +451,55 @@ final class WpPostStore implements Store
                 unset($row);
             } finally {
                 Scf::$io--;
+            }
+        }
+
+        if ($this->trashVisible && array_key_exists('deletedAt', $rows[0])) {
+            $missing = [];
+            foreach ($rows as $i => $row) {
+                if (($row['deletedAt'] ?? null) === null && isset($row[$pk])) {
+                    $missing[$i] = (int) $row[$pk];
+                }
+            }
+            if ($missing !== []) {
+                update_meta_cache('post', array_values($missing));
+                foreach ($missing as $i => $id) {
+                    $ts = get_post_meta($id, '_wp_trash_meta_time', true);
+                    if (is_numeric($ts) && (int) $ts > 0) {
+                        $rows[$i]['deletedAt'] = gmdate('Y-m-d\TH:i:s.000\Z', (int) $ts);
+                    }
+                }
+            }
+        }
+        $needsGmtCheck = (array_key_exists('createdAt', $rows[0]) || array_key_exists('updatedAt', $rows[0]))
+            && ((string) get_option('timezone_string', '') !== '' || (float) get_option('gmt_offset', 0) !== 0.0);
+        if ($needsGmtCheck) {
+            $ids = array_values(array_unique(array_map('intval', array_column($rows, $pk))));
+            if ($ids !== []) {
+                $in = implode(', ', array_fill(0, count($ids), '?'));
+                $zero = $this->db->run(
+                    'SELECT ID, post_date, post_date_gmt, post_modified, post_modified_gmt FROM `' . $this->db->wpdb()->posts . "` WHERE ID IN ($in) AND (post_date_gmt = '0000-00-00 00:00:00' OR post_modified_gmt = '0000-00-00 00:00:00')",
+                    $ids,
+                );
+                if ($zero !== []) {
+                    $byId = [];
+                    foreach ($zero as $z) {
+                        $byId[(int) $z['ID']] = $z;
+                    }
+                    foreach ($rows as &$row) {
+                        $z = $byId[(int) ($row[$pk] ?? 0)] ?? null;
+                        if ($z === null) {
+                            continue;
+                        }
+                        if (array_key_exists('createdAt', $row) && $z['post_date_gmt'] === '0000-00-00 00:00:00' && $z['post_date'] !== '0000-00-00 00:00:00') {
+                            $row['createdAt'] = str_replace(' ', 'T', get_gmt_from_date((string) $z['post_date'])) . '.000Z';
+                        }
+                        if (array_key_exists('updatedAt', $row) && $z['post_modified_gmt'] === '0000-00-00 00:00:00' && $z['post_modified'] !== '0000-00-00 00:00:00') {
+                            $row['updatedAt'] = str_replace(' ', 'T', get_gmt_from_date((string) $z['post_modified'])) . '.000Z';
+                        }
+                    }
+                    unset($row);
+                }
             }
         }
 
@@ -509,6 +604,106 @@ final class WpPostStore implements Store
         $this->db->core(static fn () => wp_delete_post((int) $pk, true));
     }
 
+    public function softDelete(string $collection, int|string $pk, string $at, ?int $userId, ?string $group): void
+    {
+        if (defined('EMPTY_TRASH_DAYS') && !EMPTY_TRASH_DAYS) {
+            throw new HttpError(
+                409,
+                'trash_disabled',
+                "WordPress Trash is disabled (EMPTY_TRASH_DAYS is 0), so TypedPress refuses to soft-delete $collection rows (wp_trash_post would permanently delete them). Enable Trash or use purge().",
+            );
+        }
+        $spec = $this->schema->collection($collection);
+        $id = (int) $pk;
+        $this->db->touchPost($id);
+        $trashed = $this->db->core(static function () use ($id, $spec): mixed {
+            if (($spec['commerce'] ?? null) === 'product' && function_exists('wc_get_product')) {
+                $product = wc_get_product($id);
+                if (!$product) {
+                    return false;
+                }
+                $product->delete(false);
+
+                return get_post_status($id) === 'trash';
+            }
+
+            return wp_trash_post($id);
+        });
+        clean_post_cache($id);
+        if (!$trashed || get_post_status($id) !== 'trash') {
+            throw new \RuntimeException("Could not soft-delete $collection post $id (WordPress Trash refused or did not transition status to trash)");
+        }
+        $this->db->core(static function () use ($id, $at, $userId, $group): void {
+            update_post_meta($id, self::DELETED_AT_META, $at);
+            if ($userId !== null) {
+                update_post_meta($id, self::DELETED_BY_META, (string) $userId);
+            } else {
+                delete_post_meta($id, self::DELETED_BY_META);
+            }
+            if ($group !== null) {
+                update_post_meta($id, self::DELETED_GROUP_META, $group);
+            } else {
+                delete_post_meta($id, self::DELETED_GROUP_META);
+            }
+        });
+        clean_post_cache($id);
+    }
+
+    public function restore(string $collection, int|string $pk): void
+    {
+        $spec = $this->schema->collection($collection);
+        $id = (int) $pk;
+        $post = get_post($id);
+        if (!$post instanceof \WP_Post) {
+            throw HttpError::notFound("No $collection row with id $id");
+        }
+        // Check active-row uniqueness before untrashing (restoring desired slug if WordPress suffixed `__trashed`).
+        $check = [];
+        $slugCol = $spec['slug'] ?? null;
+        if ($slugCol !== null) {
+            $desired = get_post_meta($id, '_wp_desired_post_slug', true);
+            $check[$slugCol] = is_string($desired) && $desired !== ''
+                ? $desired
+                : (string) preg_replace('/__trashed$/', '', (string) $post->post_name);
+        }
+        $titleCol = $spec['title'] ?? null;
+        if ($titleCol !== null && ($spec['columns'][$titleCol]['unique'] ?? false)) {
+            $check[$titleCol] = (string) $post->post_title;
+        }
+        foreach ($spec['columns'] as $col => $def) {
+            if (($def['unique'] ?? false) && $this->isMeta($spec, (string) $col)) {
+                $val = get_post_meta($id, $spec['wp']['metaPrefix'] . $col, true);
+                if ($val !== '' && $val !== false && $val !== null) {
+                    $check[(string) $col] = $val;
+                }
+            }
+        }
+        $this->checkUnique($collection, $check, $id);
+        $this->db->touchPost($id);
+        $prevStatus = get_post_meta($id, '_wp_trash_meta_status', true);
+        $untrashed = $this->db->core(static function () use ($id, $prevStatus): mixed {
+            $filter = static fn (string $newStatus, int $postId, string $previous): string => $postId === $id && is_string($prevStatus) && $prevStatus !== ''
+                ? $prevStatus
+                : ($postId === $id && $previous !== '' ? $previous : $newStatus);
+            add_filter('wp_untrash_post_status', $filter, PHP_INT_MAX, 3);
+            try {
+                return wp_untrash_post($id);
+            } finally {
+                remove_filter('wp_untrash_post_status', $filter, PHP_INT_MAX);
+            }
+        });
+        clean_post_cache($id);
+        if (!$untrashed || get_post_status($id) === 'trash') {
+            throw new \RuntimeException("Could not restore $collection post $id from WordPress Trash");
+        }
+        $this->db->core(static function () use ($id): void {
+            delete_post_meta($id, self::DELETED_AT_META);
+            delete_post_meta($id, self::DELETED_BY_META);
+            delete_post_meta($id, self::DELETED_GROUP_META);
+        });
+        clean_post_cache($id);
+    }
+
     /** Core wp_posts fields for the columns present in $values (§4.4). */
     private function corePost(array $spec, array $values): array
     {
@@ -531,6 +726,9 @@ final class WpPostStore implements Store
             if (array_key_exists('order', $values)) {
                 $post['menu_order'] = (int) ($values['order'] ?? 0);
             }
+        }
+        if (array_key_exists('author', $values) && ($spec['columns']['author']['system'] ?? false) && $values['author'] !== null) {
+            $post['post_author'] = (int) $values['author'];
         }
         if (array_key_exists('status', $values) && ($spec['columns']['status']['system'] ?? false)) {
             $post['post_status'] = ['draft' => 'draft', 'published' => 'publish', 'scheduled' => 'future'][$values['status']] ?? 'draft';
@@ -620,6 +818,12 @@ final class WpPostStore implements Store
         if (isset($values['uid']) && ($spec['columns']['uid']['system'] ?? false)) {
             $this->db->core(static fn () => update_post_meta($id, self::UID_META, $values['uid']));
         }
+        if (isset($values['createdAt']) && ($spec['columns']['createdAt']['system'] ?? false)) {
+            $this->db->core(static fn () => update_post_meta($id, self::CREATED_AT_META, (string) $values['createdAt']));
+        }
+        if (isset($values['updatedAt']) && ($spec['columns']['updatedAt']['system'] ?? false)) {
+            $this->db->core(static fn () => update_post_meta($id, self::UPDATED_AT_META, (string) $values['updatedAt']));
+        }
         Scf::$io++;
         try {
             foreach ($values as $col => $stored) {
@@ -696,18 +900,56 @@ final class WpPostStore implements Store
 
     // ================================================================ revisions (§4.7): WP revisions + SCF meta
 
+    private const REV_META = '_tp_rev_meta';
+    private const REV_SEQ_META = '_tp_rev_seq';
+
     public function revisions(string $collection, int|string $pk): array
     {
         $rows = $this->rowsWhere($collection, "r.post_type = 'revision' AND r.post_parent = ? AND r.post_name NOT LIKE '%autosave%'", [(int) $pk]);
+        $entries = array_map(fn (array $row) => $this->revisionEntry($collection, (int) $pk, $row), $rows);
+        // Backfill monotonic 1-based version numbers oldest-to-newest for any WP-core-created revision lacking `_tp_rev_meta`.
+        $total = count($entries);
+        for ($i = 0; $i < $total; $i++) {
+            if ($entries[$i]['version'] === 0) {
+                $entries[$i]['version'] = $total - $i;
+            }
+        }
 
-        return array_map(fn (array $row) => $this->revisionEntry($collection, (int) $pk, $row), $rows);
+        return $entries;
     }
 
-    public function revision(string $collection, int|string $pk, int $revisionId): ?array
+    public function revision(string $collection, int|string $pk, int $revisionId, bool $byVersion = false): ?array
     {
+        if ($byVersion) {
+            foreach ($this->revisions($collection, $pk) as $entry) {
+                if ($entry['version'] === $revisionId) {
+                    return $entry;
+                }
+            }
+        }
         $rows = $this->rowsWhere($collection, "r.post_type = 'revision' AND r.post_parent = ? AND r.ID = ?", [(int) $pk, $revisionId]);
+        if ($rows !== []) {
+            $entry = $this->revisionEntry($collection, (int) $pk, $rows[0]);
+            if ($entry['version'] === 0) {
+                foreach ($this->revisions($collection, $pk) as $listed) {
+                    if ($listed['id'] === $entry['id']) {
+                        $entry['version'] = $listed['version'];
+                        break;
+                    }
+                }
+            }
 
-        return $rows === [] ? null : $this->revisionEntry($collection, (int) $pk, $rows[0]);
+            return $entry;
+        }
+        if (!$byVersion) {
+            foreach ($this->revisions($collection, $pk) as $entry) {
+                if ($entry['version'] === $revisionId) {
+                    return $entry;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -727,6 +969,15 @@ final class WpPostStore implements Store
             $system += array_intersect_key($this->rowsWhere($collection, 'r.ID = ?', [$pk])[0] ?? [], $keys);
         }
         $row = array_replace($row, array_intersect_key($system, $keys));
+        $meta = json_decode((string) get_metadata('post', $rid, self::REV_META, true), true);
+        $meta = is_array($meta) ? $meta : [];
+        if (isset($meta['links']) && is_array($meta['links'])) {
+            foreach ($meta['links'] as $col => $ids) {
+                if (isset($spec['columns'][$col]) && $spec['columns'][$col]['type'] === 'refList') {
+                    $row[$col] = $ids;
+                }
+            }
+        }
         if ($spec['localized'] ?? false) { // a revision post has no language: its group is the parent's
             $row['translations'] = Js::jsonStringify(Polylang::group($pk, $this->schema->locales()['all'] ?? []) ?: new \stdClass());
         }
@@ -735,8 +986,12 @@ final class WpPostStore implements Store
 
         return [
             'id' => $rid,
+            'version' => isset($meta['version']) && is_int($meta['version']) ? $meta['version'] : 0,
+            'op' => isset($meta['op']) && is_string($meta['op']) ? $meta['op'] : 'update',
             'at' => str_replace(' ', 'T', (string) $at) . '.000Z',
             'userId' => $post instanceof \WP_Post && (int) $post->post_author > 0 ? (int) $post->post_author : null,
+            'schemaMigration' => isset($meta['schemaMigration']) && is_string($meta['schemaMigration']) && $meta['schemaMigration'] !== '' ? $meta['schemaMigration'] : null,
+            'changed' => isset($meta['changed']) && is_array($meta['changed']) ? array_values($meta['changed']) : null,
             'row' => $row,
         ];
     }
@@ -763,7 +1018,7 @@ final class WpPostStore implements Store
     private function snapshotKeys(array $spec): array
     {
         $keys = [];
-        foreach (['status', 'publishedAt'] as $col) {
+        foreach (['status', 'publishedAt', 'author', 'createdAt', 'updatedAt', 'deletedAt', 'deletedBy', 'deletedGroup'] as $col) {
             if ($spec['columns'][$col]['system'] ?? false) {
                 $keys[$col] = true;
             }
@@ -779,9 +1034,18 @@ final class WpPostStore implements Store
     }
 
     /** A WP revision of the post as it is now (snapshotRevision fills in its fields, keep-all, §4.7). */
-    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId): void
+    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId, array $meta = []): void
     {
         $id = (int) $pk;
+        $seq = (int) get_metadata('post', $id, self::REV_SEQ_META, true);
+        if ($seq <= 0) {
+            $countRows = $this->db->run(
+                "SELECT COUNT(*) AS n FROM `{$this->db->wpdb()->posts}` WHERE post_type = 'revision' AND post_parent = ? AND post_status = 'inherit' AND post_name NOT LIKE '%autosave%'",
+                [$id],
+            );
+            $seq = (int) ($countRows[0]['n'] ?? 0);
+        }
+        $nextVersion = $seq + 1;
         $rid = $this->db->core(static fn () => _wp_put_post_revision($id));
         if ($rid instanceof \WP_Error || !$rid) {
             throw new \RuntimeException('Could not save a revision of post ' . $id);
@@ -791,6 +1055,26 @@ final class WpPostStore implements Store
         if ($userId !== null) {
             $this->db->run('UPDATE `' . $this->db->wpdb()->posts . '` SET post_author = ? WHERE ID = ?', [$userId, $rid]);
         }
+        $spec = $this->schema->collection($collection);
+        $links = [];
+        foreach ($spec['columns'] as $col => $def) {
+            if (($def['type'] ?? null) === 'refList' && array_key_exists($col, $encodedRow)) {
+                $links[$col] = $encodedRow[$col];
+            }
+        }
+        $revMeta = [
+            'version' => $nextVersion,
+            'op' => (string) ($meta['op'] ?? 'update'),
+            'schemaMigration' => is_string($meta['schemaMigration'] ?? null) ? $meta['schemaMigration'] : null,
+            'changed' => array_key_exists('changed', $meta) && is_array($meta['changed']) ? array_values($meta['changed']) : null,
+        ];
+        if ($links !== []) {
+            $revMeta['links'] = $links;
+        }
+        $this->db->core(static function () use ($id, $rid, $revMeta, $nextVersion): void {
+            update_metadata('post', $rid, self::REV_META, wp_slash(Js::jsonStringify($revMeta)));
+            update_metadata('post', $id, self::REV_SEQ_META, (string) $nextVersion);
+        });
         clean_post_cache($rid);
     }
 
@@ -827,29 +1111,6 @@ final class WpPostStore implements Store
     public static function stagedName(int $pk): string
     {
         return $pk . self::STAGED_SUFFIX;
-    }
-
-    /**
-     * Staged revisions written before they had their own status are `inherit`, so core listed them as
-     * autosaves. Give them the staged status; nothing else about them changes. A guarded runtime
-     * upgrade step ({@see Runtime::boot()}): it runs once per site, and again finds nothing to do.
-     */
-    public static function upgradeStagedStatus(\TypedPress\Store $store): void
-    {
-        $db = $store instanceof CompositeStore ? $store->db : null;
-        if ($db === null) {
-            return;
-        }
-        $posts = $db->wpdb()->posts;
-        foreach ($db->run("SELECT ID, post_parent, post_name FROM `$posts` WHERE post_type = 'revision' AND post_status = 'inherit' AND post_name LIKE ?", ['%-autosave-staged-v1']) as $row) {
-            $name = self::stagedName((int) $row['post_parent']);
-            if ($row['post_name'] === $name) {
-                // The name again: a promote or discard that committed since the read renamed it, and
-                // that retired revision must stay `inherit`, in the item's history.
-                $db->run("UPDATE `$posts` SET post_status = ? WHERE ID = ? AND post_status = 'inherit' AND post_name = ?", [self::STAGED_STATUS, (int) $row['ID'], $name]);
-                clean_post_cache((int) $row['ID']);
-            }
-        }
     }
 
     /** The id of the item's staged revision, or null when nothing is staged. */

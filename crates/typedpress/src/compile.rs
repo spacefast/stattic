@@ -15,7 +15,10 @@ mod client;
 mod effects;
 mod host;
 mod html;
+mod inputs;
+pub use inputs::apply_inputs;
 mod javascript;
+mod projection;
 
 use crate::builtins::ERROR_CONSTRUCTORS;
 use crate::diag::{Diag, Result, Span, suggest};
@@ -23,7 +26,7 @@ use crate::eval::{BINARY_GLOBALS, Evaluator};
 use crate::extract::{Extracted, Root, Slot};
 use crate::ir::*;
 use crate::num::php_number;
-use crate::schema::{ColType, Column, HookKind, Owner, RelKind, Schema};
+use crate::schema::{ColType, Column, HookKind, Owner, RelKind, RouteDependency, Schema};
 use crate::types::{self, Builder, BuilderKind, JSON_TYPES, Ty};
 use crate::value::*;
 use indexmap::IndexMap;
@@ -413,6 +416,8 @@ pub struct Compiler<'a, 'p> {
     collections: &'a [Rc<CollectionVal>],
     /// Each registered action's allocation → its registered name (`Extracted::action_values`).
     action_values: &'a HashMap<usize, String>,
+    /// Each registered job's allocation → its registered name (`Extracted::job_values`).
+    job_values: &'a HashMap<usize, String>,
     type_aliases: HashMap<(usize, String), (Vec<TypeParam>, TyAnn)>,
     duplicate_type_aliases: HashSet<(usize, String)>,
     annotation_depth: usize,
@@ -440,6 +445,9 @@ pub struct Compiler<'a, 'p> {
     pub output: String,
     /// The `"use client"` component being compiled (generator B), if any.
     client: Option<client::ClientCtx>,
+    /// Inside `<form action={name}>`: the action's name and its input fields, which the form's
+    /// named fields are checked against and get their state from (`Forms::control`).
+    form_scope: Option<(String, Vec<(String, bool)>)>,
     /// Compiled `"use client"` components: namespace → (analysis, server actions).
     pub islands: Vec<crate::client_component::Analysis>,
     fx: Option<FnCtx>,
@@ -480,15 +488,81 @@ pub struct Compiler<'a, 'p> {
     pub uses: Vec<crate::plugins::Use>,
     /// Which compiled functions each function calls, for the read→send report.
     pub calls: HashMap<String, HashSet<String>>,
+    /// Where each compiled function writes (a kind write, a queued job, an email), for the check
+    /// that a query never writes.
+    writes: HashMap<String, Vec<(Span, &'static str)>>,
     /// The compiled functions that read a WooCommerce order kind, or call an ability that needs the
     /// `personal` grant ([`Catalog::personal`](crate::wordpress::abilities::Catalog)).
     pub personal: HashSet<String>,
     /// The app's own abilities each compiled function calls with `abilities.call`, by ability name.
     /// The pipeline follows the ones that are actions to settle [`Action::personal`].
     pub ability_calls: HashMap<String, HashSet<String>>,
+    pub route_effects: RouteEffects,
+    route_columns: HashMap<Span, std::collections::BTreeSet<String>>,
     plugin_names: Vec<String>,
     /// Each plugin's PHP function answering its locked fetch hosts, written once the lock settles.
     pub host_functions: Vec<String>,
+}
+
+/// Render effects by emitted function, combined with the helper graph after compilation.
+#[derive(Default)]
+pub struct RouteEffects {
+    pub dependencies: HashMap<String, HashSet<RouteDependency>>,
+    pub private: HashSet<String>,
+    pub literal_markup: HashSet<String>,
+}
+
+fn literal_markup(f: &Func, layout: bool) -> bool {
+    #[derive(Clone, Copy)]
+    enum Children<'a> {
+        None,
+        Binding(&'a str),
+        Props(&'a str),
+    }
+
+    fn markup(expr: &Expr, children: Children<'_>) -> bool {
+        match &expr.kind {
+            ExprKind::Str(_) | ExprKind::Num(_) | ExprKind::Bool(_) | ExprKind::Null => true,
+            ExprKind::Ident(name) => matches!(children, Children::Binding(binding) if name == binding),
+            ExprKind::Member { obj, prop, .. } if prop == "children" => {
+                matches!((&obj.kind, children), (ExprKind::Ident(name), Children::Props(binding)) if name == binding)
+            }
+            ExprKind::Jsx(jsx) if !matches!(jsx.kind, JsxKind::Component(_)) => {
+                jsx.attrs
+                    .iter()
+                    .all(|attr| matches!(attr, JsxAttr::Named { value, .. } if markup(value, Children::None)))
+                    && jsx.children.iter().all(|child| markup(child, children))
+            }
+            _ => false,
+        }
+    }
+
+    let children = match f.params.as_slice() {
+        [] => Children::None,
+        [param] if layout && !param.rest && param.default.is_none() => match &param.pat {
+            Pat::Id(name, _) => Children::Props(name),
+            Pat::Obj { props, rest: None, .. } => match props.as_slice() {
+                [(key, Pat::Id(name, _))] if key == "children" => Children::Binding(name),
+                _ => return false,
+            },
+            _ => return false,
+        },
+        _ => return false,
+    };
+    match &f.body {
+        FnBody::Expr(expr) => markup(expr, children),
+        FnBody::Block(stmts) => matches!(stmts.as_slice(), [Stmt::Return(Some(expr), _)] if markup(expr, children)),
+    }
+}
+
+fn object_prop<'a>(expr: &'a Expr, name: &str) -> Option<&'a Expr> {
+    let ExprKind::Object(props) = &expr.kind else {
+        return None;
+    };
+    props.iter().rev().find_map(|prop| match prop {
+        Prop::KV(PropKey::Static(key), value) if key == name => Some(value),
+        _ => None,
+    })
 }
 
 /// What kind of WordPress feature a module uses: the capability kinds a plugin gate counts.
@@ -537,6 +611,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ev,
             collections: &ext.collections,
             action_values: &ext.action_values,
+            job_values: &ext.job_values,
             type_aliases,
             duplicate_type_aliases,
             annotation_depth: 0,
@@ -567,14 +642,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
             current: String::new(),
             uses: Vec::new(),
             calls: HashMap::new(),
+            writes: HashMap::new(),
             personal: HashSet::new(),
             ability_calls: HashMap::new(),
+            route_effects: RouteEffects::default(),
+            route_columns: HashMap::new(),
             host_functions: Vec::new(),
             plugin_names: ext.uses.iter().map(|p| p.name.clone()).collect(),
             abilities: crate::wordpress::abilities::Catalog::default(),
             wordpress_uses: Vec::new(),
             queried: std::collections::BTreeSet::new(),
             client: None,
+            form_scope: None,
             islands: Vec::new(),
         }
     }
@@ -686,6 +765,67 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         self.output.push_str(&body);
         name
+    }
+
+    /// Records that the function compiling now writes at `span` (`what`: "writes posts").
+    fn writes(&mut self, span: Span, what: &'static str) {
+        self.writes.entry(self.current.clone()).or_default().push((span, what));
+    }
+
+    /// A query may not write: refuses the first write its handler, or anything it calls, makes.
+    fn check_queries(&self, out: &[(Slot, String)]) -> Result<()> {
+        for (slot, name) in out {
+            let Slot::ActionHandler { action } = slot else { continue };
+            if !self.schema.actions[action].query {
+                continue;
+            }
+            let mut seen = HashSet::from([name.clone()]);
+            let mut stack = vec![name.clone()];
+            while let Some(f) = stack.pop() {
+                if let Some((span, what)) = self.writes.get(&f).and_then(|w| w.first()) {
+                    let via = if &f == name {
+                        ""
+                    } else {
+                        " (in a function the query calls)"
+                    };
+                    return err_help(
+                        *span,
+                        format!("`{action}` is a query, so it can't write: this {what}{via}"),
+                        format!(
+                            "make it a mutation (`export const {action} = mutation({{ ... }}, ...)`), which runs in one transaction; or move the write into a mutation or a job"
+                        ),
+                    );
+                }
+                for callee in self.calls.get(&f).into_iter().flatten() {
+                    if seen.insert(callee.clone()) {
+                        stack.push(callee.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn route_dep(&mut self, dep: RouteDependency) {
+        if self.schema.app.is_some() {
+            self.route_effects
+                .dependencies
+                .entry(self.current.clone())
+                .or_default()
+                .insert(dep);
+        }
+    }
+
+    fn route_opaque(&mut self, call: impl Into<String>) {
+        if self.schema.app.is_some() {
+            self.route_dep(RouteDependency::opaque(call));
+        }
+    }
+
+    fn route_private(&mut self) {
+        if self.schema.app.is_some() {
+            self.route_effects.private.insert(self.current.clone());
+        }
     }
 
     /// Records a capability the plugin compiling now uses; app code is unrestricted.
@@ -1108,6 +1248,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         while let Some((closure, name, params)) = self.pending.pop() {
             self.compile_function(&closure, &name, params, None, false)?;
         }
+        self.check_queries(&out)?;
         if self.uses_jobs {
             self.wrap_roots_with_job_queue(&out);
         }
@@ -1133,7 +1274,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 }
             }
             Slot::JobHandler { job } => vec![
-                types::action_input(&self.schema.jobs[job].input, &types::json_ty),
+                match &self.schema.jobs[job].input_ty {
+                    Some(t) => t.clone(),
+                    None => types::action_input(&self.schema.jobs[job].input, &types::json_ty),
+                },
                 types::job_ctx(),
             ],
             Slot::FieldAccess { .. } => vec![types::field_access_ctx()],
@@ -1159,7 +1303,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Slot::AppHandler { .. } => vec![types::route_request(), ctx],
             Slot::AppStaticParams { .. } => vec![],
             Slot::ActionHandler { action } => vec![
-                types::action_input(&self.schema.actions[action].input, &types::json_ty),
+                match &self.schema.actions[action].input_ty {
+                    Some(t) => t.clone(),
+                    None => types::action_input(&self.schema.actions[action].input, &types::json_ty),
+                },
                 ctx,
             ],
             Slot::Access { owner, op } => {
@@ -1314,14 +1461,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 continue;
             }
             if i == 0 && receives_this(&f) && p.ann.is_none() && !self.javascript_module(f.module) {
-                return Err(Diag::new(
-                    p.span,
-                    "TypedPress code doesn't support `this` without a type in a function that isn't a method of an object literal",
-                )
-                .code(crate::diag::Code::Unsupported)
-                .help(
-                    "declare it, e.g. `function f(this: { count: number })`, or write the function as a method in the object literal it is called on",
-                ));
+                return Err(untyped_this(p.span));
             }
             let declared = match &p.ann {
                 // `PageProps`/`LayoutProps` from "typedpress/app" are whatever the router passes this route.
@@ -1421,8 +1561,33 @@ impl<'a, 'p> Compiler<'a, 'p> {
             );
         }
         let saved = self.fx.replace(fx);
+        // A function compiled while another is (a helper its caller needs first) is not inside
+        // the caller's `<form>`.
+        let saved_form = self.form_scope.take();
+        // A function compiled while compiling a class (a method, the constructor, an initializer)
+        // runs when the class is used: the class reaches it in the call graph.
+        if self.current.starts_with("%class") {
+            let class = self.current.clone();
+            self.calls.entry(class).or_default().insert(name.to_string());
+        }
         let caller = std::mem::replace(&mut self.current, name.to_string());
+        if self.schema.app.is_some() {
+            if self.javascript_module(f.module) {
+                self.route_opaque("JavaScript module");
+            } else if literal_markup(
+                &f,
+                matches!(slot, Some(Slot::AppPage { file }) if file.ends_with("/layout.tsx")),
+            ) {
+                self.route_effects.literal_markup.insert(name.to_string());
+            }
+        }
+        if matches!(slot, Some(Slot::AppPage { .. }))
+            && let Some((call, fields)) = projection::list_fields(&f)
+        {
+            self.route_columns.insert(call, fields);
+        }
         let result = self.compile_function_body(&f, name, &param_tys, slot);
+        self.form_scope = saved_form;
         self.current = caller;
         let fx = std::mem::replace(&mut self.fx, saved).expect("function context");
         let (params_php, body, mut parameter_docs) = result?;
@@ -2320,11 +2485,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 {
                     let _ = writeln!(out, "{p}{source} = {src};\n{p}foreach ({source} as {value}) {{");
                 } else {
+                    let inner = pad(indent + 1);
+                    let _ = writeln!(out, "{p}{source} = {src};\n{p}for ({index} = 0; ; {index}++) {{");
+                    // JavaScript array iterators read the current length on every step.
                     let _ = writeln!(
                         out,
-                        "{p}{source} = {src};\n{p}for ({index} = 0; {index} < \\count({source}->a); {index}++) {{"
+                        "{inner}if ({index} >= \\count({source}->a)) {{\n{inner}\tbreak;\n{inner}}}"
                     );
-                    let _ = writeln!(out, "{}{value} = {source}->a[{index}];", pad(indent + 1));
+                    let _ = writeln!(out, "{inner}{value} = {source}->a[{index}];");
                 }
                 let mut previous = None;
                 if *kind == DeclKind::Var {
@@ -2858,9 +3026,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     constraint: default_binding_type(&constraint, &d.ty, mutable),
                 };
                 let tmp = self.tmp_var();
-                let assigned = format!("{tmp} = {src}");
-                let missing = format!("({assigned}) === \\TypedPress\\Js::undefined()");
-                let _ = writeln!(out, "{p}{tmp} = ({missing} ? {} : {tmp});", d.php);
+                let _ = writeln!(out, "{p}{tmp} = {src};");
+                let _ = writeln!(out, "{p}if (\\TypedPress\\Js::undefined() === {tmp}) {{");
+                let _ = writeln!(out, "{}{tmp} = {};", pad(indent + 1), d.php);
+                let _ = writeln!(out, "{p}}}");
                 self.bind_pattern_types(inner, &tmp, types, mutable, out, indent)?;
             }
             Pat::Obj { props, rest, span } => {
@@ -3268,11 +3437,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 );
                 out.extend(right);
                 // Both operands hold only on the conjunction's true side or
-                // the disjunction's false side. Keep the other side conservative.
+                // the disjunction's false side. Keep the other side conservative:
+                // the declared type, or for a member path (`input.q`, which has no
+                // declaration of its own) both sides together, the type it had.
                 for entry in &mut out[start..] {
-                    if let Some(declared) = self.declared_path_ty(&entry.0) {
-                        entry.2 = declared;
-                    }
+                    entry.2 = self
+                        .declared_path_ty(&entry.0)
+                        .unwrap_or_else(|| Ty::union([entry.1.clone(), entry.2.clone()]));
                 }
             }
             ExprKind::Logical(LogOp::And | LogOp::Or, _, _) => {
@@ -3462,6 +3633,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 span,
                 "`<kind>.system` can't be stored in a variable",
                 "call it directly: `posts.system.list(...)`",
+            ),
+            Ty::KindRevisions(_, _) => err_help(
+                span,
+                "`<kind>.revisions` can't be stored in a variable",
+                "call it directly: `posts.revisions.list(id)`",
             ),
             Ty::Db | Ty::DbQuery | Ty::QueryColl(_) | Ty::DbGlobals | Ty::DbGlobal(_) => {
                 err(span, "`db` can't be stored in a variable; call it directly")
@@ -3699,15 +3875,108 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 self.javascript_object(props)?
             }
             ExprKind::Object(props) => {
+                struct DeferredMethod<'a> {
+                    slot: usize,
+                    func: &'a Rc<Func>,
+                    key_php: String,
+                    name: String,
+                    optional_overrides: Vec<Ty>,
+                }
+
+                impl DeferredMethod<'_> {
+                    fn field_type(&self, ty: Ty) -> Ty {
+                        Ty::union(std::iter::once(ty).chain(self.optional_overrides.iter().cloned()))
+                    }
+                }
+
+                #[derive(Clone, Copy)]
+                enum MethodState {
+                    Pending,
+                    Typing,
+                    Done,
+                    Deferred(usize),
+                }
+
+                struct MethodTyping<'a, 'f> {
+                    methods: &'a [DeferredMethod<'f>],
+                    owner: &'a HashMap<String, usize>,
+                    untyped: HashSet<&'a str>,
+                    states: Vec<MethodState>,
+                    fields: &'a mut IndexMap<String, (Ty, bool)>,
+                    parts: &'a mut [String],
+                }
+
+                impl MethodTyping<'_, '_> {
+                    fn compile(&mut self, c: &mut Compiler<'_, '_>, i: usize, speculative: bool) -> Result<()> {
+                        match self.states[i] {
+                            MethodState::Typing | MethodState::Done => return Ok(()),
+                            // Retry speculative failures once another sibling's type is known.
+                            MethodState::Deferred(count) if speculative && count == self.untyped.len() => return Ok(()),
+                            _ => {}
+                        }
+                        self.states[i] = MethodState::Typing;
+                        let result = self.compile_pending(c, i, speculative);
+                        self.states[i] = if result.is_ok() {
+                            MethodState::Done
+                        } else {
+                            MethodState::Deferred(self.untyped.len())
+                        };
+                        result
+                    }
+
+                    fn compile_pending(&mut self, c: &mut Compiler<'_, '_>, i: usize, speculative: bool) -> Result<()> {
+                        let method = &self.methods[i];
+                        let mut whole = false;
+                        for read in &method.func.this_reads {
+                            match read {
+                                ThisRead::Field(key) if self.untyped.contains(key.as_str()) => {
+                                    self.compile(c, self.owner[key], speculative)?;
+                                }
+                                ThisRead::Whole => whole = true,
+                                ThisRead::Field(_) => {}
+                            }
+                        }
+                        if whole {
+                            // Try untyped siblings first. A sibling that depends on this method
+                            // can still be typed after it if the method never reads that sibling.
+                            for (j, sibling) in self.methods.iter().enumerate() {
+                                if self.untyped.contains(sibling.name.as_str()) && self.owner[&sibling.name] == j {
+                                    let _ = self.compile(c, j, true);
+                                }
+                            }
+                        }
+                        let this = Ty::Obj(
+                            self.fields
+                                .iter()
+                                .filter(|(key, _)| !self.untyped.contains(key.as_str()))
+                                .map(|(key, (ty, optional))| (key.clone(), (widen_fresh_literals(ty), *optional)))
+                                .collect(),
+                        );
+                        let build = |c: &mut Compiler<'_, '_>| c.method_with_this(method.func, this);
+                        let result = if speculative { c.attempt(build) } else { build(c) };
+                        let v = result.map_err(|d| {
+                            this_cycle_help(d, &method.name, method.func, self.untyped.iter().copied(), |key| {
+                                self.owner.get(key).map(|i| self.methods[*i].func.clone())
+                            })
+                        })?;
+                        if self.owner.get(&method.name) == Some(&i) {
+                            self.fields[&method.name].0 = method.field_type(v.ty);
+                            self.untyped.remove(method.name.as_str());
+                        }
+                        self.parts[method.slot] = format!("[{} => {}]", method.key_php, v.php);
+                        Ok(())
+                    }
+                }
+
                 let mut parts = Vec::new();
                 let mut fields: IndexMap<String, (Ty, bool)> = IndexMap::new();
                 let mut map_values = Vec::new();
                 let mut is_map = false;
                 // TypeScript types `this` in an object literal's methods as the literal itself.
-                // Methods that read `this` compile after every other property (creating a
+                // Methods with an inferred `this` compile after every other property (creating a
                 // function evaluates nothing, so this keeps JavaScript's order), typed by the
                 // finished fields; their PHP fills the slot reserved at their position.
-                let mut deferred: Vec<(usize, &Rc<Func>, String, String)> = Vec::new();
+                let mut deferred: Vec<DeferredMethod<'_>> = Vec::new();
                 // The deferred method each key still holds; a later property or spread with the
                 // same key replaces it, and the literal's field takes that value's type.
                 let mut owner: HashMap<String, usize> = HashMap::new();
@@ -3730,12 +3999,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
                             };
                             if let (ExprKind::Func(f), Some(k)) = (&value.kind, name)
                                 && receives_this(f)
+                                && f.params.first().is_some_and(|p| p.ann.is_none())
                                 && !self.javascript_module(f.module)
                             {
                                 fields.shift_remove(k);
                                 fields.insert(k.clone(), (Ty::Unknown, false));
                                 owner.insert(k.clone(), deferred.len());
-                                deferred.push((parts.len(), f, key_php, k.clone()));
+                                deferred.push(DeferredMethod {
+                                    slot: parts.len(),
+                                    func: f,
+                                    key_php,
+                                    name: k.clone(),
+                                    optional_overrides: Vec::new(),
+                                });
                                 parts.push(String::new());
                                 continue;
                             }
@@ -3758,10 +4034,21 @@ impl<'a, 'p> Compiler<'a, 'p> {
                             };
                             match shape {
                                 Ty::Obj(f) => {
-                                    for (k, t) in f {
-                                        owner.remove(&k);
-                                        fields.shift_remove(&k);
-                                        fields.insert(k, t);
+                                    for (key, (ty, optional)) in f {
+                                        if optional {
+                                            // An absent spread key leaves the previous value in place.
+                                            if let Some(&i) = owner.get(&key) {
+                                                deferred[i].optional_overrides.push(ty);
+                                                continue;
+                                            }
+                                            if let Some((previous, _)) = fields.get_mut(&key) {
+                                                *previous = Ty::union([previous.clone(), ty]);
+                                                continue;
+                                            }
+                                        }
+                                        owner.remove(&key);
+                                        fields.shift_remove(&key);
+                                        fields.insert(key, (ty, optional));
                                     }
                                 }
                                 Ty::Map(t) => {
@@ -3785,78 +4072,29 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     // then each method once, after the sibling methods it reads through `this`
                     // (`Func::this_reads`). A method reading one that isn't typed yet (a cycle
                     // without annotations) sees no such field and is refused.
-                    let live = |i: usize, name: &str, owner: &HashMap<String, usize>| owner.get(name) == Some(&i);
-                    for (i, (_, f, _, name)) in deferred.iter().enumerate() {
-                        if live(i, name, &owner)
-                            && let Some(ty) = self.declared_signature(f)?
-                            && let Some(entry) = fields.get_mut(name)
+                    for (i, method) in deferred.iter().enumerate() {
+                        if owner.get(&method.name) == Some(&i)
+                            && let Some(ty) = self.declared_signature(method.func)?
                         {
-                            entry.0 = ty;
+                            fields[&method.name].0 = method.field_type(ty);
                         }
                     }
                     // Keys still held by a method with no type yet: left out of `this`.
-                    let mut untyped: HashSet<String> = deferred
+                    let untyped = owner
                         .iter()
-                        .enumerate()
-                        .filter(|(i, (_, _, _, name))| {
-                            live(*i, name, &owner) && fields.get(name).is_some_and(|(t, _)| *t == Ty::Unknown)
-                        })
-                        .map(|(_, (_, _, _, name))| name.clone())
+                        .filter(|(name, _)| fields[*name].0 == Ty::Unknown)
+                        .map(|(name, _)| name.as_str())
                         .collect();
-                    let by_name: HashMap<&str, usize> = owner.iter().map(|(k, i)| (k.as_str(), *i)).collect();
-                    let mut order = Vec::with_capacity(deferred.len());
-                    let mut state = vec![0u8; deferred.len()];
-                    fn visit(
-                        i: usize,
-                        deferred: &[(usize, &Rc<Func>, String, String)],
-                        by_name: &HashMap<&str, usize>,
-                        untyped: &HashSet<String>,
-                        state: &mut [u8],
-                        order: &mut Vec<usize>,
-                    ) {
-                        if state[i] != 0 {
-                            return;
-                        }
-                        state[i] = 1;
-                        for read in &deferred[i].1.this_reads {
-                            if untyped.contains(read)
-                                && let Some(&j) = by_name.get(read.as_str())
-                            {
-                                visit(j, deferred, by_name, untyped, state, order);
-                            }
-                        }
-                        state[i] = 2;
-                        order.push(i);
-                    }
+                    let mut typing = MethodTyping {
+                        methods: &deferred,
+                        owner: &owner,
+                        untyped,
+                        states: vec![MethodState::Pending; deferred.len()],
+                        fields: &mut fields,
+                        parts: &mut parts,
+                    };
                     for i in 0..deferred.len() {
-                        visit(i, &deferred, &by_name, &untyped, &mut state, &mut order);
-                    }
-                    for i in order {
-                        let this: IndexMap<String, (Ty, bool)> = fields
-                            .iter()
-                            .filter(|(k, _)| !untyped.contains(*k))
-                            .map(|(k, (t, o))| (k.clone(), (widen_fresh_literals(t), *o)))
-                            .collect();
-                        let (slot, f, key_php, name) = &deferred[i];
-                        // A cycle without annotations reads a method before it has a type.
-                        let early = f
-                            .this_reads
-                            .iter()
-                            .find(|r| untyped.contains(*r) && *r != name)
-                            .cloned();
-                        let v = self.method_with_this(f, Ty::Obj(this)).map_err(|d| match &early {
-                            Some(m) if d.message.ends_with(&format!("has no field `{m}`")) => d.help(format!(
-                                "`{m}` and `{name}` call each other through `this`; annotate the return type of `{m}`, e.g. `{m}(): number`"
-                            )),
-                            _ => d,
-                        })?;
-                        if live(i, name, &owner)
-                            && let Some(entry) = fields.get_mut(name)
-                        {
-                            entry.0 = v.ty.clone();
-                            untyped.remove(name);
-                        }
-                        parts[*slot] = format!("[{key_php} => {}]", v.php);
+                        typing.compile(self, i, false)?;
                     }
                 }
                 let ty = if is_map {
@@ -4135,9 +4373,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
         };
         let database_receiver = match &out.ty {
-            Ty::Db | Ty::DbQuery | Ty::QueryColl(_) | Ty::KindSystem(_) | Ty::DbGlobals | Ty::DbGlobal(_) => {
-                Some("\\TypedPress\\db()")
-            }
+            Ty::Db
+            | Ty::DbQuery
+            | Ty::QueryColl(_)
+            | Ty::KindSystem(_)
+            | Ty::KindRevisions(_, _)
+            | Ty::DbGlobals
+            | Ty::DbGlobal(_) => Some("\\TypedPress\\db()"),
             Ty::Builder(_) => Some(""),
             _ => None,
         };
@@ -4408,38 +4650,36 @@ impl<'a, 'p> Compiler<'a, 'p> {
         // (it may assign the left variable, as in `x < (x = 5)`), the left one is read first.
         let copy_a = !literal(&a) && (!plain(&a) || !plain(&b));
         let copy_b = !plain(&b);
-        let mut assign = Vec::new();
+        if copy_a || copy_b {
+            // Avoid inline assignment inside conditions (flagged by WPCS); `dynamicBinary` handles
+            // left-to-right operand evaluation and numeric comparisons directly.
+            return Out::atom(
+                format!(
+                    "\\TypedPress\\Js::dynamicBinary({}, {}, {})",
+                    php_str(sym),
+                    a.php,
+                    b.php
+                ),
+                Ty::Bool,
+            );
+        }
         let mut test = Vec::new();
-        let mut side = |c: &mut Self, v: &Out, copy: bool| {
-            let php = if copy {
-                let tmp = c.tmp_var();
-                assign.push(format!("{tmp} = {}", v.php));
-                tmp
-            } else {
-                v.php.clone()
-            };
+        for v in [&a, &b] {
             if !literal(v) {
-                test.push(format!("(\\is_int({php}) || \\is_float({php}))"));
+                test.push(format!("(\\is_int({}) || \\is_float({}))", v.php, v.php));
             }
-            php
-        };
-        let x = side(self, &a, copy_a);
-        let y = side(self, &b, copy_b);
-        let native = format!("(float) {x} {sym} (float) {y}");
+        }
+        let native = format!("(float) {} {sym} (float) {}", a.php, b.php);
         if test.is_empty() {
             return Out::new(native, Ty::Bool);
         }
-        // A non-empty array literal is truthy: it only sequences the assignments.
-        let prefix = if assign.is_empty() {
-            String::new()
-        } else {
-            format!("[{}] && ", assign.join(", "))
-        };
         Out::atom(
             format!(
-                "({prefix}{} ? {native} : \\TypedPress\\Js::dynamicBinary({}, {x}, {y}))",
+                "({} ? {native} : \\TypedPress\\Js::dynamicBinary({}, {}, {}))",
                 test.join(" && "),
-                php_str(sym)
+                php_str(sym),
+                a.php,
+                b.php
             ),
             Ty::Bool,
         )
@@ -4551,6 +4791,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     /// `member`: the value was read through a static member chain (`ns.a.b`), so its type
     /// is the widened property type rather than a `const` binding's literal.
     fn captured_use(&mut self, n: &str, v: Value, b: &Binding, span: Span, callee: bool, member: bool) -> Result<Out> {
+        let n = if n == crate::lower::COMMONJS_THIS { "this" } else { n };
         let home_receiver = self.home_receiver.take();
         if b.mutable && b.module_level && !self.javascript_module(self.fx.as_ref().expect("fn").module) {
             return err_help(
@@ -4619,7 +4860,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 };
                 let caller = self.current.clone();
                 self.calls.entry(caller).or_default().insert(name.clone());
-                let Some(ty) = self.helper_types.get(&key).cloned() else {
+                let ty = match self.helper_types.get(&key) {
+                    Some(ty) => Some(ty.clone()),
+                    // Resolving the helper's annotations can compile a class that calls it before
+                    // compile_function publishes its signature. The class now has its field types.
+                    None => self.declared_signature(&c.func)?,
+                };
+                let Some(ty) = ty else {
                     return err_help(
                         span,
                         format!("`{n}` calls itself, so it needs a return type"),
@@ -4713,7 +4960,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Value::Builtin(Builtin::Connectors) => err_help(
                 span,
                 "`connectors` can't be used as a value",
-                "call `connectors.call(role, tool, args?)` directly",
+                "call `connectors.call(role, tool, args?)` or `connectors.enqueue(role, tool, args?, opts?)` directly",
             ),
             Value::Builtin(Builtin::WpFunction(name)) => err_help(
                 span,
@@ -4725,10 +4972,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 "`abilities` can't be used as a value",
                 "call `abilities.call(\"vendor/name\", input)` directly",
             ),
-            Value::Builtin(Builtin::Jobs) => err_help(
+            Value::Job(_) => err_help(
                 span,
-                "`jobs` can't be used as a value",
-                "call `jobs.<name>.enqueue(input)` directly",
+                format!("`{n}` is a job: it runs on the queue, not as a function"),
+                format!("queue it with `{n}.enqueue({{ ... }})`"),
             ),
             Value::Builtin(Builtin::HttpError) => err(span, "use `throw new HttpError(status, code, message)`"),
             Value::Builtin(Builtin::Static("Number", method)) if method.as_ref() == "isFinite" => {
@@ -4738,10 +4985,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Value::Builtin(_)
             | Value::Column(_)
             | Value::ColRef(_)
-            | Value::Relation(_)
             | Value::Action(_)
-            | Value::Job(_)
-            | Value::Route(_)
             | Value::Plugin(_)
             | Value::Screen(_)
             | Value::FileBucket(_)
@@ -5240,53 +5484,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let result = self
             .home_this_type(home, home_path, &c.func.this_reads, &binding, span, &mut Vec::new())
             .and_then(|(this, left_out)| {
-                self.compile_helper_now(c, name, Some(this))
-                    .map_err(|d| self.this_cycle_help(d, home, path, &left_out))
+                self.compile_helper_now(c, name, Some(this)).map_err(|d| {
+                    let method = path.rsplit('.').next().unwrap_or(path);
+                    this_cycle_help(
+                        d,
+                        method,
+                        &c.func,
+                        left_out.iter().map(String::as_str),
+                        |key| match home.borrow().get(key) {
+                            Some(Value::Closure(c)) => Some(c.func.clone()),
+                            _ => None,
+                        },
+                    )
+                })
             });
         self.typing_this.remove(&typing);
         self.failed_helpers = outer_failures;
         result
-    }
-
-    /// The fix for a `this` read refused because a sibling method had no type yet: a method that
-    /// calls itself, or methods calling each other, need one return type annotated; a method
-    /// reached through `this` held in a variable, spread or destructured isn't compiled first.
-    fn this_cycle_help(&self, d: Diag, home: &Obj, path: &str, left_out: &[String]) -> Diag {
-        let method = path.rsplit('.').next().unwrap_or(path);
-        let Some(m) = left_out
-            .iter()
-            .find(|m| d.message.ends_with(&format!("has no field `{m}`")))
-        else {
-            return d;
-        };
-        let Some(Value::Closure(c)) = home.borrow().get(m).cloned() else {
-            return d;
-        };
-        let params = c
-            .func
-            .params
-            .iter()
-            .skip(usize::from(receives_this(&c.func)))
-            .map(|p| match &p.pat {
-                Pat::Id(n, _) => format!("{n}: number"),
-                _ => "value: number".into(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let calls_back = c.func.this_reads.iter().any(|r| r == method || r == m);
-        let reads_directly = path_reads(home, method).is_some_and(|reads| reads.iter().any(|r| r == m));
-        let help = if m == method {
-            format!("`{m}` calls itself through `this`; annotate its return type, e.g. `{m}({params}): number`")
-        } else if calls_back && reads_directly {
-            format!(
-                "`{m}` and `{method}` call each other through `this`; annotate the return type of `{m}`, e.g. `{m}({params}): number`"
-            )
-        } else {
-            format!(
-                "`{method}` reaches `{m}` through `this` held in a variable, spread or destructured, so `{m}` isn't typed first; call it as `this.{m}(...)`, or annotate its parameters and return type, e.g. `{m}({params}): number`"
-            )
-        };
-        d.help(help)
     }
 
     /// The type of `home` as a method's `this`, and the keys left out because their method is
@@ -5295,7 +5509,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         &mut self,
         home: &Obj,
         path: &str,
-        reads: &[String],
+        reads: &[ThisRead],
         binding: &Binding,
         span: Span,
         seen: &mut Vec<usize>,
@@ -5304,8 +5518,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let members: Vec<(String, Value)> = home.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut fields = IndexMap::new();
         let mut left_out = Vec::new();
+        let whole = reads.iter().any(|read| matches!(read, ThisRead::Whole));
         for (key, member) in members {
-            let needed = reads.contains(&key);
+            let named = reads
+                .iter()
+                .any(|read| matches!(read, ThisRead::Field(name) if name == &key));
+            let needed = named || whole;
             let member_path = format!("{path}.{key}");
             let ty = match &member {
                 Value::Closure(c) => {
@@ -5314,10 +5532,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     } else if let Some(ty) = self.declared_signature(&c.func)? {
                         Some(ty)
                     } else if needed && !self.typing_this.contains(&(self.owner(), closure_key(c))) {
-                        self.attempt(|this| {
+                        let built = self.attempt(|this| {
                             this.home_receiver = Some(Rc::as_ptr(home) as usize);
                             this.captured_use(&member_path, member.clone(), binding, span, true, true)
-                        })?;
+                        });
+                        if named {
+                            built?;
+                        }
                         self.helper_types.get(&closure_key(c)).cloned()
                     } else {
                         None
@@ -5328,12 +5549,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         None
                     } else {
                         // A nested object's methods are compiled when the method reads it.
-                        let all: Vec<String> = if needed {
-                            o.borrow().keys().cloned().collect()
-                        } else {
-                            Vec::new()
-                        };
-                        Some(self.home_this_type(o, &member_path, &all, binding, span, seen)?.0)
+                        let reads = if needed { &[ThisRead::Whole][..] } else { &[] };
+                        Some(self.home_this_type(o, &member_path, reads, binding, span, seen)?.0)
                     }
                 }
                 _ => match self
@@ -5394,6 +5611,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let calls = std::mem::take(&mut self.calls);
         let ability_calls = std::mem::take(&mut self.ability_calls);
         let personal = std::mem::take(&mut self.personal);
+        let route_effects = std::mem::take(&mut self.route_effects);
         let built = build(self);
         for (graph, prior) in [(&mut self.calls, calls), (&mut self.ability_calls, ability_calls)] {
             let added = std::mem::replace(graph, prior);
@@ -5402,6 +5620,18 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     graph.entry(caller).or_default().extend(targets);
                 }
             }
+        }
+        let added = std::mem::replace(&mut self.route_effects, route_effects);
+        if built.is_ok() {
+            for (name, dependencies) in added.dependencies {
+                self.route_effects
+                    .dependencies
+                    .entry(name)
+                    .or_default()
+                    .extend(dependencies);
+            }
+            self.route_effects.private.extend(added.private);
+            self.route_effects.literal_markup.extend(added.literal_markup);
         }
         if built.is_err() {
             self.classes.retain(|k, _| classes.contains(k));
@@ -5581,8 +5811,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
         let Ty::Fn(declared, _) = &v.ty else {
             return err(e.span, format!("expected a function, got {}", v.ty.describe()));
         };
+        self.check_callback_reference(e)?;
         check_callback_parameters(params, declared, e.span)?;
         Ok(checked_function(v))
+    }
+
+    fn check_callback_reference(&mut self, e: &Expr) -> Result<()> {
+        if let Some((_, Value::Closure(c), _)) = self.static_receiver(e)?
+            && receives_this(&c.func)
+            && let Some(ann) = c.func.params.first().and_then(|p| p.ann.as_ref())
+        {
+            let receiver = self.resolve_runtime_ann(ann, c.func.module)?;
+            check_callback_receiver(&receiver, e.span)?;
+        }
+        Ok(())
     }
 
     /// An object-literal method that reads `this`, compiled with `this` typed as the literal.
@@ -5624,6 +5866,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn closure_with_types(&mut self, f: &Rc<Func>, params: Option<&[Ty]>) -> Result<Out> {
+        let implicit_this = self.implicit_this.take();
         if !f.type_params.is_empty() {
             return err_help(
                 f.span,
@@ -5648,28 +5891,16 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     ps.get(i).cloned()
                 }
             });
-            let implicit_this = (is_this && p.ann.is_none())
-                .then(|| self.implicit_this.take())
-                .flatten();
+            let implicit_this = implicit_this.as_ref().filter(|_| is_this);
             let t = match (&p.ann, implicit_this) {
-                (None, Some(this)) => this,
+                (None, Some(this)) => this.clone(),
                 // A callback is called without a receiver it could rely on.
                 (None, None) if is_this && params.is_some() => Ty::Unknown,
                 (Some(a), _) => {
                     let declared = self.resolve_runtime_ann(a, module)?;
                     // A callback is called without a receiver, so its `this` is undefined.
-                    if is_this
-                        && params.is_some()
-                        && check_parameter_argument(&Ty::Undefined, &declared, p.span).is_err()
-                    {
-                        return err_help(
-                            p.span,
-                            format!(
-                                "this callback is called without a receiver, so `this` is undefined, not {}",
-                                declared.describe()
-                            ),
-                            "capture the object in a variable or use an arrow function, and read it instead of `this`",
-                        );
+                    if is_this && params.is_some() {
+                        check_callback_receiver(&declared, p.span)?;
                     }
                     if let Some(given) = &given {
                         check_parameter_argument(given, &parameter_input_type(p, declared.clone()), p.span)?;
@@ -5687,6 +5918,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                             Ty::Dynamic
                         }
                     }
+                    None if is_this => return Err(untyped_this(p.span)),
                     None => return err(p.span, "this callback parameter is never given a value"),
                 },
             };
@@ -6735,6 +6967,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::Collection(t) if prop == "system" => {
                 return Ok(Out::atom("\\TypedPress\\db()", Ty::KindSystem(t.clone())));
             }
+            Ty::Collection(t) if prop == "revisions" => {
+                return Ok(Out::atom("\\TypedPress\\db()", Ty::KindRevisions(t.clone(), false)));
+            }
+            Ty::KindSystem(t) if prop == "revisions" => {
+                return Ok(Out::atom("\\TypedPress\\db()", Ty::KindRevisions(t.clone(), true)));
+            }
             Ty::Db if prop == "query" => return Ok(Out::atom("\\TypedPress\\db()", Ty::DbQuery)),
             Ty::Db if prop == "globals" => return Ok(Out::atom("\\TypedPress\\db()", Ty::DbGlobals)),
             Ty::DbGlobals => {
@@ -7295,6 +7533,12 @@ impl<'a, 'p> Compiler<'a, 'p> {
         }
         let mut entries = Vec::new();
         let mut spread = false;
+        // A named field of `<form action={name}>`: checked against the action's input, and given
+        // the last submit's state for it (`Forms::control`) before the author's own attributes.
+        if let Some(entry) = self.form_field(&folded_tag, jsx)? {
+            entries.push(entry);
+            spread = true;
+        }
         let mut form_action: Option<String> = None;
         for attr in &jsx.attrs {
             match attr {
@@ -7517,7 +7761,27 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 _,
             ) => args.push(php_str(text)),
             (_, Some(children)) => args.extend(children),
-            (children, None) => args.extend(self.jsx_children(children)?),
+            (children, None) => {
+                // The fields of `<form action={name}>` are the ones its children name.
+                let outer = form_action.as_ref().map(|action| {
+                    // Each input field, and whether it holds a list (several values of one name).
+                    let fields = self.schema.actions[action]
+                        .input
+                        .values()
+                        .map(|c| {
+                            let list = matches!(c.ty, ColType::Select | ColType::RefList | ColType::MediaList)
+                                || c.shape.as_ref().is_some_and(|s| s["type"] == "array");
+                            (c.name.clone(), list)
+                        })
+                        .collect();
+                    self.form_scope.replace((action.clone(), fields))
+                });
+                let children = self.jsx_children(children);
+                if let Some(outer) = outer {
+                    self.form_scope = outer;
+                }
+                args.extend(children?);
+            }
         }
         args.extend(form_fields);
         if let Some(folded) = self.fold_element(&output_tag, jsx, spread || form_action.is_some(), &args[2..]) {
@@ -7534,6 +7798,106 @@ impl<'a, 'p> Compiler<'a, 'p> {
     /// literal attribute values only, no spread, form action or client directive. `children` are the
     /// compiled children; static ones are already escaped markup. A fully static element is one
     /// `Html::raw`; one with dynamic children places them between its static open and close tags.
+    /// A field inside `<form action={name}>` (`<input>`, `<textarea>`, `<select>`, `<button>`) with a
+    /// literal `name`, written in the form's own JSX: the name must be one of the action's input
+    /// fields, as the action refuses any other, and the field gets `Forms::control`'s attributes:
+    /// `aria-invalid` when the last submit's error names it, and after that error the value typed or
+    /// the boxes checked. A control the browser never sends (`type="button"`, `disabled`, a submitter
+    /// posting elsewhere) and a field of another form (`form="id"`) are left alone.
+    fn form_field(&self, tag: &str, jsx: &Jsx) -> Result<Option<String>> {
+        let Some((action, fields)) = &self.form_scope else {
+            return Ok(None);
+        };
+        if !matches!(tag, "input" | "textarea" | "select" | "button") {
+            return Ok(None);
+        }
+        let attr = |key: &str| {
+            jsx.attrs.iter().find_map(|a| match a {
+                JsxAttr::Named { name, value, .. } if name == key => Some(value),
+                _ => None,
+            })
+        };
+        let literal = |key: &str| {
+            attr(key).map(|v| match &v.kind {
+                ExprKind::Str(text) => Some(text.as_str()),
+                _ => None,
+            })
+        };
+        let set = |keys: &[&str]| keys.iter().any(|k| attr(k).is_some());
+        let kind = match literal("type") {
+            Some(Some(kind)) => Some(kind.to_ascii_lowercase()),
+            Some(None) => None,
+            None if tag == "button" => Some("submit".to_string()),
+            None if tag == "input" => Some("text".to_string()),
+            None => Some(tag.to_string()),
+        };
+        // Sent with another form, never sent, or sent to another address.
+        let disabled = attr("disabled").is_some_and(|v| matches!(v.kind, ExprKind::Bool(true)));
+        if set(&["form", "formAction"]) || disabled || matches!(kind.as_deref(), Some("button" | "reset")) {
+            return Ok(None);
+        }
+        let Some(name_expr) = attr("name") else { return Ok(None) };
+        let ExprKind::Str(name) = &name_expr.kind else {
+            return Ok(None);
+        };
+        if kind.as_deref() == Some("image") {
+            return err_help(
+                name_expr.span,
+                format!(
+                    "an image button named `{name}` sends `{name}.x` and `{name}.y`, which `{action}` would refuse"
+                ),
+                "remove `name`, or use a `<button>` with an image inside",
+            );
+        }
+        let field = name.strip_suffix("[]").unwrap_or(name);
+        // What `Forms::decode` drops before the action reads the body.
+        if matches!(field, "_tp_return" | "_tp_form" | "_wpnonce" | "_locale" | "_method") {
+            return Ok(None);
+        }
+        let Some((_, list)) = fields.iter().find(|(f, _)| f == field) else {
+            let help = match suggest(field, fields.iter().map(|(f, _)| f.as_str())) {
+                Some(s) => format!("did you mean `{s}`?"),
+                None if fields.is_empty() => format!("`{action}` takes no input; remove the name"),
+                None => format!(
+                    "`{action}` takes {}",
+                    fields
+                        .iter()
+                        .map(|(f, _)| format!("`{f}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            };
+            return err_help(
+                name_expr.span,
+                format!("`{field}` isn't an input of `{action}`, so the action would refuse this form"),
+                help,
+            );
+        };
+        // `value` refills what was typed (over a `defaultValue` the page wrote, such as the stored
+        // value of an edit form; a `value` the page sets wins); `checked` checks the box or option
+        // again when its value was sent (over a `defaultChecked`); `none` only marks the field. One text box can't hold a list's values, so a list field's
+        // boxes are refilled only when they are checkboxes.
+        let (mode, option) = match kind.as_deref() {
+            Some("submit") => return Ok(None),
+            Some("checkbox" | "radio") if set(&["checked"]) => ("none", None),
+            Some("checkbox" | "radio") => match literal("value") {
+                None => ("checked", None),
+                Some(Some(v)) => ("checked", Some(v)),
+                Some(None) => ("none", None),
+            },
+            Some("password" | "hidden" | "file") | Some("select") | None => ("none", None),
+            _ if *list || name.ends_with("[]") || set(&["value"]) => ("none", None),
+            _ => ("value", None),
+        };
+        let option = option.map_or_else(|| "null".to_string(), php_str);
+        Ok(Some(format!(
+            "...\\TypedPress\\Render\\Forms::control({}, {}, {}, {option})",
+            php_str(action),
+            php_str(name),
+            php_str(mode)
+        )))
+    }
+
     fn fold_element(&mut self, tag: &str, jsx: &Jsx, spread: bool, children: &[String]) -> Option<String> {
         if spread || self.client.is_some() || !html::foldable_tag(tag) {
             return None;
@@ -7884,6 +8248,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         match self.resolve(n, callee.span)? {
             Resolved::Global("Date") => {
+                if args.is_empty() {
+                    self.route_opaque("new Date()");
+                }
                 crate::builtins::check_date_literal(args, span)?;
                 let argv = self.plain_args(args)?;
                 Ok(match argv.as_slice() {
@@ -8581,7 +8948,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     // ---- jobs (§6.1, lane D) ------------------------------------------------------
 
-    /// `once(key, fn)`, `jobs.<name>.enqueue(input, opts?)` and `env("NAME")`; None for any other call.
+    /// `once(key, fn)`, `jobName.enqueue(input, opts?)` and `env("NAME")`; None for any other call.
     fn jobs_call(&mut self, callee: &Expr, args: &[ArrEl], span: Span) -> Result<Option<Out>> {
         let builtin = |this: &mut Self, e: &Expr| -> Result<Option<Builtin>> {
             let ExprKind::Ident(n) = &e.kind else { return Ok(None) };
@@ -8589,7 +8956,6 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 Resolved::Value(
                     Value::Builtin(
                         b @ (Builtin::Once
-                        | Builtin::Jobs
                         | Builtin::Env
                         | Builtin::Mail
                         | Builtin::Connectors
@@ -8631,11 +8997,28 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 self.abilities_call(prop, args, span).map(Some)
             }
             ExprKind::Member { obj, prop, .. } if prop == "enqueue" => match &obj.kind {
-                ExprKind::Member {
-                    obj: root, prop: job, ..
-                } if builtin(self, root)? == Some(Builtin::Jobs) => {
-                    self.enqueue_call(job, obj.span, args, span).map(Some)
-                }
+                // `notifyLowStock.enqueue(...)` on the job's own export.
+                ExprKind::Ident(n) => match self.resolve(n, obj.span).map_err(|d| {
+                    if d.help.is_none() {
+                        d.help(format!(
+                            "a job is queued through its export: `export const {n} = job({{ ... }}, async (input) => ...)`, imported where it's queued"
+                        ))
+                    } else {
+                        d
+                    }
+                })? {
+                    Resolved::Value(Value::Job(j), _) => {
+                        let Some(job) = self.job_values.get(&(Rc::as_ptr(&j) as usize)).cloned() else {
+                            return err_help(
+                                obj.span,
+                                format!("`{n}` is a job that isn't registered"),
+                                format!("export it: `export const {n} = job(...)`"),
+                            );
+                        };
+                        self.enqueue_call(&job, obj.span, args, span).map(Some)
+                    }
+                    _ => Ok(None),
+                },
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -8714,21 +9097,28 @@ impl<'a, 'p> Compiler<'a, 'p> {
             );
         }
         self.uses("mail", "send", span);
+        self.writes(span, "sends an email");
         Ok(Out::atom(
             format!("\\TypedPress\\Mail::send({})", v.php),
             Ty::Promise(Box::new(types::obj_pub(&[("id", Ty::Str)]))),
         ))
     }
 
-    /// `connectors.call(role, tool, args?)` from "spacepress" / "typedpress": invokes a host connector.
+    /// `connectors.call(role, tool, args?)` from "spacepress" / "typedpress" invokes a host connector
+    /// now; `connectors.enqueue(role, tool, args?, { delay?, key? })` queues the call in the caller's
+    /// transaction as the built-in `typedpress.connector` job, which runs after commit.
     fn connectors_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
-        if name != "call" {
-            return err_help(
-                span,
-                format!("`connectors` has no function `{name}`"),
-                "use `connectors.call(role, tool, args?)`",
-            );
-        }
+        let queued = match name {
+            "call" => false,
+            "enqueue" => true,
+            _ => {
+                return err_help(
+                    span,
+                    format!("`connectors` has no function `{name}`"),
+                    "use `connectors.call(role, tool, args?)` or `connectors.enqueue(role, tool, args?, { key?, delay? })`",
+                );
+            }
+        };
         if self.fx().no_db {
             return err_help(
                 span,
@@ -8736,11 +9126,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 "move the call into a hook, action, route or job",
             );
         }
-        if args.len() < 2 || args.len() > 3 {
+        let max = if queued { 4 } else { 3 };
+        if args.len() < 2 || args.len() > max {
             return err_help(
                 span,
-                "connectors.call() takes a connector role, a tool name, and optional args",
-                "write connectors.call(\"slack\", \"post_message\", { channel, text })",
+                format!(
+                    "connectors.{name}() takes a connector role, a tool name, {}",
+                    if queued {
+                        "optional args and optional options"
+                    } else {
+                        "and optional args"
+                    }
+                ),
+                if queued {
+                    "write connectors.enqueue(\"slack\", \"post_message\", { channel, text }, { key: \"order-42\" })"
+                } else {
+                    "write connectors.call(\"slack\", \"post_message\", { channel, text })"
+                },
             );
         }
         let role_expr = self.arg(args, 0, span, "a connector role")?;
@@ -8749,7 +9151,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if !role.ty.is_str() || role.ty.is_nullable() {
             return err_help(
                 role_expr.span,
-                format!("connectors.call() role must be a string, not {}", role.ty.describe()),
+                format!("connectors.{name}() role must be a string, not {}", role.ty.describe()),
                 "pass the connector role name as a string, e.g. \"slack\"",
             );
         }
@@ -8759,7 +9161,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if !tool.ty.is_str() || tool.ty.is_nullable() {
             return err_help(
                 tool_expr.span,
-                format!("connectors.call() tool must be a string, not {}", tool.ty.describe()),
+                format!("connectors.{name}() tool must be a string, not {}", tool.ty.describe()),
                 "pass the connector tool name as a string",
             );
         }
@@ -8778,12 +9180,46 @@ impl<'a, 'p> Compiler<'a, 'p> {
             _ => "*".to_string(),
         };
         self.uses("connectors", &cap, span);
+        if !queued {
+            return Ok(Out::atom(
+                format!(
+                    "\\TypedPress\\Connectors::call({}, {}, {})",
+                    role.php, tool.php, args_php
+                ),
+                Ty::Promise(Box::new(Ty::Unknown)),
+            ));
+        }
+        self.writes(span, "queues a connector call");
+        let opts = match args.get(3) {
+            None => "null".to_string(),
+            Some(_) => {
+                let e = self.arg(args, 3, span, "options")?;
+                let v = self.expr(e)?;
+                let v = self.finish_value(v, e.span)?;
+                let mut fields = IndexMap::new();
+                fields.insert("delay".to_string(), (Ty::Num, true));
+                fields.insert("key".to_string(), (Ty::Str, true));
+                let want = Ty::Obj(fields);
+                if !assignable(&v.ty, &want) {
+                    return err_help(
+                        e.span,
+                        format!(
+                            "connectors.enqueue() options are {}, not {}",
+                            want.describe(),
+                            v.ty.describe()
+                        ),
+                        "use { delay: seconds, key: \"dedupe-key\" }",
+                    );
+                }
+                v.php
+            }
+        };
         Ok(Out::atom(
             format!(
-                "\\TypedPress\\Connectors::call({}, {}, {})",
+                "\\TypedPress\\Connectors::enqueue({}, {}, {}, {opts})",
                 role.php, tool.php, args_php
             ),
-            Ty::Promise(Box::new(Ty::Unknown)),
+            Ty::Promise(Box::new(types::obj_pub(&[("id", Ty::Str)]))),
         ))
     }
 
@@ -8942,6 +9378,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 v.php
             }
         };
+        if !self.abilities.readonly.contains(ability.as_str()) {
+            self.writes(name_expr.span, "calls an ability that isn't read-only");
+        }
+        self.route_opaque(format!("ability {ability}"));
         self.use_wordpress(WordPressKind::Ability, ability, name_expr.span);
         Ok(Out::atom(
             format!("\\TypedPress\\Wp\\Abilities\\Call::run({}, {input})", php_str(ability)),
@@ -8953,6 +9393,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
     /// `TypedPress\Wp\Functions::call` with the catalog's fixed arguments appended.
     fn wp_function_call(&mut self, name: &str, args: &[ArrEl], span: Span) -> Result<Out> {
         let f = crate::wordpress::function(name).expect("only catalog functions are imported");
+        if matches!(name, "update_option" | "delete_option" | "wp_insert_post") {
+            self.writes(span, "calls a WordPress function that writes");
+        }
         if self.fx().no_db {
             return err_help(
                 span,
@@ -8998,6 +9441,22 @@ impl<'a, 'p> Compiler<'a, 'p> {
             php.push(v.php);
         }
         php.extend(f.fixed.iter().map(php_json));
+        match (name, args.first()) {
+            (
+                "get_option",
+                Some(ArrEl::Item(Expr {
+                    kind: ExprKind::Str(option),
+                    ..
+                })),
+            ) => {
+                self.route_dep(RouteDependency::Option { name: option.clone() });
+            }
+            ("is_user_logged_in" | "current_user_can" | "get_current_user_id", _) => {
+                self.route_private();
+                self.route_opaque(name);
+            }
+            _ => self.route_opaque(name),
+        }
         self.use_wordpress(WordPressKind::Function, name, span);
         Ok(Out::atom(
             format!(
@@ -9013,6 +9472,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         if self.fx().no_db {
             return err_help(span, "access rules can't use once()", "move it into a hook or action");
         }
+        self.writes(span, "records a once() result");
         if args.len() != 2 {
             return err_help(
                 span,
@@ -9056,14 +9516,10 @@ impl<'a, 'p> Compiler<'a, 'p> {
         ))
     }
 
+    /// `x.enqueue(input, { delay, key })` for the job registered as `job`.
     fn enqueue_call(&mut self, job: &str, job_span: Span, args: &[ArrEl], span: Span) -> Result<Out> {
-        // Inside a plugin, `jobs.<name>` names the plugin's own job.
-        let registered = match &self.plugin {
-            Some((_, plugin)) => format!("{plugin}_{job}"),
-            None => job.to_string(),
-        };
-        let job = registered.as_str();
         self.uses("jobs", job, job_span);
+        self.writes(job_span, "queues a job");
         let Some(spec) = self.schema.jobs.get(job) else {
             let mut d = Diag::new(job_span, format!("unknown job `{job}`"));
             if let Some(s) = suggest(job, self.schema.jobs.keys().map(String::as_str)) {
@@ -9080,10 +9536,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
             return err_help(
                 span,
                 "enqueue() takes the job input and optional options",
-                "write jobs.x.enqueue({ ... })",
+                "write notifySubscribers.enqueue({ postId }, { delay: 60, key: \"post-42\" })",
             );
         }
-        let want = types::columns_insert(&spec.input, &types::json_ty);
+        let want = match &spec.input_ty {
+            Some(t) => t.clone(),
+            None => types::columns_insert(&spec.input, &types::json_ty),
+        };
         let input_expr = self.arg(args, 0, span, "the job input")?;
         let input = self.expr(input_expr)?;
         let input = self.finish_value(input, input_expr.span)?;
@@ -9544,6 +10003,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn static_call(&mut self, g: &str, m: &str, args: &[ArrEl], span: Span) -> Result<Out> {
+        if matches!((g, m), ("Math", "random") | ("Date", "now") | ("crypto", _)) {
+            self.route_opaque(format!("{g}.{m}"));
+        }
         if BINARY_GLOBALS.contains(&g) {
             self.binary_global(g, span)?;
             let argv = self.javascript_args(args)?;
@@ -9957,6 +10419,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Ty::QueryColl(table) => return self.query_call(&table, m, args, span, m_span),
             Ty::Collection(table) => return self.kind_call(&table, false, m, args, span, m_span),
             Ty::KindSystem(table) => return self.kind_call(&table, true, m, args, span, m_span),
+            Ty::KindRevisions(table, system) => {
+                return self.kind_revisions_call(&table, system, m, args, span, m_span);
+            }
             Ty::Db => return self.db_call(m, args, span, m_span),
             Ty::Builder(b) => return self.builder_call(*b, m, args, span, m_span),
             Ty::DbQuery => return err(m_span, format!("use `db.query.<collection>.{m}(...)`")),
@@ -10152,6 +10617,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             } else {
                 let rep = self.expr(rep_e)?;
                 if let Ty::Fn(declared, _) = &rep.ty {
+                    self.check_callback_reference(rep_e)?;
                     check_callback_parameters(&parameters(declared.len()), declared, rep_e.span)?;
                     checked_function(rep)
                 } else if !rep.ty.is_str() {
@@ -10590,6 +11056,34 @@ impl<'a, 'p> Compiler<'a, 'p> {
 
     // ---- database ---------------------------------------------------------------
 
+    fn projected_list(&self, table: &str, span: Span, options: Option<&Expr>, mut php: String) -> String {
+        let Some(fields) = self.route_columns.get(&span) else {
+            return php;
+        };
+        if options.is_some_and(|opts| object_prop(opts, "columns").is_some() || object_prop(opts, "with").is_some()) {
+            return php;
+        }
+        let spec = &self.schema.collections[table];
+        if !fields.iter().all(|field| {
+            spec.columns.get(field).is_some_and(|col| match col.access.get("read") {
+                None | Some(crate::schema::Access::Allow(true)) => true,
+                Some(crate::schema::Access::Role(role)) => role == "anyone",
+                _ => false,
+            })
+        }) {
+            return php;
+        }
+        debug_assert!(php.starts_with('['));
+        let fields = fields
+            .iter()
+            .map(|field| format!("{} => true", php_str(field)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let comma = if php == "[]" { "" } else { ", " };
+        php.insert_str(1, &format!("'columns' => [{fields}]{comma}"));
+        php
+    }
+
     fn query_call(&mut self, table: &str, m: &str, args: &[ArrEl], span: Span, m_span: Span) -> Result<Out> {
         let key = self.schema.collections[table].key.clone();
         self.uses("read", key, m_span);
@@ -10612,8 +11106,30 @@ impl<'a, 'p> Compiler<'a, 'p> {
             Some(ArrEl::Item(o)) => self.query_opts(table, o, m == "findMany")?,
             Some(ArrEl::Spread(x)) => return err(x.span, "spread arguments aren't supported here"),
         };
-        let _ = span;
+        let options = args.first().and_then(|arg| match arg {
+            ArrEl::Item(opts) => Some(opts),
+            ArrEl::Spread(_) => None,
+        });
+        let where_ = args.first().and_then(|arg| match arg {
+            ArrEl::Item(opts) => object_prop(opts, "where"),
+            ArrEl::Spread(_) => None,
+        });
+        let exact = where_.is_some_and(|filter| {
+            self.schema.collections[table].columns.iter().any(|(name, col)| {
+                (col.primary_key || col.unique)
+                    && object_prop(filter, name).is_some_and(|expr| {
+                        matches!(expr.kind, ExprKind::Str(_) | ExprKind::Num(_)) || object_prop(expr, "eq").is_some()
+                    })
+            })
+        });
+        let collection = table.to_string();
+        self.route_dep(if exact {
+            RouteDependency::Row { collection }
+        } else {
+            RouteDependency::List { collection }
+        });
         let (php, ty) = if m == "findMany" {
+            let opts = self.projected_list(table, span, options, opts);
             (
                 format!("\\TypedPress\\Seam::findMany({}, {opts})", php_str(table)),
                 Ty::Array(Box::new(row_ty)),
@@ -10639,21 +11155,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
         span: Span,
         m_span: Span,
     ) -> Result<Out> {
-        const METHODS: [&str; 7] = ["list", "paginate", "get", "count", "create", "update", "delete"];
+        const METHODS: [&str; 9] = [
+            "list", "paginate", "get", "count", "create", "update", "delete", "restore", "purge",
+        ];
         if !METHODS.contains(&m) {
             let mut d = Diag::new(m_span, format!("kinds have no method `{m}`"));
             if let Some(s) = suggest(m, METHODS) {
                 d = d.help(format!("did you mean `{s}`?"));
             } else {
-                d = d.help("use list, paginate, get, count, create, update or delete");
+                d = d.help("use list, paginate, get, count, create, update, delete, restore or purge");
             }
             return Err(d);
         }
         let key = self.schema.collections[table].key.clone();
         self.uses(
-            if matches!(m, "create" | "update") {
+            if matches!(m, "create" | "update" | "restore") {
                 "write"
-            } else if m == "delete" {
+            } else if matches!(m, "delete" | "purge") {
                 "delete"
             } else {
                 "read"
@@ -10661,6 +11179,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
             key.clone(),
             m_span,
         );
+        match m {
+            "create" => self.writes(m_span, "creates a row"),
+            "update" => self.writes(m_span, "updates a row"),
+            "delete" => self.writes(m_span, "deletes a row"),
+            "restore" => self.writes(m_span, "restores a row"),
+            "purge" => self.writes(m_span, "permanently deletes a row"),
+            _ => {}
+        }
         let mut plain = Vec::new();
         for a in args {
             match a {
@@ -10677,6 +11203,13 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         if plain.len() < least || plain.len() > most {
             return err(span, format!("`{key}.{m}` takes {want}"));
+        }
+        let collection = table.to_string();
+        match m {
+            "list" | "paginate" => self.route_dep(RouteDependency::List { collection }),
+            "get" => self.route_dep(RouteDependency::Row { collection }),
+            "count" => self.route_dep(RouteDependency::Count { collection }),
+            _ => self.route_opaque(format!("{key}.{m}")),
         }
         let trusted = if system { "true" } else { "false" };
         let row = types::row(self.schema, table);
@@ -10706,6 +11239,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     Some(o) => self.kind_opts(table, o, true, m == "paginate")?,
                 };
                 if m == "list" {
+                    let opts = self.projected_list(table, span, plain.first().copied(), opts);
                     (
                         format!("\\TypedPress\\Seam::kindList({}, {opts}, {trusted})", php_str(table)),
                         Ty::Array(Box::new(row_ty)),
@@ -10773,6 +11307,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     row,
                 )
             }
+            "restore" => {
+                let target = id(self, plain[0])?;
+                (
+                    format!(
+                        "\\TypedPress\\Seam::kindRestore({}, {target}, {trusted})",
+                        php_str(table)
+                    ),
+                    row,
+                )
+            }
+            "purge" => {
+                let target = id(self, plain[0])?;
+                (
+                    format!("\\TypedPress\\Seam::kindPurge({}, {target}, {trusted})", php_str(table)),
+                    row,
+                )
+            }
             _ => {
                 let target = id(self, plain[0])?;
                 (
@@ -10781,6 +11332,155 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         php_str(table)
                     ),
                     row,
+                )
+            }
+        };
+        Ok(Out::atom(php, Ty::Promise(Box::new(ty))))
+    }
+
+    /// `posts.revisions.{list,get,diff,restore}` (and `.system.revisions.*`): unified native revision API.
+    fn kind_revisions_call(
+        &mut self,
+        table: &str,
+        system: bool,
+        m: &str,
+        args: &[ArrEl],
+        span: Span,
+        m_span: Span,
+    ) -> Result<Out> {
+        const METHODS: [&str; 4] = ["list", "get", "diff", "restore"];
+        if !METHODS.contains(&m) {
+            let mut d = Diag::new(m_span, format!("`revisions` has no method `{m}`"));
+            if let Some(s) = suggest(m, METHODS) {
+                d = d.help(format!("did you mean `{s}`?"));
+            } else {
+                d = d.help("use list, get, diff or restore");
+            }
+            return Err(d);
+        }
+        let key = self.schema.collections[table].key.clone();
+        self.uses(if m == "restore" { "write" } else { "read" }, key.clone(), m_span);
+        if m == "restore" {
+            self.writes(m_span, "restores a revision");
+        }
+        let mut plain = Vec::new();
+        for a in args {
+            match a {
+                ArrEl::Item(x) => plain.push(x),
+                ArrEl::Spread(x) => return err(x.span, "spread arguments aren't supported here"),
+            }
+        }
+        let (want_n, want) = match m {
+            "list" => (1, "an id"),
+            "get" | "restore" => (2, "an id and a version number"),
+            _ => (3, "an id, fromVersion, and toVersion"),
+        };
+        if plain.len() != want_n {
+            return err(span, format!("`{key}.revisions.{m}` takes {want}"));
+        }
+        let trusted = if system { "true" } else { "false" };
+        let row = types::row(self.schema, table);
+        let pk_ty = self.schema.collections[table]
+            .primary_key()
+            .map(|c| types::col_base(c, &types::json_ty, true))
+            .unwrap_or(Ty::Num);
+        let mut arg_id = |e: &Expr| -> Result<String> {
+            let v = self.expr(e)?;
+            let v = self.finish_value(v, e.span)?;
+            if !assignable(&v.ty, &pk_ty) {
+                return err(
+                    e.span,
+                    format!(
+                        "`{key}.revisions.{m}` needs the row's id ({}), not {}",
+                        pk_ty.describe(),
+                        v.ty.describe()
+                    ),
+                );
+            }
+            Ok(v.php)
+        };
+        let target = arg_id(plain[0])?;
+        let mut arg_num = |e: &Expr, label: &str| -> Result<String> {
+            let v = self.expr(e)?;
+            let v = self.finish_value(v, e.span)?;
+            if !assignable(&v.ty, &Ty::Num) {
+                return err(
+                    e.span,
+                    format!("`{key}.revisions.{m}` needs a numeric {label}, not {}", v.ty.describe()),
+                );
+            }
+            Ok(v.php)
+        };
+        let (php, ty) = match m {
+            "list" => {
+                let mut user_fields = IndexMap::new();
+                user_fields.insert("id".into(), (Ty::Num, false));
+                user_fields.insert("name".into(), (Ty::Str, false));
+                let mut summary = IndexMap::new();
+                summary.insert("id".into(), (Ty::Num, false));
+                summary.insert("version".into(), (Ty::Num, false));
+                summary.insert(
+                    "op".into(),
+                    (
+                        Ty::Union(vec![
+                            Ty::StrLit("create".into()),
+                            Ty::StrLit("update".into()),
+                            Ty::StrLit("delete".into()),
+                            Ty::StrLit("restore".into()),
+                            Ty::StrLit("purge".into()),
+                        ]),
+                        false,
+                    ),
+                );
+                summary.insert("at".into(), (Ty::Str, false));
+                summary.insert("user".into(), (Ty::Obj(user_fields).nullable(), false));
+                summary.insert("schemaMigration".into(), (Ty::Str.nullable(), false));
+                summary.insert("changed".into(), (Ty::Array(Box::new(Ty::Str)).nullable(), false));
+                (
+                    format!(
+                        "\\TypedPress\\Seam::kindRevisionsList({}, {target}, {trusted})",
+                        php_str(table)
+                    ),
+                    Ty::Array(Box::new(Ty::Obj(summary))),
+                )
+            }
+            "get" => {
+                let ver = arg_num(plain[1], "version")?;
+                (
+                    format!(
+                        "\\TypedPress\\Seam::kindRevisionsGet({}, {target}, {ver}, {trusted})",
+                        php_str(table)
+                    ),
+                    row,
+                )
+            }
+            "restore" => {
+                let ver = arg_num(plain[1], "version")?;
+                (
+                    format!(
+                        "\\TypedPress\\Seam::kindRevisionsRestore({}, {target}, {ver}, {trusted})",
+                        php_str(table)
+                    ),
+                    row,
+                )
+            }
+            _ => {
+                let from_v = arg_num(plain[1], "fromVersion")?;
+                let to_v = arg_num(plain[2], "toVersion")?;
+                let mut change = IndexMap::new();
+                change.insert("field".into(), (Ty::Str, false));
+                change.insert("from".into(), (Ty::Unknown, false));
+                change.insert("to".into(), (Ty::Unknown, false));
+                let mut diff = IndexMap::new();
+                diff.insert("from".into(), (Ty::Num, false));
+                diff.insert("to".into(), (Ty::Num, false));
+                diff.insert("changes".into(), (Ty::Array(Box::new(Ty::Obj(change))), false));
+                (
+                    format!(
+                        "\\TypedPress\\Seam::kindRevisionsDiff({}, {target}, {from_v}, {to_v}, {trusted})",
+                        php_str(table)
+                    ),
+                    Ty::Obj(diff),
                 )
             }
         };
@@ -10800,19 +11500,19 @@ impl<'a, 'p> Compiler<'a, 'p> {
         };
         let allowed: &[&str] = if paginate {
             &[
-                "where", "orderBy", "with", "search", "limit", "cursor", "columns", "locale",
+                "where", "orderBy", "with", "search", "limit", "cursor", "columns", "locale", "deleted",
             ]
         } else if list {
             &[
-                "where", "orderBy", "with", "search", "limit", "offset", "columns", "locale",
+                "where", "orderBy", "with", "search", "limit", "offset", "columns", "locale", "deleted",
             ]
         } else if props
             .iter()
             .any(|p| matches!(p, Prop::KV(PropKey::Static(k), _) if k == "with" || k == "columns"))
         {
-            &["with", "columns", "locale"]
+            &["with", "columns", "locale", "deleted"]
         } else {
-            &["where", "search", "locale", "with", "columns"]
+            &["where", "search", "locale", "with", "columns", "deleted"]
         };
         let mut rest = Vec::new();
         let mut extra = Vec::new();
@@ -10829,6 +11529,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             }
             match k.as_str() {
                 "search" | "cursor" => {
+                    if k == "search" {
+                        self.route_dep(RouteDependency::Search {
+                            collection: table.to_string(),
+                        });
+                    }
                     let x = self.expr(v)?;
                     if !assignable(&x.ty, &Ty::Str.nullable()) {
                         return err(v.span, format!("`{k}` must be a string"));
@@ -10914,11 +11619,20 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     }
                     l.wrapped()
                 }
+                "deleted" => {
+                    let d = self.expr(v)?;
+                    if !assignable(&d.ty, &Ty::Str) {
+                        return err(v.span, "`deleted` must be \"exclude\", \"include\" or \"only\"");
+                    }
+                    d.wrapped()
+                }
                 other => {
                     let mut d = Diag::new(v.span, format!("query options have no `{other}`"));
                     if let Some(s) = suggest(
                         other,
-                        ["where", "orderBy", "limit", "offset", "columns", "with", "locale"],
+                        [
+                            "where", "orderBy", "limit", "offset", "columns", "with", "locale", "deleted",
+                        ],
                     ) {
                         d = d.help(format!("did you mean `{s}`?"));
                     }
@@ -10984,6 +11698,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let r = self.check_relation(table, rel, v.span)?.clone();
             let target = self.schema.collections[&r.collection].key.clone();
             self.uses("read", target, v.span);
+            self.route_dep(RouteDependency::Relation {
+                collection: table.to_string(),
+                field: rel.clone(),
+                target: r.collection.clone(),
+            });
             match &v.kind {
                 ExprKind::Bool(true) => {
                     parts.push(format!("{} => true", php_str(rel)));
@@ -11106,6 +11825,11 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         let target = c.relations[name].collection.clone();
                         let key = self.schema.collections[&target].key.clone();
                         self.uses("read", key, v.span);
+                        self.route_dep(RouteDependency::Relation {
+                            collection: table.to_string(),
+                            field: name.to_string(),
+                            target: target.clone(),
+                        });
                         match &v.kind {
                             ExprKind::Bool(true) => "true".to_string(),
                             _ => self.filter(&target, v, true)?,
@@ -11323,6 +12047,17 @@ impl<'a, 'p> Compiler<'a, 'p> {
             format!("globals.{name}"),
             m_span,
         );
+        if m == "update" {
+            self.writes(m_span, "updates a global");
+        }
+        if m == "get" {
+            self.route_dep(RouteDependency::Global {
+                name: name.to_string(),
+                fields: self.schema.globals[name].fields.keys().cloned().collect(),
+            });
+        } else {
+            self.route_opaque(format!("db.globals.{name}.{m}"));
+        }
         // Typed like collection rows: `json<T>()` fields read and write as T.
         let row = types::columns_row(&self.schema.globals[name].fields, &types::json_ty);
         let php = match (m, args) {
@@ -11389,6 +12124,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 );
             }
         };
+        self.route_opaque(format!("db.{m}"));
         crate::builtins::check("db", m, args.len(), crate::builtins::Phase::Emitter, span)?;
         let t = self.arg(args, 0, span, "a collection")?;
         let v = self.expr(t)?;
@@ -11399,6 +12135,14 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let key = self.schema.collections[&table].key.clone();
             self.uses("delete", key, t.span);
         }
+        self.writes(
+            m_span,
+            match kind {
+                BuilderKind::Insert => "inserts a row",
+                BuilderKind::Update => "updates rows",
+                BuilderKind::Delete => "deletes rows",
+            },
+        );
         if v.php != php_str(&table) {
             return err_help(
                 t.span,
@@ -11535,9 +12279,8 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 }
 
-/// The host of a URL whose `https://host/` prefix is written in the source: a string, a template
-/// or a `+` chain starting with one. Anything else is built at runtime.
-pub(super) fn static_host(e: &Expr) -> Option<String> {
+/// The host of a source-written HTTPS URL or a built-in URL constructed from literals.
+pub(super) fn static_host(e: &Expr, is_builtin_url: impl FnOnce(&Expr) -> bool) -> Option<String> {
     let complete = matches!(e.kind, ExprKind::Str(_));
     let prefix = match &e.kind {
         ExprKind::Str(s) => s.clone(),
@@ -11553,7 +12296,31 @@ pub(super) fn static_host(e: &Expr) -> Option<String> {
                 _ => return None,
             }
         }
-        ExprKind::As(inner, _) | ExprKind::NonNull(inner) => return static_host(inner),
+        ExprKind::As(inner, _) | ExprKind::NonNull(inner) => return static_host(inner, is_builtin_url),
+        ExprKind::New { callee, args, .. } if is_builtin_url(callee) => {
+            let literal = |arg: &ArrEl| match arg {
+                ArrEl::Item(Expr {
+                    kind: ExprKind::Str(s), ..
+                }) => Some(s.clone()),
+                _ => None,
+            };
+            let (input, base) = match args.as_slice() {
+                [input] => (literal(input)?, None),
+                [input, base] => (literal(input)?, Some(url::Url::parse(&literal(base)?).ok()?)),
+                _ => return None,
+            };
+            // Even a literal path can name a different authority (`//other.example/path`).
+            let url = url::Url::options().base_url(base.as_ref()).parse(&input).ok()?;
+            if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+                return None;
+            }
+            return Some(
+                url.host_str()?
+                    .trim_matches(['[', ']'])
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase(),
+            );
+        }
         _ => return None,
     };
     let rest = prefix
@@ -11581,15 +12348,19 @@ pub(super) fn static_host(e: &Expr) -> Option<String> {
 mod tests {
     use super::{Compiler, static_host};
     use crate::diag::{Diag, Span};
-    use crate::ir::{Expr, ExprKind};
+    use crate::ir::{ArrEl, Expr, ExprKind};
+    use crate::schema::RouteDependency;
 
     #[test]
     fn locked_hosts_normalize_like_the_runtime_fetch_check() {
         let host = |url: &str| {
-            static_host(&Expr {
-                kind: ExprKind::Str(url.to_string()),
-                span: Span::NONE,
-            })
+            static_host(
+                &Expr {
+                    kind: ExprKind::Str(url.to_string()),
+                    span: Span::NONE,
+                },
+                |_| false,
+            )
         };
         assert_eq!(
             host("https://[2606:4700:4700::1111]/").as_deref(),
@@ -11608,6 +12379,43 @@ mod tests {
     }
 
     #[test]
+    fn literal_url_constructors_lock_the_resolved_https_host() {
+        let expr = |kind| Expr { kind, span: Span::NONE };
+        let new_url = |input: ExprKind, base: Option<&str>, builtin: bool| {
+            let args = std::iter::once(input)
+                .chain(base.map(|s| ExprKind::Str(s.into())))
+                .map(|kind| ArrEl::Item(expr(kind)))
+                .collect();
+            static_host(
+                &expr(ExprKind::New {
+                    callee: Box::new(expr(ExprKind::Ident("URL".into()))),
+                    args,
+                    type_args: vec![],
+                }),
+                |_| builtin,
+            )
+        };
+        let base = Some("https://API.Example.com.:8443/v1/");
+        assert_eq!(
+            new_url(ExprKind::Str("item".into()), base, true).as_deref(),
+            Some("api.example.com")
+        );
+        assert_eq!(
+            new_url(ExprKind::Str("//other.example/a".into()), base, true).as_deref(),
+            Some("other.example")
+        );
+        assert_eq!(
+            new_url(ExprKind::Str("http://other.example/a".into()), base, true),
+            None
+        );
+        assert_eq!(new_url(ExprKind::Ident("input".into()), base, true), None);
+        assert_eq!(
+            new_url(ExprKind::Str("https://other.example/a".into()), None, false),
+            None
+        );
+    }
+
+    #[test]
     fn refused_speculative_build_discards_nested_usage_records() {
         let project = tempfile::tempdir().unwrap();
         let entry = project.path().join("typedpress.config.ts");
@@ -11619,16 +12427,21 @@ mod tests {
         let program = crate::loader::load(&entry).unwrap();
         let mut evaluator = crate::eval::Evaluator::new(&program);
         let config = evaluator.run().unwrap();
-        let extracted = crate::extract::extract(&config, &mut evaluator, Span::NONE, "usage-test").unwrap();
+        let mut extracted = crate::extract::extract(&config, &mut evaluator, Span::NONE, "usage-test").unwrap();
+        extracted.schema.app = Some(Default::default());
         let mut compiler = Compiler::new(&extracted.schema, &mut evaluator, &extracted, &program);
         compiler.abilities.personal.insert("app/private".into());
         compiler.current = "root".into();
         compiler.uses("abilities", "app/kept", Span::NONE);
         compiler.calls.entry("root".into()).or_default().insert("kept".into());
+        compiler.route_opaque("kept");
 
         let refused = compiler.attempt::<()>(|this| {
             this.attempt(|nested| {
                 nested.uses("abilities", "app/private", Span::NONE);
+                nested.route_private();
+                nested.route_opaque("discarded");
+                nested.route_effects.literal_markup.insert("root".into());
                 nested
                     .calls
                     .entry("root".into())
@@ -11643,6 +12456,7 @@ mod tests {
         compiler
             .attempt(|this| {
                 this.uses("abilities", "app/accepted", Span::NONE);
+                this.route_opaque("accepted");
                 this.calls.entry("root".into()).or_default().insert("accepted".into());
                 Ok(())
             })
@@ -11653,6 +12467,12 @@ mod tests {
             ["app/kept".into(), "app/accepted".into()].into()
         );
         assert!(!compiler.personal.contains("root"));
+        assert!(!compiler.route_effects.private.contains("root"));
+        assert!(!compiler.route_effects.literal_markup.contains("root"));
+        assert_eq!(
+            compiler.route_effects.dependencies["root"],
+            [RouteDependency::opaque("kept"), RouteDependency::opaque("accepted")].into()
+        );
     }
 }
 
@@ -12001,6 +12821,7 @@ fn truthiness_part(t: &Ty, truthy: bool) -> Ty {
         | Ty::DbQuery
         | Ty::QueryColl(_)
         | Ty::KindSystem(_)
+        | Ty::KindRevisions(_, _)
         | Ty::DbGlobals
         | Ty::DbGlobal(_)
         | Ty::Builder(_) => {
@@ -12084,6 +12905,31 @@ fn check_parameter_argument(given: &Ty, declared: &Ty, span: Span) -> Result<()>
     Ok(())
 }
 
+fn untyped_this(span: Span) -> Diag {
+    Diag::new(
+        span,
+        "TypedPress code doesn't support `this` without a type in a function that isn't a method of an object literal",
+    )
+    .code(crate::diag::Code::Unsupported)
+    .help(
+        "declare it, e.g. `function f(this: { count: number })`, or write the function as a method in the object literal it is called on",
+    )
+}
+
+fn check_callback_receiver(receiver: &Ty, span: Span) -> Result<()> {
+    if check_parameter_argument(&Ty::Undefined, receiver, span).is_ok() {
+        return Ok(());
+    }
+    err_help(
+        span,
+        format!(
+            "this callback is called without a receiver, so `this` is undefined, not {}",
+            receiver.describe()
+        ),
+        "capture the object in a variable or use an arrow function, and read it instead of `this`",
+    )
+}
+
 fn check_callback_parameters(given: &[Ty], declared: &[Ty], span: Span) -> Result<()> {
     for (i, declared) in declared.iter().enumerate() {
         if let Ty::Rest(container) = declared {
@@ -12158,12 +13004,44 @@ fn parameter_default_suffix(parameters: &[Param], types: &[Ty]) -> &'static str 
     }
 }
 
-/// The `this.<key>` names the method stored under `key` in `home` reads (`Func::this_reads`).
-fn path_reads(home: &Obj, key: &str) -> Option<Vec<String>> {
-    match home.borrow().get(key) {
-        Some(Value::Closure(c)) => Some(c.func.this_reads.clone()),
-        _ => None,
+/// A method that reads a sibling still being inferred needs an annotation to break the cycle.
+fn this_cycle_help<'a>(
+    d: Diag,
+    method: &str,
+    function: &Func,
+    untyped: impl IntoIterator<Item = &'a str>,
+    lookup: impl FnOnce(&str) -> Option<Rc<Func>>,
+) -> Diag {
+    let Some(missing) = untyped.into_iter().find(|key| {
+        function.this_reads.iter().any(|read| read.needs(key)) && d.message.ends_with(&format!("has no field `{key}`"))
+    }) else {
+        return d;
+    };
+    let Some(sibling) = lookup(missing) else { return d };
+    let reads_field = |f: &Func, key: &str| {
+        f.this_reads
+            .iter()
+            .any(|read| matches!(read, ThisRead::Field(name) if name == key))
+    };
+    let mut help = if method == missing {
+        format!("`{method}` calls itself through `this`; annotate its return type")
+    } else if reads_field(function, missing) && reads_field(&sibling, method) {
+        format!("`{missing}` and `{method}` call each other through `this`; annotate the return type of `{missing}`")
+    } else {
+        format!(
+            "`{method}` and `{missing}` are part of a cycle through `this`; annotate the return type of `{missing}`"
+        )
+    };
+    if let Some(params) = sibling
+        .params
+        .iter()
+        .skip(usize::from(receives_this(&sibling)))
+        .map(|p| crate::diag::source_text(p.span))
+        .collect::<Option<Vec<_>>>()
+    {
+        let _ = write!(help, ", e.g. `{missing}({}): number`", params.join(", "));
     }
+    d.help(help)
 }
 
 /// Whether an ordinary function takes its receiver as the hidden `this` parameter.
@@ -12297,6 +13175,7 @@ fn widen_fresh_literals(t: &Ty) -> Ty {
         | Ty::DbQuery
         | Ty::QueryColl(_)
         | Ty::KindSystem(_)
+        | Ty::KindRevisions(_, _)
         | Ty::DbGlobals
         | Ty::DbGlobal(_)
         | Ty::Builder(_) => t.clone(),
@@ -13030,9 +13909,9 @@ mod php_binding_tests {
         let entry = project.path().join("function action__probe(.ts");
         std::fs::write(
             &entry,
-            r#"import { action, defineConfig } from "typedpress";
+            r#"import { mutation, defineConfig } from "typedpress";
 import { work } from "./tp/work.js";
-export const probe = action({ input: {}, handler: async () => await work() });
+export const probe = mutation({}, async () => await work());
 export default defineConfig({ name: "documentation-queue" });"#,
         )
         .unwrap();

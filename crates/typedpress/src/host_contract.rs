@@ -1,5 +1,5 @@
 //! What a host (Spacefast, or any platform that compiles and mounts TypedPress apps itself) relies on,
-//! stated once. The hosted manifest carries it (`bundle::compile_tree`), and `docs/host-contract.md`
+//! stated once. The hosted manifest carries it (`bundle::compile_tree`), and `www/content/docs/reference/host-contract.md`
 //! is generated from it (`tests/host_contract.rs` fails when the doc is stale).
 //!
 //! Bump [`HOST_CONTRACT`] only when something here changes incompatibly for a host: a manifest field
@@ -27,10 +27,6 @@ pub const RESERVED_PATHS: &[(&str, &str)] = &[
     (
         "/wp-admin/new/*",
         "TypedPress Admin, unless the app sets `admin: false`: served by wp-admin's `admin.php?page=typedpress-admin`. Apache applies the plugin's `.htaccess` rule; any other server must send a path that is not a file to WordPress's `index.php`, which redirects it to `admin.php?page=typedpress-admin&p=<route>`",
-    ),
-    (
-        "/typedpress-admin/*",
-        "the admin's earlier address, redirected to `/wp-admin/new/*`",
     ),
 ];
 
@@ -63,7 +59,7 @@ pub const HOOKS: &[(&str, &str, &str)] = &[
     (
         "tp_mail_transport",
         "filter",
-        "delivers `mail.send` messages; without it, the app's mail is refused",
+        "optional: delivers `mail.send` messages itself by returning `true`, refuses one for a retry with `false` or a throw, or returns `null` to leave it to WordPress's `wp_mail()` (before this, `null` was a refusal and managed builds refused mail without a transport)",
     ),
     (
         "tp_purge_urls",
@@ -91,11 +87,6 @@ pub const HOOKS: &[(&str, &str, &str)] = &[
         "lets the identity session cookie authenticate the app's REST API (a host serving its own frontend)",
     ),
     (
-        "tp_identity_session_cookie_aliases",
-        "filter",
-        "other cookie names whose session a migrated site keeps",
-    ),
-    (
         "tp_fetch_allow_address",
         "filter",
         "allows an outgoing `fetch` to an address TypedPress denies by default",
@@ -108,7 +99,12 @@ pub const HOOKS: &[(&str, &str, &str)] = &[
     (
         "sp_connectors_call",
         "filter",
-        "invokes a host-managed connector for `connectors.call(role, tool, args?)`; credentials remain owned by the host",
+        "invokes a host-managed connector with `(null, $role, $tool, $args, $context)`: now for `connectors.call(role, tool, args?)` (`$context['mode']` is `call`), or after commit from the built-in `typedpress.connector` job for `connectors.enqueue(role, tool, args?, { key?, delay? })` (`mode` is `queued`, with `jobId` and `attempt`; a `WP_Error`, a throw or `null` retries with backoff; a queued call runs at least once and may repeat, so de-duplicate by `jobId`); register with 5 accepted args to receive `$context`; credentials remain owned by the host",
+    ),
+    (
+        "sp_identity_callback_url",
+        "filter",
+        "the redirect URI an OpenID provider is sent back to, with `($url, $provider, $pathUrl)`: the default `<prefix>/provider/callback?provider=<name>`, or `$pathUrl`, `<prefix>/callback/<name>`; both are served",
     ),
     (
         "sp_auth_prefix",
@@ -134,7 +130,7 @@ pub const JOBS_COMMAND: &str = "wp typedpress jobs tick [--limit=<1..100>] [--bu
 pub const MOUNT: &[(&str, &str)] = &[
     (
         "TypedPress\\Loader\\Loader::load($root, $build, $options)",
-        "before WordPress initializes, with the build the host selected for this request",
+        "before WordPress initializes, with the build the host selected for this request. `preview: true` marks a preview binding, one that runs on a database of its own and seeds it again for each version: the seed's writes queue no webhook deliveries and no `mail.send` mail (`mail.send` checks the message and resolves to `{ id: \"\" }`); after the seed a preview sends webhooks and mail like any site. Off by default, which is production",
     ),
     (
         "TypedPress\\Loader\\Loader::initialize($root, $build)",
@@ -154,8 +150,8 @@ pub const MOUNT: &[(&str, &str)] = &[
     ),
 ];
 
-/// Sealed mode (`sealed: true`, docs/sealed.md): what a host does with the allow-list.
-pub const SEALED: &str = "When the app sets `sealed: true`, the hosted manifest and the build manifest carry `sealed`: the plugin directory names that may load (TypedPress's own, the platform pins, and the plugins the config declares). The key is absent when the app isn't sealed. TypedPress itself only refuses new activations and reports what else is loaded, because WordPress loads drop-ins, must-use plugins and active plugins before TypedPress's app plugin. A host that wants the list enforced does it in its own early code (a must-use plugin of the host's, or `sunrise.php`): it filters `option_active_plugins` with `TypedPress\\Loader\\Loader::allowedPlugins($active, $sealed)`, keeps the hidden entries stored with `TypedPress\\Loader\\Loader::keepUnlisted($new, $stored, $sealed)` on `pre_update_option_active_plugins`, ships no must-use plugin or drop-in beyond its own, and defines `TP_SEALED_ENFORCED` so the app reports `enforced: \"host\"`. `allowedPlugins` never passes `vip-block-data-api` or `vip-decoupled-bundle`, whatever list it is given: each serves stored content around the app's read rules. Nothing changes for sites that don't serve a TypedPress app. docs/sealed.md has the example.";
+/// Sealed mode (`sealed: true`, /docs/operations/cli-and-deploy): what a host does with the allow-list.
+pub const SEALED: &str = "When the app sets `sealed: true`, the hosted manifest and the build manifest carry `sealed`: the plugin directory names that may load (TypedPress's own, the platform pins, and the plugins the config declares). The key is absent when the app isn't sealed. TypedPress itself only refuses new activations and reports what else is loaded, because WordPress loads drop-ins, must-use plugins and active plugins before TypedPress's app plugin. A host that wants the list enforced does it in its own early code (a must-use plugin of the host's, or `sunrise.php`): it filters `option_active_plugins` with `TypedPress\\Loader\\Loader::allowedPlugins($active, $sealed)`, keeps the hidden entries stored with `TypedPress\\Loader\\Loader::keepUnlisted($new, $stored, $sealed)` on `pre_update_option_active_plugins`, ships no must-use plugin or drop-in beyond its own, and defines `TP_SEALED_ENFORCED` so the app reports `enforced: \"host\"`. `allowedPlugins` never passes `vip-block-data-api` or `vip-decoupled-bundle`, whatever list it is given: each serves stored content around the app's read rules. Nothing changes for sites that don't serve a TypedPress app. /docs/operations/cli-and-deploy has the example.";
 
 /// Prebuilt pages (`prerender = true` with `output: "server"`; docs/decisions/2026-11-13-static-output.md):
 /// who serves their files. Serving them before PHP is deferred to the engine work; the decision
@@ -163,10 +159,9 @@ pub const SEALED: &str = "When the app sets `sealed: true`, the hosted manifest 
 pub const PREBUILT: &str = "A build with prebuilt pages writes their HTML and Markdown below `wp-content/cache/typedpress-prebuilt/` (moved by the `tp_prebuilt_dir` filter), and PHP serves them: `TypedPress\\Render\\Prebuilt::serve()` answers at `plugins_loaded` when the request, its cookies, the site's visibility and the file's age allow it, and lets WordPress render otherwise. A host must not serve these files directly, from its web server or any cache of its own, and must not expose the folder over HTTP: deny requests to it as it does for other private paths. Whether a file may be served is decided per request, and only `serve()` decides it. A host's page cache stores and purges these answers as it does any other page. The rebuild runs as the `tp_prebuild` Action Scheduler action, on the host's jobs worker like any other.";
 
 /// The table-prefix rule.
-pub const TABLE_PREFIX: &str = "TypedPress puts every table under WordPress's `$wpdb->prefix` and never changes it. App tables are `{prefix}tp_<table>`, system tables `{prefix}tp__<name>`, identity tables `{prefix}tp_identity_<name>`. The host owns the prefix: a host that binds several apps to one database gives each its own prefix before WordPress loads. An app's `existingTable` must be under that prefix (and not WordPress's, TypedPress's or Action Scheduler's own table, nor under another site's longer prefix, which need not end in `_`), or the Space's own Zero 0.8 table `sf_<space>_<table>_<10 hex>` with the converter's digest of that Space id and table name. The Space id comes from the host: `spacefast_content_space_id()` when it exists, else the `TP_SPACE_ID` constant defined before WordPress loads; on a `sfz_<24 hex>_` prefix it must also be the Space that prefix was made from. With neither, no 0.8 table binds.";
+pub const TABLE_PREFIX: &str = "TypedPress puts every table under WordPress's `$wpdb->prefix` and never changes it. App tables are `{prefix}tp_<table>`, system tables `{prefix}tp__<name>`, identity tables `{prefix}tp_identity_<name>`. The host owns the prefix: a host that binds several apps to one database gives each its own prefix before WordPress loads. An app's `existingTable` must be under that prefix, and not WordPress's, TypedPress's, Action Scheduler's, identity's or WooCommerce's own table, nor under another site's longer prefix, which need not end in `_`.";
 
-/// The longest system name TypedPress adds after the prefix: `tp_identity_recovery_codes` (29) and
-/// `tp__services_submissions` (27). An app table adds `tp_` to a name the app chose, so a
+/// The longest system name TypedPress adds after the prefix: `tp_identity_recovery_codes` (29). An app table adds `tp_` to a name the app chose, so a
 /// longer table name is the app's choice and is refused at deploy by MySQL's 64-character limit.
 pub const MAX_SUFFIX: usize = 29;
 
@@ -184,7 +179,7 @@ pub fn manifest_host() -> Value {
     })
 }
 
-/// The generated part of docs/host-contract.md (between its markers).
+/// The generated part of www/content/docs/reference/host-contract.md (between its markers).
 pub fn render_doc() -> String {
     let mut out = String::new();
     out.push_str(&format!(

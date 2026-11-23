@@ -1,11 +1,11 @@
-// The `in` operator, which live Zero 0.8 apps use (first#138 census): own and inherited
+// The `in` operator: own and inherited
 // properties, arrays, arguments, class instances and statics, built-in values, union narrowing,
 // and the TypeError for a primitive right side. Every action runs under Node and as compiled PHP;
 // the JSON results must be byte-identical. `in-helpers.mjs` runs the same checks untyped.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation as server } from "typedpress";
 import { inUntyped as inUntypedImpl } from "./in-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => server({}, handler);
 
 const KEYS = ["a", "b", "missing", "0", "1", "2", "-1", "1.5", "01", "length", "toString", "valueOf", "constructor", "hasOwnProperty", "__proto__", "push", "map", "undefined", "null", "4294967295"];
 

@@ -2558,7 +2558,7 @@ mod tests {
                 ),
                 (
                     "tp/actions.ts",
-                    br#"import { action } from "spacepress"; export const ping = action({ access: "anyone", handler() { return { ok: true }; } });"#,
+                    br#"import { mutation } from "spacepress"; export const ping = mutation({ access: "anyone" }, async () => ({ ok: true }));"#,
                 ),
                 ("index.html", b"<!doctype html><html><body>astro home</body></html>"),
                 ("_astro/app.a1b2c3d4.js", b"console.log('astro');"),

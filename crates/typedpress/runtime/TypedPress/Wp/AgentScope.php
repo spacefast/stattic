@@ -258,7 +258,7 @@ final class AgentScope
 
     /**
      * TypedPress's API, as core dispatches to it: its own features with no core route (sign-in,
-     * sync, files, services) never reach another route, so the API's method and path are judged
+     * sync, files) never reach another route, so the API's method and path are judged
      * here. Kinds are judged again on the core route each one dispatches to.
      */
     private static function facade(array $scope, string $path, bool $read): ?string

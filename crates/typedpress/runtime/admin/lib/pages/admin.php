@@ -103,7 +103,27 @@ $tp_admin_native = array();
 foreach ( \TypedPress\Wp\Runtime::plugin()->schema->collections() as $name => $collection ) {
     $type = isset( $collection['wp']['postType'] ) ? get_post_type_object( $collection['wp']['postType'] ) : null;
     if ( $type && $type->show_in_rest ) {
-        $tp_admin_native[ $name ] = array( 'postType' => $type->name, 'metaPrefix' => $collection['wp']['metaPrefix'] ?? 'tp_', 'path' => '/' . ( $type->rest_namespace ?: 'wp/v2' ) . '/' . ( $type->rest_base ?: $type->name ) );
+        $terms = array();
+        $rest_terms = true;
+        foreach ( $collection['columns'] as $column => $def ) {
+            if ( ! \TypedPress\Wp\PostMeta::terms( $def ) ) {
+                continue;
+            }
+            $target = \TypedPress\Wp\Runtime::plugin()->schema->collection( $def['references']['collection'] );
+            $taxonomy = get_taxonomy( $target['wp']['taxonomy'] );
+            if ( $taxonomy && $taxonomy->show_in_rest ) {
+                $terms[ $column ] = $taxonomy->rest_base ?: $taxonomy->name;
+            } else {
+                // Keep this collection on TypedPress's form/API: core REST cannot
+                // represent every assignment, and terms are never post meta.
+                $rest_terms = false;
+                break;
+            }
+        }
+        if ( ! $rest_terms ) {
+            continue;
+        }
+        $tp_admin_native[ $name ] = array( 'postType' => $type->name, 'terms' => $terms, 'path' => '/' . ( $type->rest_namespace ?: 'wp/v2' ) . '/' . ( $type->rest_base ?: $type->name ) );
     }
 }
 wp_add_inline_script( 'wp-api-fetch', 'window.tpAdmin = ' . wp_json_encode( array(

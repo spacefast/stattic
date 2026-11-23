@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace TypedPress\Sync;
 
 use TypedPress\HttpError;
+use TypedPress\Viewer;
 use TypedPress\Wp\CompositeStore;
 use TypedPress\Wp\Plugin;
 
@@ -51,7 +52,7 @@ final class Trash
      * after, and the update notice. A draft leaving is nothing to visitors. $row is the full stored row
      * and the caller has authorized the trash.
      */
-    public static function trash(string $collection, array $spec, array $row): bool
+    public static function trash(string $collection, array $spec, array $row, Viewer $viewer): bool
     {
         if (!self::postBacked($spec)) {
             return false;
@@ -61,6 +62,7 @@ final class Trash
         if (defined('EMPTY_TRASH_DAYS') && !EMPTY_TRASH_DAYS) {
             throw new HttpError(409, 'trash_disabled', "This site turns WordPress's trash off (EMPTY_TRASH_DAYS is 0), so typedpress sync can't move $collection items to it, and won't delete them. Delete the item in wp-admin, or turn the trash on.");
         }
+        db()->requireDeleteVisibility($collection, $row, $viewer);
         $pk = (int) $row[$spec['primaryKey']];
         $connection = Plugin::instance()->connection();
         $connection->touchPost($pk);
@@ -72,7 +74,7 @@ final class Trash
             throw new \RuntimeException("Could not move post $pk to the trash");
         }
         if (($row['status'] ?? null) === 'published') {
-            self::changed($collection, $pk, $row);
+            self::changed($collection, $pk, $row, $viewer);
         }
 
         return true;
@@ -117,10 +119,10 @@ final class Trash
     }
 
     /** The update lifecycle of a published item moving into the trash, with trashed posts readable. */
-    private static function changed(string $collection, int $id, array $before): void
+    private static function changed(string $collection, int $id, array $before, Viewer $viewer): void
     {
         $store = db()->store();
-        $run = static fn () => db()->afterEditorSave($collection, $id, $before, db()->actor());
+        $run = static fn () => db()->afterEditorSave($collection, $id, $before, $viewer->user);
         $store instanceof CompositeStore ? $store->withTrash($collection, $run) : $run();
     }
 }

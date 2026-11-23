@@ -133,12 +133,23 @@ impl<'a, 'p> Compiler<'a, 'p> {
             .class_ids
             .entry((self.owner(), Rc::as_ptr(class) as usize))
             .or_insert(next);
-        if self.classes.contains_key(&id) {
-            return Ok(id);
+        if !self.classes.contains_key(&id) {
+            // A refused class registers nothing, so the next reference compiles it again and reports
+            // the refusal (`instanceof` narrowing compiles the class speculatively; see `attempt`).
+            let caller = std::mem::replace(&mut self.current, format!("%class{id}"));
+            // Helper signatures can depend on the provisional class shape. Keep their failures
+            // local to this build, just as receiver typing keeps its own failure cache.
+            let outer_failures = std::mem::take(&mut self.failed_helpers);
+            let compiled = self.attempt(|this| this.compile_class(id, class));
+            self.failed_helpers = outer_failures;
+            self.current = caller;
+            compiled?;
         }
-        // A refused class registers nothing, so the next reference compiles it again and reports
-        // the refusal (`instanceof` narrowing compiles the class speculatively; see `attempt`).
-        self.attempt(|this| this.compile_class(id, class))
+        // A function that uses a class may run any of its code (constructor, field initializers,
+        // methods, accessors): the call graph says so, for the check that a query never writes.
+        let caller = self.current.clone();
+        self.calls.entry(caller).or_default().insert(format!("%class{id}"));
+        Ok(id)
     }
 
     fn compile_class(&mut self, id: usize, class: &Rc<ClassValue>) -> Result<usize> {

@@ -34,7 +34,7 @@ final class Tick
     public const MAX_LIMIT = 100;
     public const DEFAULT_BUDGET_MS = 45_000;
 
-    /** @return array{processed: int, failures: int, outboxDispatched: int, requeued: int, receiptsExpired: int, remaining: bool} */
+    /** @return array{processed: int, failures: int, requeued: int, receiptsExpired: int, remaining: bool} */
     public static function run(int $limit = self::DEFAULT_LIMIT, int $budgetMs = self::DEFAULT_BUDGET_MS): array
     {
         $limit = max(1, min(self::MAX_LIMIT, $limit));
@@ -165,9 +165,7 @@ final class Tick
             }
         }
 
-        // `outboxDispatched` stays in the output for hosts that read it: jobs reach Action Scheduler in
-        // the transaction that queues them, so a tick has no tickets to hand over.
-        return ['processed' => $processed, 'failures' => $failures, 'outboxDispatched' => 0,
+        return ['processed' => $processed, 'failures' => $failures,
             'requeued' => $requeued, 'receiptsExpired' => $expired, 'remaining' => $remaining];
     }
 

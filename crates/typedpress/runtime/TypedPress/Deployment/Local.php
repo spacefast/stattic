@@ -226,7 +226,7 @@ final class Local
         mkdir($root . '/site/wp-content/uploads', 0700);
         mkdir($root . '/site/wp-content/database', 0700);
         Files::copy($sqlite, $root . '/site/wp-content/plugins/sqlite-database-integration');
-        $dropin = str_replace(['{SQLITE_IMPLEMENTATION_FOLDER_PATH}', '{SQLITE_PLUGIN}'], ['__ZERO_RELOCATABLE_SQLITE__', 'sqlite-database-integration/load.php'], file_get_contents($sqlite . '/db.copy'));
+        $dropin = str_replace(['{SQLITE_IMPLEMENTATION_FOLDER_PATH}', '{SQLITE_PLUGIN}'], ['__TYPEDPRESS_RELOCATABLE_SQLITE__', 'sqlite-database-integration/load.php'], file_get_contents($sqlite . '/db.copy'));
         file_put_contents($root . '/site/wp-content/db.php', $dropin);
         $config = "<?php\n";
         foreach (['DB_NAME' => 'wordpress', 'DB_USER' => '', 'DB_PASSWORD' => '', 'DB_HOST' => 'localhost', 'DB_CHARSET' => 'utf8mb4', 'DB_COLLATE' => '',

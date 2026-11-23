@@ -10,10 +10,10 @@
 //! { "name": "pantry",
 //!   "files": { "typedpress.config.ts": "…", "tp/lib/fields.ts": "…", "tp/_generated/abilities.json": "…",
 //!              "tp/_generated/plugins.lock.json": "…" },,
-//!   "previous": null, "migrationFiles": [], "frozen": false }
+//!   "frozen": false }
 //! ```
-//! `previous` is the last build's `tp/_generated/migrations/snapshot.json` (null for a first build) and
-//! `migrationFiles` the names beside it, which number the next migration like `typedpress build` does.
+//! Pass committed migration folders under `tp/_generated/migrations/` in `files` so the compiler
+//! can fold the same history as `typedpress build`.
 //! `files` carries every compiler input, including the committed `tp/_generated/abilities.json` lock that
 //! types `abilities.call` from "php/wordpress".
 //! `tp/_generated/plugins.lock.json` grants plugin packages, and `frozen` refuses grants beyond it, as
@@ -22,10 +22,10 @@
 //! cannot hold one either, so that is the one shape of project the disk can have and this cannot.
 //!
 //! Response: `{ "check": <typedpress-diagnostics envelope>, "output": null }` on a diagnostic, otherwise
-//! `output` carries `schemaPhp`, `functionsPhp`, `migrations` (`[name, sql]` pairs), `snapshot`,
+//! `output` carries `schemaPhp`, `functionsPhp`, `migrations` (`[relativePath, text]` pairs), `snapshot`,
 //! `client` (`types.ts` and `schema.ts`), `genTs`, `warnings`, `unsupportedPlugins`, `hints`,
 //! `appPlugin` (every file of the `typedpress-app-<name>` plugin `typedpress build` writes, by path below the
-//! plugins directory: the `.sql` files under `tp/_generated/migrations/` in `files` and this
+//! plugins directory: the migration folders under `tp/_generated/migrations/` in `files` and this
 //! compile's new ones; its `tp/app/openapi.json` is what `typedpress build` also writes to
 //! `tp/_generated/openapi.json`), `tpPlugins` (TypedPress's plugins in activation
 //! order) and `wordpressPlugins` (`{slug, version}`, dependencies first).
@@ -45,10 +45,6 @@ struct Request {
     /// Optional binary files (e.g. imported PNG/WebP/WOFF2), base64-encoded.
     #[serde(default)]
     binary: BTreeMap<String, String>,
-    #[serde(default)]
-    previous: Option<serde_json::Value>,
-    #[serde(default)]
-    migration_files: Vec<String>,
     #[serde(default)]
     frozen: bool,
 }
@@ -90,7 +86,7 @@ struct Response<'a> {
 }
 
 /// Sources by absolute path under one project directory.
-pub(crate) struct Memory {
+pub struct Memory {
     files: BTreeMap<PathBuf, String>,
     binary: BTreeMap<PathBuf, Vec<u8>>,
 }
@@ -101,7 +97,7 @@ fn not_found() -> std::io::Error {
 }
 
 impl Memory {
-    pub(crate) fn new(files: BTreeMap<PathBuf, String>) -> Self {
+    pub fn new(files: BTreeMap<PathBuf, String>) -> Self {
         Memory {
             files,
             binary: BTreeMap::new(),
@@ -261,6 +257,16 @@ fn compile_request(request: Request) -> String {
     };
     let mut public = under("public/");
     let ledger = under(&format!("{}/", pipeline::LEDGER));
+    let mut prev_entries = Vec::new();
+    for (rel, bytes) in &ledger {
+        if let Some((id, file)) = rel.split_once('/')
+            && file == "ops.json"
+            && !id.is_empty()
+            && !file.contains('/')
+        {
+            prev_entries.push((id.to_string(), bytes.clone()));
+        }
+    }
     let mut binary: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
     for (rel, b64) in request.binary {
         let Some(bytes) = crate::assets::base64_decode(&b64) else {
@@ -278,8 +284,17 @@ fn compile_request(request: Request) -> String {
         .collect();
     let frozen = request.frozen;
     let previous = || {
-        let mut previous =
-            pipeline::Previous::from_project(request.previous, request.migration_files.iter().map(String::as_str))?;
+        let mut parsed = Vec::with_capacity(prev_entries.len());
+        for (id, bytes) in prev_entries {
+            let ops: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+                diag::Diag::new(
+                    diag::Span::NONE,
+                    format!("{}/{id}/ops.json is not valid JSON: {e}", pipeline::LEDGER),
+                )
+            })?;
+            parsed.push((id, ops));
+        }
+        let mut previous = pipeline::Previous::from_entries(parsed)?;
         previous.frozen = frozen;
         Ok(previous)
     };
@@ -296,13 +311,20 @@ fn compile_request(request: Request) -> String {
         Err(diagnostics) => (diagnostics, None),
         Ok(built) => {
             snapshot = Some(built.snapshot.clone());
-            // The ledger's SQL from the request, then this compile's new files, as `typedpress build`
-            // writes the new ones into the ledger and packs all of it.
+            // The ledger's migration folders from the request, then this compile's new folders,
+            // as `typedpress build` writes the new ones into the ledger and packs all of it.
+            let mut new_migration_files: Vec<(String, String)> = Vec::new();
+            for entry in &built.migrations {
+                new_migration_files.push((
+                    format!("{}/ops.json", entry.id),
+                    serde_json::to_string_pretty(&entry.ops).expect("ops serialize") + "\n",
+                ));
+                new_migration_files.push((format!("{}/migration.sql", entry.id), entry.sql.clone()));
+            }
             let migrations = ledger.into_iter().chain(
-                built
-                    .migrations
+                new_migration_files
                     .iter()
-                    .map(|(name, sql)| (name.clone(), sql.clone().into_bytes())),
+                    .map(|(rel, text)| (rel.clone(), text.clone().into_bytes())),
             );
             let (schema_php, packaged) = crate::app_plugin::package(&built, migrations, public);
             let mut app_plugin = BTreeMap::new();
@@ -343,7 +365,7 @@ fn compile_request(request: Request) -> String {
                 wordpress_plugins,
                 schema_php,
                 functions_php: built.functions_php,
-                migrations: built.migrations,
+                migrations: new_migration_files,
                 snapshot: built.snapshot,
                 client,
                 gen_ts: built.gen_ts,
@@ -364,7 +386,7 @@ fn compile_request(request: Request) -> String {
 }
 
 /// Filesystem operations accept either an absolute `project` on the host or a `files`
-/// map relative to it. Migration returns a candidate file map; the caller owns writes.
+/// map relative to it.
 pub fn operation(operation: &str, request: &str) -> String {
     diag::isolated(|| {
         let result = (|| -> Result<serde_json::Value, String> {
@@ -404,45 +426,8 @@ pub fn operation(operation: &str, request: &str) -> String {
                         Err(d) => Ok(serde_json::json!({"check":diag::envelope(&[d], &project), "output":null})),
                     }
                 }
-                "migrateApp" => {
-                    // `fresh: true` creates new v2 tables, even with a `space` named: a new Space has
-                    // no 0.8 tables to adopt. `space` alone adopts; neither refuses a schema.
-                    let tables = crate::config_migrate::app::Tables::from(
-                        request["space"].as_str(),
-                        request["fresh"].as_bool().unwrap_or(false),
-                    );
-                    let mut candidate = crate::config_migrate::app::migrate(
-                        fs,
-                        &project,
-                        tables,
-                        crate::config_migrate::app::Inputs {
-                            users: request["users"].as_bool().unwrap_or(false),
-                            zero_css: request["zeroCss"].as_str().map(str::to_owned),
-                        },
-                    );
-                    candidate.finish();
-                    Ok(serde_json::to_value(candidate).unwrap())
-                }
-                "migrateConfig" => {
-                    let source = crate::config_migrate::Source::parse(request["source"].as_str().unwrap_or("zero"))
-                        .ok_or("unknown source CMS")?;
-                    let path = project.join(request["input"].as_str().unwrap_or("capsule.ts"));
-                    let text = fs.read_to_string(&path).map_err(|e| e.to_string())?;
-                    let mut entries = vec![];
-                    Ok(
-                        match crate::config_migrate::convert(source, &path, &text, &mut entries) {
-                            Ok(config) => {
-                                serde_json::json!({"status":"candidate", "entries":entries,"errors":[],"files":{"typedpress.config.ts":config}})
-                            }
-                            Err(e) => {
-                                serde_json::json!({"status":"refused", "entries":entries,"errors":[e],"files":{}})
-                            }
-                        },
-                    )
-                }
                 "check" => {
                     let root = fs.canonicalize(&project).map_err(|e| e.to_string())?;
-                    let previous = root.join(pipeline::LEDGER).join("snapshot.json");
                     let built = loader::load_from(fs.clone(), &root.join("typedpress.config.ts")).and_then(|program| {
                         pipeline::build(
                             &root,
@@ -451,30 +436,26 @@ pub fn operation(operation: &str, request: &str) -> String {
                                 if fs.exists(&root.join(pipeline::OLD_LEDGER)) {
                                     return Err(pipeline::moved_ledger());
                                 }
-                                let snapshot = if fs.exists(&previous) {
-                                    Some(
-                                        serde_json::from_str(
-                                            &fs.read_to_string(&previous)
-                                                .map_err(|e| diag::Diag::new(diag::Span::NONE, e.to_string()))?,
-                                        )
-                                        .map_err(|e| diag::Diag::new(diag::Span::NONE, e.to_string()))?,
-                                    )
-                                } else {
-                                    None
-                                };
                                 let dir = root.join(pipeline::LEDGER);
-                                let paths = if fs.is_dir(&dir) {
-                                    fs.read_dir(&dir)
+                                let mut entries = Vec::new();
+                                if fs.is_dir(&dir) {
+                                    for path in fs
+                                        .read_dir(&dir)
                                         .map_err(|e| diag::Diag::new(diag::Span::NONE, e.to_string()))?
-                                } else {
-                                    vec![]
-                                };
-                                let names: Vec<_> = paths
-                                    .iter()
-                                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
-                                    .collect();
-                                let mut previous =
-                                    pipeline::Previous::from_project(snapshot, names.iter().map(|s| s.as_ref()))?;
+                                    {
+                                        if fs.is_dir(&path) {
+                                            let id =
+                                                path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                                            let text = fs
+                                                .read_to_string(&path.join("ops.json"))
+                                                .map_err(|e| diag::Diag::new(diag::Span::NONE, e.to_string()))?;
+                                            let ops: serde_json::Value = serde_json::from_str(&text)
+                                                .map_err(|e| diag::Diag::new(diag::Span::NONE, e.to_string()))?;
+                                            entries.push((id, ops));
+                                        }
+                                    }
+                                }
+                                let mut previous = pipeline::Previous::from_entries(entries)?;
                                 previous.frozen = request["frozen"].as_bool().unwrap_or(false);
                                 Ok(previous)
                             },
@@ -557,8 +538,6 @@ mod abi {
     }
     operation!(tp_sources, "sources");
     operation!(tp_check, "check");
-    operation!(tp_migrate_app, "migrateApp");
-    operation!(tp_migrate_config, "migrateConfig");
 }
 
 #[cfg(test)]
@@ -681,9 +660,9 @@ mod tests {
     /// The browser types `abilities.call` from the lock it is sent, exactly as the command line does.
     #[test]
     fn a_locked_ability_in_the_request_types_its_call() {
-        let config = r#"import { action, defineConfig } from "typedpress";
+        let config = r#"import { query, defineConfig } from "typedpress";
 import { abilities } from "php/wordpress";
-const __a = action({ input: {}, access: "anyone", handler: () => abilities.call("acme/info", { field: "title" }) }); export { __a as a }; export default defineConfig({});"#;
+const __a = query({ access: "anyone" }, () => abilities.call("acme/info", { field: "title" })); export { __a as a }; export default defineConfig({});"#;
         let lock = serde_json::json!({"version": 1, "abilities": [{"name": "acme/info",
             "input_schema": {"type": "object", "properties": {"field": {"enum": ["name"]}}, "required": ["field"]}, "output_schema": {}}]});
         let message = |files: serde_json::Value| {

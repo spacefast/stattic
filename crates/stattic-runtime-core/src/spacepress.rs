@@ -3,7 +3,7 @@
 //! Handles:
 //! - `spacepress.config.ts` (raw project) and `.spacepress-source/` (captured bundle)
 //! - Inline `app` section inside `spacefast.config.ts`
-//! - Legacy `zero.config.ts` and `.zero-source/` via the compiler's `zero_bundle` path
+//! - Legacy `zero.config.ts` and `.zero-source/`, handed to the quarantined Zero v2 compiler (`zero_v2`)
 //!
 //! Built frontend output (`index.html`, `_astro/*`, `_next/*`, `assets/*`, etc.) and
 //! Cloudflare Functions (`functions/*`, `__spacefast/functions/bundles/*`, `_worker.js`)

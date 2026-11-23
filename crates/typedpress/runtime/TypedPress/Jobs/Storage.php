@@ -8,12 +8,12 @@ use function TypedPress\db;
 
 /**
  * Raw SQL on the jobs system tables, on the active store's connection (so it shares the request
- * transaction). Statements are written with "double-quoted" identifiers and `{outbox}`, `{jobs}`,
+ * transaction). Statements are written with "double-quoted" identifiers and `{jobs}` and
  * `{receipts}` placeholders, rendered with backticks and the WordPress table prefix.
  */
 final class Storage
 {
-    public const TABLES = ['outbox', 'jobs', 'receipts'];
+    public const TABLES = ['jobs', 'receipts'];
 
     /** @param list<int|float|string|null> $params @return list<array<string, mixed>> */
     public static function run(string $sql, array $params = []): array
@@ -65,7 +65,7 @@ final class Storage
         return 'INSERT IGNORE';
     }
 
-    /** The statement with `{outbox}`/`{jobs}`/`{receipts}` and "double-quoted" identifiers made MySQL's. */
+    /** The statement with `{jobs}`/`{receipts}` and "double-quoted" identifiers made MySQL's. */
     public static function sql(string $sql, string $prefix): string
     {
         foreach (self::TABLES as $t) {
@@ -82,11 +82,6 @@ final class Storage
         // Keys compare byte for byte: a PAD SPACE collation would make "k" and "k " collide.
         $bytes = 'VARBINARY(764)';
         $tail = 'ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin';
-        // No longer written: runtimes before this one kept job tickets here until after commit. Kept, rows
-        // and all (data is never deleted automatically); ActionSchedulerQueue::prepare() queues what is left.
-        \TypedPress\SystemTables::register('__tp_outbox', [
-            "CREATE TABLE IF NOT EXISTS `{prefix}tp__outbox` (`id` CHAR(36) NOT NULL, `job` VARCHAR(191) $text NOT NULL, `input` LONGTEXT NOT NULL, `key` VARCHAR(191) $text NULL, `runAt` CHAR(24) NOT NULL, `createdAt` CHAR(24) NOT NULL, PRIMARY KEY (`id`)) $tail",
-        ]);
         // `dedupe` is the key while the job is pending or running (§6.1) and NULL otherwise;
         // UNIQUE(job, dedupe) is the one dedupe mechanism (NULLs never collide).
         \TypedPress\SystemTables::register('__tp_jobs', [

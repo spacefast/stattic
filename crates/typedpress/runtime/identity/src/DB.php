@@ -28,7 +28,7 @@ final class DB
                 409,
             );
         }
-        return $result;
+        return (int) $result;
     }
     public function row(string $sql, mixed ...$args): ?array
     {

@@ -188,7 +188,8 @@ final class Loader
      * even without an auth collection), `beforeIdentity` (callable run just before typedpress-identity loads),
      * `url` (the public base URL of `$root`, for plugin asset URLs), `inspect` (mount it to inspect, not
      * to serve: the app's compiled WordPress hooks are not registered, so nothing of the app's own code
-     * runs; see {@see inspect()}).
+     * runs; see {@see inspect()}), `preview` (bool: this request serves a preview binding, which runs on
+     * its own database; the seed then queues no webhooks or mail; see {@see \TypedPress\Preview}).
      */
     public static function load(string $root, string $build, array $options = []): void
     {
@@ -209,6 +210,10 @@ final class Loader
         if (!is_array($variables)) {
             throw new \InvalidArgumentException('Runtime variables must map names to strings');
         }
+        $preview = array_key_exists('preview', $options) ? $options['preview'] : false;
+        if (!is_bool($preview)) {
+            throw new \InvalidArgumentException('preview must be true or false');
+        }
         $before = $options['beforeIdentity'] ?? null;
         if ($before !== null && !is_callable($before)) {
             throw new \InvalidArgumentException('beforeIdentity must be callable');
@@ -225,11 +230,17 @@ final class Loader
             'manifest' => $manifest,
             'inspect' => !empty($options['inspect']),
             'assetsDir' => is_string($options['assetsDir'] ?? null) && $options['assetsDir'] !== '' ? rtrim($options['assetsDir'], '/\\') : null,
+            'preview' => $preview,
         ];
         // Restrict lookup before feature registration, schema loading, or app boot.
         require_once $runtime . '/typedpress-runtime/tp/Env.php';
         \TypedPress\Env::isolate($variables);
         require_once $runtime . '/typedpress-runtime/tp/bootstrap.php';
+        // A build compiled before the switch has no Preview class; it seeds as
+        // production does, as it always has.
+        if (class_exists(\TypedPress\Preview::class)) {
+            \TypedPress\Preview::bind($preview);
+        }
         self::$schema = \TypedPress\Schema::load($app . '/tp/app/schema.php');
         if (self::$schema->commerce() !== null) {
             require_once $runtime . '/typedpress-commerce.php';
@@ -337,7 +348,7 @@ final class Loader
         return (self::$loaded['inspect'] ?? false) === true;
     }
 
-    /** `{root, build, manifest, identity, inspect}` of this request's build, or null. */
+    /** `{root, build, manifest, identity, inspect, preview}` of this request's build, or null. */
     public static function loaded(): ?array
     {
         return self::$loaded;

@@ -179,9 +179,7 @@ function tp_admin_route_below( $path, $mount ) {
 }
 
 /**
- * Requests for the admin that reached index.php: the old `/typedpress-admin/<route>` (a permanent redirect
- * to the mount), and `/wp-admin/new/<route>` on a server that does not apply the rule (one that
- * ignores `.htaccess`): there the route takes wp-admin's query form, which every server serves.
+ * Requests for `/wp-admin/new/<route>` that reached index.php use wp-admin's query form.
  *
  * @param bool $parse Whether WordPress should parse the request.
  * @return bool
@@ -190,11 +188,6 @@ function tp_admin_front_request( $parse ) {
 	$uri   = wp_unslash( $_SERVER['REQUEST_URI'] ?? '/' ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- compared, never printed.
 	$path  = (string) wp_parse_url( $uri, PHP_URL_PATH );
 	$query = (string) wp_parse_url( $uri, PHP_URL_QUERY );
-	$old   = tp_admin_route_below( $path, home_url( '/typedpress-admin' ) );
-	if ( null !== $old ) {
-		wp_safe_redirect( tp_admin_url( $old ) . ( '' !== $query ? '?' . $query : '' ), 301 );
-		exit;
-	}
 	$route = tp_admin_route_below( $path, tp_admin_url( '/' ) );
 	if ( null === $route ) {
 		return $parse;
@@ -222,14 +215,6 @@ function tp_admin_render_page() {
 	$request = wp_unslash( $_SERVER['REQUEST_URI'] ?? '' ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- compared, never printed.
 	$below   = tp_admin_route_below( (string) wp_parse_url( $request, PHP_URL_PATH ), tp_admin_url( '/' ) );
 	$pretty  = null !== $below;
-	// A route that was renamed (`/legacy/<slug>` is `/classic/<slug>`) answers with its new address.
-	$route   = $pretty ? $below : ( is_string( $_GET['p'] ?? null ) ? wp_unslash( $_GET['p'] ) : null ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended,WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- compared, then redirected through wp_safe_redirect.
-	$renamed = null === $route ? null : tp_admin_renamed_route( $route );
-	if ( null !== $renamed ) {
-		$query = $pretty ? (string) wp_parse_url( $request, PHP_URL_QUERY ) : '';
-		wp_safe_redirect( $pretty ? tp_admin_url( $renamed ) . ( '' !== $query ? '?' . $query : '' ) : tp_admin_query_url( $renamed ), 301 );
-		exit;
-	}
 	// The menu entry has no route: send it to the mount, like upstream.
 	if ( ! $pretty && ! is_string( $_GET['p'] ?? null ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		wp_safe_redirect( tp_admin_url( '/' ) );

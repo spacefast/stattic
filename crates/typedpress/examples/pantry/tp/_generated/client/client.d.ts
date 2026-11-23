@@ -1,3 +1,6 @@
+export type Id<Kind extends string = string> = number & {
+	readonly __tp_kind?: Kind;
+};
 export type Role = "guest" | "subscriber" | "author" | "editor" | "admin";
 export interface User {
 	id: number;
@@ -38,18 +41,36 @@ export interface PrivateFile {
 }
 export interface RevisionSummary {
 	id: number;
+	version: number;
+	op: "create" | "update" | "delete" | "restore" | "purge";
 	at: string;
 	user: {
 		id: number;
 		name: string;
 	} | null;
+	schemaMigration: string | null;
+	changed: string[] | null;
+}
+export interface RevisionDiff<T = Record<string, unknown>> {
+	from: number;
+	to: number;
+	changes: {
+		field: keyof T & string;
+		from: unknown;
+		to: unknown;
+	}[];
 }
 export type Status = "draft" | "published" | "scheduled";
 export type Locale = never;
 export interface Location {
-	id: number;
+	id: Id<"locations">;
 	name: string;
 	kind: "fridge" | "freezer" | "pantry";
+	author: number | null;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 }
 export interface LocationInsert {
 	name: string;
@@ -113,14 +134,74 @@ export interface LocationFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	items?: true | ItemFilter;
 	AND?: LocationFilter[];
 	OR?: LocationFilter[];
 	NOT?: LocationFilter;
 }
-export type LocationOrder = Partial<Record<"id" | "name" | "kind", "asc" | "desc">> | string;
+export type LocationOrder = Partial<Record<"id" | "name" | "kind" | "author" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy", "asc" | "desc">> | string;
 export interface Item {
-	id: number;
+	id: Id<"items">;
 	name: string;
 	slug: string;
 	quantity: number;
@@ -128,10 +209,13 @@ export interface Item {
 	lowStockAt: number;
 	expiresOn: string | null;
 	opened: boolean;
-	locationId: number | null;
+	locationId: Id<"locations"> | null;
 	tags: string[];
 	createdAt: string;
 	updatedAt: string;
+	author: number | null;
+	deletedAt: string | null;
+	deletedBy: number | null;
 }
 export interface ItemInsert {
 	name: string;
@@ -141,7 +225,7 @@ export interface ItemInsert {
 	lowStockAt?: number;
 	expiresOn?: string | null;
 	opened?: boolean;
-	locationId?: number | null;
+	locationId?: Id<"locations"> | null;
 	tags?: string[];
 	createdAt?: string;
 	updatedAt?: string;
@@ -326,23 +410,62 @@ export interface ItemFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	shoppingList?: true | ShoppingListFilter;
 	AND?: ItemFilter[];
 	OR?: ItemFilter[];
 	NOT?: ItemFilter;
 }
-export type ItemOrder = Partial<Record<"id" | "name" | "slug" | "quantity" | "unit" | "lowStockAt" | "expiresOn" | "opened" | "locationId" | "createdAt" | "updatedAt", "asc" | "desc">> | string;
+export type ItemOrder = Partial<Record<"id" | "name" | "slug" | "quantity" | "unit" | "lowStockAt" | "expiresOn" | "opened" | "locationId" | "createdAt" | "updatedAt" | "author" | "deletedAt" | "deletedBy", "asc" | "desc">> | string;
 export interface ShoppingList {
-	id: number;
-	itemId: number | null;
+	id: Id<"shoppingList">;
+	itemId: Id<"items"> | null;
 	name: string;
 	done: boolean;
 	notifiedAt: string | null;
 	createdAt: string;
 	updatedAt: string;
+	author: number | null;
+	deletedAt: string | null;
+	deletedBy: number | null;
 }
 export interface ShoppingListInsert {
-	itemId?: number | null;
+	itemId?: Id<"items"> | null;
 	name: string;
 	done?: boolean;
 	notifiedAt?: string | null;
@@ -455,11 +578,47 @@ export interface ShoppingListFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	AND?: ShoppingListFilter[];
 	OR?: ShoppingListFilter[];
 	NOT?: ShoppingListFilter;
 }
-export type ShoppingListOrder = Partial<Record<"id" | "itemId" | "name" | "done" | "notifiedAt" | "createdAt" | "updatedAt", "asc" | "desc">> | string;
+export type ShoppingListOrder = Partial<Record<"id" | "itemId" | "name" | "done" | "notifiedAt" | "createdAt" | "updatedAt" | "author" | "deletedAt" | "deletedBy", "asc" | "desc">> | string;
 export interface ConsumeInput {
 	itemId: number;
 	amount?: number;
@@ -520,7 +679,8 @@ export declare const SCHEMA: {
 			readonly path: "locations";
 			readonly primaryKey: "id";
 			readonly drafts: false;
-			readonly revisions: false;
+			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly items: {
@@ -537,7 +697,8 @@ export declare const SCHEMA: {
 			readonly path: "items";
 			readonly primaryKey: "id";
 			readonly drafts: false;
-			readonly revisions: false;
+			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly locationId: {
@@ -559,7 +720,8 @@ export declare const SCHEMA: {
 			readonly path: "shopping_list";
 			readonly primaryKey: "id";
 			readonly drafts: false;
-			readonly revisions: false;
+			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly itemId: {
@@ -637,6 +799,8 @@ export type ListQuery<
 	limit?: number;
 	offset?: number;
 	with?: W;
+	/** Soft-delete filter: `"exclude"` (default), `"include"`, or `"only"`. Non-default modes require `restore` or `delete` access. */
+	deleted?: "exclude" | "include" | "only";
 } & StatusQuery<K> & LocaleQuery<K>;
 /**
 * A read. Await it for one answer, or `subscribe` to keep it current: the callback gets the result
@@ -694,12 +858,18 @@ export interface CollectionClient<K extends CollectionKey> {
 	*/
 	update(id: IdOf<K>, patch: Collections[K]["patch"] & WriteConditions): Promise<Row<K>>;
 	delete(id: IdOf<K>, options?: WriteConditions): Promise<Row<K>>;
+	/** Restores a soft-deleted row (and any cascade-deleted children sharing its deletion group). */
+	restore(id: IdOf<K>): Promise<Row<K>>;
+	/** Permanently removes the row from storage (default access `"system"`). */
+	purge(id: IdOf<K>): Promise<Row<K>>;
 	/** `list(q).subscribe(onRows, onError)`. Returns a function that stops watching. */
 	watch<const W extends Collections[K]["with"] = Extract<{}, Collections[K]["with"]>>(q: ListQuery<K, ExactWith<K, W>> | undefined, onRows: (rows: RowWith<K, W>[]) => void, onError?: (error: TypedPressError) => void): () => void;
 	revisions: {
 		/** Newest first. Needs `update` access on the row. */
 		list(id: IdOf<K>): Promise<RevisionSummary[]>;
 		get(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
+		/** Diffs two revisions (by version or revision id) as this viewer may read them. */
+		diff(id: IdOf<K>, fromVersion: number, toVersion: number): Promise<RevisionDiff<Row<K>>>;
 		/** Runs the update pipeline with the revision as the patch; returns the updated row. */
 		restore(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
 	};

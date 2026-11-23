@@ -1,10 +1,10 @@
 // Named function expressions and recursive local functions, which esbuild bundles of live 0.8 apps
 // contain. Every action runs under Node and as compiled PHP; the JSON results must be
 // byte-identical.
-import { action, defineConfig } from "typedpress";
+import { defineConfig, mutation } from "typedpress";
 import { fastpath, hoistedVar, named, recursiveLocal, selfBound, selfBoundReassigned, selfBoundSuspending } from "./function-expressions-helpers.mjs";
 
-const run = (handler: () => unknown) => action({ input: {}, handler });
+const run = (handler: () => unknown) => mutation({}, handler);
 
 function typedRecursion(): number[] {
   function fact(n: number): number { return n <= 1 ? 1 : n * fact(n - 1); }
@@ -46,7 +46,7 @@ export const functionSelfBoundReassigned = run(() => selfBoundReassigned());
 
 export const functionSelfBoundTyped = run(() => typedSelfBound());
 
-export const functionSelfBoundSuspending = action({ input: {}, handler: async () => await selfBoundSuspending() });
+export const functionSelfBoundSuspending = mutation({}, async () => await selfBoundSuspending());
 
 export const functionFastpath = run(() => fastpath("*.ts"));
 

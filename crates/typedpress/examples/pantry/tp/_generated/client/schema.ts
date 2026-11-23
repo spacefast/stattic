@@ -8,7 +8,8 @@ export const SCHEMA = {
       "path": "locations",
       "primaryKey": "id",
       "drafts": false,
-      "revisions": false,
+      "revisions": true,
+      "softDelete": true,
       "localized": false,
       "relations": {
         "items": {
@@ -25,7 +26,8 @@ export const SCHEMA = {
       "path": "items",
       "primaryKey": "id",
       "drafts": false,
-      "revisions": false,
+      "revisions": true,
+      "softDelete": true,
       "localized": false,
       "relations": {
         "locationId": {
@@ -47,7 +49,8 @@ export const SCHEMA = {
       "path": "shopping_list",
       "primaryKey": "id",
       "drafts": false,
-      "revisions": false,
+      "revisions": true,
+      "softDelete": true,
       "localized": false,
       "relations": {
         "itemId": {

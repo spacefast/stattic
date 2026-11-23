@@ -46,7 +46,7 @@ final class BlockTemplates
     public static function register(Plugin $plugin): void
     {
         $app = $plugin->schema->app();
-        if (!is_array($app) || ($app['legacyRoutes'] ?? false) || self::$plugin !== null) {
+        if (!is_array($app) || self::$plugin !== null) {
             return;
         }
         self::$plugin = $plugin;

@@ -100,9 +100,7 @@ final class RegExp implements \Stringable
 
     public function __unserialize(array $data): void
     {
-        // Earlier receipts serialized private translation fields with PHP's mangled names.
-        $source = $data["\0" . self::class . "\0src"] ?? $data['source'];
-        $this->__construct($source, $data['flags']);
+        $this->__construct($data['source'], $data['flags']);
         $this->lastIndex = $data['lastIndex'];
     }
 

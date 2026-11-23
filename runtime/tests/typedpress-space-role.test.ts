@@ -140,7 +140,7 @@ add_action('rest_api_init', static function () {
       );
       writeFileSync(
         path.join(project, "tp/actions.ts"),
-        'import {action} from "spacepress"; export const whoami = action({access:"anyone",handler(input, ctx){return {role: ctx.user === null ? null : ctx.user.role};}});',
+        'import {mutation} from "spacepress"; export const whoami = mutation({access:"anyone"}, async (_input: {}, ctx) => ({role: ctx.user === null ? null : ctx.user.role}));',
       );
       const step = await prepareZeroV2SourcePublish(project);
       assert.ok(step);

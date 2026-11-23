@@ -53,7 +53,7 @@ final class WpTableStore implements Store, Links
     {
         $spec = $this->schema->collection($collection);
         if (isset($spec['existingTable'])) {
-            Guard::table($spec['existingTable'], $this->db->prefix(), Guard::names($collection, $spec));
+            Guard::table($spec['existingTable'], $this->db->prefix());
 
             return $spec['existingTable'];
         }
@@ -63,7 +63,9 @@ final class WpTableStore implements Store, Links
 
     public function source(string $collection): Source
     {
-        return $this->sources[$collection] ??= Source::plain(
+        $key = $this->db->prefix() . ':' . $collection;
+
+        return $this->sources[$key] ??= Source::plain(
             $this->dialect,
             $this->dialect->quote($this->table($collection)),
             $this->schema->collection($collection)['columns'],
@@ -89,13 +91,24 @@ final class WpTableStore implements Store, Links
         return [];
     }
 
+    private function physicalColumn(string $collection, string $name): string
+    {
+        $cols = $this->schema->collection($collection)['columns'];
+
+        return (string) ($cols[$name]['column'] ?? $name);
+    }
+
     public function insert(string $collection, array $values): int|string
     {
         $q = $this->dialect->quote(...);
-        $sql = 'INSERT INTO ' . $q($this->table($collection)) . ($values === []
+        $physical = [];
+        foreach ($values as $col => $val) {
+            $physical[$this->physicalColumn($collection, (string) $col)] = $val;
+        }
+        $sql = 'INSERT INTO ' . $q($this->table($collection)) . ($physical === []
             ? ' () VALUES ()'
-            : ' (' . implode(', ', array_map($q, array_keys($values))) . ') VALUES (' . implode(', ', array_fill(0, count($values), '?')) . ')');
-        $this->db->run($sql, array_values($values));
+            : ' (' . implode(', ', array_map($q, array_keys($physical))) . ') VALUES (' . implode(', ', array_fill(0, count($physical), '?')) . ')');
+        $this->db->run($sql, array_values($physical));
         $pk = $this->schema->collection($collection)['primaryKey'];
 
         return $values[$pk] ?? $this->db->insertId();
@@ -107,9 +120,10 @@ final class WpTableStore implements Store, Links
             return;
         }
         $q = $this->dialect->quote(...);
-        $assign = implode(', ', array_map(static fn ($c) => $q((string) $c) . ' = ?', array_keys($values)));
+        $assign = implode(', ', array_map(fn ($c) => $q($this->physicalColumn($collection, (string) $c)) . ' = ?', array_keys($values)));
+        $pkCol = $this->physicalColumn($collection, $this->schema->collection($collection)['primaryKey']);
         $this->db->run(
-            'UPDATE ' . $q($this->table($collection)) . " SET $assign WHERE " . $q($this->schema->collection($collection)['primaryKey']) . ' = ?',
+            'UPDATE ' . $q($this->table($collection)) . " SET $assign WHERE " . $q($pkCol) . ' = ?',
             [...array_values($values), $pk],
         );
     }
@@ -117,24 +131,46 @@ final class WpTableStore implements Store, Links
     public function delete(string $collection, int|string $pk): void
     {
         $q = $this->dialect->quote(...);
-        $this->db->run('DELETE FROM ' . $q($this->table($collection)) . ' WHERE ' . $q($this->schema->collection($collection)['primaryKey']) . ' = ?', [$pk]);
+        $pkCol = $this->physicalColumn($collection, $this->schema->collection($collection)['primaryKey']);
+        $this->db->run('DELETE FROM ' . $q($this->table($collection)) . ' WHERE ' . $q($pkCol) . ' = ?', [$pk]);
+    }
+
+    public function softDelete(string $collection, int|string $pk, string $at, ?int $userId, ?string $group): void
+    {
+        $this->update($collection, $pk, [
+            'deletedAt' => $at,
+            'deletedBy' => $userId,
+            'deletedGroup' => $group,
+            '_live' => null,
+        ]);
+    }
+
+    public function restore(string $collection, int|string $pk): void
+    {
+        $this->update($collection, $pk, [
+            'deletedAt' => null,
+            'deletedBy' => null,
+            'deletedGroup' => null,
+            '_live' => 1,
+        ]);
     }
 
     // ================================================================ many-ref links
 
     public function linkTable(string $join): string
     {
-        return $this->dialect->quote($this->db->prefix() . 'tp_' . $join);
+        return $this->dialect->quote($this->db->prefix() . 'tp__join_' . $join);
     }
 
-    public function links(string $join, string $by, array $ids): array
+    public function links(string $join, string $by, array $ids, bool $forUpdate = false): array
     {
         if ($ids === []) {
             return [];
         }
         $by = $by === 'target_id' ? 'target_id' : 'owner_id';
         $rows = $this->db->run(
-            'SELECT `owner_id`, `target_id`, `position` FROM ' . $this->linkTable($join) . " WHERE `$by` IN (" . implode(', ', array_fill(0, count($ids), '?')) . ') ORDER BY `owner_id`, `position`',
+            'SELECT `owner_id`, `target_id`, `position` FROM ' . $this->linkTable($join) . " WHERE `$by` IN (" . implode(', ', array_fill(0, count($ids), '?')) . ') ORDER BY `owner_id`, `position`'
+            . ($forUpdate ? $this->dialect->writeLock() : ''),
             array_values(array_map('intval', $ids)),
         );
 
@@ -200,31 +236,87 @@ final class WpTableStore implements Store, Links
 
     // ================================================================ revisions (§4.7, custom tables)
 
+    public function hasRevisionsTable(): bool
+    {
+        return $this->db->run(
+            'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+            [$this->db->prefix() . 'tp__revisions'],
+        ) !== [];
+    }
+
+    public function latestSchemaMigration(): ?string
+    {
+        $ledger = $this->db->prefix() . 'tp__migrations';
+        if ($this->db->run('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [$ledger]) === []) {
+            return null;
+        }
+        $hasKind = $this->db->run(
+            'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+            [$ledger, 'kind'],
+        ) !== [];
+        $kindClause = $hasKind ? " AND `kind` = 'schema'" : '';
+        $rows = $this->db->run(
+            "SELECT `id` FROM `$ledger` WHERE `app` = ? AND `id` NOT LIKE '%:%'{$kindClause} ORDER BY `applied_at` DESC, `id` DESC LIMIT 1",
+            [$this->schema->name()],
+        );
+
+        return isset($rows[0]['id']) ? (string) $rows[0]['id'] : null;
+    }
+
     public function revisions(string $collection, int|string $pk): array
     {
-        $rows = $this->db->run('SELECT * FROM `' . $this->db->prefix() . 'tp__revisions` WHERE `collection` = ? AND `pk` = ? ORDER BY `id` DESC', [$collection, (string) $pk]);
+        $rows = $this->db->run(
+            'SELECT * FROM `' . $this->db->prefix() . 'tp__revisions` WHERE `collection` = ? AND `pk` = ? ORDER BY `version` DESC, `id` DESC',
+            [$collection, (string) $pk],
+        );
 
         return array_map(self::revisionRow(...), $rows);
     }
 
-    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId): void
+    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId, array $meta = []): void
     {
+        $table = '`' . $this->db->prefix() . 'tp__revisions`';
+        // The insert owns its newly allocated key. A locking read of its revision history can lock
+        // the gap around that key and deadlock with another insert allocating a different key.
+        $forUpdate = $this->db->sqlite() || ($meta['allocatedKey'] ?? false) ? '' : ' FOR UPDATE';
+        $max = $this->db->run("SELECT MAX(`version`) AS v FROM $table WHERE `collection` = ? AND `pk` = ?$forUpdate", [$collection, (string) $pk]);
+        $version = ((int) ($max[0]['v'] ?? 0)) + 1;
+        $op = (string) ($meta['op'] ?? 'update');
+        $schemaMigration = is_string($meta['schemaMigration'] ?? null) && $meta['schemaMigration'] !== '' ? $meta['schemaMigration'] : null;
+        $changed = array_key_exists('changed', $meta) && is_array($meta['changed']) ? Js::jsonStringify(array_values($meta['changed'])) : null;
         $this->db->run(
-            'INSERT INTO `' . $this->db->prefix() . 'tp__revisions` (`collection`, `pk`, `at`, `userId`, `row`) VALUES (?, ?, ?, ?, ?)',
-            [$collection, (string) $pk, Js::iso(Js::now()), $userId, Js::jsonStringify($encodedRow)],
+            "INSERT INTO $table (`collection`, `pk`, `version`, `op`, `at`, `userId`, `schemaMigration`, `row`, `changed`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [$collection, (string) $pk, $version, $op, Js::iso(Js::now()), $userId, $schemaMigration, Js::jsonStringify($encodedRow), $changed],
         );
     }
 
-    public function revision(string $collection, int|string $pk, int $revisionId): ?array
+    public function revision(string $collection, int|string $pk, int $revisionId, bool $byVersion = false): ?array
     {
-        $rows = $this->db->run('SELECT * FROM `' . $this->db->prefix() . 'tp__revisions` WHERE `collection` = ? AND `pk` = ? AND `id` = ?', [$collection, (string) $pk, $revisionId]);
+        $table = '`' . $this->db->prefix() . 'tp__revisions`';
+        $primary = $byVersion ? 'version' : 'id';
+        $fallback = $byVersion ? 'id' : 'version';
+        $rows = $this->db->run("SELECT * FROM $table WHERE `collection` = ? AND `pk` = ? AND `$primary` = ? LIMIT 1", [$collection, (string) $pk, $revisionId]);
+        if ($rows === []) {
+            $rows = $this->db->run("SELECT * FROM $table WHERE `collection` = ? AND `pk` = ? AND `$fallback` = ? LIMIT 1", [$collection, (string) $pk, $revisionId]);
+        }
 
         return $rows === [] ? null : self::revisionRow($rows[0]);
     }
 
     private static function revisionRow(array $r): array
     {
-        return ['id' => (int) $r['id'], 'at' => (string) $r['at'], 'userId' => $r['userId'] === null ? null : (int) $r['userId'], 'row' => json_decode((string) $r['row'], true)];
+        $changed = isset($r['changed']) && is_string($r['changed']) ? json_decode($r['changed'], true) : null;
+
+        return [
+            'id' => (int) $r['id'],
+            'version' => (int) ($r['version'] ?? 1),
+            'op' => (string) ($r['op'] ?? 'update'),
+            'at' => (string) $r['at'],
+            'userId' => $r['userId'] === null ? null : (int) $r['userId'],
+            'schemaMigration' => isset($r['schemaMigration']) && $r['schemaMigration'] !== '' ? (string) $r['schemaMigration'] : null,
+            'changed' => is_array($changed) ? array_values($changed) : null,
+            'row' => json_decode((string) $r['row'], true),
+        ];
     }
 
     public function promoteDue(string $collection, string $nowIso): array
@@ -263,13 +355,16 @@ final class WpTableStore implements Store, Links
         return $e;
     }
 
-    /** Index names emitted by the compiler: `<col>_unique`, or the column itself. */
+    /** Index names emitted by the compiler: `<col>_unique`, `<col>__live` (SQLite soft-delete unique), or the column itself. */
     private static function uniqueColumn(string $key): ?string
     {
         if ($key === 'translationGroup_locale') { // §7.3: one row per locale per group
             return 'locale';
         }
-        if (preg_match('/^(?:.*__)?([A-Za-z0-9]+)_unique$/', $key, $m)) {
+        if (str_ends_with($key, '__live')) {
+            $key = substr($key, 0, -strlen('__live'));
+        }
+        if (preg_match('/^(?:.*__)?([A-Za-z0-9_]+)_unique$/', $key, $m)) {
             return $m[1];
         }
 

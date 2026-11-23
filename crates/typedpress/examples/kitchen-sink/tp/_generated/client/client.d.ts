@@ -1,3 +1,6 @@
+export type Id<Kind extends string = string> = number & {
+	readonly __tp_kind?: Kind;
+};
 export type Role = "guest" | "subscriber" | "author" | "editor" | "admin";
 export interface User {
 	id: number;
@@ -39,16 +42,29 @@ export interface PrivateFile {
 }
 export interface RevisionSummary {
 	id: number;
+	version: number;
+	op: "create" | "update" | "delete" | "restore" | "purge";
 	at: string;
 	user: {
 		id: number;
 		name: string;
 	} | null;
+	schemaMigration: string | null;
+	changed: string[] | null;
+}
+export interface RevisionDiff<T = Record<string, unknown>> {
+	from: number;
+	to: number;
+	changes: {
+		field: keyof T & string;
+		from: unknown;
+		to: unknown;
+	}[];
 }
 export type Status = "draft" | "published" | "scheduled";
 export type Locale = never;
 export interface Event {
-	id: number;
+	id: Id<"events">;
 	title: string;
 	slug: string | null;
 	description: string | null;
@@ -80,6 +96,11 @@ export interface Event {
 	})[] | null;
 	status: "draft" | "published" | "scheduled";
 	publishedAt: string | null;
+	author: number | null;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 	uid: string | null;
 }
 export interface EventInsert {
@@ -426,6 +447,66 @@ export interface EventFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	uid?: string | null | {
 		eq?: string | null;
 		ne?: string | null;
@@ -448,9 +529,9 @@ export interface EventFilter {
 	OR?: EventFilter[];
 	NOT?: EventFilter;
 }
-export type EventOrder = Partial<Record<"id" | "title" | "slug" | "description" | "startsOn" | "venue" | "poster" | "handout" | "format" | "registrationOpen" | "demoUrl" | "status" | "publishedAt" | "uid", "asc" | "desc">> | string;
+export type EventOrder = Partial<Record<"id" | "title" | "slug" | "description" | "startsOn" | "venue" | "poster" | "handout" | "format" | "registrationOpen" | "demoUrl" | "status" | "publishedAt" | "author" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy" | "uid", "asc" | "desc">> | string;
 export interface Post {
-	id: number;
+	id: Id<"posts">;
 	title: string;
 	slug: string;
 	content: string | null;
@@ -458,6 +539,11 @@ export interface Post {
 	minutes: number | null;
 	status: "draft" | "published" | "scheduled";
 	publishedAt: string | null;
+	author: number | null;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 	uid: string | null;
 }
 export interface PostInsert {
@@ -598,6 +684,66 @@ export interface PostFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	uid?: string | null | {
 		eq?: string | null;
 		ne?: string | null;
@@ -618,17 +764,22 @@ export interface PostFilter {
 	OR?: PostFilter[];
 	NOT?: PostFilter;
 }
-export type PostOrder = Partial<Record<"id" | "title" | "slug" | "content" | "excerpt" | "minutes" | "status" | "publishedAt" | "uid", "asc" | "desc">> | string;
+export type PostOrder = Partial<Record<"id" | "title" | "slug" | "content" | "excerpt" | "minutes" | "status" | "publishedAt" | "author" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy" | "uid", "asc" | "desc">> | string;
 export interface Recipe {
-	id: number;
+	id: Id<"recipes">;
 	title: string;
 	slug: string;
 	content: string | null;
 	excerpt: string | null;
 	servings: number;
-	topicIds: number[];
+	topicIds: Id<"topics">[];
 	status: "draft" | "published" | "scheduled";
 	publishedAt: string | null;
+	author: number | null;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 	uid: string | null;
 }
 export interface RecipeInsert {
@@ -637,7 +788,7 @@ export interface RecipeInsert {
 	content?: string | null;
 	excerpt?: string | null;
 	servings?: number;
-	topicIds?: number[];
+	topicIds?: Id<"topics">[];
 	status?: "draft" | "published" | "scheduled";
 	publishedAt?: string | null;
 	uid?: string | null;
@@ -786,6 +937,66 @@ export interface RecipeFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	uid?: string | null | {
 		eq?: string | null;
 		ne?: string | null;
@@ -806,23 +1017,28 @@ export interface RecipeFilter {
 	OR?: RecipeFilter[];
 	NOT?: RecipeFilter;
 }
-export type RecipeOrder = Partial<Record<"id" | "title" | "slug" | "content" | "excerpt" | "servings" | "status" | "publishedAt" | "uid", "asc" | "desc">> | string;
+export type RecipeOrder = Partial<Record<"id" | "title" | "slug" | "content" | "excerpt" | "servings" | "status" | "publishedAt" | "author" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy" | "uid", "asc" | "desc">> | string;
 export interface Handbook {
-	id: number;
+	id: Id<"handbook">;
 	title: string;
 	slug: string;
 	content: string | null;
-	parent: number | null;
+	parent: Id<"handbook"> | null;
 	order: number;
 	status: "draft" | "published" | "scheduled";
 	publishedAt: string | null;
+	author: number | null;
+	createdAt: string;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 	uid: string | null;
 }
 export interface HandbookInsert {
 	title: string;
 	slug?: string;
 	content?: string | null;
-	parent?: number | null;
+	parent?: Id<"handbook"> | null;
 	order?: number;
 	status?: "draft" | "published" | "scheduled";
 	publishedAt?: string | null;
@@ -967,6 +1183,66 @@ export interface HandbookFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	uid?: string | null | {
 		eq?: string | null;
 		ne?: string | null;
@@ -988,11 +1264,11 @@ export interface HandbookFilter {
 	OR?: HandbookFilter[];
 	NOT?: HandbookFilter;
 }
-export type HandbookOrder = Partial<Record<"id" | "title" | "slug" | "content" | "parent" | "order" | "status" | "publishedAt" | "uid", "asc" | "desc">> | string;
+export type HandbookOrder = Partial<Record<"id" | "title" | "slug" | "content" | "parent" | "order" | "status" | "publishedAt" | "author" | "createdAt" | "updatedAt" | "deletedAt" | "deletedBy" | "uid", "asc" | "desc">> | string;
 export interface Registration {
-	id: number;
-	eventId: number;
-	memberId: number;
+	id: Id<"registrations">;
+	eventId: Id<"events">;
+	memberId: Id<"members">;
 	seats: number;
 	code: string;
 	preferences?: {
@@ -1000,10 +1276,14 @@ export interface Registration {
 	} | null;
 	bookedOn: string;
 	updatedAt: string;
+	author: number | null;
+	createdAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 }
 export interface RegistrationInsert {
-	eventId: number;
-	memberId: number;
+	eventId: Id<"events">;
+	memberId: Id<"members">;
 	seats?: number;
 	code?: string;
 	preferences?: {
@@ -1140,19 +1420,71 @@ export interface RegistrationFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	createdAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	AND?: RegistrationFilter[];
 	OR?: RegistrationFilter[];
 	NOT?: RegistrationFilter;
 }
-export type RegistrationOrder = Partial<Record<"id" | "eventId" | "memberId" | "seats" | "code" | "bookedOn" | "updatedAt", "asc" | "desc">> | string;
+export type RegistrationOrder = Partial<Record<"id" | "eventId" | "memberId" | "seats" | "code" | "bookedOn" | "updatedAt" | "author" | "createdAt" | "deletedAt" | "deletedBy", "asc" | "desc">> | string;
 export interface Activity {
-	id: number;
-	eventId: number | null;
+	id: Id<"activity">;
+	eventId: Id<"events"> | null;
 	summary: string;
 	createdAt: string;
+	author: number | null;
+	updatedAt: string;
+	deletedAt: string | null;
+	deletedBy: number | null;
 }
 export interface ActivityInsert {
-	eventId?: number | null;
+	eventId?: Id<"events"> | null;
 	summary: string;
 	createdAt?: string;
 }
@@ -1223,13 +1555,61 @@ export interface ActivityFilter {
 		isNull?: true;
 		isNotNull?: true;
 	};
+	author?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	updatedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedAt?: string | null | {
+		eq?: string | null;
+		ne?: string | null;
+		gt?: string;
+		gte?: string;
+		lt?: string;
+		lte?: string;
+		in?: string[];
+		notIn?: string[];
+		isNull?: true;
+		isNotNull?: true;
+	};
+	deletedBy?: number | null | {
+		eq?: number | null;
+		ne?: number | null;
+		gt?: number;
+		gte?: number;
+		lt?: number;
+		lte?: number;
+		in?: number[];
+		notIn?: number[];
+		isNull?: true;
+		isNotNull?: true;
+	};
 	AND?: ActivityFilter[];
 	OR?: ActivityFilter[];
 	NOT?: ActivityFilter;
 }
-export type ActivityOrder = Partial<Record<"id" | "eventId" | "summary" | "createdAt", "asc" | "desc">> | string;
+export type ActivityOrder = Partial<Record<"id" | "eventId" | "summary" | "createdAt" | "author" | "updatedAt" | "deletedAt" | "deletedBy", "asc" | "desc">> | string;
 export interface Member {
-	id: number;
+	id: Id<"members">;
 	email: string;
 	name: string;
 	website: string | null;
@@ -1361,7 +1741,7 @@ export interface MemberFilter {
 }
 export type MemberOrder = Partial<Record<"id" | "email" | "name" | "website" | "plan" | "role", "asc" | "desc">> | string;
 export interface Topic {
-	id: number;
+	id: Id<"topics">;
 	name: string;
 	slug: string;
 	description: string;
@@ -1521,7 +1901,7 @@ export interface TopicFilter {
 }
 export type TopicOrder = Partial<Record<"id" | "name" | "slug" | "description" | "count" | "url" | "color" | "uid", "asc" | "desc">> | string;
 export interface Supply {
-	id: number;
+	id: Id<"supplies">;
 	uid: string | null;
 	name: string;
 	slug: string;
@@ -1542,8 +1922,8 @@ export interface Supply {
 	purchasable: boolean;
 	availability: string;
 	url: string | null;
-	categories: number[];
-	tags: number[];
+	categories: Id<"supplyCategories">[];
+	tags: Id<"supplyTags">[];
 }
 export interface SupplyInsert {
 	uid?: string | null;
@@ -1562,8 +1942,8 @@ export interface SupplyInsert {
 		name: string;
 		file: string;
 	}[];
-	categories?: number[];
-	tags?: number[];
+	categories?: Id<"supplyCategories">[];
+	tags?: Id<"supplyTags">[];
 }
 export interface SupplyPatch {
 	uid?: string | null;
@@ -1871,12 +2251,12 @@ export interface SupplyFilter {
 }
 export type SupplyOrder = Partial<Record<"id" | "uid" | "name" | "slug" | "description" | "sku" | "shortDescription" | "price" | "status" | "virtual" | "downloadable" | "type" | "purchasable" | "availability" | "url", "asc" | "desc">> | string;
 export interface SupplyCategory {
-	id: number;
+	id: Id<"supplyCategories">;
 	uid: string | null;
 	name: string;
 	slug: string;
 	description: string;
-	parent: number | null;
+	parent: Id<"supplyCategories"> | null;
 	count: number;
 	url: string | null;
 }
@@ -1885,7 +2265,7 @@ export interface SupplyCategoryInsert {
 	name: string;
 	slug?: string;
 	description?: string;
-	parent?: number | null;
+	parent?: Id<"supplyCategories"> | null;
 }
 export interface SupplyCategoryPatch {
 	uid?: string | null;
@@ -2027,7 +2407,7 @@ export interface SupplyCategoryFilter {
 }
 export type SupplyCategoryOrder = Partial<Record<"id" | "uid" | "name" | "slug" | "description" | "parent" | "count" | "url", "asc" | "desc">> | string;
 export interface SupplyTag {
-	id: number;
+	id: Id<"supplyTags">;
 	uid: string | null;
 	name: string;
 	slug: string;
@@ -2168,7 +2548,7 @@ export interface SupplyTagFilter {
 }
 export type SupplyTagOrder = Partial<Record<"id" | "uid" | "name" | "slug" | "description" | "count" | "url", "asc" | "desc">> | string;
 export interface Order {
-	id: number;
+	id: Id<"orders">;
 	status: string;
 	currency: string;
 	precision: number;
@@ -2773,10 +3153,17 @@ export interface SettingsPatch {
 export interface BookSeatsInput {
 	eventId: number;
 	seats: number;
-	allergies?: string | null;
+	allergies?: string;
 }
 export type BookSeatsOutput = {
 	code: string;
+};
+export interface ContactKitchenInput {
+	email: string;
+	message: string;
+}
+export type ContactKitchenOutput = {
+	delivery: string;
 };
 export interface CancelSeatsInput {
 	eventId: number;
@@ -2807,8 +3194,44 @@ export interface CancelWorkshopInput {
 export type CancelWorkshopOutput = {
 	id: number;
 };
+export interface RestoreWorkshopInput {
+	id: number;
+}
+export type RestoreWorkshopOutput = {
+	id: number;
+};
+export interface PurgeWorkshopInput {
+	id: number;
+}
+export type PurgeWorkshopOutput = {
+	id: number;
+};
+export interface WorkshopHistoryInput {
+	id: number;
+}
+export type WorkshopHistoryOutput = {
+	count: number;
+	firstTitle: string | null;
+	diff: {
+		from: number;
+		to: number;
+		changes: ({
+			field: string;
+			from?: unknown;
+			to?: unknown;
+		})[];
+	} | null;
+};
+export interface RevertWorkshopInput {
+	id: number;
+	version: number;
+}
+export type RevertWorkshopOutput = {
+	id: number;
+	title: string;
+};
 export interface PostAnnouncementInput {
-	announcement?: string | null;
+	announcement?: string;
 }
 export type PostAnnouncementOutput = {
 	announcement: string | null;
@@ -2823,6 +3246,12 @@ export type DraftRecapOutput = {
 };
 export type CheckScheduleInput = Record<string, never>;
 export type CheckScheduleOutput = {
+	workshops: number;
+	timezone: string;
+	hasWorkshops: boolean;
+};
+export type ScheduleMetricsInput = Record<string, never>;
+export type ScheduleMetricsOutput = {
 	workshops: number;
 	timezone: string;
 	hasWorkshops: boolean;
@@ -2936,6 +3365,10 @@ export interface Actions {
 		input: BookSeatsInput;
 		output: BookSeatsOutput;
 	};
+	contactKitchen: {
+		input: ContactKitchenInput;
+		output: ContactKitchenOutput;
+	};
 	cancelSeats: {
 		input: CancelSeatsInput;
 		output: CancelSeatsOutput;
@@ -2956,6 +3389,22 @@ export interface Actions {
 		input: CancelWorkshopInput;
 		output: CancelWorkshopOutput;
 	};
+	restoreWorkshop: {
+		input: RestoreWorkshopInput;
+		output: RestoreWorkshopOutput;
+	};
+	purgeWorkshop: {
+		input: PurgeWorkshopInput;
+		output: PurgeWorkshopOutput;
+	};
+	workshopHistory: {
+		input: WorkshopHistoryInput;
+		output: WorkshopHistoryOutput;
+	};
+	revertWorkshop: {
+		input: RevertWorkshopInput;
+		output: RevertWorkshopOutput;
+	};
 	postAnnouncement: {
 		input: PostAnnouncementInput;
 		output: PostAnnouncementOutput;
@@ -2968,6 +3417,10 @@ export interface Actions {
 		input: CheckScheduleInput;
 		output: CheckScheduleOutput;
 	};
+	scheduleMetrics: {
+		input: ScheduleMetricsInput;
+		output: ScheduleMetricsOutput;
+	};
 }
 export declare const SCHEMA: {
 	readonly name: "kitchen-sink";
@@ -2977,6 +3430,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: true;
 			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly registrations: {
@@ -3006,6 +3460,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: true;
 			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {};
 			readonly media: readonly [];
@@ -3017,6 +3472,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: true;
 			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly topicIds: {
@@ -3034,6 +3490,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: true;
 			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly parent: {
@@ -3055,7 +3512,8 @@ export declare const SCHEMA: {
 			readonly path: "registrations";
 			readonly primaryKey: "id";
 			readonly drafts: false;
-			readonly revisions: false;
+			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly eventId: {
@@ -3077,7 +3535,8 @@ export declare const SCHEMA: {
 			readonly path: "activity";
 			readonly primaryKey: "id";
 			readonly drafts: false;
-			readonly revisions: false;
+			readonly revisions: true;
+			readonly softDelete: true;
 			readonly localized: false;
 			readonly relations: {
 				readonly eventId: {
@@ -3095,6 +3554,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {
 				readonly registrations: {
@@ -3112,6 +3572,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {
 				readonly recipes: {
@@ -3129,6 +3590,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {
 				readonly categories: {
@@ -3151,6 +3613,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {
 				readonly supplies: {
@@ -3168,6 +3631,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {
 				readonly supplies: {
@@ -3185,6 +3649,7 @@ export declare const SCHEMA: {
 			readonly primaryKey: "id";
 			readonly drafts: false;
 			readonly revisions: false;
+			readonly softDelete: false;
 			readonly localized: false;
 			readonly relations: {};
 			readonly media: readonly [];
@@ -3193,7 +3658,7 @@ export declare const SCHEMA: {
 		};
 	};
 	readonly globals: readonly ["settings"];
-	readonly actions: readonly ["bookSeats", "cancelSeats", "upcoming", "closeRegistration", "scheduleAgain", "cancelWorkshop", "postAnnouncement", "draftRecap", "checkSchedule"];
+	readonly actions: readonly ["bookSeats", "contactKitchen", "cancelSeats", "upcoming", "closeRegistration", "scheduleAgain", "cancelWorkshop", "restoreWorkshop", "purgeWorkshop", "workshopHistory", "revertWorkshop", "postAnnouncement", "draftRecap", "checkSchedule", "scheduleMetrics"];
 	readonly buckets: readonly ["handouts"];
 };
 export type SchemaDescriptor = typeof SCHEMA;
@@ -3256,6 +3721,8 @@ export type ListQuery<
 	limit?: number;
 	offset?: number;
 	with?: W;
+	/** Soft-delete filter: `"exclude"` (default), `"include"`, or `"only"`. Non-default modes require `restore` or `delete` access. */
+	deleted?: "exclude" | "include" | "only";
 } & StatusQuery<K> & LocaleQuery<K>;
 /**
 * A read. Await it for one answer, or `subscribe` to keep it current: the callback gets the result
@@ -3313,12 +3780,18 @@ export interface CollectionClient<K extends CollectionKey> {
 	*/
 	update(id: IdOf<K>, patch: Collections[K]["patch"] & WriteConditions): Promise<Row<K>>;
 	delete(id: IdOf<K>, options?: WriteConditions): Promise<Row<K>>;
+	/** Restores a soft-deleted row (and any cascade-deleted children sharing its deletion group). */
+	restore(id: IdOf<K>): Promise<Row<K>>;
+	/** Permanently removes the row from storage (default access `"system"`). */
+	purge(id: IdOf<K>): Promise<Row<K>>;
 	/** `list(q).subscribe(onRows, onError)`. Returns a function that stops watching. */
 	watch<const W extends Collections[K]["with"] = Extract<{}, Collections[K]["with"]>>(q: ListQuery<K, ExactWith<K, W>> | undefined, onRows: (rows: RowWith<K, W>[]) => void, onError?: (error: TypedPressError) => void): () => void;
 	revisions: {
 		/** Newest first. Needs `update` access on the row. */
 		list(id: IdOf<K>): Promise<RevisionSummary[]>;
 		get(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
+		/** Diffs two revisions (by version or revision id) as this viewer may read them. */
+		diff(id: IdOf<K>, fromVersion: number, toVersion: number): Promise<RevisionDiff<Row<K>>>;
 		/** Runs the update pipeline with the revision as the patch; returns the updated row. */
 		restore(id: IdOf<K>, revisionId: number): Promise<Row<K>>;
 	};
@@ -3741,6 +4214,8 @@ export interface WooCartState {
 	loading: boolean;
 	/** True while a write waits for Woo. */
 	pending: boolean;
+	/** True after an order succeeds until Woo confirms the cart again. */
+	stale: boolean;
 	/** The last failure. A refused write stays until the next write starts, so a later write that was
 	* already queued and succeeds does not hide it. A failed read stays until Woo next answers with a cart. */
 	error: Error | undefined;

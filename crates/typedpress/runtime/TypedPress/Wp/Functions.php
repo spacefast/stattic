@@ -25,6 +25,10 @@ final class Functions
         }
         $args = array_map(self::toPhp(...), $args);
         Guard::call($function, $args);
+        if ($function === 'get_option' && is_string($args[0] ?? null)
+            && in_array($args[0], Runtime::plugin()?->schema->app()['purgeOptions'] ?? [], true)) {
+            \TypedPress\Render\Reads::option($args[0]);
+        }
         $result = self::tracked(static fn () => $function(...$args));
         if ($result instanceof \WP_Error) {
             // The error's own status when it carries one; otherwise WordPress refused the input.

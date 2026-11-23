@@ -141,17 +141,6 @@ impl Fs for Recording {
     fn allow_packages(&self) -> bool {
         self.packages
     }
-    // How the sources are read is the wrapped tree's: a raw 0.3 project (`crate::zero_bundle`) is
-    // captured with the reading its capture is compiled with.
-    fn frozen_capture(&self) -> bool {
-        self.fs.frozen_capture()
-    }
-    fn module_alias(&self) -> Option<&'static str> {
-        self.fs.module_alias()
-    }
-    fn legacy_fields(&self) -> bool {
-        self.fs.legacy_fields()
-    }
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         self.fs.read_dir(path)
     }
@@ -224,8 +213,18 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
     let migration_dir = project.join(crate::pipeline::LEDGER);
     if fs.is_dir(&migration_dir) {
         for path in fs.read_dir(&migration_dir).map_err(io)? {
-            safe_migration_name(&path.file_name().unwrap_or_default().to_string_lossy())?;
-            recording.read_to_string(&path).map_err(io)?;
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if fs.is_dir(&path) {
+                for child in fs.read_dir(&path).map_err(io)? {
+                    let file = child.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let rel = format!("{name}/{file}");
+                    safe_migration_name(&rel)?;
+                    recording.read_to_string(&child).map_err(io)?;
+                }
+            } else {
+                safe_migration_name(&name)?;
+                recording.read_to_string(&path).map_err(io)?;
+            }
         }
     }
     let mut sync_bytes = 0usize;
@@ -407,6 +406,13 @@ fn safe_input(path: &str) -> Result<(), Diag> {
 
 fn safe_migration_name(name: &str) -> Result<(), Diag> {
     safe_input(name)?;
+    if let Some((id, file)) = name.split_once('/')
+        && !file.contains('/')
+        && crate::migrate::is_migration_id(id)
+        && matches!(file, "ops.json" | "migration.sql")
+    {
+        return Ok(());
+    }
     if name == "snapshot.json"
         || (name.len() > 9
             && name.as_bytes()[..4].iter().all(u8::is_ascii_digit)
@@ -452,8 +458,6 @@ fn public_assets(from: &Path, to: Option<&Path>) -> Result<(), Diag> {
 struct CapturedFs {
     root: PathBuf,
     sources: SourceBundle,
-    /// The name a pre-rename capture imports TypedPress by (`crate::zero_bundle`).
-    module_alias: Option<&'static str>,
 }
 #[cfg(feature = "host")]
 impl CapturedFs {
@@ -463,15 +467,10 @@ impl CapturedFs {
 }
 #[cfg(feature = "host")]
 impl Fs for CapturedFs {
-    fn frozen_capture(&self) -> bool {
+    fn captured(&self) -> bool {
         true
     }
-    fn module_alias(&self) -> Option<&'static str> {
-        self.module_alias
-    }
-    fn legacy_fields(&self) -> bool {
-        self.module_alias.is_some()
-    }
+
     fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
         let prefix = self
             .key(path)
@@ -1008,18 +1007,10 @@ pub(crate) fn compile_tree(
     previous: Option<&Path>,
     runtime: bool,
 ) -> Result<Compiled, Diag> {
-    // A raw project from a client released before the rename is captured here first, exactly as
-    // `host::sources` captures it, and read as that capture (`crate::zero_bundle::capture_raw`).
-    let (bytes, raw) = if crate::zero_bundle::is_raw(source)? {
-        let [app, vendor, manifest] = crate::zero_bundle::capture_raw(source)?;
-        (manifest.into_bytes(), Some([app, vendor]))
-    } else {
-        (std::fs::read(source.join(MANIFEST_FILE)).map_err(io)?, None)
-    };
+    let bytes = std::fs::read(source.join(MANIFEST_FILE)).map_err(io)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|e| failure(e.to_string()))?;
-    let legacy = manifest.format == crate::zero_bundle::FORMAT;
     let is_spacepress_bundle = manifest.format == SPACEPRESS_FORMAT;
-    if !(legacy || is_spacepress_bundle || manifest.format == "typedpress.source-bundle.v1")
+    if !(is_spacepress_bundle || manifest.format == "typedpress.source-bundle.v1")
         || manifest.name.is_empty()
         || !manifest
             .name
@@ -1028,38 +1019,21 @@ pub(crate) fn compile_tree(
     {
         return Err(failure("invalid source bundle format or app name"));
     }
-    let sources = if legacy {
-        crate::zero_bundle::read(source, &manifest, raw)?
+    let (app_file, vendor_file) = if is_spacepress_bundle && source.join(SPACEPRESS_APP_FILE).is_file() {
+        (SPACEPRESS_APP_FILE, SPACEPRESS_VENDOR_FILE)
     } else {
-        let (app_file, vendor_file) = if is_spacepress_bundle && source.join(SPACEPRESS_APP_FILE).is_file() {
-            (SPACEPRESS_APP_FILE, SPACEPRESS_VENDOR_FILE)
-        } else {
-            (APP_FILE, VENDOR_FILE)
-        };
-        let captured = read_bundles(
-            source,
-            [(app_file, &manifest.app_sha256), (vendor_file, &manifest.vendor_sha256)],
-        )?;
-        // A bundle captured before `tp/_generated/` names its locks and ledger at their old paths.
-        // The hashes cover the bytes as captured; only the paths are read on this layout.
-        SourceBundle {
-            files: captured
-                .files
-                .into_iter()
-                .map(|(path, text)| (crate::layout::current(&path), text))
-                .collect(),
-            binary: captured
-                .binary
-                .into_iter()
-                .map(|(path, data)| (crate::layout::current(&path), data))
-                .collect(),
-            canonical: captured
-                .canonical
-                .into_iter()
-                .map(|(path, real)| (crate::layout::current(&path), crate::layout::current(&real)))
-                .collect(),
-        }
+        (APP_FILE, VENDOR_FILE)
     };
+    let sources = read_bundles(
+        source,
+        [(app_file, &manifest.app_sha256), (vendor_file, &manifest.vendor_sha256)],
+    )?;
+    if sources.files.keys().any(|path| {
+        path.strip_prefix(crate::pipeline::OLD_LEDGER)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+    }) {
+        return Err(crate::pipeline::moved_ledger());
+    }
     // A capture from before `tp/app/` may hold TSX pages for the old renderer (`pages/`, with
     // their `tp/pages.json` artifact). There is no renderer for them any more, and compiling the
     // rest would publish the site without its pages.
@@ -1071,19 +1045,18 @@ pub(crate) fn compile_tree(
         return Err(failure(format!(
             "this bundle has TSX pages from the old pages renderer ({path}), which TypedPress no longer has"
         ))
-        .help("move the pages to tp/app/ (docs/pages.md), then publish again with `typedpress sources`"));
+        .help(
+            "move the pages to tp/app/ (/docs/core/pages-and-islands), then publish again with `typedpress sources`",
+        ));
     }
     let name = manifest.name;
     let root = source.join("modules");
     let source_migrations = sources
         .files
         .iter()
-        // A capture is frozen: one taken by an older compiler keeps its ledger at the old path, and
-        // its archive must survive a recompile (docs/spacefast-deploy.md).
         .filter_map(|(path, text)| {
-            [crate::pipeline::LEDGER, crate::pipeline::OLD_LEDGER]
-                .iter()
-                .find_map(|ledger| path.strip_prefix(ledger)?.strip_prefix('/'))
+            path.strip_prefix(crate::pipeline::LEDGER)?
+                .strip_prefix('/')
                 .map(|name| (name, text))
         })
         .map(|(name, text)| {
@@ -1094,30 +1067,31 @@ pub(crate) fn compile_tree(
     let fs = Rc::new(CapturedFs {
         root: root.clone(),
         sources,
-        module_alias: legacy.then_some(crate::zero_bundle::MODULE),
     });
     let entry = crate::layout::project_config(|p| fs.is_file(p), &root);
     let program = loader::load_from(fs.clone(), &entry).map_err(|mut d| d.remove(0))?;
-    let snapshot = previous
-        .map(|p| {
-            std::fs::read(p.join("snapshot.json"))
-                .map_err(io)
-                .and_then(|b| serde_json::from_slice(&b).map_err(|e| failure(e.to_string())))
-        })
-        .transpose()?;
     let previous_migrations = previous.map(|p| p.join("migrations"));
-    let names: Vec<String> = match &previous_migrations {
-        Some(p) => std::fs::read_dir(p)
-            .map_err(io)?
-            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
-            .collect::<Result<_, _>>()
-            .map_err(io)?,
-        None => Vec::new(),
-    };
+    let mut prev_entries: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut prev_folders: Vec<String> = Vec::new();
+    if let Some(p) = &previous_migrations
+        && p.is_dir()
+    {
+        for entry in std::fs::read_dir(p).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let path = entry.path();
+            if path.is_dir() {
+                let id = entry.file_name().to_string_lossy().into_owned();
+                let ops_bytes = std::fs::read(path.join("ops.json")).map_err(io)?;
+                let ops: serde_json::Value = serde_json::from_slice(&ops_bytes).map_err(|e| failure(e.to_string()))?;
+                prev_entries.push((id.clone(), ops));
+                prev_folders.push(id);
+            }
+        }
+    }
     let built = pipeline::build(
         Path::new(&name),
         &program,
-        || pipeline::Previous::from_project(snapshot, names.iter().map(String::as_str)),
+        || pipeline::Previous::from_entries(prev_entries),
         crate::emit::runtime_file,
     )?;
     if built.plugins.as_ref().is_some_and(|p| !p.plugins.is_empty()) {
@@ -1132,7 +1106,11 @@ pub(crate) fn compile_tree(
         let archive = output.join("source-migrations");
         std::fs::create_dir(&archive).map_err(io)?;
         for (name, text) in source_migrations {
-            std::fs::write(archive.join(name), text).map_err(io)?;
+            let dest = archive.join(&name);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(io)?;
+            }
+            std::fs::write(dest, text).map_err(io)?;
         }
     }
     if !seeds.is_empty() {
@@ -1148,12 +1126,26 @@ pub(crate) fn compile_tree(
     let migrations = output.join("migrations");
     std::fs::create_dir(&migrations).map_err(io)?;
     if let Some(previous) = previous_migrations {
-        for name in &names {
-            std::fs::copy(previous.join(name), migrations.join(name)).map_err(io)?;
+        for id in &prev_folders {
+            let dst = migrations.join(id);
+            std::fs::create_dir_all(&dst).map_err(io)?;
+            for file in ["ops.json", "migration.sql"] {
+                let src_f = previous.join(id).join(file);
+                if src_f.is_file() {
+                    std::fs::copy(src_f, dst.join(file)).map_err(io)?;
+                }
+            }
         }
     }
-    for (name, sql) in &built.migrations {
-        std::fs::write(migrations.join(name), sql).map_err(io)?;
+    for entry in &built.migrations {
+        let dst = migrations.join(&entry.id);
+        std::fs::create_dir_all(&dst).map_err(io)?;
+        std::fs::write(
+            dst.join("ops.json"),
+            serde_json::to_string_pretty(&entry.ops).map_err(|e| failure(e.to_string()))? + "\n",
+        )
+        .map_err(io)?;
+        std::fs::write(dst.join("migration.sql"), &entry.sql).map_err(io)?;
     }
     std::fs::write(
         output.join("snapshot.json"),

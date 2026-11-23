@@ -16,9 +16,9 @@ use function TypedPress\db;
  * joins that row's group (at most one row per locale) and pre-fills every synced column, refusing a
  * payload value that differs. Update: `locale` is immutable; a write that changes synced columns
  * applies them to every other row of the group through the update pipeline (hooks and revisions per
- * row, trusted: the group shares those values by definition). A row that joins a group outside the
- * API (Polylang's "+" in wp-admin) adopts the values of the group's oldest row. Delete removes only
- * that row, so the group shrinks.
+ * row). A viewer-bound update requires read access to the siblings before it can propagate. A row
+ * that joins a group outside the API (Polylang's "+" in wp-admin) adopts the values of the group's
+ * oldest row. Delete removes only that row, so the group shrinks.
  */
 final class GroupSync
 {
@@ -129,7 +129,20 @@ final class GroupSync
         }
     }
 
-    public static function written(string $op, string $collection, array $row, ?array $previous): void
+    /** Check the final patch (including beforeUpdate changes) before the source row is written. */
+    public static function requireReadableSiblings(string $collection, array $row, array $previous, ?Viewer $viewer): void
+    {
+        if ($viewer === null || !Module::localized($collection)) {
+            return;
+        }
+        $spec = db()->schema()->collection($collection);
+        $pk = $spec['primaryKey'];
+        if (!isset(self::$active[self::key($collection, $row, $pk)]) && self::syncedChanges($spec, $row, $previous) !== []) {
+            db()->requireReadableTranslations($collection, self::siblings($collection, $row, $pk), $viewer);
+        }
+    }
+
+    public static function written(string $op, string $collection, array $row, ?array $previous, ?Viewer $viewer = null): void
     {
         if ($op === 'delete' || !Module::localized($collection)) {
             return;
@@ -141,12 +154,6 @@ final class GroupSync
         }
         if (isset(self::$active[self::key($collection, $row, $pk)])) {
             return; // this row is being given its group's values; the outer write checks the group
-        }
-        $changed = [];
-        foreach ($previous === null ? [] : Module::synced($spec) as $col) {
-            if (!Module::same($row[$col], $previous[$col])) {
-                $changed[$col] = $row[$col];
-            }
         }
         if ($previous === null) {
             $members = Module::members($row, $pk);
@@ -161,22 +168,47 @@ final class GroupSync
             $join === null
                 ? self::adopt($collection, $row) // a row that joined a group outside the API (wp-admin "+")
                 : self::joined($collection, $row, $join[2], $join[3]);
-        } elseif ($changed !== []) {
-            // Every member as currently committed, locked: a translation created concurrently can't be missed.
-            $members = Lock::members($collection, $row, Module::members($row, $pk));
-            $siblings = array_values(array_filter($members, static fn ($id) => $id !== $row[$pk]));
-            self::quietly(self::key($collection, $row, $pk), static function () use ($collection, $pk, $row, $siblings, $changed): void {
+        } elseif (($changed = self::syncedChanges($spec, $row, $previous)) !== []) {
+            $siblings = self::siblings($collection, $row, $pk);
+            self::quietly(self::key($collection, $row, $pk), static function () use ($collection, $pk, $row, $siblings, $changed, $viewer): void {
                 foreach ($siblings === [] ? [] : db()->findMany($collection, ['where' => [$pk => ['in' => $siblings]], 'locale' => '*']) as $sibling) {
                     $patch = array_filter($changed, static fn ($v, $col) => !Module::same($sibling[$col], $v), ARRAY_FILTER_USE_BOTH);
+                    if ($patch === []) {
+                        continue;
+                    }
+                    // Hooks on the source or an earlier sibling can change this sibling's read scope.
+                    if ($viewer !== null) {
+                        db()->requireReadableTranslations($collection, [$sibling[$pk]], $viewer);
+                    }
                     // A sibling the same bulk update covers is written now, once, with that update's
                     // own patch plus the group's values (its hooks then don't run a second time).
-                    if ($patch !== [] && !db()->updateWithin($collection, $row[$pk], $sibling[$pk], $patch)) {
+                    if (!db()->updateWithin($collection, $row[$pk], $sibling[$pk], $patch)) {
                         db()->update($collection, $patch, [$pk => $sibling[$pk]]);
                     }
                 }
             });
         }
         self::agrees($collection, $row[$pk]);
+    }
+
+    private static function syncedChanges(array $spec, array $row, array $previous): array
+    {
+        $changed = [];
+        foreach (Module::synced($spec) as $col) {
+            if (!Module::same($row[$col], $previous[$col])) {
+                $changed[$col] = $row[$col];
+            }
+        }
+
+        return $changed;
+    }
+
+    /** Lock current membership so a translation created concurrently cannot be missed. */
+    private static function siblings(string $collection, array $row, string $pk): array
+    {
+        $members = Lock::members($collection, $row, Module::members($row, $pk));
+
+        return array_values(array_filter($members, static fn ($id) => $id !== $row[$pk]));
     }
 
     /**

@@ -8,6 +8,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": {
 				"registrations": {
@@ -31,6 +32,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": {},
 			"media": [],
@@ -42,6 +44,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": { "topicIds": {
 				"kind": "many",
@@ -57,6 +60,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": true,
 			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": {
 				"parent": {
@@ -78,7 +82,8 @@ export const SCHEMA = {
 			"path": "registrations",
 			"primaryKey": "id",
 			"drafts": false,
-			"revisions": false,
+			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": {
 				"eventId": {
@@ -100,7 +105,8 @@ export const SCHEMA = {
 			"path": "activity",
 			"primaryKey": "id",
 			"drafts": false,
-			"revisions": false,
+			"revisions": true,
+			"softDelete": true,
 			"localized": false,
 			"relations": { "eventId": {
 				"kind": "one",
@@ -116,6 +122,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": { "registrations": {
 				"kind": "many",
@@ -131,6 +138,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": { "recipes": {
 				"kind": "many",
@@ -146,6 +154,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": {
 				"categories": {
@@ -168,6 +177,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": { "supplies": {
 				"kind": "many",
@@ -183,6 +193,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": { "supplies": {
 				"kind": "many",
@@ -198,6 +209,7 @@ export const SCHEMA = {
 			"primaryKey": "id",
 			"drafts": false,
 			"revisions": false,
+			"softDelete": false,
 			"localized": false,
 			"relations": {},
 			"media": [],
@@ -208,14 +220,20 @@ export const SCHEMA = {
 	"globals": ["settings"],
 	"actions": [
 		"bookSeats",
+		"contactKitchen",
 		"cancelSeats",
 		"upcoming",
 		"closeRegistration",
 		"scheduleAgain",
 		"cancelWorkshop",
+		"restoreWorkshop",
+		"purgeWorkshop",
+		"workshopHistory",
+		"revertWorkshop",
 		"postAnnouncement",
 		"draftRecap",
-		"checkSchedule"
+		"checkSchedule",
+		"scheduleMetrics"
 	],
 	"buckets": ["handouts"]
 };
@@ -301,6 +319,7 @@ function listParams(q) {
 	if (q.where !== undefined) p.set("where", JSON.stringify(q.where));
 	if (typeof q.status === "string") p.set("status", q.status);
 	if (typeof q.locale === "string") p.set("locale", q.locale);
+	if (typeof q.deleted === "string") p.set("deleted", q.deleted);
 	if (q.orderBy !== undefined) {
 		const order = orderParam(q.orderBy);
 		if (order) p.set("orderBy", order);
@@ -323,6 +342,7 @@ function liveArgs(q) {
 	if (typeof q.offset === "number") args.offset = q.offset;
 	if (typeof q.cursor === "string") args.cursor = q.cursor;
 	if (typeof q.locale === "string") args.locale = q.locale;
+	if (typeof q.deleted === "string") args.deleted = q.deleted;
 	if (isObject(q.with) && Object.keys(withJson(q.with)).length > 0) args.with = withJson(q.with);
 	return args;
 }
@@ -1243,6 +1263,8 @@ export function createClient(options = {}) {
 			create: (data) => wrote(request("POST", path, { json: data }), key),
 			update: (id, patch) => wrote(request("PATCH", one(id), { json: patch }), key),
 			delete: (id, options) => wrote(request("DELETE", one(id), { query: conditions(options) }), key),
+			restore: (id) => wrote(request("POST", `${one(id)}/restore`), key),
+			purge: (id) => wrote(request("DELETE", `${one(id)}/purge`), key),
 			revisions: {
 				// Every revision, newest first: the API pages them ({ data, cursor }), this follows the cursor.
 				list: async (id) => {
@@ -1261,7 +1283,11 @@ export function createClient(options = {}) {
 					return all;
 				},
 				get: (id, rid) => request("GET", `${one(id)}/revisions/${seg(rid)}`),
-				restore: (id, rid) => request("POST", `${one(id)}/revisions/${seg(rid)}/restore`)
+				diff: (id, from, to) => request("GET", `${one(id)}/revisions/diff`, { query: new URLSearchParams({
+					from: String(from),
+					to: String(to)
+				}) }),
+				restore: (id, rid) => wrote(request("POST", `${one(id)}/revisions/${seg(rid)}/restore`), key)
 			},
 			stage: (id, patch) => request("PATCH", `${one(id)}/staged`, { json: patch }),
 			staged: (id) => request("GET", `${one(id)}/staged`),
@@ -1731,6 +1757,7 @@ export function createCartStore(client = cart) {
 		cart: undefined,
 		loading: true,
 		pending: false,
+		stale: false,
 		error: undefined
 	};
 	let state = initial;
@@ -1769,10 +1796,11 @@ export function createCartStore(client = cart) {
 	/** Woo gave a cart. That answers a failed read; a refused write stays until the next write starts. */
 	function answered() {
 		answeredAt = Date.now();
-		return state.error !== undefined && state.error === failedRead ? {
+		return {
 			loading: false,
-			error: undefined
-		} : { loading: false };
+			stale: false,
+			...state.error === failedRead ? { error: undefined } : {}
+		};
 	}
 	function describe(error) {
 		return error instanceof Error ? error : new Error(String(error));
@@ -1787,7 +1815,7 @@ export function createCartStore(client = cart) {
 		const next = enqueue(async () => {
 			try {
 				const cart = await client.get();
-				if (cart !== confirmed) receive(cart);
+				if (cart !== confirmed || state.stale) receive(cart);
 				return cart;
 			} catch (error) {
 				failedRead = describe(error);
@@ -1814,20 +1842,22 @@ export function createCartStore(client = cart) {
 			let changes = { loading: false };
 			try {
 				const answer = await run();
-				confirmed = cartOf(answer) ?? receivedDuringWrite ?? confirmed;
-				changes = answered();
+				const current = cartOf(answer) ?? receivedDuringWrite;
+				if (current) {
+					confirmed = current;
+					changes = answered();
+				} else {
+					changes.stale = true;
+				}
 				return answer;
 			} catch (error) {
 				// Woo sends the current cart with a 409. Any other refusal rolls back to the confirmed cart.
 				const current = (error instanceof WooStoreError ? error.cart : undefined) ?? receivedDuringWrite;
 				if (current) {
 					confirmed = current;
-					answeredAt = Date.now();
+					changes = answered();
 				}
-				changes = {
-					loading: false,
-					error: describe(error)
-				};
+				changes.error = describe(error);
 				throw error;
 			} finally {
 				writing = false;
@@ -1892,18 +1922,30 @@ export function createCartStore(client = cart) {
 			} } : {}
 		}))
 	};
-	// The order is queued behind the cart's writes and holds `pending`. The cart shown stays as it is
-	// until the read the client makes after the order answers.
-	if ("checkout" in client) {
-		actions.checkout = (input) => write(() => client.checkout(input), (current) => current, () => undefined);
-	}
-	const page = () => globalThis.document;
 	const reread = () => {
 		refresh().catch(() => undefined);
 	};
+	if ("checkout" in client) {
+		actions.checkout = async (input) => {
+			const order = await write(async () => {
+				// Observe the client's post-order read even if the store has no subscribers.
+				const stop = client.subscribe((cart) => {
+					receivedDuringWrite = cart;
+				});
+				try {
+					return await client.checkout(input);
+				} finally {
+					stop();
+				}
+			}, (current) => current, () => undefined);
+			if (state.stale) reread();
+			return order;
+		};
+	}
+	const page = () => globalThis.document;
 	const shown = () => {
 		// Switching tabs back and forth asks once per SHOWN_AGAIN_MS at most; a cart Woo just confirmed is current.
-		if (page()?.visibilityState === "visible" && Date.now() - answeredAt >= SHOWN_AGAIN_MS) reread();
+		if (page()?.visibilityState === "visible" && (state.stale || Date.now() - answeredAt >= SHOWN_AGAIN_MS)) reread();
 	};
 	const restored = (event) => {
 		if (event?.persisted === true) reread();

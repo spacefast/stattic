@@ -38,7 +38,7 @@ final class JsonSchema
             // REST also accepts epoch milliseconds and any date string TypedPress parses.
             'timestamp' => $output ? ['type' => 'string', 'format' => 'date-time'] : ['type' => ['string', 'integer']],
             'date' => $output ? ['type' => 'string', 'format' => 'date'] : ['type' => 'string'],
-            'json' => ['type' => self::ANY],
+            'json' => $col['shape'] ?? ['type' => self::ANY],
             'media', 'file' => $output ? ['type' => ['integer', 'object']] : ['type' => 'integer'],
             'mediaList' => ['type' => 'array', 'items' => $output ? ['type' => ['integer', 'object']] : ['type' => 'integer']],
             'select' => ['type' => 'array', 'items' => ['type' => 'string', 'enum' => array_values($col['enum'] ?? [])], 'uniqueItems' => true],

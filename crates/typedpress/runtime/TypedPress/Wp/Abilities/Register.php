@@ -362,9 +362,10 @@ final class Register
         $ops = [];
         $columns = array_values(array_map('strval', array_keys(array_filter($spec['columns'], static fn (array $c): bool => !($c['hidden'] ?? false)))));
 
-        // A kind with staged versions takes `_rev` (refuse when the row changed since that read) and
-        // `takeover` (take another user's edit lock) on its writes ({@see \TypedPress\Wp\Rev}).
-        $guard = \TypedPress\Wp\Staged::enabled($spec) ? [\TypedPress\Wp\Rev::FIELD => ['type' => 'string'], \TypedPress\Wp\Rev::TAKEOVER => ['type' => 'boolean']] : [];
+        // Post kinds with staged versions take `_rev` and `takeover`; SQL tables with revisions take `_rev`.
+        $guard = \TypedPress\Wp\Staged::enabled($spec)
+            ? [\TypedPress\Wp\Rev::FIELD => ['type' => 'string'], \TypedPress\Wp\Rev::TAKEOVER => ['type' => 'boolean']]
+            : (\TypedPress\Wp\Rev::enabled($spec) ? [\TypedPress\Wp\Rev::FIELD => ['type' => 'string']] : []);
         if ($guard !== []) {
             $row['properties'][\TypedPress\Wp\Rev::FIELD] = ['type' => 'string'];
         }
@@ -423,8 +424,11 @@ final class Register
                 'label' => "Revisions of $name", 'description' => "List the saved revisions of one $name row of the $appLabel app, newest first.",
                 'input' => JsonSchema::input(['id' => $pk], ['id']),
                 'output' => ['type' => 'object', 'required' => ['revisions'], 'properties' => ['revisions' => ['type' => 'array', 'items' => ['type' => 'object', 'properties' => [
-                    'id' => ['type' => 'integer'], 'at' => ['type' => 'string', 'format' => 'date-time'],
+                    'id' => ['type' => 'integer'], 'version' => ['type' => 'integer'], 'op' => ['type' => 'string'],
+                    'at' => ['type' => 'string', 'format' => 'date-time'],
                     'user' => ['type' => ['object', 'null'], 'properties' => ['id' => ['type' => 'integer'], 'name' => ['type' => 'string']]],
+                    'schemaMigration' => ['type' => ['string', 'null']],
+                    'changed' => ['type' => ['array', 'null'], 'items' => ['type' => 'string']],
                 ]]]]],
                 'annotations' => ['readonly' => true, 'idempotent' => true], 'rule' => [$rules['update'], 'update', "update $name rows"],
                 'call' => static fn (array $in): array => ['GET', $item('/revisions')($in), [], null],

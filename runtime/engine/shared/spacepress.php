@@ -205,7 +205,7 @@ function _stattic_spacepress_bind_wordpress(): void
         add_filter('sp_assets_url', static fn (): string => SP_ASSETS_URL);
         add_filter('sp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
         add_filter('tp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
-        add_filter('sp_connectors_call', '_stattic_spacepress_connectors_call', 10, 4);
+        add_filter('sp_connectors_call', '_stattic_spacepress_connectors_call', 10, 5);
 
         add_filter('automatic_updater_disabled', '__return_true');
         add_filter('auto_update_core', '__return_false');
@@ -436,18 +436,25 @@ function _stattic_spacepress_connector_viewer(array $serving, string $host, stri
  * Spacefast's control-plane connector relay with viewer subject + signed Space
  * runtime credential.
  *
- * Supports both positional `(null, $role, $tool, $args)` and structured
+ * Supports both positional `(null, $role, $tool, $args, $call)` and structured
  * `(null, ['role' => ..., 'tool' => ..., 'args' => ..., 'handler' => ...])`
  * invocations.
  *
+ * A queued call (`$call['mode'] === 'queued'`, from `connectors.enqueue()`)
+ * runs in SpacePress's connector job and may repeat: its `jobId` is the relay's
+ * request id, so a repeat replays the same run, and an answer that is not
+ * final yet returns a `WP_Error`, which SpacePress retries with backoff.
+ *
  * @param array<string, mixed>|string $roleOrRequest
  * @param array<string, mixed> $args
+ * @param array<string, mixed> $call
  */
 function _stattic_spacepress_connectors_call(
     mixed $result,
     string|array $roleOrRequest,
     ?string $tool = null,
-    array $args = []
+    array $args = [],
+    array $call = []
 ): mixed {
     if ($result !== null) {
         return $result;
@@ -468,12 +475,19 @@ function _stattic_spacepress_connectors_call(
         $requestId = '';
         $explicitVisitor = null;
     }
+    $queued = ($call['mode'] ?? null) === 'queued';
+    if ($queued && $requestId === '' && is_scalar($call['jobId'] ?? null) && (string) $call['jobId'] !== '') {
+        $requestId = 'spacepress-job:' . $call['jobId'];
+    }
 
     $context = is_array($GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] ?? null)
         ? $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']
         : [];
     $answer = _stattic_spacepress_connectors_relay($context, $role, $toolName, $callArgs, $handler, $requestId, $explicitVisitor);
     _stattic_spacepress_connectors_log_failure($answer, (string) ($context['version_id'] ?? ''), $role, $toolName, $handler, $requestId);
+    if ($queued && in_array($answer['state'] ?? null, ['unavailable', 'approval_pending', 'running'], true) && class_exists('WP_Error')) {
+        return new WP_Error('spacefast_connector_' . $answer['state'], (string) ($answer['message'] ?? ''));
+    }
     return $answer;
 }
 

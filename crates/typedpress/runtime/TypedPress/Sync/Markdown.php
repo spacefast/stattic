@@ -85,7 +85,7 @@ final class Markdown
             // Component blocks are tags; the Markdown around and inside them is written as usual,
             // each run of other blocks through this same gate.
             $markdown = \TypedPress\Content\Blocks::fromBlocks($parsed, static fn (string $run): string => self::fromBlocks($run));
-            $lost = self::firstLoss(self::key(self::toBlocks($markdown)), self::key(self::respellLegacy($blocks)));
+            $lost = self::firstLoss(self::key(self::toBlocks($markdown)), self::key(self::normalizeToolkitMarkup($blocks)));
             if ($lost !== null) {
                 throw new HttpError(422, 'not_representable', "$lost can't be written as Markdown; use *.html");
             }
@@ -99,7 +99,7 @@ final class Markdown
         // The producer ends on a blank line; a file ends on one newline. Both read back as the same blocks.
         // The producer also closes every quote with empty `> ` lines; the gate below proves dropping them is lossless.
         $markdown = rtrim((string) preg_replace('/(?:^>[> ]*\n)+(?=\n|\z)/m', '', self::produce($blocks)), "\n") . "\n";
-        $original = self::key(self::respellLegacy($blocks));
+        $original = self::key(self::normalizeToolkitMarkup($blocks));
         $reparsed = self::key(self::toBlocks($markdown));
         $lost = self::firstLoss($reparsed, $original);
         if ($lost !== null) {
@@ -248,7 +248,7 @@ final class Markdown
     }
 
     /** Code/image blocks in the toolkit's own spelling, respelled as stored; one document either way. */
-    private static function respellLegacy(string $blocks): string
+    private static function normalizeToolkitMarkup(string $blocks): string
     {
         if (!preg_match('/<!-- wp:(code|image)[ \n]/', $blocks)) {
             return $blocks;

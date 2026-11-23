@@ -41,7 +41,7 @@ final class Purges
     private static bool $everything = false;
 
     /** Post types whose writes change how every page looks: the Site Editor's. */
-    public const DESIGN_TYPES = ['wp_template', 'wp_template_part', 'wp_global_styles', 'wp_navigation'];
+    public const DESIGN_TYPES = ['wp_template', 'wp_template_part', 'wp_global_styles', 'wp_navigation', 'nav_menu_item'];
 
     public static function register(Plugin $plugin): void
     {
@@ -56,7 +56,6 @@ final class Purges
                 return;
             }
             if (in_array($post->post_type, self::DESIGN_TYPES, true)) {
-                \TypedPress\Render\Prebuilt::forget();
                 self::everything();
             }
         };
@@ -78,11 +77,14 @@ final class Purges
         add_action('transition_post_status', static function (string $new, string $old, \WP_Post $post) use ($plugin): void {
             if (self::listening() && $new !== $old) {
                 self::add($plugin, self::postUrls($post, $old === 'publish' || $new === 'publish'));
+                self::plannedPost($plugin, $post);
             }
         }, 10, 3);
         add_action('before_delete_post', static function (int $id) use ($plugin): void {
             if (self::listening()) {
-                self::add($plugin, self::postUrls(get_post($id)));
+                $post = get_post($id);
+                self::add($plugin, self::postUrls($post));
+                self::plannedPost($plugin, $post);
             }
         }, 10, 1);
         add_action('set_object_terms', static function (int $id, array $terms, array $ttIds, string $taxonomy, bool $append, array $old) use ($plugin): void {
@@ -91,14 +93,14 @@ final class Purges
             sort($changed);
             sort($previous);
             // Term archives list public posts only: a draft's terms show nowhere.
-            if (self::listening() && $changed !== $previous && ($urls = self::postUrls(get_post($id))) !== []) {
-                self::add($plugin, [...self::listings(self::termUrls([...$changed, ...$previous], $taxonomy)), ...$urls]);
+            if (self::listening() && $changed !== $previous) {
+                self::changedPostTerms($plugin, $id, $taxonomy, [...$changed, ...$previous]);
             }
         }, 10, 6);
         // wp_remove_object_terms() fires this, not set_object_terms: the terms the post left.
         add_action('deleted_term_relationships', static function (int $id, array $ttIds, string $taxonomy) use ($plugin): void {
-            if (self::listening() && $ttIds !== [] && ($urls = self::postUrls(get_post($id))) !== []) {
-                self::add($plugin, [...self::listings(self::termUrls(array_map('intval', $ttIds), $taxonomy)), ...$urls]);
+            if (self::listening() && $ttIds !== []) {
+                self::changedPostTerms($plugin, $id, $taxonomy, array_map('intval', $ttIds));
             }
         }, 10, 3);
         // A term edit purges its archive before (edit_terms runs before the update, so a slug change
@@ -106,12 +108,34 @@ final class Purges
         $term = static function (int $termId, string $taxonomy) use ($plugin): void {
             $term = get_term($termId, $taxonomy);
             if (self::listening() && $term instanceof \WP_Term) {
-                self::add($plugin, self::listings(self::termUrls([$term->term_taxonomy_id], $taxonomy)));
+                $planned = self::plannedKindUrls($plugin, 'taxonomy', $taxonomy);
+                self::add($plugin, [...self::listings(self::termUrls([$term->term_taxonomy_id], $taxonomy)), ...$planned]);
             }
         };
         add_action('edit_terms', $term, 10, 2);
+        add_action('created_term', static function (int $termId, int $ttId, string $taxonomy) use ($plugin): void {
+            if (self::listening()) {
+                self::add($plugin, self::plannedKindUrls($plugin, 'taxonomy', $taxonomy), false);
+            }
+        }, 10, 3);
         add_action('edited_term', static fn (int $termId, int $ttId, string $taxonomy) => $term($termId, $taxonomy), 10, 3);
         add_action('pre_delete_term', $term, 10, 2);
+        // The shared document shell uses site settings and menus even on a literal page.
+        $shell = static function (): void {
+            if (!self::frontEnd()) {
+                self::everything();
+            }
+        };
+        foreach (['blogname', 'blogdescription', 'blog_public', 'blog_charset', 'WPLANG',
+            'permalink_structure', 'home', 'siteurl', 'site_icon', 'wpcom_public_coming_soon',
+            'wpcom_coming_soon', 'theme_mods_' . get_option('stylesheet')] as $option) {
+            foreach (['add_option_', 'update_option_', 'delete_option_'] as $hook) {
+                add_action($hook . $option, $shell, 10, 0);
+            }
+        }
+        foreach (['wp_update_nav_menu', 'wp_delete_nav_menu', 'switch_theme'] as $hook) {
+            add_action($hook, $shell, 10, 0);
+        }
         // A global's fields are options named `<postId>_<field>` (`tp_global_shop_currency`, SCF's
         // options page layout; a repeater's or group's values are further options below its field's
         // name): `db.globals.<name>.update()`, the API and the options page in wp-admin all save them
@@ -121,10 +145,11 @@ final class Purges
         foreach ($plugin->schema->globals() as $name => $global) {
             $prefixes[$global['wp']['postId'] . '_'] = (string) $name;
         }
-        if ($prefixes !== []) {
+        $options = array_fill_keys($plugin->schema->app()['purgeOptions'] ?? [], true);
+        if ($prefixes !== [] || $options !== []) {
             $busy = false;
-            $global = static function (mixed $option) use ($plugin, $prefixes, &$busy): void {
-                if (!is_string($option) || $busy) {
+            $changed = static function (mixed $option) use ($plugin, $prefixes, $options, &$busy): void {
+                if (!is_string($option) || $busy || !self::listening()) {
                     return;
                 }
                 // Every global whose prefix the option has: `shop` and `shop_hours` share one, and
@@ -135,12 +160,16 @@ final class Purges
                         $names[] = $name;
                     }
                 }
-                if ($names === [] || !self::listening() || $plugin->unavailable() !== null) {
+                $tracked = isset($options[$option]);
+                if ((!$tracked && $names === []) || $plugin->unavailable() !== null) {
                     return;
                 }
                 $busy = true;
                 try {
                     $plugin->app(); // the read index is read through the app's store
+                    if ($tracked) {
+                        \TypedPress\Render\Cache::optionWritten($option);
+                    }
                     foreach ($names as $name) {
                         \TypedPress\Render\Cache::globalWritten($name);
                     }
@@ -149,7 +178,7 @@ final class Purges
                 }
             };
             foreach (['added_option', 'updated_option', 'deleted_option'] as $hook) {
-                add_action($hook, $global, 10, 1);
+                add_action($hook, $changed, 10, 1);
             }
         }
     }
@@ -204,6 +233,7 @@ final class Purges
         $before = self::$before[$id] ?? [];
         unset(self::$before[$id]);
         self::add($plugin, [...$before, ...self::postUrls($post)]);
+        self::plannedPost($plugin, $post);
     }
 
     /** EditorSave::end: the save it holds open collects its URLs now, inside the transaction. */
@@ -352,6 +382,37 @@ final class Purges
         // Other addresses that show this post (a `page.md` route answers with and without a trailing
         // slash), and the sitemap files that list it (core's and TypedPress's), which have no twins.
         return [...(array) apply_filters('tp_post_purge_urls', [$urls[0], ...self::listings(array_slice($urls, 1))], $post), ...Sitemap::filesFor($post)];
+    }
+
+    private static function plannedPost(Plugin $plugin, ?\WP_Post $post): void
+    {
+        if ($post instanceof \WP_Post && $post->post_type !== 'revision' && !wp_is_post_autosave($post)) {
+            self::add($plugin, self::plannedKindUrls($plugin, 'postType', $post->post_type), false);
+        }
+    }
+
+    /** @param list<int> $ttIds */
+    private static function changedPostTerms(Plugin $plugin, int $id, string $taxonomy, array $ttIds): void
+    {
+        $post = get_post($id);
+        $urls = self::postUrls($post);
+        if ($urls !== []) {
+            self::add($plugin, [...self::listings(self::termUrls($ttIds, $taxonomy)), ...$urls]);
+        }
+        self::plannedPost($plugin, $post);
+        self::add($plugin, self::plannedKindUrls($plugin, 'taxonomy', $taxonomy), false);
+    }
+
+    /** @return list<string> */
+    private static function plannedKindUrls(Plugin $plugin, string $wpField, string $wpName): array
+    {
+        $urls = [];
+        foreach ($plugin->schema->kinds() as $name => $spec) {
+            if (($spec['wp'][$wpField] ?? null) === $wpName) {
+                array_push($urls, ...\TypedPress\Render\RoutePlan::urls($plugin, (string) $name));
+            }
+        }
+        return $urls;
     }
 
     /**

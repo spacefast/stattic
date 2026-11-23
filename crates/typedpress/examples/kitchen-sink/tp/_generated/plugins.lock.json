@@ -21,6 +21,7 @@
         "http": [],
         "env": [],
         "mail": [],
+        "connectors": [],
         "jobs": [],
         "timers": [],
         "abilities": [],

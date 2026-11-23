@@ -360,3 +360,28 @@ test("a refused token order keeps the cart and reports the refusal", async (t) =
   const state = cart.read();
   assert.deepEqual([state.pending, state.cart?.itemsCount, (state.error as WooStoreError).status], [false, 1, 400]);
 });
+
+test("a successful token order leaves the cart stale until a read succeeds", async (t) => {
+  const tokens = { headers: { "Cart-Token": "token" } };
+  const result = { order_id: 7, status: "processing", payment_result: { payment_status: "success", redirect_url: "", payment_details: [] } };
+  const retry = Promise.withResolvers<Response>();
+  const calls: string[] = [];
+  const client = createCartClient({ session: "token", fetch: async (url, init) => {
+    calls.push(`${init?.method} ${String(url).replace("/wp-json/wc/store/v1", "")}`);
+    if (calls.length === 1) return Response.json(wireCart(1), tokens);
+    if (String(url).endsWith("/checkout")) return Response.json(result, tokens);
+    if (calls.length === 3) return Response.json({}, { status: 503 });
+    return retry.promise;
+  } });
+  const cart = mount(client, (hooks) => hooks.useCart());
+  t.after(cart.unmount);
+  await cart.read().refresh();
+
+  const placed = await cart.read().checkout({ billing_address: { email: "buyer@example.test" }, payment_method: "cod" });
+  assert.deepEqual(placed, result);
+  assert.deepEqual([cart.read().pending, cart.read().stale, cart.read().cart?.itemsCount], [false, true, 1]);
+  retry.resolve(Response.json(wireCart(0), tokens));
+  await cart.read().refresh();
+  assert.deepEqual(calls, ["GET /cart", "POST /checkout", "GET /cart", "GET /cart"]);
+  assert.deepEqual([cart.read().stale, cart.read().cart?.itemsCount, cart.read().error], [false, 0, undefined]);
+});

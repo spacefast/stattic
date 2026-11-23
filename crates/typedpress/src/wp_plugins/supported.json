@@ -3,6 +3,7 @@
   "plugins": {
     "action-scheduler": { "min": "4.2.0", "below": "5" },
     "classic-editor": { "min": "1.6.7", "below": "2" },
+    "gutenberg": { "min": "24.4.1", "below": "24.4.2" },
     "mcp-adapter": { "min": "0.7.1", "below": "0.8" },
     "polylang": { "min": "3.9", "below": "4" },
     "secure-custom-fields": { "min": "6.9.7", "below": "7" },

@@ -187,9 +187,17 @@ final class Receiver
                 : 'This site has no such build.', 404);
         }
         $migrations = [];
-        foreach (scandir($app . '/migrations') ?: [] as $name) {
-            if (is_file($app . '/migrations/' . $name)) {
-                $migrations[$name] = (string) file_get_contents($app . '/migrations/' . $name);
+        foreach (scandir($app . '/migrations') ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $dir = $app . '/migrations/' . $entry;
+            if (is_dir($dir)) {
+                foreach (['ops.json', 'migration.sql'] as $file) {
+                    if (is_file($dir . '/' . $file)) {
+                        $migrations[$entry . '/' . $file] = (string) file_get_contents($dir . '/' . $file);
+                    }
+                }
             }
         }
 

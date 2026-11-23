@@ -14,8 +14,6 @@
     { "name": "pull", "args": "[dir] [--site url] [--check]", "summary": "write a site's runtime schema versions to tp/_generated/runtime-schema.json, signed in as an administrator" },
     { "name": "styles pull", "args": "[dir] [--site dir|@alias] [--check]", "summary": "write a site's Global Styles (the Styles screen, the Site Editor) over tp/theme.json; the build ships it and generates tp/_generated/theme.css" },
     { "name": "abilities pull", "args": "[dir] --site url [--only vendor/*]", "summary": "lock a site's abilities into tp/_generated/abilities.json" },
-    { "name": "migrate app", "args": "--from zero-0.8 [--manifest <finalize.json>] [<capsule-dir>] --out <new-dir> [--space <space-id> | --fresh] [--users] [--zero-css <zero.css>] [--dry-run] [--json]", "summary": "convert a Zero 0.8 app" },
-    { "name": "migrate config", "args": "--from emdash|payload|sanity|zero <input> --out <new/typedpress.config.ts>", "summary": "import another CMS's schema" },
     { "name": "plugin", "args": "[--out file.zip]", "summary": "write the TypedPress WordPress plugin (typedpress.zip) to upload and activate in wp-admin" },
     { "name": "login", "args": "<site-url> [dir] [--no-browser]", "summary": "sign in to a WordPress site that runs the TypedPress plugin; the site's owner approves an application password in the browser, and every command that talks to the site uses it" },
     { "name": "logout", "args": "<site-url>", "summary": "forget a site's credential on this machine" },
@@ -25,6 +23,7 @@
   "site": [
     { "name": "wp", "args": "<WP-CLI arguments>", "summary": "any WP-CLI command (typedpress wp plugin list)", "via": "wp" },
     { "name": "migrate", "args": "[--drop=<kind>=<rows>,...] [--mark-applied=<id>]", "summary": "apply pending database migrations, checked against live rows" },
+    { "name": "danger", "args": "status | plan | drop-column <table> <col> | drop-table <table> | purge-deleted <kind> | raw-sql (requires typedpress/danger)", "summary": "CLI-only destructive cleanup escape hatch (two-phase retired drops, purge, audit log)" },
     { "name": "seed", "args": "--records=<dir> [--dry-run]", "summary": "typedpress-sync content from compiled records" },
     { "name": "jobs", "args": "list [--state=s] | run <id> | retry <id> | cancel <id> | maintain | tick [--limit=n] [--budget-ms=ms]", "summary": "inspect and drive background jobs" },
     { "name": "abilities", "args": "", "summary": "list the app's abilities" },
@@ -38,9 +37,6 @@
     { "name": "git-dispatch", "args": "status | set [--repo=<owner/name>] [--token] | clear [--token]", "summary": "the repository a save of synced content notifies; --token reads the token from stdin into WordPress's Secrets API" },
     { "name": "publish-due", "args": "", "summary": "publish scheduled records that are due" },
     { "name": "staged", "args": "list [<kind>] | show|compare|discard <kind> <id> | stage <kind> <id> <json> | promote <kind> <id> [--at=<ISO time> | --cancel] (writes take --rev=<token>)", "summary": "staged versions of post kinds: list, stage, compare, promote, discard" },
-    { "name": "identity", "args": "account|suspend|restore|revoke|erase <user-id> | app add --name=n --redirect=uri --origin=o [--id=app_id] | agent add <user> --name=n [--write] [--personal] [--abilities=a,b] | agent list <user> | agent grant <user> <id> [--write] [--personal] [--abilities=a,b] | agent revoke <user> <id> | webhook-add <url> | webhook-remove <id> | webhooks | maintenance | rotate-keys", "summary": "TypedPress Identity accounts, applications, agent credentials, webhooks and keys" },
-    { "name": "migrate-legacy", "args": "<content-model.php | -> [--dry-run] [--space=id]", "summary": "move content from an original Zero site" },
-    { "name": "migrate-legacy-users", "args": "--space=id [--dry-run]", "summary": "move an original Zero site's users" },
-    { "name": "migrate-spacefast", "args": "--space=id --source-prefix=p --target-prefix=p [--dry-run | --verify]", "summary": "move a Spacefast-hosted Space's tables" }
+    { "name": "identity", "args": "account|suspend|restore|revoke|erase <user-id> | app add --name=n --redirect=uri --origin=o [--id=app_id] | agent add <user> --name=n [--write] [--personal] [--abilities=a,b] | agent list <user> | agent grant <user> <id> [--write] [--personal] [--abilities=a,b] | agent revoke <user> <id> | webhook-add <url> | webhook-remove <id> | webhooks | maintenance | rotate-keys", "summary": "TypedPress Identity accounts, applications, agent credentials, webhooks and keys" }
   ]
 }

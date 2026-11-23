@@ -50,7 +50,7 @@ final class RoutePages
     public static function register(Plugin $plugin): void
     {
         $app = $plugin->schema->app();
-        if (!is_array($app) || self::$instance !== null || ($app['legacyRoutes'] ?? false) === true) {
+        if (!is_array($app) || self::$instance !== null) {
             return;
         }
         $routes = [];

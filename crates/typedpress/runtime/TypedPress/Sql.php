@@ -19,6 +19,7 @@ final class Sql
     private const FIELD_OPS = Schema::FIELD_OPS;
 
     private readonly Dialect $d;
+    private readonly string $lock;
     private int $aliases = 0;
     /** @var list<int|float|string|null> */
     private array $params = [];
@@ -33,9 +34,10 @@ final class Sql
     private bool $trusted = false;
 
     /** @param ?\Closure(string): list<array|SqlPredicate> $guardsFor the viewer's read guards per relation target (null = trusted) */
-    private function __construct(private readonly Schema $schema, private readonly Store $store, private readonly ?\Closure $guardsFor = null)
+    private function __construct(private readonly Schema $schema, private readonly Store $store, private readonly ?\Closure $guardsFor, bool $forUpdate)
     {
         $this->d = $store->dialect();
+        $this->lock = $forUpdate ? $this->d->writeLock() : '';
     }
 
     /**
@@ -53,9 +55,9 @@ final class Sql
      * @param list<array|SqlPredicate> $guards
      * @return array{sql: string, params: list<int|float|string|null>}
      */
-    public static function select(Schema $schema, Store $store, string $collection, array $opts, ?array $partition = null, string $ptr = '', array $guards = [], ?\Closure $guardsFor = null, ?array $only = null): array
+    public static function select(Schema $schema, Store $store, string $collection, array $opts, ?array $partition = null, string $ptr = '', array $guards = [], ?\Closure $guardsFor = null, ?array $only = null, bool $forUpdate = false): array
     {
-        return (new self($schema, $store, $guardsFor))->compile($collection, $opts, $partition, $ptr, $guards, $only);
+        return (new self($schema, $store, $guardsFor, $forUpdate))->compile($collection, $opts, $partition, $ptr, $guards, $only);
     }
 
     /** @param ?array<string, mixed> $only the columns to select, by name; null selects every column */
@@ -65,8 +67,21 @@ final class Sql
         $src = $this->source($collection);
         $alias = $this->alias();
         $conds = [];
+        $deleted = $opts['deleted'] ?? 'exclude';
         if ($src->baseWhere !== '') {
-            $conds[] = $this->sub($src->baseWhere, $alias, '');
+            $base = $deleted === 'exclude'
+                ? $src->baseWhere
+                : str_replace("NOT IN ('trash', ", 'NOT IN (', $src->baseWhere);
+            $conds[] = $this->sub($base, $alias, '');
+            if ($deleted === 'only') {
+                $conds[] = $alias . ".post_status = 'trash'";
+            }
+        } elseif (($spec['softDelete'] ?? false) && isset($src->columns['_live'])) {
+            if ($deleted === 'exclude') {
+                $conds[] = $this->cmpRef($collection, '_live', $alias) . ' = 1';
+            } elseif ($deleted === 'only') {
+                $conds[] = $this->cmpRef($collection, '_live', $alias) . ' IS NULL';
+            }
         }
         if (isset($opts['where'])) {
             $conds[] = $this->filter($collection, $opts['where'], $alias, $ptr . '/where');
@@ -139,7 +154,7 @@ final class Sql
             }
         }
 
-        return ['sql' => $sql, 'params' => $this->params];
+        return ['sql' => $sql . $this->lock, 'params' => $this->params];
     }
 
     // ================================================================ sources, aliases, joins
@@ -205,6 +220,7 @@ final class Sql
             throw HttpError::invalidQuery('orderBy must be an object', $ptr);
         }
         $spec = $this->schema->collection($collection);
+        $orderBy = Schema::resolveAliases($spec, $orderBy, $ptr);
         $out = [];
         foreach ($orderBy as $col => $dir) {
             $col = (string) $col;
@@ -255,10 +271,14 @@ final class Sql
             throw HttpError::invalidQuery('Filter must be an object', $ptr);
         }
         $spec = $this->schema->collection($collection);
+        $where = Schema::resolveAliases($spec, $where, $ptr);
         $parts = [];
         foreach ($where as $key => $value) {
             $kptr = $ptr . HttpError::seg($key);
             $key = (string) $key;
+            if ($value === JsUndefined::Value) {
+                throw HttpError::invalidInput("Filter value for '$key' cannot be undefined; omit the key or pass null explicitly", $kptr);
+            }
             if ($key === 'OR' || $key === 'AND') {
                 $parts[] = $this->combine($key, $value, $kptr, fn ($f, $p) => $this->filter($collection, $f, $alias, $p));
             } elseif ($key === 'NOT') {
@@ -329,6 +349,9 @@ final class Sql
 
     private function op(string $collection, string $name, string $op, mixed $arg, string $alias, string $ptr): string
     {
+        if ($arg === JsUndefined::Value) {
+            throw HttpError::invalidInput("Filter operator '$op' on '$name' cannot be undefined", $ptr);
+        }
         $col = $this->schema->collection($collection)['columns'][$name];
         $src = $this->source($collection);
         $ref = $src->columns[$name];
@@ -417,6 +440,9 @@ final class Sql
             return $negate ? '1 = 1' : '0 = 1';
         }
         foreach ($list as $i => $v) {
+            if ($v === JsUndefined::Value) {
+                throw HttpError::invalidInput("Filter value in list on '$name' cannot be undefined", $ptr . '/' . $i);
+            }
             $this->params[] = $this->param($collection, $name, $v, $ptr . '/' . $i);
         }
 
@@ -503,7 +529,7 @@ final class Sql
         }
         if (!is_array($value) || array_is_list($value)) {
             if ($value === []) {
-                return 'NOT EXISTS (' . $this->linked($collection, $through, $alias) . ')';
+            return 'NOT EXISTS (' . $this->linked($collection, $through, $alias) . $this->lock . ')';
             }
             throw HttpError::invalidQuery("`$name` is a list of ids: filter it with `{ has: id }`, or on the linked rows", $ptr);
         }
@@ -513,13 +539,13 @@ final class Sql
             $parts[] = match ((string) $op) {
                 'has' => Js::isInteger($arg)
                     ? (function () use ($collection, $through, $alias, $arg): string {
-                        $sql = 'EXISTS (' . $this->linked($collection, $through, $alias) . ' AND ' . $this->d->quote('target_id') . ' = ?)';
+                        $sql = 'EXISTS (' . $this->linked($collection, $through, $alias) . ' AND ' . $this->d->quote('target_id') . ' = ?' . $this->lock . ')';
                         $this->params[] = (int) $arg;
 
                         return $sql;
                     })()
                     : throw HttpError::invalidQuery('has expects an id', $optr),
-                'eq' => $arg === [] ? 'NOT EXISTS (' . $this->linked($collection, $through, $alias) . ')'
+                'eq' => $arg === [] ? 'NOT EXISTS (' . $this->linked($collection, $through, $alias) . $this->lock . ')'
                     : throw HttpError::invalidQuery("`eq` isn't supported on list columns; use `has`", $optr),
                 'NOT' => 'NOT (' . $this->linkFilter($collection, $name, $arg, $alias, $optr) . ')',
                 'AND', 'OR' => $this->combine((string) $op, $arg, $optr, fn ($f, $p) => $this->linkFilter($collection, $name, $f, $alias, $p)),
@@ -538,9 +564,11 @@ final class Sql
         $conds = [];
         if ($src->baseWhere !== '') {
             $conds[] = $this->sub($src->baseWhere, $inner, '');
+        } elseif (($this->schema->collection($target)['softDelete'] ?? false) && isset($src->columns['_live'])) {
+            $conds[] = $this->cmpRef($target, '_live', $inner) . ' = 1';
         }
         $conds[] = isset($rel['through'])
-            ? $this->cmpRef($target, $this->schema->collection($target)['primaryKey'], $inner) . ' IN (' . $this->linked($collection, $rel['through'], $alias) . ')'
+            ? $this->cmpRef($target, $this->schema->collection($target)['primaryKey'], $inner) . ' IN (' . $this->linked($collection, $rel['through'], $alias) . $this->lock . ')'
             : $this->cmpRef($target, $rel['to'], $inner) . ' = ' . $this->cmpRef($collection, $rel['from'], $alias);
         if (!$this->trusted && $this->guardsFor !== null) {
             foreach ($this->relationGuards[$target] ??= ($this->guardsFor)($target) as $g) {
@@ -553,7 +581,7 @@ final class Sql
             throw HttpError::invalidQuery('Relation filter must be true, false or a filter object', $ptr);
         }
         // Joins are assembled after the inner filter so nested EXISTS can mark this alias's columns.
-        $sql = 'EXISTS (SELECT 1 FROM ' . $src->table . ' ' . $inner . $this->joins($target, $inner) . ' WHERE ' . implode(' AND ', $conds) . ')';
+        $sql = 'EXISTS (SELECT 1 FROM ' . $src->table . ' ' . $inner . $this->joins($target, $inner) . ' WHERE ' . implode(' AND ', $conds) . $this->lock . ')';
 
         return $value === false ? "NOT $sql" : $sql;
     }

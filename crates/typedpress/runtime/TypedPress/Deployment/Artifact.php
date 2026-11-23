@@ -162,8 +162,14 @@ final class Artifact
                 }
             }
             if (str_starts_with($name, $prefix . 'migrations/') && str_ends_with($name, '.sql')) {
-                Files::require(preg_match('~^' . preg_quote($prefix, '~') . 'migrations/([0-9]{4}_[a-z0-9_]+)\.sql$~D', $name, $matches) === 1,
-                    'invalid_migration', 'Migration filenames must use the compiler numbering convention.');
+                $folderMatch = preg_match('~^' . preg_quote($prefix, '~') . 'migrations/([0-9]{14}_[0-9a-hjkmnp-tv-z]{6}_[a-z0-9_]+)/migration\.sql$~D', $name, $matches) === 1;
+                if ($folderMatch) {
+                    $opsPath = $prefix . 'migrations/' . $matches[1] . '/ops.json';
+                    Files::require(isset($files[$opsPath]), 'invalid_migration', 'Migration folder is missing ops.json beside migration.sql.');
+                } else {
+                    Files::require(preg_match('~^' . preg_quote($prefix, '~') . 'migrations/([0-9]{4}_[a-z0-9_]+)\.sql$~D', $name, $matches) === 1,
+                        'invalid_migration', 'Migration filenames must use the compiler sortable folder or legacy numbering convention.');
+                }
                 $sql = file_get_contents($root . '/' . $name);
                 $sql = preg_replace('~/\*.*?\*/|--[^\n]*~s', ' ', $sql);
                 $destructive = preg_match('/\b(DROP|TRUNCATE|DELETE|REPLACE|UPDATE|MODIFY|CHANGE|RENAME)\b/i', $sql) === 1;

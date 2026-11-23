@@ -8,6 +8,7 @@ use TypedPress\App;
 use TypedPress\Db;
 use TypedPress\HttpError;
 use TypedPress\Schema;
+use TypedPress\Viewer;
 
 /**
  * The app bootstrap (§4.9). Runtime::app constructs it after compatibility checks;
@@ -21,7 +22,7 @@ final class Plugin
     public const MIN_SCF = Platform::PLUGINS['secure-custom-fields']['version'];
 
     private static ?self $instance = null;
-    private static ?bool $keyed = null;
+    private static ?bool $hasLedger = null;
 
     private ?App $app = null;
     private string $mainFile;
@@ -41,6 +42,7 @@ final class Plugin
 
     /** A standalone deploy can replace schema.php mid-request. A managed build's files are immutable. */
     private ?string $loadedHash = null;
+    private ?string $loadedSchemaHash = null;
 
     public function __construct(public readonly string $dir, string $mainFile, public readonly Schema $schema)
     {
@@ -50,6 +52,7 @@ final class Plugin
         self::$instance = $this;
         $this->mainFile = $mainFile;
         if ($this->schema->commerce() !== null) { \TypedPress\Commerce\Module::register($this); }
+        DestructiveMigrations::registerFor($this);
         Hardening::apply($schema);
         Sealed::apply($schema);
         if (!Runtime::managed()) {
@@ -69,6 +72,7 @@ final class Plugin
             });
         }
         CoreAccess::register();
+        Coediting::register();
         AgentScope::register();
         $this->registerEditorSave();
         if (($this->schema->auth()['collection'] ?? null) !== null) {
@@ -83,14 +87,77 @@ final class Plugin
         add_filter('wp_insert_post_empty_content', fn ($empty, $post) => $empty || ($this->unavailable() !== null && $this->touchesCollection($post)), PHP_INT_MAX, 2);
         $refuseDelete = fn ($check, $post) => $this->unavailable() !== null && $post instanceof \WP_Post && $this->touchesCollection((array) $post) ? false : $check;
         // WordPress empties its trash on a schedule (wp_scheduled_delete), with nobody there to read a
-        // refusal: a First item's before half runs here, where core still lets a delete be declined,
-        // so a refused item is skipped and logged and the run goes on.
-        add_filter('pre_delete_post', fn ($check, $post) => $refuseDelete($check, $post) ?? $this->prepareDelete($check, $post), PHP_INT_MAX, 2);
+        // refusal. For TypedPress post types with softDelete enabled, block wp_scheduled_delete so
+        // TypedPress's own `retention` policy (default `"forever"`) governs trash lifetime.
+        add_filter('pre_delete_post', function ($check, $post) use ($refuseDelete) {
+            if ($post instanceof \WP_Post && doing_action('wp_scheduled_delete') && Retention::blocksWpScheduledDelete($this->schema, $post->post_type)) {
+                return false;
+            }
+            if ($check === null && $post instanceof \WP_Post && !$this->connection()->busy() && !wp_doing_cron()
+                && (is_admin() || (defined('REST_REQUEST') && REST_REQUEST)) && get_current_user_id() > 0) {
+                $collection = $this->collectionOf($post->ID);
+                if ($collection !== null && ($this->schema->collection($collection)['softDelete'] ?? false)) {
+                    $viewer = CoreAccess::viewer();
+                    $allowed = $viewer !== null && $this->withTrash(fn () => $this->app()->db->permits($collection, 'purge', $post->ID, $viewer));
+                    if (!$allowed) {
+                        return false;
+                    }
+                }
+            }
+
+            return $refuseDelete($check, $post) ?? $this->prepareDelete($check, $post);
+        }, PHP_INT_MAX, 2);
         // The run's last prepared delete, if a later filter declined it, ends with the run.
         add_action('wp_scheduled_delete', [EditorSave::class, 'abandonPrepared'], PHP_INT_MAX, 0);
         add_filter('pre_trash_post', $refuseDelete, PHP_INT_MAX, 2);
         // wp_untrash_post deletes the trash metadata before its update; refuse before that.
-        add_filter('pre_untrash_post', fn ($check, $post) => $this->unavailable() !== null && $post instanceof \WP_Post && $this->touchesCollection((array) $post) ? false : $check, PHP_INT_MAX, 2);
+        add_filter('pre_untrash_post', function ($check, $post) {
+            if ($this->unavailable() !== null && $post instanceof \WP_Post && $this->touchesCollection((array) $post)) {
+                return false;
+            }
+            if ($check === null && $post instanceof \WP_Post && !$this->connection()->busy()
+                && (is_admin() || (defined('REST_REQUEST') && REST_REQUEST)) && get_current_user_id() > 0) {
+                $collection = $this->collectionOf($post->ID);
+                if ($collection !== null && ($this->schema->collection($collection)['softDelete'] ?? false)) {
+                    $viewer = CoreAccess::viewer();
+                    $allowed = $viewer !== null && $this->withTrash(fn () => $this->app()->db->permits($collection, 'restore', $post->ID, $viewer));
+                    if (!$allowed) {
+                        return false;
+                    }
+                }
+            }
+
+            return $check;
+        }, PHP_INT_MAX, 2);
+        // Keep TypedPress soft-delete metadata in sync when a post is trashed or untrashed via wp-admin or core REST.
+        add_action('trashed_post', function (int $postId): void {
+            if ($this->connection()->busy()) {
+                return;
+            }
+            $collection = $this->collectionOf($postId);
+            if ($collection === null || !($this->schema->collection($collection)['softDelete'] ?? false)) {
+                return;
+            }
+            update_post_meta($postId, WpPostStore::DELETED_AT_META, \TypedPress\Js::iso(\TypedPress\Js::now()));
+            $uid = get_current_user_id();
+            if ($uid > 0) {
+                update_post_meta($postId, WpPostStore::DELETED_BY_META, (string) $uid);
+            } else {
+                delete_post_meta($postId, WpPostStore::DELETED_BY_META);
+            }
+        }, 10, 1);
+        add_action('untrashed_post', function (int $postId): void {
+            if ($this->connection()->busy()) {
+                return;
+            }
+            $collection = $this->collectionOf($postId);
+            if ($collection === null || !($this->schema->collection($collection)['softDelete'] ?? false)) {
+                return;
+            }
+            delete_post_meta($postId, WpPostStore::DELETED_AT_META);
+            delete_post_meta($postId, WpPostStore::DELETED_BY_META);
+            delete_post_meta($postId, WpPostStore::DELETED_GROUP_META);
+        }, 10, 1);
         add_filter('rest_pre_dispatch', [$this, 'refuseCoreWrites'], 10, 3);
         // wp_delete_user deletes the user (and identity its credentials) whatever happens to their
         // posts, so refuse deleting anyone who owns TypedPress posts before any of it starts.
@@ -201,7 +268,9 @@ final class Plugin
             $args[] = '--' . $name . ($value === true ? '' : '=' . ($value === false ? 'false' : (string) $value));
         }
         // (Runtime's `wp typedpress` dispatcher already refused everything but `migrate` while storage is behind.)
-        if (($args[0] ?? '') === 'migrate') {
+        if (($args[0] ?? '') === 'danger') {
+            [$code, $out] = DestructiveMigrations::wpCli($this, array_slice($args, 1), $assocArgs);
+        } elseif (($args[0] ?? '') === 'migrate') {
             try {
                 // `--drop=likes=1204,likes.note=12`: WP-CLI keeps the last of repeated flags, so values are comma-separated.
                 $this->drops = SchemaCheck::drops(array_key_exists('drop', $assocArgs) ? [$assocArgs['drop']] : []);
@@ -311,7 +380,7 @@ final class Plugin
     {
         global $wpdb;
 
-        return $this->connection ??= new Connection($wpdb);
+        return $this->connection ??= new Connection($wpdb, $this->requireWritableStorage(...));
     }
 
     /** A URL inside the app plugin's directory (its compiled client modules). */
@@ -369,9 +438,7 @@ final class Plugin
 
     public function maybeMigrate(): void
     {
-        // Storage from before the rename that hasn't moved yet: migrating now would create empty
-        // tables under the names the data is about to take. The runtime reports why (Runtime::boot).
-        if (!Runtime::installs() || ZeroNames::pending() || $this->current()) {
+        if (!Runtime::installs() || $this->current()) {
             return;
         }
         // A schema refusal holds until someone confirms or changes something: this build, or the
@@ -445,7 +512,7 @@ final class Plugin
     private function refusalState(): string
     {
         $migrator = $this->migrator();
-        $done = $migrator->keyed() ? $migrator->applied() : [];
+        $done = $migrator->hasLedger() ? $migrator->applied() : [];
 
         return hash('sha256', $this->schemaHash() . "\0" . implode("\n", $done));
     }
@@ -527,16 +594,13 @@ final class Plugin
         delete_option($this->refusalOption());
         IdentityBridge::provision();
         $this->backfillMembers();
-        update_option($this->schemaOption(), $this->schemaHash(), false);
+        $schemaHash = $this->schemaHash();
+        NativePosts::rememberPostTypes($this->schema, $schemaHash);
+        update_option($this->schemaOption(), $schemaHash, false);
 
         return $applied;
     }
 
-    /**
-     * Storage matches this build: the schema hash is recorded and the ledger is keyed by app. A
-     * runtime update alone (same app build, older ledger) is therefore an upgrade too; the per-request
-     * check costs one cached option read, plus one information_schema read the first time per process.
-     */
     /**
      * Storage matches this build: nothing refused or held back, and every migration file of the build
      * is in the ledger. A build whose migrations haven't all run (WP-CLI before `typedpress migrate`, a
@@ -558,13 +622,13 @@ final class Plugin
     {
         if ($fresh) {
             wp_cache_delete($this->schemaOption(), 'options');
-            self::$keyed = null;
+            self::$hasLedger = null;
         }
         if (get_option($this->schemaOption()) !== $this->schemaHash()) {
             return false;
         }
 
-        return self::$keyed ??= $this->migrator()->keyed();
+        return self::$hasLedger ??= $this->migrator()->hasLedger();
     }
 
     private function migrator(): Migrator
@@ -580,6 +644,15 @@ final class Plugin
     public function storageProblems(): array
     {
         return $this->migrator()->nonInnoDb();
+    }
+
+    private function requireWritableStorage(): void
+    {
+        $bad = $this->storageProblems();
+        if ($bad !== []) {
+            error_log('[typedpress] TypedPress requires InnoDB and utf8mb4: ' . implode(', ', $bad));
+            throw new \TypedPress\HttpError(503, 'unavailable', self::UNAVAILABLE);
+        }
     }
 
     /**
@@ -603,7 +676,7 @@ final class Plugin
         wp_cache_delete($this->schemaOption(), 'options');
         clearstatcache(true, $this->dir . '/tp/app/schema.php');
 
-        $loaded = $this->buildHash();
+        $loaded = $this->loadedSchemaHash ??= $this->schemaHash();
         return get_option($this->schemaOption()) === $loaded && $this->schemaHash() === $loaded;
     }
 
@@ -614,7 +687,14 @@ final class Plugin
 
     private function schemaHash(): string
     {
-        return hash_file('sha256', $this->dir . '/tp/app/schema.php');
+        $parts = [(string) @hash_file('sha256', $this->dir . '/tp/app/schema.php')];
+        $migFiles = glob($this->dir . '/tp/app/migrations/*/migration.sql') ?: [];
+        sort($migFiles, SORT_STRING);
+        foreach ($migFiles as $file) {
+            $parts[] = basename(dirname($file)) . ':' . (string) @hash_file('sha256', $file);
+        }
+
+        return count($parts) === 1 ? $parts[0] : hash('sha256', implode("\n", $parts));
     }
 
     /** Identifies the compiled schema this request runs: what a runtime schema version was validated on. */
@@ -902,7 +982,8 @@ final class Plugin
         if ($row !== null) {
             $this->deleting[$postId] = [$collection, $row];
             try {
-                $db->beforeEditorDelete($collection, $row, WpAuth::current());
+                $user = WpAuth::current();
+                $db->beforeEditorDelete($collection, $row, $user === null ? null : new Viewer($user));
             } catch (\Throwable $e) {
                 unset($this->deleting[$postId]);
                 if ($prepared) {

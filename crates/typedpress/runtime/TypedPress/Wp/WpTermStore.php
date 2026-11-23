@@ -324,7 +324,7 @@ final class WpTermStore implements Store, Links
             . " JOIN `{$wpdb->term_taxonomy}` tt ON tt.term_taxonomy_id = tr.term_taxonomy_id WHERE tt.taxonomy = '$taxonomy')";
     }
 
-    public function links(string $join, string $by, array $ids): array
+    public function links(string $join, string $by, array $ids, bool $forUpdate = false): array
     {
         if ($ids === []) {
             return [];
@@ -332,7 +332,8 @@ final class WpTermStore implements Store, Links
         $column = $by === 'target_id' ? 'l.`target_id`' : 'l.`owner_id`';
         $rows = $this->db->run(
             'SELECT l.`owner_id`, l.`target_id`, l.`position` FROM ' . $this->linkTable($join) . " l WHERE $column IN ("
-            . implode(', ', array_fill(0, count($ids), '?')) . ') ORDER BY l.`owner_id`, l.`position`, l.`target_id`',
+            . implode(', ', array_fill(0, count($ids), '?')) . ') ORDER BY l.`owner_id`, l.`position`, l.`target_id`'
+            . ($forUpdate ? $this->dialect->writeLock() : ''),
             array_values(array_map('intval', $ids)),
         );
 
@@ -398,11 +399,11 @@ final class WpTermStore implements Store, Links
         return []; // taxonomies keep no revisions
     }
 
-    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId): void
+    public function revisionWrite(string $collection, int|string $pk, array $encodedRow, ?int $userId, array $meta = []): void
     {
     }
 
-    public function revision(string $collection, int|string $pk, int $revisionId): ?array
+    public function revision(string $collection, int|string $pk, int $revisionId, bool $byVersion = false): ?array
     {
         return null;
     }

@@ -75,8 +75,8 @@ final class NativePosts
      * the field `tp_excerpt` becomes the post's own excerpt, on each revision too, comments open when
      * the kind has them on, and a slug a core post already has is made unique by WordPress (the old one
      * kept as `_wp_old_slug`). Nothing is deleted. Runs once per app and site, in one transaction, under
-     * the deploy's lock and after its migrations, and only when this app deployed here before, so a
-     * fresh app never takes another app's leftover rows.
+     * the deploy lock and after migrations. The previous installation of this app on this site
+     * must have declared the source post type.
      *
      * @return int how many items moved
      */
@@ -87,22 +87,22 @@ final class NativePosts
             return 0;
         }
         $old = 'tp_' . $kind;
+        $app = $plugin->schema->name();
+        $previous = get_option('tp_' . $app . '_post_types');
+        $types = $previous['types'] ?? null;
+        $schemaHash = $previous['schemaHash'] ?? null;
+        if (!is_array($types) || !in_array($old, $types, true)
+            || !is_string($schemaHash) || $schemaHash !== get_option('tp_' . $app . '_schema')) {
+            return 0;
+        }
         foreach ($plugin->schema->collections() as $spec) {
             if (($spec['wp']['postType'] ?? null) === $old) {
                 return 0; // another kind of the app still owns that type
             }
         }
         // Once per app and site: the option records that this app's `tp_<kind>` items were adopted.
-        $done = 'tp_' . $plugin->schema->name() . '_adopted_posts';
+        $done = 'tp_' . $app . '_adopted_posts';
         if (get_option($done) !== false) {
-            return 0;
-        }
-        // Only rows this app wrote: it ran here before (its schema option predates this deploy, or its
-        // migration ledger has entries from an earlier build). A fresh app on a site that kept another
-        // app's `tp_posts` leaves them alone.
-        $previous = get_option('tp_' . $plugin->schema->name() . '_schema');
-        if (!is_string($previous) || $previous === '' || $previous === $plugin->buildHash()) {
-            update_option($done, 'none', false);
             return 0;
         }
         $connection = $plugin->connection();
@@ -148,6 +148,13 @@ final class NativePosts
         }
 
         return $moved;
+    }
+
+    /** Remember the post types the app declared on this site after a successful migration. */
+    public static function rememberPostTypes(\TypedPress\Schema $schema, string $schemaHash): void
+    {
+        $types = array_column(array_column($schema->collections(), 'wp'), 'postType');
+        update_option('tp_' . $schema->name() . '_post_types', ['schemaHash' => $schemaHash, 'types' => $types], false);
     }
 
     /**

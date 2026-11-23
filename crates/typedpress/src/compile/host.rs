@@ -380,6 +380,7 @@ impl Compiler<'_, '_> {
 
     /// `fetch(url, init?)`, the standard signature, → `Promise<Response>`.
     fn fetch_call(&mut self, args: &[ArrEl], span: Span) -> Result<Out> {
+        self.route_opaque("fetch");
         if args.is_empty() || args.len() > 2 {
             return err_help(
                 span,
@@ -388,7 +389,7 @@ impl Compiler<'_, '_> {
             );
         }
         let url_expr = self.arg(args, 0, span, "a URL")?;
-        let host = static_host(url_expr);
+        let host = static_host(url_expr, |callee| self.is_global(callee, "URL"));
         self.host_use(HostUse::Fetch(host.as_deref()), url_expr.span)?;
         let url = self.expr(url_expr)?;
         let url = self.finish_value(url, url_expr.span)?;
@@ -409,6 +410,20 @@ impl Compiler<'_, '_> {
             None => "null".to_string(),
             Some(_) => {
                 let init_expr = self.arg(args, 1, span, "init")?;
+                // Only a GET or HEAD written out as such reads; any other method may change something
+                // on the other side, so a query can't send it.
+                let reads = match &init_expr.kind {
+                    ExprKind::Object(props) => props.iter().all(|p| match p {
+                        Prop::KV(PropKey::Static(k), v) if k == "method" => {
+                            matches!(&v.kind, ExprKind::Str(m) if m.eq_ignore_ascii_case("GET") || m.eq_ignore_ascii_case("HEAD"))
+                        }
+                        _ => true,
+                    }),
+                    _ => false,
+                };
+                if !reads {
+                    self.writes(init_expr.span, "sends a request that isn't a GET");
+                }
                 let mut spans = HashMap::new();
                 if let ExprKind::Object(props) = &init_expr.kind {
                     for p in props {

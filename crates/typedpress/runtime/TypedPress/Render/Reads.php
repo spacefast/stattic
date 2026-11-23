@@ -74,6 +74,13 @@ final class Reads
         }
     }
 
+    public static function option(string $name): void
+    {
+        if (self::$current !== null) {
+            self::$also['option:' . $name] = true;
+        }
+    }
+
     /**
      * A read that returned no rows but depended on all of a kind's (a count): recorded as a listing,
      * so any write to the kind counts as a change to what the render read.

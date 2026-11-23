@@ -180,7 +180,7 @@ final class Organizations
                 604800,
             );
             $siteName = get_bloginfo("name");
-            $identityUrl = home_url("/identity");
+            $identityUrl = home_url(Plugin::basePath());
             $invitationCode = $id . "." . $secret;
             $subject = "Join your organization on " . $siteName;
             $custom = class_exists(\TypedPress\Render\Email::class)

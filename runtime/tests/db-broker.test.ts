@@ -38,6 +38,7 @@ afterAll(() => {
 
 type CliRequest = {
   space?: string;
+  preview?: string;
   databases?: typeof d1Databases;
   migrate?: boolean;
   action?: string;
@@ -575,6 +576,7 @@ type D1Operation = (D1Statement | { mode: "transaction"; statements: D1Statement
 
 async function d1(input: {
   space?: string;
+  preview?: string;
   databases?: typeof d1Databases;
   migrate?: boolean;
   operations?: D1Operation[];
@@ -582,6 +584,7 @@ async function d1(input: {
   const result = await php({
     action: "d1",
     space: input.space ?? "spc_d1",
+    preview: input.preview,
     databases: input.databases ?? d1Databases,
     migrate: input.migrate ?? false,
     capabilities: ["db.read", "db.write"],
@@ -690,4 +693,60 @@ test("D1 refuses table escapes and unsupported SQL before execution and isolates
   expect(result.responses?.slice(1).map((r) => [r.ok, r.code])).toEqual(
     Array.from({ length: 7 }, () => [false, "d1_error"]),
   );
+});
+
+test("a preview's D1 migrations, reads and writes never reach live tables or another preview's", async () => {
+  const space = "spc_d1_preview";
+  const tables = () =>
+    mysql
+      .exec("SHOW TABLES LIKE 'sf\\_d1\\_%'")
+      .split("\n")
+      .filter((name) => name !== "")
+      .toSorted();
+  expect(await d1({ space, migrate: true })).toEqual({ responses: [] });
+  const liveTables = tables();
+  await d1({
+    space,
+    operations: [
+      { sql: "INSERT INTO links (slug,url) VALUES ('live','https://example.com/live')" },
+    ],
+  });
+
+  // The preview migrates on its own scope: three new tables (two declared and
+  // its ledger), none of the live ones touched.
+  expect(await d1({ space, preview: "ver_preview_a", migrate: true })).toEqual({ responses: [] });
+  const withPreview = tables();
+  expect(withPreview.filter((name) => !liveTables.includes(name))).toHaveLength(3);
+  expect(liveTables.every((name) => withPreview.includes(name))).toBe(true);
+
+  const preview = await d1({
+    space,
+    preview: "ver_preview_a",
+    operations: [
+      { sql: "SELECT slug FROM links" },
+      { sql: "INSERT INTO links (slug,url) VALUES ('preview','https://example.com/preview')" },
+      { sql: "DELETE FROM links WHERE slug='live'" },
+      { sql: "SELECT slug FROM links" },
+    ],
+  });
+  expect(preview.responses?.map((r) => r.rows ?? r.affectedRows)).toEqual([
+    [],
+    1,
+    0,
+    [{ slug: "preview" }],
+  ]);
+  // A second preview of the same Space is isolated from the first.
+  expect(
+    (
+      await d1({
+        space,
+        preview: "ver_preview_b",
+        migrate: true,
+        operations: [{ sql: "SELECT slug FROM links" }],
+      })
+    ).responses?.[0],
+  ).toEqual({ ok: true, rows: [] });
+
+  const live = await d1({ space, operations: [{ sql: "SELECT slug FROM links" }] });
+  expect(live.responses?.[0]).toEqual({ ok: true, rows: [{ slug: "live" }] });
 });

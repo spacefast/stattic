@@ -104,6 +104,7 @@
     "engine/shared/space-mail.php",
     "engine/shared/space-identity.php",
     "engine/shared/spacepress.php",
+    "engine/shared/preview.php",
     "engine/shared/native-process.php",
     "engine/shared/pointers.php",
     "engine/shared/private-tree.php",

@@ -203,8 +203,8 @@ function _stattic_spacepress_bind_wordpress(): void
         add_filter('sp_auth_prefix', static fn (): string => SP_AUTH_PREFIX);
         add_filter('sp_assets_dir', static fn (): string => SP_ASSETS_DIR);
         add_filter('sp_assets_url', static fn (): string => SP_ASSETS_URL);
-        add_filter('sp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_send($message), 10, 2);
-        add_filter('tp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_send($message), 10, 2);
+        add_filter('sp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
+        add_filter('tp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
         add_filter('sp_connectors_call', '_stattic_spacepress_connectors_call', 10, 4);
 
         add_filter('automatic_updater_disabled', '__return_true');
@@ -214,6 +214,26 @@ function _stattic_spacepress_bind_wordpress(): void
         add_filter('site_url', 'spacefast_content_request_url', 1);
         add_filter('home_url', 'spacefast_content_public_url', 1);
         add_filter('rest_url', 'spacefast_content_request_url', 1);
+    }
+
+    // A preview never charges a live card, delivers a webhook or mails a
+    // customer (shared/preview.php).
+    $versionId = (string) ($context['version_id'] ?? '');
+    if ($privateRoot !== '' && $spaceId !== '' && $versionId !== '') {
+        require_once __DIR__ . '/preview.php';
+        try {
+            $preview = _stattic_runtime_version_is_preview($privateRoot, $spaceId, $versionId);
+        } catch (RuntimeException) {
+            // No evidence this is live: hold its side effects rather than
+            // refuse the request or let a preview send.
+            $preview = true;
+        }
+        if ($preview) {
+            $variables = is_file($root . '/variables.json')
+                ? json_decode((string) file_get_contents($root . '/variables.json'), true)
+                : [];
+            _stattic_preview_guard_side_effects($versionId, is_array($variables) ? $variables : []);
+        }
     }
 }
 
@@ -322,6 +342,13 @@ function _stattic_spacepress_mail_variables(): array
         'SP_MAIL_SENDER_DOMAIN' => $normalized,
         'TP_MAIL_SENDER_DOMAIN' => $normalized,
     ];
+}
+
+/** A preview holds SpacePress mail (shared/preview.php); live sends it. */
+function _stattic_spacepress_mail_transport(array $message): bool
+{
+    require_once __DIR__ . '/preview.php';
+    return _stattic_preview_mail_held() || _stattic_spacepress_mail_send($message);
 }
 
 /** Hand a SpacePress mail message to the Space's native service-broker email lane. */

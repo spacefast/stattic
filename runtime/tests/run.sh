@@ -83,7 +83,7 @@ test_args+=(--timeout 30000)
 # zero-v2-worker.test.ts runs ~44s and zero-v2-realtime, installer-update, and
 # content-source-sync land in 50-62s general shards; launching them up front
 # eliminates the long solo tail at the end of the suite.
-long_files=(tests/typedpress-publish.test.ts tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts tests/zero-v2-worker.test.ts tests/zero-v2-realtime.test.ts tests/installer-update.test.ts tests/content-source-sync.test.ts tests/typedpress-space-role.test.ts tests/access-chain.test.ts tests/wp-api.test.ts)
+long_files=(tests/typedpress-publish.test.ts tests/db-broker.test.ts tests/admission.test.ts tests/poppy-publish.test.ts tests/connectors-publish.test.ts tests/access-page.test.ts tests/version-delete-tombstones.test.ts tests/zero-v2-hosted.test.ts tests/zero-v2-write-seed.test.ts tests/zero-v2-worker.test.ts tests/zero-v2-realtime.test.ts tests/installer-update.test.ts tests/content-source-sync.test.ts tests/typedpress-space-role.test.ts tests/access-chain.test.ts tests/wp-api.test.ts tests/spacepress-preview-parity.test.ts)
 reports=()
 # Each process writes a JUnit report, the proof that the suite really ran.
 junit_dir="$(mktemp -d)"

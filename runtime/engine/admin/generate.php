@@ -1714,8 +1714,11 @@ function _stattic_runtime_redirect_target_safe(string $destination, string $acti
     return true;
 }
 
-/** Finalize must complete D1 migrations before any route pointer can activate. */
-function _stattic_runtime_apply_d1_migrations(array $functions, string $spaceId): void
+/**
+ * Finalize must complete D1 migrations before any route pointer can activate.
+ * A preview (`$previewVersionId`) migrates its own scope, never live tables.
+ */
+function _stattic_runtime_apply_d1_migrations(array $functions, string $privateRoot, string $spaceId, ?string $previewVersionId = null, bool $allowApplied = false): void
 {
     $databases = $functions['artifact']['d1'] ?? [];
     if ($databases === []) return;
@@ -1723,7 +1726,11 @@ function _stattic_runtime_apply_d1_migrations(array $functions, string $spaceId)
     _stattic_db_broker_bind_provider();
     _stattic_db_broker_grant(['db.read', 'db.write']);
     try {
-        _sf_d1_migrate($spaceId, $databases);
+        _sf_d1_migrate($spaceId, $databases, $previewVersionId, $allowApplied);
+        if ($previewVersionId !== null) {
+            require_once __DIR__ . '/../shared/preview.php';
+            _stattic_preview_d1_mark_ready($privateRoot, $spaceId, $previewVersionId);
+        }
     } catch (Throwable $error) {
         $message = $error->getMessage();
         if (!str_starts_with($message, 'D1_')) $message = 'D1 database migrations failed.';

@@ -461,7 +461,13 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     _stattic_runtime_publish_session_require_complete($session);
     require_once __DIR__ . '/../shared/zero-v2.php';
     $functionsFinalize = is_array($body['functions'] ?? null) ? $body['functions'] : null;
-    if ($functionsFinalize !== null) _stattic_runtime_apply_d1_migrations($functionsFinalize, $spaceId);
+    // A version finalized without activating production is a preview: its D1
+    // migrations run on its own scope. Promotion migrates the live scope.
+    $liveD1Prepared = false;
+    if ($functionsFinalize !== null) {
+        $liveD1Prepared = is_array($body['activate'] ?? null) && _stattic_runtime_activation_route_name($body['activate']) === 'production';
+        _stattic_runtime_apply_d1_migrations($functionsFinalize, $privateRoot, $spaceId, $liveD1Prepared ? null : $versionId);
+    }
     $zeroLock = _stattic_zero_v2_finalize_lock($privateRoot, $spaceId, $session);
     try {
         $finalized = _stattic_runtime_finalize_with_rust($privateRoot, $spaceId, $versionId, $uploadId, $session, $body);
@@ -508,7 +514,7 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if (isset($body['activate']) && is_array($body['activate'])) {
         $activation = $body['activate'];
         $routeName = _stattic_runtime_activation_route_name($activation);
-        $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, $routeName, $versionId, $activation, $claims, true);
+        $pointer = _stattic_runtime_write_route_pointer($privateRoot, $spaceId, $routeName, $versionId, $activation, $claims, true, liveD1Prepared: $liveD1Prepared);
         $activationEventId = is_string($pointer['activation_event_id'] ?? null)
             ? $pointer['activation_event_id']
             : null;
@@ -536,6 +542,22 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
         // finalizer's envelope and stops here on a replay.
         is_array($finalized['telemetry'] ?? null) ? $finalized['telemetry'] : null,
     );
+}
+
+/**
+ * A previously finalized version gets its D1 plan from disk before it goes
+ * live. A rollback whose migrations are already applied runs nothing.
+ */
+function _stattic_runtime_migrate_live_d1(string $privateRoot, string $spaceId, string $versionId): void
+{
+    $functions = _stattic_functions_config_read(_stattic_version_root($privateRoot, $spaceId, $versionId));
+    if ($functions['kind'] === 'unavailable' || $functions['kind'] === 'malformed') {
+        // Moving the pointer without the version's tables would break its Worker.
+        _stattic_problem_response(503, 'functions_config_unavailable', 'The version\'s Functions configuration could not be read. Retry the promotion.');
+    }
+    if ($functions['kind'] === 'present') {
+        _stattic_runtime_apply_d1_migrations($functions['value'], $privateRoot, $spaceId, null, true);
+    }
 }
 
 function _stattic_runtime_activation_route_name(array $activation): string
@@ -1354,7 +1376,7 @@ function _stattic_runtime_route_updated_event(string $spaceId, string $routeName
 // The one route-pointer flip, for route PUT and finalize+activate alike. An
 // unchanged conditional write must stay fully silent. No journal event means no
 // edge purge for reconcile-sweep and plan-sync re-pushes.
-function _stattic_runtime_write_route_pointer(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $body, array $claims, bool $storeIntent): array
+function _stattic_runtime_write_route_pointer(string $privateRoot, string $spaceId, string $routeName, string $versionId, array $body, array $claims, bool $storeIntent, bool $liveD1Prepared = false): array
 {
     $configDigest = is_string($body['config_digest'] ?? null) && $body['config_digest'] !== ''
         ? $body['config_digest']
@@ -1471,6 +1493,9 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
             ..._stattic_runtime_access_sweep_hostnames($storeIntent ? ['routes' => $intentRoutes] : $previousIntent, $tombstones),
         ]))
         : $hostnames;
+    if ($routeName === 'production' && !$liveD1Prepared && ($previousRoute['version_id'] ?? null) !== $versionId) {
+        _stattic_runtime_migrate_live_d1($privateRoot, $spaceId, $versionId);
+    }
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $purgeHosts, $needsSweep ? 'space_access_privatized' : 'route_updated');
     _stattic_runtime_write_route(
         $privateRoot,

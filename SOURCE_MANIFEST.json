@@ -1,7 +1,7 @@
 {
-  "revision": "45bcf194e5f120ae9e73c7a2ea3301037d198ad1",
-  "sourceHash": "e564b61f6854dfc3be5d1a825045e55f0006531cf6b2c08e901fe0778688ebdf",
-  "manifestSha256": "cf4d52968cc6a495dd657d927d75fcbf7aba7a5e960119c2134073bb377e9844",
+  "revision": "b440e8f085973f398b9a396a28fec928c07f8bc1",
+  "sourceHash": "afe09fe742124a3ee5ff978bc9282da9d6096318bc5d6f624950e8cab4429663",
+  "manifestSha256": "2f18c048516e16fe6ae57373e17839bf35f2b1c30e57727d7c090a1671fc9d1c",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "009864f71efa430cc4717b861e96964fa1fd8623a48a3400539fee0e2371365d"
+      "sha256": "cbc5cd7f6921103296b76730e570fb0517eeb298fbde5fb24e3456feb30fe696"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a49eea58756cd1d5b345a203ddd9807e767ec3a110b04ce0d8527190f73c3284"
+      "sha256": "6d5ac6bb8afc0cacfddc2dfe88c0eb896fb1d5055055be83ab079af9f51ed5dd"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29777,7 +29777,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "e8104f08b9b52c6c2ee5cf1bed1028198daa2f091693bd8ebd504ead69aa5ea7"
+      "sha256": "4aebd3f70f57d4818dbb053c325a8e51d398f13f702bc61ba31628345269092b"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -29809,7 +29809,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "fa39a467c0e35656d4fc54289de05ac43f53e63e9cef74c24690b5abdee0cce1"
+      "sha256": "831f0152e45d108efb411dd7e770ff064955fed39d7ef18f6357d71a80e08d2e"
     },
     {
       "path": "runtime/engine/admin/generated-blob.php",
@@ -29825,7 +29825,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "0f513d4739ccd6898e5930475046f38c0f29cfdd1a628950327b68af7d03f852"
+      "sha256": "5bee2b28889fff874dcb71e42f16314e6784bd78c98bfaa36f9252aa4bd36e9c"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -30113,7 +30113,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-relay.php",
-      "sha256": "7695eb10fbed56ae90c5632709f4618c72660abca65a33f2b8ef1f2fe990fb42"
+      "sha256": "7d968befb491a3f906db6de5e6374c4cea882ba5d8bea466ecd43f3ad1a9d94b"
     },
     {
       "path": "runtime/engine/runtime/headers.php",
@@ -30265,7 +30265,7 @@
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
-      "sha256": "5b566c551765321eeaf2dda05ea6e3368a5a8a275264bcf30c1ec7925b8ccae8"
+      "sha256": "dfd51f740fd15bb34e7d6fcfd7948189786d53e3cd6a30e0f13e5435b468c472"
     },
     {
       "path": "runtime/engine/shared/d1-sql.php",
@@ -30340,6 +30340,10 @@
       "sha256": "7205ce248cc3213a339b480dd959d9dc90b826e67082acd4afeb82a9dfb0e12e"
     },
     {
+      "path": "runtime/engine/shared/preview.php",
+      "sha256": "28c1016736b88cc3798688d5dbce62f4faaf46229bb26fb8a01ec680b430488f"
+    },
+    {
       "path": "runtime/engine/shared/private-tree.php",
       "sha256": "37e17eccb1db4fb524e5aca375d0977c523df81ae6d61b1b5daea42b85b59612"
     },
@@ -30401,7 +30405,7 @@
     },
     {
       "path": "runtime/engine/shared/spacepress.php",
-      "sha256": "a985a05891cbeebb658451a3e89dc1d4c1814c39bee7962d1e692d49728dd257"
+      "sha256": "d2ab87e9278bad5cb56bff774622707a06c58736e69f0fb1d9b580fe78240496"
     },
     {
       "path": "runtime/engine/shared/storage-policy.generated.php",
@@ -30669,7 +30673,7 @@
     },
     {
       "path": "runtime/tests/db-broker-cli.php",
-      "sha256": "62fe77559c18c878c8012bf2e8d86682efc6bbea25b8be9f73a0dcefc07c5388"
+      "sha256": "3cea478bf9f4cb7ba44b117ba0485760fdd4ffbda638b1b0a031822f7b6b7b8c"
     },
     {
       "path": "runtime/tests/db-broker-corpus.ts",
@@ -30681,7 +30685,7 @@
     },
     {
       "path": "runtime/tests/db-broker.test.ts",
-      "sha256": "44d804fc9b4cb8f1bf82d6cb244ae3a337f4273f6e6e06d2a4512ef543c79a30"
+      "sha256": "6ae09ac55f8637c2b3a1acdda099bdff014e6cac20ea138f0ec3bfe78e1c50e9"
     },
     {
       "path": "runtime/tests/dispatch.test.ts",
@@ -30780,6 +30784,14 @@
       "sha256": "bfb7c73fe84a19ef11956694484e5fe3747b0cce54ba2ccc3526e48c94a8a05f"
     },
     {
+      "path": "runtime/tests/fixtures/preview-side-effects.php",
+      "sha256": "f7afb0321a80fc90188a5cd0be48d430d2c97fc3be78cccb68d3cd9cf41dcfa8"
+    },
+    {
+      "path": "runtime/tests/fixtures/spacepress-preview-parity.php",
+      "sha256": "d13bcf0fad060a5bd81da32e24871b658a2916cea854134b5531d73b36c2ea79"
+    },
+    {
       "path": "runtime/tests/fixtures/without-intl-prepend.php",
       "sha256": "6251268fbfb55afff9a74e324ff2dfd1a7f168cac48886ce9aae964cafafa702"
     },
@@ -30817,7 +30829,7 @@
     },
     {
       "path": "runtime/tests/functions-relay.test.ts",
-      "sha256": "50461fe5c7ebe4933d4d82b222f6e8b558e4894d9657a2dc57c45977f7bb531a"
+      "sha256": "a05c053b7ff62371670e79b9d029ab689643cbd710e654906cae63457d4ad553"
     },
     {
       "path": "runtime/tests/grant-conformance.php",
@@ -30904,6 +30916,10 @@
       "sha256": "546d8c876321bd2018e69730030568caa50037304d7a0a19eb288f2879e17faa"
     },
     {
+      "path": "runtime/tests/preview-side-effects.test.ts",
+      "sha256": "8539d389c3297da5abad733def63f823d0c208a025225aecc1d093595e10d4cc"
+    },
+    {
       "path": "runtime/tests/provenance-serving.test.ts",
       "sha256": "759d10b1a461787591f30cf88bbcff35860d7e884ded9b18b9ad4bd85ac9d7b3"
     },
@@ -30937,7 +30953,7 @@
     },
     {
       "path": "runtime/tests/run.sh",
-      "sha256": "f1c9b05a1372483ef51b2c17e2488455f39c437afdf2ede8ee454b4a6005c7cf"
+      "sha256": "952d36e8a769a7521a6b4575d96137cf8ad4450a83e3ca560426ad4a6c80a2fc"
     },
     {
       "path": "runtime/tests/runtime-binary.sh",
@@ -30990,6 +31006,10 @@
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
       "sha256": "4b92f057f7c7dd05edb4904b86c2f999822942be0b2b628005c88c25eda2143e"
+    },
+    {
+      "path": "runtime/tests/spacepress-preview-parity.test.ts",
+      "sha256": "d6e677e83cc4ec24c3e4f5d1132129df9b84f1e712d085122e0fca0d81912060"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",

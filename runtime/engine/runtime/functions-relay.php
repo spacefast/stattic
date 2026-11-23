@@ -245,7 +245,28 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
         $frame = json_decode($body, true);
         if ($databases !== [] || (is_array($frame) && array_key_exists('d1', $frame))) {
             require_once __DIR__ . '/../shared/d1-broker.php';
-            $answer = _sf_d1_execute($body, $spaceId, $databases);
+            require_once __DIR__ . '/../shared/preview.php';
+            // A preview Worker's `env.DB` reaches its own tables, never live ones.
+            $versionId = (string) $claims['version_id'];
+            try {
+                $previewScope = _stattic_runtime_version_is_preview($privateRoot, $spaceId, $versionId) ? $versionId : null;
+                if ($previewScope !== null && $databases !== []) {
+                    // Migrating is the platform's work, not the Worker's: it
+                    // runs on a full grant, outside the frame's operation budget,
+                    // whatever the credential itself may do.
+                    _stattic_db_broker_grant(['db.read', 'db.write']);
+                    try {
+                        _stattic_preview_d1_ensure($privateRoot, $spaceId, $versionId, $databases);
+                    } finally {
+                        _stattic_db_broker_grant($grant);
+                        _stattic_db_broker_reset_metrics();
+                    }
+                }
+            } catch (RuntimeException|JsonException $error) {
+                $message = str_starts_with($error->getMessage(), 'D1_') ? $error->getMessage() : 'D1_ERROR: database operation failed.';
+                _stattic_response_send(200, json_encode(['ok' => false, 'code' => 'd1_error', 'message' => $message], JSON_THROW_ON_ERROR), 'application/json; charset=utf-8', ['Cache-Control' => 'no-store']);
+            }
+            $answer = _sf_d1_execute($body, $spaceId, $databases, $previewScope);
         } else {
             $answer = _stattic_db_broker_execute($body);
         }
@@ -285,6 +306,32 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     if ($broker === 'zero') {
         require_once __DIR__ . '/../deprecated/legacy-serve.php';
         _stattic_legacy_serve_relay_zero($body, $visitor, $identity, $spaceId, $config, $versionRoot, $serving, $host);
+    }
+
+    // A preview Worker's mail is accepted and dropped unless its version opts
+    // in, the same rule the preview's WordPress follows (shared/preview.php).
+    $serviceFrame = $broker === 'services' ? json_decode($body, true) : null;
+    if (
+        is_array($serviceFrame)
+        && ($serviceFrame['service'] ?? null) === 'email'
+        && ($serviceFrame['operation'] ?? null) === 'send'
+        && in_array('email.send', $grant, true)
+    ) {
+        require_once __DIR__ . '/../shared/preview.php';
+        $versionId = (string) $claims['version_id'];
+        try {
+            $preview = _stattic_runtime_version_is_preview($privateRoot, $spaceId, $versionId);
+        } catch (RuntimeException) {
+            _stattic_problem_refused(503, 'relay_unavailable', 'The Space route could not be read.');
+        }
+        $variableValues = is_array($config['variableValues'] ?? null) ? $config['variableValues'] : [];
+        if ($preview && !_stattic_preview_allows($variableValues, STATTIC_PREVIEW_ALLOW_MAIL)) {
+            $GLOBALS['SPACEFAST_PREVIEW_GUARD'] = ['version_id' => $versionId, 'held' => []];
+            _stattic_preview_record('mail_held', []);
+            _stattic_response_send(200, '{"ok":true,"result":true,"held":"preview"}', 'application/json; charset=utf-8', [
+                'Cache-Control' => 'no-store',
+            ]);
+        }
     }
 
     $result = _stattic_runtime_run_subprocess(

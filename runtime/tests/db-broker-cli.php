@@ -44,8 +44,10 @@ switch ((string) ($request['action'] ?? 'operations')) {
     case 'd1':
         require_once __DIR__ . '/../engine/shared/d1-broker.php';
         try {
-            if ($request['migrate'] ?? false) _sf_d1_migrate($request['space'], $request['databases']);
-            $out['responses'] = array_map(fn ($operation) => _sf_d1_execute($operation, $request['space'], $request['databases']), $request['operations'] ?? []);
+            // `preview` names the version whose own D1 scope this run uses.
+            $preview = is_string($request['preview'] ?? null) ? $request['preview'] : null;
+            if ($request['migrate'] ?? false) _sf_d1_migrate($request['space'], $request['databases'], $preview);
+            $out['responses'] = array_map(fn ($operation) => _sf_d1_execute($operation, $request['space'], $request['databases'], $preview), $request['operations'] ?? []);
         } catch (Throwable $error) {
             $out['error'] = $error->getMessage();
         }

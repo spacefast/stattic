@@ -15,11 +15,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { Window } from "happy-dom";
+import { z } from "zod";
 
 import {
   enableSpaceMailEndpoint,
   apiJson,
+  createDeclaredSession,
   deploy,
+  finalize,
   finalizeRaw,
   get,
   publicAccessConfig,
@@ -30,6 +33,7 @@ import {
   selfSignedCertificate,
   signToken,
   startRuntime,
+  uploadSessionBlobs,
 } from "./harness.ts";
 import {
   type MysqlContainer,
@@ -675,6 +679,67 @@ test("mail needs a daily allowance, then sends through wp_mail and returns its a
   expect(wpMailCaptures()).toHaveLength(before + 3);
   // Leave an enabled route for the unauthorized-domain refusal below.
   await routeWithAllowance(4);
+});
+
+test("a preview Worker's mail is held unless the version opts in", async () => {
+  await putRoute(rt, SPACE_ID, "production", {
+    version_id: VERSION_ID,
+    config: {
+      ...publicAccessConfig({ mode: "website", site_title: "Functions relay" }),
+      billing: { emailRecipientsDaily: 10 },
+      email: { senderDomain: "example.com" },
+    },
+  });
+  const message = {
+    service: "email",
+    operation: "send",
+    payload: {
+      from: { email: "orders@example.com" },
+      to: [{ email: "customer@example.com" }],
+      subject: "Your order",
+      text: "Thanks",
+    },
+  };
+  const deployPreview = (versionId: string, variableValues: Record<string, string>) =>
+    deploy(rt, {
+      spaceId: SPACE_ID,
+      versionId,
+      metadata: { mode: "website", title: "Mail preview" },
+      files: { "index.html": "preview" },
+      functions: { ...functionsFinalize("functions.test"), variableValues },
+    });
+  await deployPreview("ver_fx_mail_preview", {});
+  await deployPreview("ver_fx_mail_preview_opt_in", { SPACEPRESS_PREVIEW_ALLOW_MAIL: "true" });
+  const token = (versionId: string) =>
+    relayToken({ version_id: versionId, capabilities: ["email.send"] });
+  const before = wpMailCaptures().length;
+
+  const unknown = await relay(
+    { ...message, operation: "unknown" },
+    token("ver_fx_mail_preview"),
+    "services",
+    "inv_preview_mail_unknown",
+  );
+  expect(await unknown.json()).toMatchObject({ ok: false, code: "service_operation_unknown" });
+
+  const held = await relay(message, token("ver_fx_mail_preview"), "services", "inv_preview_mail");
+  expect(await held.json()).toEqual({ ok: true, result: true, held: "preview" });
+  expect(wpMailCaptures()).toHaveLength(before);
+  expect(
+    runtimeLogRecords().some(
+      (record) =>
+        record.versionId === "ver_fx_mail_preview" && record.metadata.event === "mail_held",
+    ),
+  ).toBe(true);
+
+  const sent = await relay(
+    message,
+    token("ver_fx_mail_preview_opt_in"),
+    "services",
+    "inv_preview_mail_opt_in",
+  );
+  expect(await sent.json()).toEqual({ ok: true, result: true });
+  expect(wpMailCaptures()).toHaveLength(before + 1);
 });
 
 test("mail from a domain other than the Space primary is refused before sending", async () => {
@@ -1525,4 +1590,157 @@ test("finalize provisions D1 before serving and the relay restricts its credenti
   expect(await failed.json()).toMatchObject({ code: "d1_migration_failed" });
   expect(mysql.exec("SHOW TABLES")).toBe(tablesBefore);
   expect(await (await get(rt, HOST, "/")).text()).toContain("<h1>static</h1>");
+});
+
+const d1AnswerSchema = z.object({
+  ok: z.boolean(),
+  rows: z.array(z.record(z.string(), z.unknown())).optional(),
+  affectedRows: z.number().optional(),
+});
+
+test("a preview Worker's env.DB and a preview finalize never touch the live D1 tables, and promotion migrates live", async () => {
+  const space = "spc_fx_d1_scope";
+  const host = "fx-d1-scope.test";
+  const functions = functionsFinalize(host);
+  const d1 = (sql: string, next?: string) => ({
+    ...functions,
+    artifact: {
+      ...functions.artifact,
+      d1: [
+        {
+          binding: "DB",
+          databaseName: "scoped",
+          migrations: [
+            { name: "0001.sql", sql },
+            ...(next === undefined ? [] : [{ name: "0002.sql", sql: next }]),
+          ],
+        },
+      ],
+    },
+    grantedCapabilities: ["db.read", "db.write"],
+  });
+  const route = {
+    config: publicAccessConfig({ mode: "website", site_title: "D1 scope" }),
+    production_hostnames: [host],
+    noindex_production_hostnames: [],
+    version_hostnames: [],
+  };
+  const query = async (versionId: string, sql: string, params: string[] = []) => {
+    const response = await fetch(`${rt.baseUrl}/__spacefast/functions/relay`, {
+      method: "POST",
+      headers: {
+        host,
+        "content-type": "application/json",
+        authorization: `Bearer ${relayToken({ space_id: space, version_id: versionId })}`,
+      },
+      body: JSON.stringify({ d1: "DB", sql, params }),
+    });
+    return d1AnswerSchema.parse(await response.json());
+  };
+  const d1Tables = () => mysql.exec("SHOW TABLES LIKE 'sf\\_d1\\_%'").split("\n").filter(Boolean);
+
+  await deploy(rt, {
+    spaceId: space,
+    versionId: "ver_d1_live",
+    metadata: { mode: "website", title: "D1 live" },
+    files: { "index.html": "live" },
+    functions: d1("CREATE TABLE items (slug TEXT PRIMARY KEY);"),
+    activate: { route_name: "production", ...route },
+  });
+  expect(
+    await query("ver_d1_live", "INSERT INTO items (slug) VALUES (?)", ["live-row"]),
+  ).toMatchObject({
+    ok: true,
+    affectedRows: 1,
+  });
+  const liveTables = d1Tables();
+
+  // A preview whose migration adds a column the live schema lacks.
+  await deploy(rt, {
+    spaceId: space,
+    versionId: "ver_d1_preview",
+    metadata: { mode: "website", title: "D1 preview" },
+    files: { "index.html": "preview" },
+    functions: d1("CREATE TABLE items (slug TEXT PRIMARY KEY, note TEXT);"),
+  });
+  const previewTables = d1Tables().filter((name) => !liveTables.includes(name));
+  expect(previewTables).toHaveLength(2);
+  expect(await query("ver_d1_preview", "SELECT slug FROM items")).toEqual({ ok: true, rows: [] });
+  expect(
+    await query("ver_d1_preview", "INSERT INTO items (slug, note) VALUES (?, ?)", [
+      "preview-row",
+      "draft",
+    ]),
+  ).toMatchObject({ ok: true, affectedRows: 1 });
+  expect(await query("ver_d1_preview", "DELETE FROM items")).toMatchObject({
+    ok: true,
+    affectedRows: 1,
+  });
+  expect(await query("ver_d1_live", "SELECT slug FROM items")).toEqual({
+    ok: true,
+    rows: [{ slug: "live-row" }],
+  });
+  // The live schema never saw the preview's column.
+  expect(await query("ver_d1_live", "SELECT note FROM items")).toMatchObject({ ok: false });
+
+  // Promotion runs the version's new migration against the live scope first,
+  // so its Worker reads live rows through the new column.
+  const third = "ver_d1_promoted";
+  const files = { "index.html": "promoted" };
+  const session = await createDeclaredSession(rt, space, third, files, {
+    metadata: { mode: "website", title: "D1 promoted" },
+  });
+  await uploadSessionBlobs(rt, session, files);
+  const preview = await finalize(rt, space, third, {
+    upload_id: session.uploadId,
+    functions: d1(
+      "CREATE TABLE items (slug TEXT PRIMARY KEY);",
+      "ALTER TABLE items ADD COLUMN rank INTEGER;",
+    ),
+  });
+  expect(preview.status).toBe(200);
+  expect(
+    await query(third, "INSERT INTO items (slug, rank) VALUES (?, ?)", ["third-preview-row", "1"]),
+  ).toMatchObject({ ok: true });
+  expect(await query("ver_d1_live", "SELECT rank FROM items")).toMatchObject({ ok: false });
+  // The upload session is released. Activation on a finalize retry must use
+  // the stored Functions config, even when the request has no migration plan.
+  const activated = await finalize(rt, space, third, {
+    upload_id: session.uploadId,
+    activate: { route_name: "production", ...route },
+  });
+  expect(activated.status).toBe(200);
+  expect(await query(third, "SELECT slug, rank FROM items")).toEqual({
+    ok: true,
+    rows: [{ slug: "live-row", rank: null }],
+  });
+  // The version that is no longer live now reads its own preview scope.
+  expect(await query("ver_d1_live", "SELECT slug FROM items")).toEqual({ ok: true, rows: [] });
+  expect(liveTables.every((name) => d1Tables().includes(name))).toBe(true);
+
+  // Rewriting the pointer for the live version (an access change) runs no migration.
+  await putRoute(rt, space, "production", { version_id: third, ...route });
+  // Rolling back to a version with fewer migrations keeps the live tables
+  // and their data; the column the newer version added stays.
+  await putRoute(rt, space, "production", { version_id: "ver_d1_live", ...route });
+  expect(await query("ver_d1_live", "SELECT slug FROM items")).toEqual({
+    ok: true,
+    rows: [{ slug: "live-row" }],
+  });
+  // A version whose applied migration changed is still refused.
+  await deploy(rt, {
+    spaceId: space,
+    versionId: "ver_d1_edited",
+    metadata: { mode: "website", title: "D1 edited" },
+    files: { "index.html": "edited" },
+    functions: d1("CREATE TABLE items (slug TEXT PRIMARY KEY, other TEXT);"),
+  });
+  const refused = await putRoute(
+    rt,
+    space,
+    "production",
+    { version_id: "ver_d1_edited", ...route },
+    422,
+  );
+  expect(await refused.json()).toMatchObject({ code: "d1_migration_failed" });
 });

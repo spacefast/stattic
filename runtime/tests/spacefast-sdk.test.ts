@@ -1012,7 +1012,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   expect(run.head[0]).toMatchObject({ rel: "stylesheet", href: RUNTIME_COLLAB_THEME_PATH });
   expect(run.head[1]).toMatchObject({
     async: true,
-    src: "https://cast.example.test/sdk/v1/collab.js",
+    src: "https://cast.example.test/sdk/v2/collab.js",
     type: "module",
   });
   expect(run.head[1]?.attributes["data-sf-config"]).toBe(RUNTIME_COLLAB_MANIFEST_PATH);
@@ -1124,7 +1124,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
   });
   const localStack = await get(runtime, "local-stack.site.test", "/__spacefast/sdk.js");
   expect(localStack.status).toBe(200);
-  expect(await localStack.text()).toContain('"http://localhost:4400/sdk/v1/collab.js"');
+  expect(await localStack.text()).toContain('"http://localhost:4400/sdk/v2/collab.js"');
 
   for (const [label, spaceSuffix, host, available] of [
     ["custom", "custom", "ui-custom.site.test", true],
@@ -2373,7 +2373,7 @@ test("sdk.js loads the Space bar only where the bar is projected and the Space i
   expect((await get(runtime, "bar.site.test", "/")).status).not.toBe(200);
   const today = await sdk();
   expect(today?.tracker?.src).toBe(RUNTIME_TRACKER_SCRIPT_PATH);
-  expect(today?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
+  expect(today?.collab?.module).toBe("https://cast.example.test/sdk/v2/collab.js");
   expect(today?.bar).toBeUndefined();
 
   await activate("private", true);
@@ -2381,15 +2381,36 @@ test("sdk.js loads the Space bar only where the bar is projected and the Space i
   expect(withBar?.bar).toEqual({
     frame: bar.frame_url,
     dashboard: bar.dashboard_url,
-    module: "https://cast.example.test/sdk/v1/bar.js",
+    module: "https://cast.example.test/sdk/v2/bar.js",
   });
   expect(withBar?.tracker?.site).toBe("pk_bar");
-  expect(withBar?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
+  expect(withBar?.collab?.module).toBe("https://cast.example.test/sdk/v2/collab.js");
 
   await activate("public", true);
   const open = await sdk();
   expect(open?.bar).toBeUndefined();
-  expect(open?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
+  expect(open?.collab?.module).toBe("https://cast.example.test/sdk/v2/collab.js");
+
+  // The engine's sdk-modules.json names both module paths; runtime promotion
+  // probes Cast for the same list.
+  await activate("private", true);
+  const modulesFile = path.join(runtime.engineRoot, "runtime/sdk-modules.json");
+  writeFileSync(
+    modulesFile,
+    JSON.stringify({ bar: "/sdk/v9/bar.js", collab: "/sdk/v9/collab.js" }),
+  );
+  const listed = await sdk();
+  expect(listed?.bar?.module).toBe("https://cast.example.test/sdk/v9/bar.js");
+  expect(listed?.collab?.module).toBe("https://cast.example.test/sdk/v9/collab.js");
+
+  // A broken list is a broken bundle: sdk.js loads nothing rather than guess.
+  for (const broken of ['{"bar": "/sdk/v9/bar.js"}', "not json", null]) {
+    if (broken === null) rmSync(modulesFile);
+    else writeFileSync(modulesFile, broken);
+    const response = await get(runtime, "bar.site.test", "/__spacefast/sdk.js");
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("/* spacefast: injection off */\n");
+  }
 });
 
 const sessionResponseSchema = z.object({ data: z.object({ bar: z.boolean().optional() }) });
@@ -2614,12 +2635,12 @@ test("on a public Space the bar loads only behind the sign-in marker, and only a
   const withoutMarker = await page("", "");
   expect(withoutMarker.sessionReads).toBe(0);
   expect(withoutMarker.barState).toBe("anonymous_mark");
-  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v1/collab.js");
-  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v1/bar.js");
+  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v2/collab.js");
+  expect(withoutMarker.added).not.toContain("https://cast.example.test/sdk/v2/bar.js");
   const memberPage = await page(member.documentCookie, member.cookie);
   expect(memberPage.sessionReads).toBe(1);
-  expect(memberPage.added).toContain("https://cast.example.test/sdk/v1/bar.js");
-  expect(memberPage.added).not.toContain("https://cast.example.test/sdk/v1/collab.js");
+  expect(memberPage.added).toContain("https://cast.example.test/sdk/v2/bar.js");
+  expect(memberPage.added).not.toContain("https://cast.example.test/sdk/v2/collab.js");
   expect(memberPage.barState).toBe("frame_booting");
 
   expect(member.body.data.bar).toBe(true);
@@ -2651,7 +2672,7 @@ test("on a public Space the bar loads only behind the sign-in marker, and only a
   });
   const off = await sdkFor();
   expect(bootConfig(off.body)?.bar).toBeUndefined();
-  expect(bootConfig(off.body)?.collab?.module).toBe("https://cast.example.test/sdk/v1/collab.js");
+  expect(bootConfig(off.body)?.collab?.module).toBe("https://cast.example.test/sdk/v2/collab.js");
 });
 
 async function bootSdkInPage(
@@ -2974,7 +2995,7 @@ test("Comments boots only while the plan has it on", async () => {
       await (await get(runtime, host, RUNTIME_COLLAB_MANIFEST_PATH)).json(),
     );
     return {
-      loader: sdk.includes("https://cast.example.test/sdk/v1/collab.js"),
+      loader: sdk.includes("https://cast.example.test/sdk/v2/collab.js"),
       cast: manifest.cast,
       ticketUrl: manifest.ticketUrl,
     };

@@ -61,6 +61,7 @@
     "engine/runtime/sell.php",
     "engine/runtime/sell-client.js",
     "engine/runtime/space-bar.php",
+    "engine/runtime/sdk-modules.json",
     "engine/runtime/spacefast-sdk.php",
     "engine/runtime/zero-routes.php",
     "engine/runtime/storage.php",

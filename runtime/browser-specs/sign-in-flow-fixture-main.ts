@@ -116,6 +116,7 @@ export async function main(): Promise<void> {
     { verifyCollaborationBearer },
     { parseCommentRoomKey },
     { buildCdnModules },
+    { buildCollabOverlay },
     harness,
   ] = await Promise.all([
     import("../../apps/control-plane/src/app.ts"),
@@ -140,6 +141,7 @@ export async function main(): Promise<void> {
     import("../../apps/control-plane/src/comments/mint.ts"),
     import("../../apps/control-plane/src/comments/rooms.ts"),
     import("../../packages/space-client/scripts/browser.mjs"),
+    import("../../packages/collab-sdk/scripts/overlay.mjs"),
     import("../tests/harness.ts"),
   ]);
 
@@ -335,10 +337,14 @@ export async function main(): Promise<void> {
       { preconnect: realFetch.preconnect },
     );
 
-    // Build the Cast CDN modules (`sdk/v1/bar.js`, `sdk/v1/client.js`, and their
-    // shared chunks) into a run-owned temp directory, matching Cast's own build.
+    // Build the Cast CDN modules (`sdk/v2/bar.js`, `sdk/v2/collab.js`,
+    // `sdk/v1/client.js`, and their chunks) into a run-owned temp directory,
+    // matching Cast's own build.
     castSdkDirectory = mkdtempSync(path.join(tmpdir(), "sign-in-flow-cast-sdk-"));
-    await buildCdnModules({ outdir: castSdkDirectory });
+    await Promise.all([
+      buildCdnModules({ outdir: castSdkDirectory }),
+      buildCollabOverlay({ outdir: castSdkDirectory }),
+    ]);
 
     // The TLS listener every browser and engine request for a production name
     // arrives at. Its port is known now, so the engines' proxy can name it.
@@ -403,7 +409,7 @@ export async function main(): Promise<void> {
         }
         if (
           host === "cast.spacefast.com" &&
-          url.pathname.startsWith("/sdk/v1/") &&
+          /^\/sdk\/v[12]\//.test(url.pathname) &&
           castSdkDirectory
         ) {
           const file = url.pathname.slice("/sdk/v1/".length);

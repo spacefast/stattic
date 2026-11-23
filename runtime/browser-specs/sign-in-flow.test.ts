@@ -269,13 +269,23 @@ async function continueOnDoor(page: Page, button: RegExp) {
   expect((await door).status()).toBe(303);
 }
 
-/** Opens the bar's account menu; the bar's own sign-in window closes by itself first. */
+/** Opens the account menu after the Bar exchanges its popup's authorization code. */
 async function openAccountMenu(page: Page) {
   const frame = await barFrame(page);
-  const popup = page.context().waitForEvent("page");
-  await frame.getByRole("button", { name: "Account and options" }).click();
-  await (await popup).waitForEvent("close");
-  return frame.getByRole("region", { name: "Account" });
+  // The sign-in window can open and close before Playwright reports it as a page.
+  const [exchange] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url() === `${fixture.apiOrigin}/v1/auth/oauth2/token` &&
+        response.request().method() === "POST",
+    ),
+    frame.getByRole("button", { name: "Account and options" }).click(),
+  ]);
+  expect(exchange.status()).toBe(200);
+  const menu = frame.getByRole("region", { name: "Account and options", exact: true });
+  await expectUi(menu).toBeVisible();
+  await expectUi.poll(() => page.context().pages().length).toBe(1);
+  return menu;
 }
 
 /**
@@ -486,6 +496,7 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     await page.waitForURL(notesUrl("/"));
     robinOnNotes = await signedInAs(page, fixture.notes.spaceId, fixture.robin);
     const menu = await openAccountMenu(page);
+    await expectUi(menu.getByText(`Signed in as ${fixture.robin.name}`)).toBeVisible();
     await expectUi(menu.getByText("You can view this Space")).toBeVisible();
     await expectUi(menu.getByRole("menuitem", { name: "Switch Account" })).toBeVisible();
     await page.close();

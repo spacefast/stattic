@@ -12,6 +12,7 @@ require_once __DIR__ . '/collab-exchange.php';
 
 // sdk.js with nothing on for this version: valid JavaScript that does nothing.
 const STATTIC_SPACEFAST_SDK_OFF = "/* spacefast: injection off */\n";
+const STATTIC_SPACEFAST_SDK_MODULES_FILE = __DIR__ . '/sdk-modules.json';
 
 /**
  * The three documents the collaboration layer boots from: `sdk.js`, the
@@ -108,7 +109,15 @@ function _stattic_spacefast_sdk_bootstrap(
     // access code (D34), so this route requires access-rules.php itself rather
     // than fataling on a public Space.
     require_once __DIR__ . '/access-rules.php';
-    $config = _stattic_spacefast_sdk_page_config($privateRoot, $serving, $requestHost, $previewToken);
+    // An engine without its module list is a broken bundle, like one without
+    // sdk.js: it answers as injection off rather than guess which Cast
+    // modules its sdk.js pairs with.
+    $modules = _stattic_spacefast_sdk_modules();
+    if ($modules === null) {
+        error_log('spacefast sdk_modules_unreadable path=' . STATTIC_SPACEFAST_SDK_MODULES_FILE);
+        return STATTIC_SPACEFAST_SDK_OFF;
+    }
+    $config = _stattic_spacefast_sdk_page_config($privateRoot, $serving, $requestHost, $previewToken, $modules);
     $embeddedTagBody = $config['tagBody'];
     unset($config['tagBody']);
     // Nothing to do at all (only the context for modules that aren't there):
@@ -131,6 +140,28 @@ function _stattic_spacefast_sdk_bootstrap(
 }
 
 /**
+ * The Cast paths of the Comments and bar modules this engine's sdk.js loads,
+ * from `sdk-modules.json`. Runtime promotion reads the same file from the
+ * engine zip (scripts/check-runtime-cast-sdk.mjs) to know which Cast modules
+ * must answer first. Null when the file is missing or malformed.
+ *
+ * @return array{bar: string, collab: string}|null
+ */
+function _stattic_spacefast_sdk_modules(): ?array
+{
+    $modules = json_decode((string) @file_get_contents(STATTIC_SPACEFAST_SDK_MODULES_FILE), true);
+    if (!is_array($modules)) {
+        return null;
+    }
+    foreach (['bar', 'collab'] as $name) {
+        if (!is_string($modules[$name] ?? null) || !str_starts_with($modules[$name], '/')) {
+            return null;
+        }
+    }
+    return ['bar' => $modules['bar'], 'collab' => $modules['collab']];
+}
+
+/**
  * What `sdk.js` does on this host's pages, as the JSON it boots from. Each
  * part is written only while the injection plan has its item on for the
  * served version (shared/injection-plan.php); nothing on is an empty config,
@@ -143,7 +174,8 @@ function _stattic_spacefast_sdk_page_config(
     string $privateRoot,
     array $serving,
     string $requestHost,
-    ?string $previewToken
+    ?string $previewToken,
+    array $modules
 ): array {
     $on = static fn (string $item): bool => _stattic_injection_on($serving, $item);
     $sdkConfig = _stattic_spacefast_sdk_config($serving);
@@ -217,13 +249,19 @@ function _stattic_spacefast_sdk_page_config(
 
     // Nothing to join costs the page zero collaboration bytes. `custom` gets
     // the Space's look and nothing else: the page brought its own UI.
+    // The Comments and bar modules this sdk.js loads come from the paths in
+    // `sdk-modules.json` (`sdk/v2/`): they end with the session signal and
+    // keep the principal this sdk.js hands over. An older engine's sdk.js
+    // keeps loading `sdk/v1/`, so a browser holding a `v1` module from before
+    // a Cast release never pairs it with this sdk.js. Cast serves the same
+    // build under both.
     if (_stattic_spacefast_collab_available($serving, $overlay)) {
         $ui = _stattic_spacefast_collab_ui($serving);
         $config['collab'] = [
             'theme' => STATTIC_SPACEFAST_COLLAB_THEME_PATH . $query,
             'config' => STATTIC_SPACEFAST_COLLAB_MANIFEST_PATH . $query,
             ...($ui === 'default' && $collabBase !== null
-                ? ['module' => rtrim($collabBase, '/') . '/sdk/v1/collab.js']
+                ? ['module' => rtrim($collabBase, '/') . $modules['collab']]
                 : []),
         ];
     }
@@ -236,7 +274,7 @@ function _stattic_spacefast_sdk_page_config(
         $config['bar'] = [
             'frame' => $bar['frame'],
             'dashboard' => $bar['dashboard'],
-            'module' => rtrim($collabBase, '/') . '/sdk/v1/bar.js',
+            'module' => rtrim($collabBase, '/') . $modules['bar'],
             // A Space anyone may open: only a browser with the returning-account
             // marker asks the session, so a visitor without one costs nothing,
             // and anyone it does not draw the frame for gets the mark: Sign in

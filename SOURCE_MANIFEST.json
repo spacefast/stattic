@@ -1,7 +1,7 @@
 {
-  "revision": "4f612cbc99f9ac79d64cd7e8499442b5d5c5356b",
-  "sourceHash": "f9246c0f4dd4f6b0b41dbd86b60a963b8fe44715d203c9c888f4278ef5466085",
-  "manifestSha256": "2f9c52867efc03651ba471943748d63e76582d3a3bbac45c0450bfdbd430ec94",
+  "revision": "dfd71003b528ceb523f1ebf210631a2cb21d6286",
+  "sourceHash": "b6615dedd26064fe6a066a19d2ae6ee54a24181f8fea1a84d2c91ebdc24a8a35",
+  "manifestSha256": "70936b6fcbcf708f377092fbc5fcf56b0cbaffafef70a4b14d1d49b25a5b44db",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "e0e7cfafc9adf9e89eadedf75848eef37221e24f00142ce5c860329971ec3ee1"
+      "sha256": "24d8392d1111c64ec36f9f0c6e0814c9959d7cd56c14c0594caa28872e6455e0"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "5f953b41d057253953b742a6f63118e5c7f53abaf8893859c78744dfcef28b8a"
+      "sha256": "1fdb087257fe98c91544e557a88b6927093d99ca8e6b54596bcba262ca693207"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29741,7 +29741,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture-main.ts",
-      "sha256": "c75136f07ffe488c6a043aa4749238caf7ab17167afed5709f74567bfe2279c7"
+      "sha256": "a1abddb97058c47e68462efcf1c02b2a9cf141d29563e5b06e128d48f0879244"
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture.ts",
@@ -29749,7 +29749,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow.test.ts",
-      "sha256": "a243c5f11a92a7df4c79b7f2eb254513f40a6d1be55d8b7d16f942d95ac97b09"
+      "sha256": "7326b8a0bd773b679e62effb07c267d47ba47150cb2243b09e4d3ef3c5170b58"
     },
     {
       "path": "runtime/browser/sell-checkout-element.js",
@@ -29777,7 +29777,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "b4c0ec7e6312d5787db7edcaf9bf6f49ed3fa798608540e9b7fe3c45a24b2967"
+      "sha256": "51d9d11068d098c2a59a2d66cc5f0e542d18590770b8258761d463d8745c9132"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -30136,6 +30136,10 @@
       "sha256": "3c2f2c8b5a9dccf67f9860c7cf0966a1ae13b8ff98e6c60d0f1e9bf5d8be372e"
     },
     {
+      "path": "runtime/engine/runtime/sdk-modules.json",
+      "sha256": "daf11edfc8d8d26fa561af5c879b59c427fcea20c4b8098ae5accf8a88a5344a"
+    },
+    {
       "path": "runtime/engine/runtime/sell-client.js",
       "sha256": "3641b4155ee631647b5fdee4344b2d50068a770b9e4a690910387c269088ebed"
     },
@@ -30157,7 +30161,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-client/sdk.js",
-      "sha256": "52f5f171d1c92461e6882cd8144c0e12ca63a4cbb8c0c245e06363bc3fa416e8"
+      "sha256": "0d05a84a6680d22b7c0b0e1dad87b436fe91ba028a1ef523e91941814c0ea236"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -30165,7 +30169,7 @@
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "553a00685fe68b740d3143506e66274248647cd41b942334bdd667fd1902b2a4"
+      "sha256": "617cbdbacb937335f4a27a751d243a1db0e5fb1cd28b72b690b73f500a4788a1"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
@@ -30977,7 +30981,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "61f061a92bb684897451ac723eba618a218ad50dfeda1745d2365b94849f7510"
+      "sha256": "4b92f057f7c7dd05edb4904b86c2f999822942be0b2b628005c88c25eda2143e"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",

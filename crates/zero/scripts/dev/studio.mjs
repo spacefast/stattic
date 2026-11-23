@@ -5,7 +5,7 @@ import { access, cp, lstat, mkdir, open, readFile, readdir, realpath, rename, rm
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const STUDIO_VERSION = '2.1.1';
 const WORDPRESS_VERSION = '7.1.4';
@@ -450,6 +450,6 @@ async function main() {
   }
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+if (import.meta.main) {
   main().catch((error) => { console.error(`zero dev: ${error.message}`); process.exitCode = 1; });
 }

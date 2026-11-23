@@ -1,7 +1,7 @@
 {
-  "revision": "8dee5f8e2832570c1c8df62230fdf0adfd7876cd",
+  "revision": "0d59b41fa3502d417afa28f7f6e62f99c18f7cff",
   "sourceHash": "e3217744a802cf81d6357c00ff3e2fab06b98236641bbf82f0e105b3af46cc1f",
-  "manifestSha256": "3619da12df19d380b5209b4e04bef17b2d19ddbf59b4a83f2dd750c591f95d29",
+  "manifestSha256": "89c71864c37a28611279cc81a6da7feadcebb284db0920affb27fca548d32f1d",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0fbac944f52d72e4203b3820f26d67bf2b84619fc9883e83819cc9da285447fc"
+      "sha256": "cc2f62434896ca74a2db6c5f9f91d257628f939205def97a4b8b83556e9ca4dc"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a24bcbf71b84fcf5c553d32e913074f634db3a643deb06fe069b82ea9ac17a54"
+      "sha256": "64859ce623d59ef23c20eb0fa69c4d2398409e56a0bbf0b94938612fb5596f7c"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29269,7 +29269,7 @@
     },
     {
       "path": "crates/zero/scripts/dev/studio.mjs",
-      "sha256": "75f87de5c57f6956e502312915629d9170d271650a9bc96ac5d875fb9336ff3f"
+      "sha256": "6fc4d644cf85bb61d72cdacf1be80ffd77374b1c50312ed205879463ea14b925"
     },
     {
       "path": "crates/zero/src/builtins.rs",

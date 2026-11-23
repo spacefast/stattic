@@ -9,11 +9,12 @@ declare(strict_types=1);
 // runs both. A command on a site with no release of its own has no copy of this
 // file to trust, so the command bootstrap restates the chroot checks too.
 //
-// A site runs its own release unless its WP Cloud persistent data names an
-// environment and channel of the Spacefast chroot in
-// `SPACEFAST_RUNTIME_ENGINE_SOURCE`, `chroot/<environment>/<channel>` (say
-// `chroot/production/latest`). The control plane sets it through the WP Cloud
-// API; nothing else does. The provider stores it encrypted under a key derived
+// A site states its engine in its WP Cloud persistent data,
+// `SPACEFAST_RUNTIME_ENGINE_SOURCE`: an environment and channel of the
+// Spacefast chroot, `chroot/<environment>/<channel>` (say
+// `chroot/production/latest`), or `site` for its own release. No value is a
+// site from before boxes stated their engine, which runs its own release. The
+// control plane sets it through the WP Cloud API; nothing else does. The provider stores it encrypted under a key derived
 // from DB_PASSWORD, so a caller defines that before asking. One chroot carries
 // every environment, each revision and link as a top-level entry:
 //
@@ -24,8 +25,8 @@ declare(strict_types=1);
 // The channel link is resolved once, and the binary is named by the revision it
 // resolved to, never through its own channel link, so a deploy that moves both
 // links between the two reads cannot pair one revision's engine with another's
-// binary. A chroot that is missing or incomplete answers with the site's own
-// release: a site switched back to the generic chroot keeps serving.
+// binary. A selected chroot that is missing or incomplete is `unavailable`,
+// never the site's own release: the command stops, as a request answers 503.
 
 const SPACEFAST_RUNTIME_CHROOT_SELECTION = '#^chroot/(staging|production)/(latest|previous)$#D';
 const SPACEFAST_RUNTIME_CHROOT_REVISION = '/^sf-engine-([0-9a-f]{40})$/D';
@@ -93,8 +94,7 @@ function _spacefast_runtime_resolve_chroot(bool $clearStatCache = false): array
     }
     $revision = $match[1];
     // An engine without this rule, or without the loader bodies the thin
-    // loader hands requests to, predates that loader: the site's own release
-    // serves instead, until the chroot carries an engine with both.
+    // loader hands requests to, predates that loader.
     foreach (SPACEFAST_RUNTIME_CHROOT_REQUIRED_FILES as $file) {
         if (!is_file($engineReal . '/' . $file)) {
             return ['kind' => 'fallback', 'reason' => 'chroot_engine_unsupported', 'revision' => $revision];
@@ -117,28 +117,51 @@ function _spacefast_runtime_resolve_chroot(bool $clearStatCache = false): array
 }
 
 /**
- * `reason` says why the site runs where it does, and `chroot_revision` which
- * revision the selected channel resolved to, so health can explain a site
- * that selects the chroot and still runs its own release.
+ * `reason` says why the site runs where it does, or why its stated engine
+ * cannot run (`source` `unavailable`, with no root or binary), and
+ * `chroot_revision` which revision the selected channel resolved to.
  *
- * @return array{release_root:string,native_binary:string,source:'chroot'|'site',reason:string,chroot_revision:?string}
+ * @return array{release_root:?string,native_binary:?string,source:'chroot'|'site'|'unavailable',reason:string,chroot_revision:?string}
  */
 function _spacefast_runtime_engine_source(string $siteReleaseRoot): array
 {
-    $resolved = _spacefast_runtime_resolve_chroot(false);
-    if ($resolved['kind'] === 'chroot') {
-        return [
-            'release_root' => $resolved['release_root'],
-            'native_binary' => $resolved['native_binary'],
-            'source' => 'chroot',
-            'reason' => 'chroot',
-            'chroot_revision' => $resolved['revision'],
-        ];
-    }
-    return [
+    $site = static fn (string $reason): array => [
         'release_root' => $siteReleaseRoot,
         'native_binary' => $siteReleaseRoot . '/bin/stattic-runtime',
         'source' => 'site',
+        'reason' => $reason,
+        'chroot_revision' => null,
+    ];
+    // The provider defines the class in its prepend. A PHP process without it
+    // (a bare CLI, a local stack) has no persistent data to select with.
+    if (!class_exists('Atomic_Persistent_Data')) {
+        return $site('no_persistent_data');
+    }
+    $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
+    $selection = is_string($selection) ? trim($selection) : $selection;
+    if ($selection === false) {
+        return $site('no_persistent_data');
+    }
+    if ($selection === 'site') {
+        return $site('site');
+    }
+    if (!is_string($selection) || $selection === '') {
+        return $site('unselected');
+    }
+    if (preg_match(SPACEFAST_RUNTIME_CHROOT_SELECTION, $selection) !== 1) {
+        return [
+            'release_root' => null,
+            'native_binary' => null,
+            'source' => 'unavailable',
+            'reason' => 'selection_invalid',
+            'chroot_revision' => null,
+        ];
+    }
+    $resolved = _spacefast_runtime_resolve_chroot(false);
+    return [
+        'release_root' => $resolved['kind'] === 'chroot' ? $resolved['release_root'] : null,
+        'native_binary' => $resolved['kind'] === 'chroot' ? $resolved['native_binary'] : null,
+        'source' => $resolved['kind'] === 'chroot' ? 'chroot' : 'unavailable',
         'reason' => $resolved['reason'],
         'chroot_revision' => $resolved['revision'],
     ];

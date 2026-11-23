@@ -143,9 +143,10 @@ On WP Cloud the engine can also run from the Spacefast chroot, where every site 
 shares one copy: `/scripts/sf-engine-<revision>/` with its binary at
 `/usr/local/bin/sf-bin-<revision>/stattic-runtime`, and each environment's
 `sf-engine-<environment>-{latest,previous}` and `sf-bin-<environment>-{latest,previous}` links
-beside them. A site opts in when its WP Cloud persistent data names one of those channels in
-`SPACEFAST_RUNTIME_ENGINE_SOURCE`, for example `chroot/production/latest`. The control plane
-sets it through the WP Cloud API.
+beside them. A site states its engine in its WP Cloud persistent data,
+`SPACEFAST_RUNTIME_ENGINE_SOURCE`: one of those channels, for example `chroot/production/latest`,
+or `site` for its own release. No value is a site from before boxes stated their engine, and it
+runs its own release. The control plane sets the value through the WP Cloud API.
 
 The thin loader reads that selection itself, before any engine code runs. It resolves the
 channel link to its revision directory and requires the body from that path, never through the
@@ -157,16 +158,22 @@ ask that release's `engine/shared/engine-selection.php`, which restates the same
 with none, their bootstrap (`runtimeEnginePhpBootstrap` in
 `apps/control-plane/src/runtime/engine-files.ts`) checks the chroot selection itself, the way the
 thin loader does, and exits on any failed check. The site's install root keeps its storage and its
-publication lock either way, and a missing or incomplete chroot falls back to the site's release
-when there is one. Canary and development sites keep one, and so does a restored site until a read
-proves it serves the chroot. Every other site has none: the installer's `--chroot-site` mode lays
+publication lock either way.
+
+A selected channel that cannot serve never falls back to a release the site may still have. Every
+request, health included, answers `503` with `Retry-After: 30` and an
+`application/problem+json` body whose `code` is `runtime_engine_unavailable`, with `details`
+naming the `lane`, the `reason` (`chroot_missing`, `chroot_engine_unsupported`, `chroot_containment_missing`,
+`chroot_binary_missing`, or `selection_invalid` for a value the control plane would never write,
+with `lane` null) and the `chroot_revision` the channel resolved to. A command gets `source`
+`unavailable` from `engine-selection.php` and exits. The installer's `--chroot-site` mode lays
 down just the loader copies and public files of the revision the site's chroot serves and removes
-any release, so such a site has nothing to fall back to. Health and the engine-update receipt report `engine_source`.
-Health also reports `engine_source_reason` (`chroot`, `no_persistent_data`, `unselected`,
-`chroot_missing`, `chroot_engine_unsupported`, `chroot_containment_missing` or
-`chroot_binary_missing`), the `chroot_revision` the selected channel resolved to, and the
-`loader_version` that handed the request over, so a site that selects the chroot and still runs
-its own release says why. A revision without loader bodies is `chroot_engine_unsupported`.
+any release. An own install on a site that states a channel still installs, but writes
+`runtime_engine_release_unserved:<reason>` to stderr, since nothing serves that release until the
+site states `site`. Health and the engine-update receipt report `engine_source`. Health also
+reports `engine_source_reason` (`chroot`, `site`, `unselected` or `no_persistent_data`), the
+`chroot_revision` the selected channel resolved to, and the `loader_version` that handed the
+request over.
 
 The engine-update receipt for a chroot engine still requires every installed loader copy, and the
 static files the web server serves without PHP (`__spacefast/chunks`, the `spacefast-managed`

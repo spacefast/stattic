@@ -1563,6 +1563,66 @@ function runWithPersistentData(
   return { exitCode: run.exitCode, stdout: run.stdout.toString(), stderr: run.stderr.toString() };
 }
 
+test("an own release on a site that states a chroot lane installs, and says nothing serves it", async () => {
+  const fixture = await startUpdateFixture({ visitorEngine: true });
+  const first = await runInstaller(fixture);
+  expect(first.exitCode, first.stderr).toBe(0);
+  expect(first.stderr).not.toContain("runtime_engine_release_unserved");
+  // A lane whose revision has no binary yet: the release is laid down all the
+  // same, and the warning names why the lane would not serve either.
+  const chrootRoot = standUpChroot(fixture, fixture.revision);
+  writeFileSync(
+    path.join(fixture.publicRoot, ".atomic-persistent-data.json"),
+    `${JSON.stringify({ SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" })}\n`,
+  );
+  const install = runWithPersistentData(
+    fixture,
+    chrootRoot,
+    [fixture.installerPath, fixture.zipUrl],
+    {
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(fixture.publicRoot),
+      SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
+      SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+      SPACEFAST_RUNTIME_ENGINE_MD5: fixture.md5,
+      SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
+      SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: "",
+    },
+  );
+  expect(install.exitCode, install.stderr).toBe(0);
+  expect(JSON.parse(install.stdout)).toMatchObject({
+    warning: "runtime_engine_release_unserved:chroot_binary_missing",
+  });
+  expect(existsSync(activeReleaseRoot(fixture.publicRoot))).toBe(true);
+
+  // A value the loader refuses leaves the release unserved too; `site` serves it.
+  for (const [selection, warning] of [
+    ["chroot/development/latest", "runtime_engine_release_unserved:selection_invalid"],
+    ["site", undefined],
+  ] as const) {
+    writeFileSync(
+      path.join(fixture.publicRoot, ".atomic-persistent-data.json"),
+      `${JSON.stringify({ SPACEFAST_RUNTIME_ENGINE_SOURCE: selection })}\n`,
+    );
+    const again = runWithPersistentData(
+      fixture,
+      chrootRoot,
+      [fixture.installerPath, fixture.zipUrl],
+      {
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_NONCE: publicationNonce(fixture.publicRoot),
+        SPACEFAST_RUNTIME_ENGINE_COMMAND_ID: crypto.randomUUID(),
+        SPACEFAST_RUNTIME_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_EXPECTED_INSTANCE_ID: "installer-test-instance",
+        SPACEFAST_RUNTIME_ENGINE_MD5: fixture.md5,
+        SPACEFAST_RUNTIME_ENGINE_REVISION: fixture.revision,
+        SPACEFAST_RUNTIME_ENGINE_NATIVE_SHA256: "",
+      },
+    );
+    expect(again.exitCode, again.stderr).toBe(0);
+    expect(JSON.parse(again.stdout).warning).toBe(warning);
+  }
+});
+
 test("a chroot-site install leaves the site the chroot's loader and no engine copy, and only then", async () => {
   const fixture = await startUpdateFixture({ visitorEngine: true });
   // A first own install gives the chroot its engine, and the site a release
@@ -1720,9 +1780,15 @@ test("a chroot-site install leaves the site the chroot's loader and no engine co
   expect(again.exitCode, again.stderr).toBe(0);
   expect(readdirSync(path.join(installRoot, "releases"))).toEqual([]);
 
-  // With no release there is nothing to fall back to.
+  // A lane that cannot serve answers why, rather than an empty page.
   rmSync(path.join(chrootRoot, "scripts", "sf-engine-production-latest"));
-  expect(visit(fixture).exitCode).toBe(1);
+  const missing = visit(fixture);
+  expect(missing.exitCode, missing.stderr).toBe(0);
+  expect(JSON.parse(missing.stdout)).toMatchObject({
+    status: 503,
+    code: "runtime_engine_unavailable",
+    details: { lane: "chroot/production/latest", reason: "chroot_missing" },
+  });
   symlinkSync(
     `sf-engine-${fixture.revision}`,
     path.join(chrootRoot, "scripts", "sf-engine-production-latest"),

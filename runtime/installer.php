@@ -3040,16 +3040,23 @@ function installer_selected_chroot(): array
             require_once $selectionHelper;
         }
     }
-    if (function_exists('_spacefast_runtime_resolve_chroot')) {
-        $resolved = _spacefast_runtime_resolve_chroot(true);
-        return ['revision' => $resolved['revision'], 'reason' => $resolved['reason']];
-    }
     if (!class_exists('Atomic_Persistent_Data')) {
         return ['revision' => null, 'reason' => 'no_persistent_data'];
     }
     $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
-    if (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', is_string($selection) ? trim($selection) : '', $selected) !== 1) {
+    $selection = is_string($selection) ? trim($selection) : '';
+    if ($selection === '') {
         return ['revision' => null, 'reason' => 'unselected'];
+    }
+    if ($selection === 'site') {
+        return ['revision' => null, 'reason' => 'site'];
+    }
+    if (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', $selection, $selected) !== 1) {
+        return ['revision' => null, 'reason' => 'selection_invalid'];
+    }
+    if (function_exists('_spacefast_runtime_resolve_chroot')) {
+        $resolved = _spacefast_runtime_resolve_chroot(true);
+        return ['revision' => $resolved['revision'], 'reason' => $resolved['reason']];
     }
     $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
     // The realpath cache too: the check under the publication lock must see a
@@ -3091,6 +3098,18 @@ function installer_selected_chroot(): array
         return ['revision' => $revision[1], 'reason' => 'chroot_binary_missing'];
     }
     return ['revision' => $revision[1], 'reason' => 'chroot'];
+}
+
+/**
+ * The receipt's `warning`, when the install laid down something the site will
+ * not serve.
+ *
+ * @return array{warning?:string}
+ */
+function installer_warning(): array
+{
+    $warning = $GLOBALS['spacefast_install_warning'] ?? null;
+    return is_string($warning) ? ['warning' => $warning] : [];
 }
 
 /**
@@ -3253,6 +3272,16 @@ $expectedNativeSha256 = strtolower(installer_config_value('SPACEFAST_RUNTIME_ENG
 if ($chrootSite) {
     // Before the publication is reserved: a refusal changes nothing.
     require_chroot_site($expectedRevision);
+} else {
+    // A release on a site that states a chroot lane, or a value the loader
+    // refuses, is laid down, but nothing serves it while that stands: the
+    // loader never falls back to it. Say so in the receipt rather than refuse,
+    // so an operator can stage one before switching the site to `site`.
+    $statedLane = installer_selected_chroot();
+    if (!in_array($statedLane['reason'], ['unselected', 'no_persistent_data', 'site'], true)) {
+        $GLOBALS['spacefast_install_warning'] = 'runtime_engine_release_unserved:' . $statedLane['reason'];
+        fwrite(STDERR, $GLOBALS['spacefast_install_warning'] . "\n");
+    }
 }
 $publication = reserve_engine_publication(
     $installRoot,
@@ -3344,7 +3373,7 @@ if (
         $expectedNativeSha256,
     )
 ) {
-    echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release', 'publication_nonce' => $publication['nonce']], JSON_PRETTY_PRINT) . "\n";
+    echo json_encode(['status' => 'current', 'engine_revision' => $expectedRevision, 'layout' => 'release', 'publication_nonce' => $publication['nonce']] + installer_warning(), JSON_PRETTY_PRINT) . "\n";
     if (defined('SPACEFAST_RUNTIME_INSTALLER_EMBEDDED') && SPACEFAST_RUNTIME_INSTALLER_EMBEDDED === true) {
         return;
     }
@@ -3667,4 +3696,4 @@ if ($chrootSite) {
     $receipt['removed'] = remove_own_releases($installRoot, $publication, $actualRevision);
 }
 
-echo json_encode(['status' => 'installed'] + $receipt, JSON_PRETTY_PRINT) . "\n";
+echo json_encode(['status' => 'installed'] + $receipt + installer_warning(), JSON_PRETTY_PRINT) . "\n";

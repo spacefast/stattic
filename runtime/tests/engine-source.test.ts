@@ -1,10 +1,11 @@
-// A site runs its own release unless its persistent data selects an
-// environment's channel of the Spacefast chroot. These run the real thin
-// loader against a chroot stood up beside the box: the selected revision's own
-// loader body serves and proves itself while the site's own install root keeps
-// its data, and an incomplete chroot falls back to the site's release. The
-// control plane's commands ask engine/shared/engine-selection.php instead, so
-// every case also checks that it answers the same.
+// A site runs the engine its persistent data states: an environment's channel
+// of the Spacefast chroot, or `site` (or, from before boxes stated one,
+// nothing) for its own release. These run the real thin loader against a
+// chroot stood up beside the box: the selected revision's own loader body
+// serves and proves itself while the site's own install root keeps its data,
+// and a selected chroot that cannot serve answers 503, never the site's
+// release. The control plane's commands ask engine/shared/engine-selection.php
+// instead, so every case also checks that it answers the same.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
@@ -38,10 +39,9 @@ let chrootRoot: string;
 
 beforeAll(async () => {
   chrootRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spacefast-chroot-")));
-  rt = await startRuntime({
-    env: { SPACEFAST_TEST_CHROOT_ROOT: chrootRoot },
-    atomicData: { SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest" },
-  });
+  // The site starts on its own release: a lane it stated before the chroot
+  // below exists would answer 503 to the harness's readiness check.
+  rt = await startRuntime({ env: { SPACEFAST_TEST_CHROOT_ROOT: chrootRoot } });
   // The external's layout: the release without its binary, the binary under
   // usr/local/bin, and a channel link beside each. The revision constant is the
   // only byte that differs from the site's release, so a response naming it
@@ -82,6 +82,14 @@ beforeAll(async () => {
     `sf-bin-${CHROOT_REVISION}`,
     path.join(chrootRoot, "usr/local/bin/sf-bin-production-latest"),
   );
+  const persistentData = path.join(rt.root, ".atomic-persistent-data.json");
+  writeFileSync(
+    persistentData,
+    `${JSON.stringify({
+      ...JSON.parse(readFileSync(persistentData, "utf8")),
+      SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/production/latest",
+    })}\n`,
+  );
 });
 
 afterAll(() => {
@@ -91,21 +99,13 @@ afterAll(() => {
 
 const chrootEngine = () => path.join(chrootRoot, "scripts", `sf-engine-${CHROOT_REVISION}`);
 
-/**
- * Health reports the thin loader's choice; the control plane's commands make
- * theirs with engine-selection.php from the site's release. Both must agree.
- */
-async function expectSelection(
-  expected: Record<string, string | number | null>,
-  loaderBody?: string,
-): Promise<void> {
-  const response = await fetch(`${rt.baseUrl}/__spacefast/health.php`);
-  expect(response.status).toBe(200);
-  const health = await response.json();
-  expect(health).toMatchObject(expected);
-  if (loaderBody !== undefined) {
-    expect(response.headers.get("x-test-loader-body")).toBe(loaderBody);
-  }
+/** What engine-selection.php, which the control plane's commands ask, answers. */
+function commandSelection(): {
+  source: string;
+  reason: string;
+  chroot_revision: string | null;
+  release_root: string | null;
+} {
   const command = Bun.spawnSync({
     cmd: [
       "php",
@@ -125,7 +125,25 @@ async function expectSelection(
     stderr: "pipe",
   });
   expect(command.exitCode, command.stderr.toString()).toBe(0);
-  const selection = JSON.parse(command.stdout.toString());
+  return JSON.parse(command.stdout.toString());
+}
+
+/**
+ * Health reports the thin loader's choice; the control plane's commands make
+ * theirs with engine-selection.php from the site's release. Both must agree.
+ */
+async function expectSelection(
+  expected: Record<string, string | number | null>,
+  loaderBody?: string,
+): Promise<void> {
+  const response = await fetch(`${rt.baseUrl}/__spacefast/health.php`);
+  expect(response.status).toBe(200);
+  const health = await response.json();
+  expect(health).toMatchObject(expected);
+  if (loaderBody !== undefined) {
+    expect(response.headers.get("x-test-loader-body")).toBe(loaderBody);
+  }
+  const selection = commandSelection();
   expect({
     engine_source: selection.source,
     engine_source_reason: selection.reason,
@@ -134,6 +152,38 @@ async function expectSelection(
     engine_source: health.engine_source,
     engine_source_reason: health.engine_source_reason,
     chroot_revision: health.chroot_revision,
+  });
+}
+
+/**
+ * A stated engine that cannot serve: every request, health included, answers
+ * 503 with why, and a command gets no engine to run.
+ */
+async function expectUnavailable(expected: {
+  lane: string | null;
+  reason: string;
+  chroot_revision: string | null;
+}): Promise<void> {
+  for (const target of ["/__spacefast/health.php", "/"]) {
+    const response = await fetch(`${rt.baseUrl}${target}`);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("content-type")).toBe("application/problem+json");
+    expect(response.headers.get("retry-after")).toBe("30");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({
+      type: "https://spacefast.com/problems/runtime_engine_unavailable",
+      title: "Runtime engine unavailable",
+      status: 503,
+      code: "runtime_engine_unavailable",
+      details: expected,
+    });
+  }
+  expect(commandSelection()).toEqual({
+    release_root: null,
+    native_binary: null,
+    source: "unavailable",
+    reason: expected.reason,
+    chroot_revision: expected.chroot_revision,
   });
 }
 
@@ -361,45 +411,53 @@ test("a request before a first install publishes the release pointer is retried"
   }
 });
 
-test("falls back to the site's release when the chroot is unselected or cannot serve it", async () => {
+test("runs the site's release only when the site states it or states nothing", async () => {
   const persistentData = path.join(rt.root, ".atomic-persistent-data.json");
   const selected = readFileSync(persistentData);
-  writeFileSync(persistentData, `${JSON.stringify(RUNTIME_ATOMIC_DATA)}\n`);
-  try {
-    await expectSelection(
-      {
-        engine_revision: "source-tree",
-        engine_source: "site",
-        engine_source_reason: "unselected",
-        chroot_revision: null,
-        loader_version: 1,
-      },
-      path.join(rt.engineRoot, "loader"),
+  for (const [data, reason] of [
+    [RUNTIME_ATOMIC_DATA, "unselected"],
+    [{ ...RUNTIME_ATOMIC_DATA, SPACEFAST_RUNTIME_ENGINE_SOURCE: "site" }, "site"],
+  ] as const) {
+    writeFileSync(persistentData, `${JSON.stringify(data)}\n`);
+    try {
+      await expectSelection(
+        {
+          engine_revision: "source-tree",
+          engine_source: "site",
+          engine_source_reason: reason,
+          chroot_revision: null,
+          loader_version: 1,
+        },
+        path.join(rt.engineRoot, "loader"),
+      );
+    } finally {
+      writeFileSync(persistentData, selected);
+    }
+  }
+});
+
+test("a stated chroot lane that cannot serve answers 503, never the site's release", async () => {
+  const persistentData = path.join(rt.root, ".atomic-persistent-data.json");
+  const selected = readFileSync(persistentData);
+
+  // A channel this chroot has no link for has nothing to offer, and a value
+  // the control plane would never write names no engine at all.
+  for (const [selection, expected] of [
+    ["chroot/staging/latest", { lane: "chroot/staging/latest", reason: "chroot_missing" }],
+    ["chroot/development/latest", { lane: null, reason: "selection_invalid" }],
+  ] as const) {
+    writeFileSync(
+      persistentData,
+      `${JSON.stringify({ ...RUNTIME_ATOMIC_DATA, SPACEFAST_RUNTIME_ENGINE_SOURCE: selection })}\n`,
     );
-  } finally {
-    writeFileSync(persistentData, selected);
+    try {
+      await expectUnavailable({ ...expected, chroot_revision: null });
+    } finally {
+      writeFileSync(persistentData, selected);
+    }
   }
 
-  // A channel this chroot has no link for has nothing to offer.
-  writeFileSync(
-    persistentData,
-    `${JSON.stringify({ ...RUNTIME_ATOMIC_DATA, SPACEFAST_RUNTIME_ENGINE_SOURCE: "chroot/staging/latest" })}\n`,
-  );
-  try {
-    await expectSelection(
-      {
-        engine_revision: "source-tree",
-        engine_source: "site",
-        engine_source_reason: "chroot_missing",
-        chroot_revision: null,
-      },
-      path.join(rt.engineRoot, "loader"),
-    );
-  } finally {
-    writeFileSync(persistentData, selected);
-  }
-
-  // Each file stands for one way the chroot fails the site, and health names
+  // Each file stands for one way the chroot fails the site, and the 503 names
   // it: a revision without its binary, and an engine without this selection
   // rule, whose loaders would stop the site reading its channel once installed.
   for (const [file, reason] of [
@@ -442,16 +500,11 @@ test("falls back to the site's release when the chroot is unselected or cannot s
       );
     }
     try {
-      await expectSelection(
-        {
-          engine_revision: "source-tree",
-          engine_source: "site",
-          engine_source_reason: reason,
-          chroot_revision: CHROOT_REVISION,
-          site_state: "configured",
-        },
-        path.join(rt.engineRoot, "loader"),
-      );
+      await expectUnavailable({
+        lane: "chroot/production/latest",
+        reason,
+        chroot_revision: CHROOT_REVISION,
+      });
     } finally {
       writeFileSync(file, bytes, { mode });
     }

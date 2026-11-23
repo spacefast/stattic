@@ -16,10 +16,14 @@ declare(strict_types=1);
 // everything that does change: the publication lock, the install journal,
 // request classification and the engine's own requires.
 //
-// The engine is the Spacefast chroot revision that the site's WP Cloud
-// persistent data names in SPACEFAST_RUNTIME_ENGINE_SOURCE
-// (`chroot/<environment>/<lane>`), or else the site's own release under
-// .stattic/releases/. The channel link is resolved to its revision directory
+// The engine is the one the site's WP Cloud persistent data states in
+// SPACEFAST_RUNTIME_ENGINE_SOURCE: a Spacefast chroot lane
+// (`chroot/<environment>/<lane>`), or `site` for the site's own release under
+// .stattic/releases/. No value is a site from before boxes stated their
+// engine, which runs its own release. A selected lane that cannot serve is
+// never replaced by the site's release: the request answers 503
+// `runtime_engine_unavailable`, so a broken lane shows instead of hiding
+// behind whatever release the site last had. The channel link is resolved to its revision directory
 // and the body is required from THAT path, never through the link: FPM runs
 // opcache.validate_timestamps=Off, so only a path per revision keeps the
 // compiled body in step with the bytes on disk. A chroot move therefore needs
@@ -136,6 +140,32 @@ declare(strict_types=1);
         exit;
     };
 
+    // The engine the site states cannot serve. Retrying will not help until
+    // the lane is fixed or the site states another engine. Health answers the
+    // same way, so the control plane reads the reason from this body.
+    $engineUnavailable = static function (?string $lane, string $reason, ?string $revision) use ($wordpress): void {
+        if ($wordpress) {
+            return;
+        }
+        http_response_code(503);
+        header('Retry-After: 30', true);
+        header('Cache-Control: private, no-store', true);
+        header('Content-Type: application/problem+json', true);
+        echo json_encode([
+            'type' => 'https://spacefast.com/problems/runtime_engine_unavailable',
+            'title' => 'Runtime engine unavailable',
+            'status' => 503,
+            'code' => 'runtime_engine_unavailable',
+            // Problem members the control plane reads go under `details`.
+            'details' => [
+                'lane' => $lane,
+                'reason' => $reason,
+                'chroot_revision' => $revision,
+            ],
+        ]);
+        exit;
+    };
+
     $publicRoot = $wordpress
         ? dirname(__DIR__, 2)
         : (basename(__DIR__) === '__spacefast' ? dirname(__DIR__) : __DIR__);
@@ -187,80 +217,92 @@ declare(strict_types=1);
         $loader['install_root'] = $installReal;
 
         // Which engine: the reasons are the ones health reports as
-        // engine_source_reason. Restates engine/shared/engine-selection.php
-        // because this thin loader runs before any engine is chosen.
-        $resolveChroot = static function (): array {
-            if (!class_exists('Atomic_Persistent_Data')) {
-                return ['kind' => 'fallback', 'reason' => 'no_persistent_data', 'revision' => null];
-            }
-            $selection = (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE;
-            if (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', is_string($selection) ? trim($selection) : '', $selected) !== 1) {
-                return ['kind' => 'fallback', 'reason' => 'unselected', 'revision' => null];
-            }
+        // engine_source_reason, or a 503 names as `reason`.
+        $siteReason = 'unselected';
+        $selection = class_exists('Atomic_Persistent_Data')
+            ? (new Atomic_Persistent_Data())->SPACEFAST_RUNTIME_ENGINE_SOURCE
+            : false;
+        $selection = is_string($selection) ? trim($selection) : $selection;
+        if ($selection === false) {
+            // The provider defines the class in its prepend. A PHP process
+            // without it (a bare CLI, a local stack) has nothing to select with.
+            $siteReason = 'no_persistent_data';
+        } elseif ($selection === 'site') {
+            $siteReason = 'site';
+        } elseif (!is_string($selection) || $selection === '') {
+            // No value: a site from before boxes stated their engine.
+            $siteReason = 'unselected';
+        } elseif (preg_match('#^chroot/(staging|production)/(latest|previous)$#D', $selection, $selected) !== 1) {
+            // Only the control plane writes the value; one it would not write
+            // names no engine this loader can trust.
+            $engineUnavailable(null, 'selection_invalid', null);
+            return;
+        } else {
             // Tests stand a chroot up under a temporary root; the box has it at `/`.
             $chrootRoot = defined('SPACEFAST_RUNTIME_CHROOT_ROOT') ? (string) SPACEFAST_RUNTIME_CHROOT_ROOT : '';
             $scriptsReal = realpath($chrootRoot . '/scripts');
             $revisionReal = realpath($chrootRoot . '/scripts/sf-engine-' . $selected[1] . '-' . $selected[2]);
+            $failure = null;
+            $chrootRevision = null;
             if (
                 !is_string($scriptsReal)
                 || !is_string($revisionReal)
                 || dirname($revisionReal) !== $scriptsReal
                 || preg_match('/^sf-engine-([0-9a-f]{40})$/D', basename($revisionReal), $revision) !== 1
             ) {
-                return ['kind' => 'fallback', 'reason' => 'chroot_missing', 'revision' => null];
-            }
-            $rev = $revision[1];
-            // A revision without loader bodies predates this loader.
-            foreach (['engine/loader/request.php', 'engine/loader/wordpress.php', 'engine/shared/engine-selection.php', 'engine/init.php'] as $requiredFile) {
-                if (!is_file($revisionReal . '/' . $requiredFile)) {
-                    return ['kind' => 'fallback', 'reason' => 'chroot_engine_unsupported', 'revision' => $rev];
+                $failure = 'chroot_missing';
+            } elseif (
+                // A revision without loader bodies predates this loader.
+                !is_file($revisionReal . '/engine/loader/request.php')
+                || !is_file($revisionReal . '/engine/loader/wordpress.php')
+                || !is_file($revisionReal . '/engine/shared/engine-selection.php')
+                || !is_file($revisionReal . '/engine/init.php')
+            ) {
+                $failure = 'chroot_engine_unsupported';
+                $chrootRevision = $revision[1];
+            } else {
+                $chrootRevision = $revision[1];
+                // Read the publisher's capability claim as data; never execute
+                // candidate PHP to ask whether it is safe.
+                $inventory = json_decode((string) @file_get_contents($revisionReal . '/engine/wordpress/components.json'), true);
+                $contained = false;
+                foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
+                    if (
+                        is_array($component)
+                        && ($component['id'] ?? null) === 'runtime-engine'
+                        && is_array($component['provides'] ?? null)
+                        && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
+                    ) {
+                        $contained = true;
+                        break;
+                    }
+                }
+                // The binary is named by the revision the link resolved to,
+                // never through its own channel link, so a deploy that moves
+                // both links between two reads cannot pair one revision's
+                // engine with another's binary.
+                $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $revision[1] . '/stattic-runtime';
+                if (!$contained) {
+                    $failure = 'chroot_containment_missing';
+                } elseif (!is_file($binary) || !is_executable($binary)) {
+                    $failure = 'chroot_binary_missing';
+                } else {
+                    $loader['engine_root'] = $revisionReal;
+                    $loader['native_binary'] = $binary;
+                    $loader['engine_source'] = 'chroot';
+                    $loader['engine_source_reason'] = 'chroot';
+                    $loader['chroot_revision'] = $revision[1];
                 }
             }
-            // Read the publisher's capability claim as data; never execute
-            // candidate PHP to ask whether it is safe.
-            $inventory = json_decode((string) @file_get_contents($revisionReal . '/engine/wordpress/components.json'), true);
-            $contained = false;
-            foreach (is_array($inventory['components'] ?? null) ? $inventory['components'] : [] as $component) {
-                if (
-                    is_array($component)
-                    && ($component['id'] ?? null) === 'runtime-engine'
-                    && is_array($component['provides'] ?? null)
-                    && in_array('runtime.security.tenant-containment.v1', $component['provides'], true)
-                ) {
-                    $contained = true;
-                    break;
-                }
+            if ($failure !== null) {
+                $engineUnavailable($selection, $failure, $chrootRevision);
+                return;
             }
-            if (!$contained) {
-                return ['kind' => 'fallback', 'reason' => 'chroot_containment_missing', 'revision' => $rev];
-            }
-            // The binary is named by the revision the link resolved to,
-            // never through its own channel link, so a deploy that moves
-            // both links between two reads cannot pair one revision's
-            // engine with another's binary.
-            $binary = $chrootRoot . '/usr/local/bin/sf-bin-' . $rev . '/stattic-runtime';
-            if (!is_file($binary) || !is_executable($binary)) {
-                return ['kind' => 'fallback', 'reason' => 'chroot_binary_missing', 'revision' => $rev];
-            }
-            return [
-                'kind' => 'chroot',
-                'engine_root' => $revisionReal,
-                'native_binary' => $binary,
-                'revision' => $rev,
-            ];
-        };
+        }
 
-        $chroot = $resolveChroot();
-        if ($chroot['kind'] === 'chroot') {
-            $loader['engine_root'] = $chroot['engine_root'];
-            $loader['native_binary'] = $chroot['native_binary'];
-            $loader['engine_source'] = 'chroot';
-            $loader['engine_source_reason'] = 'chroot';
-            $loader['chroot_revision'] = $chroot['revision'];
-        } else {
-            // The site's own release. A missing or incomplete chroot lands
-            // here too, so a site switched back to the generic chroot keeps
-            // serving.
+        if (!isset($loader['engine_root'])) {
+            // The site's own release, which a site stating `site` or nothing
+            // runs.
             $pointer = is_file($installRoot . '/active-release')
                 ? file_get_contents($installRoot . '/active-release', false, null, 0, 256)
                 : false;
@@ -284,8 +326,8 @@ declare(strict_types=1);
             $loader['engine_root'] = $releaseReal;
             $loader['native_binary'] = $releaseReal . '/bin/stattic-runtime';
             $loader['engine_source'] = 'site';
-            $loader['engine_source_reason'] = $chroot['reason'];
-            $loader['chroot_revision'] = $chroot['revision'];
+            $loader['engine_source_reason'] = $siteReason;
+            $loader['chroot_revision'] = null;
         }
     }
 

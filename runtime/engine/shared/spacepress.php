@@ -442,6 +442,72 @@ function _stattic_spacepress_connectors_call(
         $explicitVisitor = null;
     }
 
+    $context = is_array($GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] ?? null)
+        ? $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']
+        : [];
+    $answer = _stattic_spacepress_connectors_relay($context, $role, $toolName, $callArgs, $handler, $requestId, $explicitVisitor);
+    _stattic_spacepress_connectors_log_failure($answer, (string) ($context['version_id'] ?? ''), $role, $toolName, $handler, $requestId);
+    return $answer;
+}
+
+/**
+ * One `warn` runtime line per connector call that did not answer, so the author
+ * sees why a page fell back without opening the dashboard. It names the role,
+ * the tool, and the failure code, never the arguments or the visitor. A call
+ * still waiting on approval or a run has not failed, and a visitor who has not
+ * connected their own account yet is the expected first answer of a
+ * per-viewer role, not something the author can fix.
+ *
+ * @param array<string, mixed> $answer
+ * @param array<string, mixed> $handler
+ */
+function _stattic_spacepress_connectors_log_failure(
+    array $answer,
+    string $versionId,
+    string $role,
+    string $toolName,
+    array $handler,
+    string $requestId
+): void {
+    $state = is_string($answer['state'] ?? null) ? $answer['state'] : 'unavailable';
+    if (($answer['ok'] ?? false) === true || in_array($state, ['approval_pending', 'running', 'connect_required'], true)) {
+        return;
+    }
+    $code = is_string($answer['code'] ?? null) ? $answer['code'] : $state;
+    $call = $role !== '' && $toolName !== '' ? $role . '.' . $toolName : 'call';
+    $metadata = ['code' => $code, 'state' => $state];
+    if (is_int($answer['status'] ?? null)) {
+        $metadata['status'] = $answer['status'];
+    }
+    require_once __DIR__ . '/runtime-log.php';
+    _stattic_runtime_log_write([
+        'level' => 'warn',
+        'requestId' => $requestId,
+        'handlerName' => is_string($handler['name'] ?? null) ? $handler['name'] : null,
+        'message' => "Connector {$call} failed: {$code}.",
+        'metadata' => $metadata,
+    ], $versionId, 'connector');
+}
+
+/**
+ * The relay call itself: every early refusal and every answer the control plane
+ * gives comes back as one result shape.
+ *
+ * @param array<string, mixed> $context
+ * @param array<string, mixed> $callArgs
+ * @param array<string, mixed> $handler
+ * @param array<string, mixed>|null $explicitVisitor
+ * @return array<string, mixed>
+ */
+function _stattic_spacepress_connectors_relay(
+    array $context,
+    string $role,
+    string $toolName,
+    array $callArgs,
+    array $handler,
+    string $requestId,
+    ?array $explicitVisitor
+): array {
     if ($role === '' || $toolName === '') {
         return [
             'ok' => false,
@@ -451,9 +517,6 @@ function _stattic_spacepress_connectors_call(
         ];
     }
 
-    $context = is_array($GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] ?? null)
-        ? $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']
-        : [];
     $privateRoot = (string) ($context['private_root'] ?? ($GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] ?? ''));
     $spaceId = (string) ($context['space_id'] ?? ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''));
     $versionId = (string) ($context['version_id'] ?? '');

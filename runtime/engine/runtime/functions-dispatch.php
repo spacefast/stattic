@@ -500,7 +500,7 @@ function _stattic_functions_relay_response_lane(string $requestHost = '', string
                     'requestId' => $requestId,
                     'message' => 'Function cookie with an overbroad Domain was stripped.',
                     'metadata' => ['code' => 'functions_cookie_domain_stripped'],
-                ], $versionId);
+                ], $versionId, 'worker');
                 return null;
             }
             if (_stattic_platform_owns_header($name)
@@ -724,7 +724,7 @@ function _stattic_functions_dispatch(
                 'cause' => $result['error'],
                 'headersSent' => $headersSent,
             ],
-        ], $versionId);
+        ], $versionId, 'worker');
         _stattic_relay_abort_after_headers($headersSent);
         _stattic_functions_bad_gateway($requestId, $elapsedSeconds);
     }

@@ -657,7 +657,7 @@ function _stattic_functions_log_append(string $versionId, string $body): void
     $decoded = json_decode($body, true);
     foreach (is_array($decoded) && array_is_list($decoded) ? $decoded : [$decoded] as $record) {
         if (is_array($record)) {
-            _stattic_runtime_log_write($record, $versionId);
+            _stattic_runtime_log_write($record, $versionId, 'worker');
         }
     }
 }

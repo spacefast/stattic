@@ -31,6 +31,14 @@ const SPACEFAST_RUNTIME_LOG_MARKER = 'sf-log/1 ';
 const SPACEFAST_RUNTIME_LOG_MESSAGE_MAX_BYTES = 4096;
 const SPACEFAST_RUNTIME_LOG_METADATA_MAX_BYTES = 4096;
 
+// Where a line was written, under a reserved metadata key rather than a new
+// top-level field: control planes parse records strictly, runtime promotion
+// lags control-plane deploys, and lines live 28 days, so a new top-level key
+// would make an older or rolled-back reader drop every line. Older readers pass
+// metadata through untouched. The reader lifts it to the entry's `source`.
+const SPACEFAST_RUNTIME_LOG_SOURCE_KEY = 'spacefast.source';
+const SPACEFAST_RUNTIME_LOG_SOURCES = ['box', 'worker', 'job', 'connector'];
+
 // The contract's four levels, plus the aliases real tail streams emit. An
 // unknown level resolves to `info` rather than dropping the line.
 const SPACEFAST_RUNTIME_LOG_LEVELS = [
@@ -95,6 +103,23 @@ function _stattic_runtime_log_metadata(mixed $value): array
 }
 
 /**
+ * The writer, not the record, names the source, so a tenant's metadata cannot
+ * claim one. A line the box writes while WP-Cron or Action Scheduler runs is a
+ * job's.
+ */
+function _stattic_runtime_log_source(string $source): string
+{
+    if (!in_array($source, SPACEFAST_RUNTIME_LOG_SOURCES, true)) {
+        $source = 'box';
+    }
+    if ($source === 'box'
+        && ((function_exists('wp_doing_cron') && wp_doing_cron()) || (defined('DOING_CRON') && DOING_CRON))) {
+        return 'job';
+    }
+    return $source;
+}
+
+/**
  * `versionId` is the caller's to supply and never the record's: a worker naming
  * someone else's version must not be able to file its output under it. Every
  * other field is untrusted.
@@ -103,9 +128,12 @@ function _stattic_runtime_log_metadata(mixed $value): array
  * identity of its own, and a caller paging a window needs a stable key for a
  * line it may meet again at a page boundary.
  */
-function _stattic_runtime_log_write(array $record, string $versionId): void
+function _stattic_runtime_log_write(array $record, string $versionId, string $source = 'box'): void
 {
     $timestamp = _stattic_runtime_log_timestamp($record['timestamp'] ?? null);
+    // Stamped after the size cap so an oversized bag still says where it came from.
+    $metadata = _stattic_runtime_log_metadata($record['metadata'] ?? null);
+    $metadata[SPACEFAST_RUNTIME_LOG_SOURCE_KEY] = _stattic_runtime_log_source($source);
     $line = json_encode([
         'id' => bin2hex(random_bytes(12)),
         'timestamp' => $timestamp,
@@ -114,7 +142,7 @@ function _stattic_runtime_log_write(array $record, string $versionId): void
         'versionId' => $versionId === '' ? null : $versionId,
         'handlerName' => _stattic_runtime_log_string($record['handlerName'] ?? null, 256),
         'message' => _stattic_runtime_log_message($record['message'] ?? null),
-        'metadata' => (object) _stattic_runtime_log_metadata($record['metadata'] ?? null),
+        'metadata' => (object) $metadata,
     ], JSON_UNESCAPED_SLASHES);
     if (!is_string($line)) {
         return;

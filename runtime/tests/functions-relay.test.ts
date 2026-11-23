@@ -728,7 +728,8 @@ test("a worker's tail delivery lands in the PHP error log, under the credential'
   expect(entry?.message).toBe("checkout failed");
   expect(entry?.level).toBe("warn");
   expect(entry?.handlerName).toBe("POST /api/checkout");
-  expect(entry?.metadata).toEqual({ attempt: 2 });
+  // The origin stamps where the line came from; the worker cannot claim one.
+  expect(entry?.metadata).toEqual({ attempt: 2, "spacefast.source": "worker" });
   expect(entry?.versionId).toBe(VERSION_ID);
 
   // Both records in one delivery are written, and `log` resolves to the
@@ -919,7 +920,11 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
     expect(records[0]).toMatchObject({
       level: "error",
       versionId: "ver_fx_edge_1",
-      metadata: { code: "functions_transport_failed", headersSent: false },
+      metadata: {
+        code: "functions_transport_failed",
+        headersSent: false,
+        "spacefast.source": "worker",
+      },
     });
     expect(records[0]?.metadata.cause).toEqual(expect.any(String));
     expect(records[0]?.metadata.cause).not.toBe("");

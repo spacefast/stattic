@@ -2808,7 +2808,7 @@ $cookieLogRecord = $runtimeLogLast();
 check(
     ($cookieLogRecord['requestId'] ?? null) === 'req_cookie'
         && ($cookieLogRecord['versionId'] ?? null) === 'ver_cookie'
-        && ($cookieLogRecord['metadata'] ?? null) === ['code' => 'functions_cookie_domain_stripped']
+        && ($cookieLogRecord['metadata'] ?? null) === ['code' => 'functions_cookie_domain_stripped', 'spacefast.source' => 'worker']
         && !str_contains((string) file_get_contents($runtimeLogPath), 'poison=sibling')
         && !str_contains((string) file_get_contents($runtimeLogPath), 'view.fast'),
     'dispatch log: stripped cookies carry request/version IDs without cookie values or domains'
@@ -2853,14 +2853,85 @@ check(($runtimeLogLast()['message'] ?? null) === '{"order":7}', 'runtime log: a 
 // object so a caller can read it without a shape check.
 _stattic_runtime_log_write(['message' => 'x', 'metadata' => [1, 2], 'requestId' => 12, 'handlerName' => []], 'ver_writer');
 $coercedRecord = $runtimeLogLast();
-check(str_contains($runtimeLogLastLine(), '"metadata":{}'), 'runtime log: list metadata cannot answer as a JSON array');
+check(str_contains($runtimeLogLastLine(), '"metadata":{"spacefast.source":"box"}'), 'runtime log: list metadata cannot answer as a JSON array');
 check($coercedRecord['requestId'] === null && $coercedRecord['handlerName'] === null, 'runtime log: non-string ids are null, never coerced');
 
 _stattic_runtime_log_write(['message' => 'kept', 'metadata' => ['pad' => str_repeat('p', SPACEFAST_RUNTIME_LOG_METADATA_MAX_BYTES)]], 'ver_writer');
 check(
-    ($runtimeLogLast()['message'] ?? null) === 'kept' && str_contains($runtimeLogLastLine(), '"metadata":{}'),
-    'runtime log: oversized metadata is dropped and the message survives'
+    ($runtimeLogLast()['message'] ?? null) === 'kept' && str_contains($runtimeLogLastLine(), '"metadata":{"spacefast.source":"box"}'),
+    'runtime log: oversized metadata is dropped, the message survives, and the source stamp is kept'
 );
+
+// The writer names where a line came from; the record never does.
+check(($writtenRecord['metadata'] ?? null) === ['spacefast.source' => 'box'], 'runtime log: a box line is stamped box by default');
+_stattic_runtime_log_write(['message' => 'x', 'metadata' => ['spacefast.source' => 'worker', 'attempt' => 2]], 'ver_writer');
+check(
+    ($runtimeLogLast()['metadata'] ?? null) === ['spacefast.source' => 'box', 'attempt' => 2],
+    'runtime log: a tenant-supplied source is overwritten by the writer'
+);
+_stattic_runtime_log_write(['message' => 'x'], 'ver_writer', 'worker');
+check(($runtimeLogLast()['metadata']['spacefast.source'] ?? null) === 'worker', 'runtime log: the caller names the worker source');
+_stattic_runtime_log_write(['message' => 'x'], 'ver_writer', 'elsewhere');
+check(($runtimeLogLast()['metadata']['spacefast.source'] ?? null) === 'box', 'runtime log: an unknown source becomes box');
+
+// DOING_CRON is a process-wide constant, so the job stamp is probed in its own process.
+$cronLogProbe = <<<'PHP'
+define('DOING_CRON', true);
+require $argv[1];
+ini_set('error_log', $argv[2]);
+_stattic_runtime_log_write(['message' => 'from cron'], 'ver_cron');
+_stattic_runtime_log_write(['message' => 'relayed'], 'ver_cron', 'worker');
+PHP;
+$cronLogPath = sys_get_temp_dir() . '/sf-runtime-log-cron-' . bin2hex(random_bytes(6)) . '.log';
+exec(
+    escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($cronLogProbe) . ' '
+        . escapeshellarg(__DIR__ . '/../engine/shared/runtime-log.php') . ' '
+        . escapeshellarg($cronLogPath) . ' 2>&1'
+);
+$cronSources = [];
+foreach (explode("\n", (string) @file_get_contents($cronLogPath)) as $cronLine) {
+    $cronMarker = strpos($cronLine, SPACEFAST_RUNTIME_LOG_MARKER);
+    if ($cronMarker !== false) {
+        $cronRecord = json_decode(substr($cronLine, $cronMarker + strlen(SPACEFAST_RUNTIME_LOG_MARKER)), true);
+        $cronSources[] = $cronRecord['metadata']['spacefast.source'] ?? null;
+    }
+}
+@unlink($cronLogPath);
+check($cronSources === ['job', 'worker'], 'runtime log: a box line written during WP-Cron is stamped job; an explicit source is kept');
+
+// A connector call that fails writes one line naming the role, tool, and code,
+// and never the arguments.
+$connectorAnswer = _stattic_spacepress_connectors_call(null, ['role' => '', 'tool' => 'issues.list', 'args' => ['secret' => 'customer-value']]);
+$connectorRecord = $runtimeLogLast();
+check(
+    ($connectorAnswer['code'] ?? null) === 'connector_call_invalid'
+        && ($connectorRecord['level'] ?? null) === 'warn'
+        && ($connectorRecord['message'] ?? null) === 'Connector call failed: connector_call_invalid.'
+        && ($connectorRecord['metadata'] ?? null) === ['code' => 'connector_call_invalid', 'state' => 'invalid_request', 'spacefast.source' => 'connector']
+        && !str_contains($runtimeLogLastLine(), 'customer-value'),
+    'runtime log: a refused connector call writes one connector line without its arguments'
+);
+_stattic_spacepress_connectors_log_failure(
+    ['ok' => false, 'state' => 'error', 'code' => 'rate_limited', 'status' => 429, 'message' => ''],
+    'ver_writer',
+    'github',
+    'issues.list',
+    ['name' => 'listIssues'],
+    'req_conn'
+);
+$connectorRecord = $runtimeLogLast();
+check(
+    ($connectorRecord['message'] ?? null) === 'Connector github.issues.list failed: rate_limited.'
+        && ($connectorRecord['handlerName'] ?? null) === 'listIssues'
+        && ($connectorRecord['requestId'] ?? null) === 'req_conn'
+        && ($connectorRecord['metadata'] ?? null) === ['code' => 'rate_limited', 'state' => 'error', 'status' => 429, 'spacefast.source' => 'connector'],
+    'runtime log: a connector error names the role, tool, code, and status'
+);
+$beforeConnectorCount = count($runtimeLogRecords());
+foreach ([['ok' => true, 'state' => 'ok', 'data' => []], ['ok' => false, 'state' => 'running', 'message' => ''], ['ok' => false, 'state' => 'connect_required', 'message' => '']] as $quietAnswer) {
+    _stattic_spacepress_connectors_log_failure($quietAnswer, 'ver_writer', 'github', 'issues.list', [], '');
+}
+check(count($runtimeLogRecords()) === $beforeConnectorCount, 'runtime log: answered, running, and connect-required calls write nothing');
 
 // A message the shipper truncates mid-JSON is unparseable, so the writer
 // bounds it first.

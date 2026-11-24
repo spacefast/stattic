@@ -507,6 +507,19 @@ test("a deleted Space's tombstone yields to the Space serving the hostname and r
     expect(claimed.status).toBe(200);
     expect(await claimed.text()).toBe("s1");
 
+    // Space S keeps the hostname only as a canonical redirect, as a default
+    // address does once a primary domain replaces it. The claim still wins.
+    await putRoute(rt, "spc_idx_s", "production", {
+      ...productionRoute("primary-claim.test", "ver_idx_s1"),
+      host_canonical_redirects: [
+        { from: sharedHost, to: "https://primary-claim.test", status: 308 },
+      ],
+    });
+    const redirected = await get(rt, sharedHost, "/deep?x=1");
+    expect(redirected.status).toBe(308);
+    expect(redirected.headers.get("location")).toBe("https://primary-claim.test/deep?x=1");
+    expect((await healthServing(rt, sharedHost, "ver_idx_s1"))?.state).toBe("serving");
+
     // Space S releases the hostname: T's tombstone must resurface, because the
     // index is recomputed from every Space directory on disk.
     await putRoute(rt, "spc_idx_s", "production", productionRoute([], "ver_idx_s1"));

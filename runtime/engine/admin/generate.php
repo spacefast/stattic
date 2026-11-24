@@ -626,17 +626,6 @@ function _stattic_runtime_index_from_contributions(array $contributions): array
         _stattic_runtime_append_contribution_routes($contribution['routes'], $hostRoutes, $tombstonedHostnames);
         _stattic_runtime_append_contribution_routes($contribution['canonical'], $hostCanonicalRoutes, $tombstonedHostnames);
     }
-    foreach ($contributions as $contribution) {
-        foreach ($contribution['tombstones'] as $hostname) {
-            _stattic_runtime_set_tombstone_host_entry(
-                $hostnames,
-                (string) $hostname,
-                (string) $contribution['space_id'],
-                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['reason'] ?? null) : ($contribution['tombstone_reason'] ?? null),
-                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['category'] ?? null) : ($contribution['tombstone_category'] ?? null)
-            );
-        }
-    }
     foreach ($hostRoutes as &$routes) {
         usort($routes, static function ($left, $right): int {
             $leftLocation = is_array($left) ? (string) ($left['location'] ?? '/') : '/';
@@ -662,6 +651,20 @@ function _stattic_runtime_index_from_contributions(array $contributions): array
                 $hostnames[$hostname] = ['space_id' => $route['space_id']];
                 break;
             }
+        }
+    }
+    // Tombstones go last, once every live claim has its entry: another Space's
+    // tombstone yields to a redirect-only host exactly as it yields to a served
+    // one, while a Space's own tombstone still replaces its own claim.
+    foreach ($contributions as $contribution) {
+        foreach ($contribution['tombstones'] as $hostname) {
+            _stattic_runtime_set_tombstone_host_entry(
+                $hostnames,
+                (string) $hostname,
+                (string) $contribution['space_id'],
+                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['reason'] ?? null) : ($contribution['tombstone_reason'] ?? null),
+                isset($contribution['tombstone_metadata'][$hostname]) ? ($contribution['tombstone_metadata'][$hostname]['category'] ?? null) : ($contribution['tombstone_category'] ?? null)
+            );
         }
     }
     return ['hostnames' => $hostnames, 'host_routes' => $hostRoutes];

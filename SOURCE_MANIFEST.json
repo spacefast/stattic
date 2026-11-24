@@ -1,7 +1,7 @@
 {
-  "revision": "3f303db1fe1a93831093c8ef4ee84ec17ab9efe4",
+  "revision": "cc4f77d72f4efe8b8181bc8ac663bcead57ec600",
   "sourceHash": "c77f602e48807e20af2dabcc6cc4098e9d1594ca3a2fb50f843ac98894714413",
-  "manifestSha256": "0ff64ab41f4b8ff818d41e1ad1cf539e693941c02d005b6a8674568282a65553",
+  "manifestSha256": "d189517cbba2e2020c0c36c36752e035e06a08474a070a201b1a9b71e49d65ee",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "6e5545e6bd8550f9fbb9ed38faeb992e479495923e3a336bf875098d2ef84c5a"
+      "sha256": "fa3060ec899c72045f21dec5278984e01025e924eb4b210380724cebdbb40518"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "56607c3ea096cf67d1a93cf5c839f30cdbcf5e0eefc9bc657f44afd238bcdab5"
+      "sha256": "571ad2d7b31cda6b9d83c9bf26ed03ce99060ca43c3e5cc4d0bd81f2c831ac80"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29609,7 +29609,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow.test.ts",
-      "sha256": "141f4a6e528ddf13288c30cb2d9e435c4473a294449feb6dca57a1d1035e32de"
+      "sha256": "5c9cb985a281a0c9d4096406a733460f8af3039fa5b4859bb9b1c2cfcc92ae7e"
     },
     {
       "path": "runtime/browser/sell-checkout-element.js",

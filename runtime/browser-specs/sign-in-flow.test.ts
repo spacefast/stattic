@@ -259,11 +259,12 @@ const barRequests = () =>
 /** Signs in on the door the Space's sign-in sends a person to, as they would. */
 async function continueOnDoor(page: Page, button: RegExp) {
   await page.waitForURL(
-    (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/door/page",
+    (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/space-sign-in/page",
   );
   const door = page.waitForResponse(
     (response) =>
-      response.url() === `${fixture.apiOrigin}/v1/door` && response.request().method() === "POST",
+      response.url() === `${fixture.apiOrigin}/v1/space-sign-in` &&
+      response.request().method() === "POST",
   );
   await page.getByRole("button", { name: button }).first().click();
   expect((await door).status()).toBe(303);
@@ -524,7 +525,7 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     await frame.getByRole("menuitem", { name: "Switch Account" }).click();
     // The door asks which account this Space signs in as.
     await page.waitForURL(
-      (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/door/page",
+      (url) => url.origin === fixture.apiOrigin && url.pathname === "/v1/space-sign-in/page",
     );
     await expectUi(page.getByRole("heading", { name: "Choose an account" })).toBeVisible();
     await continueOnDoor(page, /Sam Second/);
@@ -671,10 +672,10 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
       sent.filter(
         ({ origin, method, pathname }) =>
           (origin === fixture.apiOrigin && pathname === "/v1/auth/oauth2/authorize") ||
-          (origin === fixture.apiOrigin && method === "POST" && pathname === "/v1/door") ||
+          (origin === fixture.apiOrigin && method === "POST" && pathname === "/v1/space-sign-in") ||
           (origin === `https://${fixture.docs.host}` &&
             (pathname === "/__spacefast/sign-in" || pathname === "/__spacefast/callback")) ||
-          (origin === fixture.apiOrigin && pathname === "/v1/door/page") ||
+          (origin === fixture.apiOrigin && pathname === "/v1/space-sign-in/page") ||
           (origin === fixture.dashboardOrigin && pathname === "/sign-in"),
       ),
     ).toEqual([]);

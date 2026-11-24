@@ -58,10 +58,56 @@ function _stattic_share_oauth_set_pending(array $serving, string $host, array $p
     _stattic_set_cookie($name, $cookie, 600);
 }
 
+// How long the gate's proof that it started a sign-in lives (`sf_gate`).
+const STATTIC_SHARE_GATE_PROOF_SECONDS = 120;
+
+// The access gate's proof that it started this sign-in, for a page this
+// visitor could not open (`runtime.share-gate-proof.v1`): a JWS signed with the
+// Space's own Ed25519 key (shared/space-identity.php), which never leaves this
+// box, over the exact runtime callback, the request the gate refused (its path
+// and query, the flow's own params left out) and this sign-in's PKCE
+// challenge, alive two minutes. Only such a start may sign a member in through
+// company SSO without a page (apps/control-plane/src/share/gate-proof.ts).
+// Null, so the start reads as the app's, until the control plane has
+// registered the key it would verify with.
+function _stattic_share_gate_proof(array $serving, string $host, string $deniedResource, string $challenge): ?string
+{
+    $issuer = _stattic_share_oauth_issuer($serving);
+    if ($issuer === null) return null;
+    require_once __DIR__ . '/../shared/space-identity.php';
+    $spaceId = _stattic_serving_space_id($serving);
+    $config = _stattic_space_identity_config($serving, _stattic_access_private_root(), $spaceId);
+    if ($config === null) return null;
+    $now = _stattic_access_session_now();
+    $header = ['alg' => 'EdDSA', 'typ' => 'sf-gate+jwt', 'kid' => $config['key']['kid']];
+    $payload = [
+        'iss' => $config['clientId'],
+        'sub' => $spaceId,
+        'aud' => $issuer,
+        'host' => $host,
+        'cb' => 'https://' . $host . STATTIC_SHARE_OAUTH_CALLBACK_PATH,
+        'res' => $deniedResource,
+        'cc' => $challenge,
+        'iat' => $now,
+        'exp' => $now + STATTIC_SHARE_GATE_PROOF_SECONDS,
+    ];
+    $input = _stattic_base64url_encode((string) json_encode($header, JSON_UNESCAPED_SLASHES))
+        . '.' . _stattic_base64url_encode((string) json_encode($payload, JSON_UNESCAPED_SLASHES));
+    $secret = (string) base64_decode($config['key']['secret'], true);
+    $signature = sodium_crypto_sign_detached($input, $secret);
+    sodium_memzero($secret);
+    return $input . '.' . _stattic_base64url_encode($signature);
+}
+
 // A silent begin is one nobody clicked for: the gate's probe, a link holder's
 // identity check or a returning account's renewal. Its refusal lands back on
 // the page it left, and $expired keeps the dead session's diagnosis for it.
-function _stattic_share_oauth_begin(array $serving, string $host, string $returnPath, bool $silent, bool $expired = false): never
+// $deniedResource is set only by the access gate's own probe for a page this
+// visitor cannot open, which it names, and that start carries the gate's
+// proof; `/__spacefast/sign-in` (an app's `signIn()`, the bar's "Switch
+// account", a returning account's renewal) never passes it, since any page or
+// app on the Space can send a browser there.
+function _stattic_share_oauth_begin(array $serving, string $host, string $returnPath, bool $silent, bool $expired = false, ?string $deniedResource = null): never
 {
     header('Referrer-Policy: no-referrer');
     $url = _stattic_share_oauth_url($serving);
@@ -92,6 +138,10 @@ function _stattic_share_oauth_begin(array $serving, string $host, string $return
     _stattic_share_oauth_set_pending($serving, $host, $pending);
     $verifier = hash_hmac('sha256', 'share-oauth-pkce:' . $state, $key);
     $nonce = hash_hmac('sha256', 'share-oauth-nonce:' . $state, $key);
+    $challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
+    $proof = $deniedResource !== null
+        ? _stattic_share_gate_proof($serving, $host, $deniedResource, $challenge)
+        : null;
     $redirect = _stattic_access_url_with_params($url, [
         'client_id' => 'spacefast-share:' . _stattic_serving_space_id($serving),
         'response_type' => 'code',
@@ -101,8 +151,9 @@ function _stattic_share_oauth_begin(array $serving, string $host, string $return
         'nonce' => $nonce,
         'return' => $returnPath,
         ...($invite !== null ? ['invite' => $invite] : []),
-        'code_challenge' => rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '='),
+        'code_challenge' => $challenge,
         'code_challenge_method' => 'S256',
+        ...($proof !== null ? ['sf_gate' => $proof] : []),
         // "Switch account" from the Space bar and the gate's "Use another
         // account": always ask which account signs in to this Space. The
         // dashboard keeps its own. `addAccount=1` is the older gate's spelling,

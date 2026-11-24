@@ -3509,27 +3509,21 @@ function _stattic_access_forget_returning_account(): void
     }
 }
 
-// Flow-state params are stripped so redirects and forms never loop.
+// Flow-state params are stripped so redirects and forms never loop. Uses the
+// same pair-preserving stripping as the gate proof (`_stattic_access_return_without_flow_params`)
+// so duplicate keys (`?tag=one&tag=two`) and dots (`?a.b=3`) keep their exact spelling.
 function _stattic_access_clean_return_path(): string
 {
     $uri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
-    $path = parse_url($uri, PHP_URL_PATH);
     $query = parse_url($uri, PHP_URL_QUERY);
-    $path = is_string($path) && $path !== '' ? $path : '/';
     parse_str(is_string($query) ? $query : '', $params);
     $explicitReturn = is_string($params['sf_access_return'] ?? null)
         ? _stattic_safe_return_path((string) $params['sf_access_return'])
         : null;
-    // A share-link token that did not open the page is spent: never carry it
-    // into the gate's forms or the redirect they bounce through.
-    foreach (STATTIC_ACCESS_FLOW_PARAMS as $flowParam) {
-        unset($params[$flowParam]);
-    }
     if ($explicitReturn !== null) {
         return $explicitReturn;
     }
-    $rebuilt = http_build_query($params);
-    return _stattic_safe_return_path($path . ($rebuilt !== '' ? '?' . $rebuilt : '')) ?? '/';
+    return _stattic_safe_return_path(_stattic_access_return_without_flow_params($uri)) ?? '/';
 }
 
 function _stattic_request_is_document_navigation(): bool
@@ -3543,6 +3537,18 @@ function _stattic_request_is_document_navigation(): bool
     // metadata as unknown: a proxy or embedded browser that drops Sec-Fetch-Dest
     // must get the usable access page, not an attempted escape from its frame.
     return $destination === 'document';
+}
+
+// A top-level document navigation the person started themselves: a click, a
+// typed address, a bookmark. The browser sends `Sec-Fetch-User: ?1` only with
+// user activation, so a script's `location =` without a click, a fetch, a
+// frame or a server's request built without those headers is none.
+function _stattic_request_is_user_navigation(): bool
+{
+    $header = static fn (string $name): string => strtolower(trim((string) ($_SERVER[$name] ?? '')));
+    return _stattic_request_is_document_navigation()
+        && $header('HTTP_SEC_FETCH_MODE') === 'navigate'
+        && $header('HTTP_SEC_FETCH_USER') === '?1';
 }
 
 // The access flow's own params. None of them is ever part of a page a flow
@@ -3952,8 +3958,22 @@ function _stattic_render_access_gate(array $serving, string $requestHost, array 
     ) {
         if ($lanes['silent'] && _stattic_share_oauth_is_account_url($lanes['account'])) {
             // Same rule as below: the probe is recorded before the browser leaves.
+            // Only the gate drawn for the very page this visitor asked for and
+            // could not open, on a navigation the person started themselves,
+            // carries the gate's proof (share-oauth.php `_stattic_share_gate_proof`).
+            // A gate drawn for a `return` someone else named (the door,
+            // `/__spacefast?return=`) proves nothing.
             _stattic_access_record_identity_check($serving, $requestHost, $identity);
-            _stattic_share_oauth_begin($serving, $host, $returnPath, true, $expired);
+            _stattic_share_oauth_begin(
+                $serving,
+                $host,
+                $returnPath,
+                true,
+                $expired,
+                !isset($options['return']) && _stattic_request_is_user_navigation()
+                    ? _stattic_access_return_without_flow_params((string) ($_SERVER['REQUEST_URI'] ?? '/'))
+                    : null
+            );
         }
         if ($lanes['silent'] && is_string($lanes['account'])) {
             _stattic_access_legacy_silent_sso_redirect(

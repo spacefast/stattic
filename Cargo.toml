@@ -50,7 +50,7 @@ strip = "symbols"
 
 [profile.wasm]
 inherits = "release"
-opt-level = "s"
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"

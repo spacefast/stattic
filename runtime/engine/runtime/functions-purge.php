@@ -117,7 +117,11 @@ function _stattic_functions_purge_admit(array $store, string $spaceId, int $now)
             return ['verdict' => 'accepted'];
         },
     );
-    return is_array($decision) ? $decision : ['verdict' => 'accepted'];
+    if (!is_array($decision)) {
+        error_log('spacefast functions purge admission store unavailable; failing open');
+        return ['verdict' => 'accepted'];
+    }
+    return $decision;
 }
 
 // Never returns.

@@ -36,7 +36,8 @@ const result = spawnSync(
     toolchain,
     "cargo",
     "build",
-    "--release",
+    "--profile",
+    "wasm",
     "--locked",
     "--target",
     target,
@@ -48,7 +49,7 @@ const result = spawnSync(
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
-const source = path.join(repoRoot, "target/wasm32-wasip1/release/stattic_runtime_wasi.wasm");
+const source = path.join(repoRoot, "target/wasm32-wasip1/wasm/stattic_runtime_wasi.wasm");
 for (const output of process.argv.slice(2)) {
   const destination = path.resolve(output);
   copyFileAtomic(source, destination);

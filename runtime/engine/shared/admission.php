@@ -42,76 +42,97 @@ function _stattic_admission_counter_path(string $privateRoot, string $spaceId): 
     return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.json';
 }
 
-// THE windowed counter: flock-serialized files, shared by every worker that
-// serves the site regardless of pool. Every mutation serializes on the
-// generation pointer's lock, so concurrent increments cannot lose each other.
-// $decide gets the in-window count and returns the delta to persist.
-// $requireGeneration binds a caller to the window it joined, so a rotated-away
-// generation makes the update a no-op instead of landing on its successor.
-function _stattic_admission_counter_update(
-    string $path,
-    int $staleSeconds,
-    callable $decide,
-    ?string $requireGeneration = null
-): ?array {
+function _stattic_admission_counter_generation(mixed $pointerRaw): ?string
+{
+    $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
+    return is_array($pointer)
+        && is_string($pointer['generation'] ?? null)
+        && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
+            ? $pointer['generation']
+            : null;
+}
+
+// THE windowed concurrency counter: flock-serialized files, shared by every
+// worker that serves the site regardless of pool. Acquire, generation rotation,
+// and release-descriptor binding happen under ONE pointer lock so there is no
+// intermediate acquired-but-unbound state and no compensating decrement path.
+function _stattic_admission_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
+{
     _stattic_runtime_mkdir(dirname($path));
     _stattic_runtime_assert_private_path($path);
     $pointerPath = $path . '.generation';
     $pointerHandle = _stattic_lock_acquire($pointerPath, STATTIC_LOCK_WAIT);
     if ($pointerHandle === false) {
-        return null;
+        return false;
     }
 
-    rewind($pointerHandle);
-    $pointerRaw = stream_get_contents($pointerHandle);
-    $generation = _stattic_admission_counter_generation($pointerRaw);
-    if ($requireGeneration !== null && ($generation === null || !hash_equals($requireGeneration, $generation))) {
-        _stattic_lock_release($pointerHandle);
-        return null;
-    }
+    $countHandle = false;
+    $releasePointer = false;
+    $releaseCounter = false;
+    $rotating = false;
+    $countPath = '';
 
-    $updatedAt = 0;
-    $startedAt = 0;
-    $count = 0;
-    if ($generation !== null) {
+    try {
+        rewind($pointerHandle);
+        $generation = _stattic_admission_counter_generation(stream_get_contents($pointerHandle));
+
+        $startedAt = 0;
+        $count = 0;
+        if ($generation !== null) {
+            $existingCountPath = $path . '.' . $generation;
+            _stattic_runtime_assert_private_path($existingCountPath);
+            $raw = is_file($existingCountPath) ? file_get_contents($existingCountPath) : false;
+            $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
+            $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
+            // Generation files created before `started_at` use their last update
+            // as the migration baseline, then gain an explicit lifetime on next write.
+            $startedAt = is_array($decoded) && is_int($decoded['started_at'] ?? null)
+                ? $decoded['started_at']
+                : $updatedAt;
+            $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
+        }
+
+        $now = time();
+        $rotating = $generation === null || $startedAt < $now - $staleSeconds;
+        if ($rotating) {
+            $count = 0;
+            $generation = bin2hex(random_bytes(16));
+            $startedAt = $now;
+        }
+
+        if ($count >= $limit) {
+            return false;
+        }
+
         $countPath = $path . '.' . $generation;
         _stattic_runtime_assert_private_path($countPath);
-        $raw = is_file($countPath) ? file_get_contents($countPath) : false;
-        $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
-        $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
-        // Generation files created before `started_at` use their last update as
-        // the migration baseline, then gain an explicit lifetime on next write.
-        $startedAt = is_array($decoded) && is_int($decoded['started_at'] ?? null)
-            ? $decoded['started_at']
-            : $updatedAt;
-        $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
-    }
-
-    $now = time();
-    $rotating = $requireGeneration === null && ($generation === null || $startedAt < $now - $staleSeconds);
-    if ($rotating) {
-        $count = 0;
-        $generation = bin2hex(random_bytes(16));
-        $startedAt = $now;
-    }
-
-    $delta = (int) $decide($count);
-    $next = max(0, $count + $delta);
-    if ($rotating || $delta !== 0) {
-        $countHandle = _stattic_lock_acquire($path . '.' . $generation, STATTIC_LOCK_WAIT);
+        $countHandle = _stattic_lock_acquire($countPath, STATTIC_LOCK_WAIT);
         if ($countHandle === false) {
-            _stattic_lock_release($pointerHandle);
-            return null;
+            return false;
         }
+
+        // Bind the release descriptors BEFORE committing the charge and before a
+        // PHP handler tightens open_basedir. Release later uses only these FDs,
+        // never a path outside the handler's jail.
+        $releasePointer = fopen($pointerPath, 'r+');
+        $releaseCounter = fopen($countPath, 'r+');
+        if (!is_resource($releasePointer) || !is_resource($releaseCounter)) {
+            if ($rotating && is_file($countPath)) {
+                unlink($countPath);
+            }
+            return false;
+        }
+
         ftruncate($countHandle, 0);
         rewind($countHandle);
         fwrite($countHandle, json_encode([
-            'count' => $next,
+            'count' => $count + 1,
             'started_at' => $startedAt,
-            'updated_at' => $delta === 0 ? $updatedAt : $now,
+            'updated_at' => $now,
         ], JSON_UNESCAPED_SLASHES) . "\n");
         fflush($countHandle);
         _stattic_lock_release($countHandle);
+        $countHandle = false;
 
         if ($rotating) {
             ftruncate($pointerHandle, 0);
@@ -131,102 +152,50 @@ function _stattic_admission_counter_update(
                 unlink($path);
             }
         }
-    }
-    _stattic_lock_release($pointerHandle);
 
-    return ['count' => $next, 'generation' => (string) $generation];
-}
+        $boundPointer = $releasePointer;
+        $boundCounter = $releaseCounter;
+        $boundGeneration = (string) $generation;
+        $releasePointer = false;
+        $releaseCounter = false;
 
-function _stattic_admission_counter_generation(mixed $pointerRaw): ?string
-{
-    $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
-    return is_array($pointer)
-        && is_string($pointer['generation'] ?? null)
-        && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
-            ? $pointer['generation']
-            : null;
-}
-
-function _stattic_admission_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
-{
-    $admitted = false;
-    $result = _stattic_admission_counter_update(
-        $path,
-        $staleSeconds,
-        static function (int $count) use ($limit, &$admitted): int {
-            $admitted = $count < $limit;
-            return $admitted ? 1 : 0;
-        },
-    );
-    if ($result === null || !$admitted) {
-        return false;
-    }
-    $generation = $result['generation'];
-    // Bind the release before a PHP handler tightens open_basedir. The pointer
-    // lock fences rotation while these descriptors are opened; release later
-    // uses only them, never a path outside the handler's jail.
-    $release = _stattic_lock_with(
-        $path . '.generation',
-        STATTIC_LOCK_WAIT,
-        null,
-        static function ($pointerLock) use ($path, $generation): ?callable {
-            rewind($pointerLock);
-            if (_stattic_admission_counter_generation(stream_get_contents($pointerLock)) !== $generation) {
-                // Rotation already retired this request's charge.
-                return static function (): void {};
-            }
-            $pointer = fopen($path . '.generation', 'r+');
-            $counter = fopen($path . '.' . $generation, 'r+');
-            if (!is_resource($pointer) || !is_resource($counter)) {
-                if (is_resource($pointer)) fclose($pointer);
-                if (is_resource($counter)) fclose($counter);
-                return null;
-            }
-            $released = false;
-            return static function () use ($pointer, $counter, $generation, &$released): void {
-                if ($released) return;
-                $released = true;
-                try {
-                    if (!_stattic_lock_flock($pointer, LOCK_EX, true)) {
-                        error_log('spacefast admission release lock unavailable');
-                        return;
-                    }
-                    rewind($pointer);
-                    if (_stattic_admission_counter_generation(stream_get_contents($pointer)) !== $generation) {
-                        return;
-                    }
-                    rewind($counter);
-                    $value = json_decode((string) stream_get_contents($counter), true);
-                    if (!is_array($value) || !is_int($value['count'] ?? null)) {
-                        error_log('spacefast admission release counter unavailable');
-                        return;
-                    }
-                    $value['count'] = max(0, $value['count'] - 1);
-                    $value['updated_at'] = time();
-                    $payload = json_encode($value, JSON_UNESCAPED_SLASHES) . "\n";
-                    rewind($counter);
-                    if (!ftruncate($counter, 0) || fwrite($counter, $payload) !== strlen($payload) || !fflush($counter)) {
-                        error_log('spacefast admission release write failed');
-                    }
-                } finally {
-                    _stattic_lock_release($pointer);
-                    fclose($counter);
+        $released = false;
+        return static function () use ($boundPointer, $boundCounter, $boundGeneration, &$released): void {
+            if ($released) return;
+            $released = true;
+            try {
+                if (!_stattic_lock_flock($boundPointer, LOCK_EX, true)) {
+                    error_log('spacefast admission release lock unavailable');
+                    return;
                 }
-            };
-        },
-    );
-    if (!is_callable($release)) {
-        // Descriptor binding failed before containment; undo the charge while
-        // its paths remain accessible, then refuse admission.
-        _stattic_admission_counter_update(
-            $path,
-            $staleSeconds,
-            static fn (int $count): int => -1,
-            $generation,
-        );
-        return false;
+                rewind($boundPointer);
+                if (_stattic_admission_counter_generation(stream_get_contents($boundPointer)) !== $boundGeneration) {
+                    return;
+                }
+                rewind($boundCounter);
+                $value = json_decode((string) stream_get_contents($boundCounter), true);
+                if (!is_array($value) || !is_int($value['count'] ?? null)) {
+                    error_log('spacefast admission release counter unavailable');
+                    return;
+                }
+                $value['count'] = max(0, $value['count'] - 1);
+                $value['updated_at'] = time();
+                $payload = json_encode($value, JSON_UNESCAPED_SLASHES) . "\n";
+                rewind($boundCounter);
+                if (!ftruncate($boundCounter, 0) || fwrite($boundCounter, $payload) !== strlen($payload) || !fflush($boundCounter)) {
+                    error_log('spacefast admission release write failed');
+                }
+            } finally {
+                _stattic_lock_release($boundPointer);
+                fclose($boundCounter);
+            }
+        };
+    } finally {
+        if (is_resource($releasePointer)) fclose($releasePointer);
+        if (is_resource($releaseCounter)) fclose($releaseCounter);
+        if (is_resource($countHandle)) _stattic_lock_release($countHandle);
+        _stattic_lock_release($pointerHandle);
     }
-    return $release;
 }
 
 function _stattic_admission_record_shed(string $privateRoot, string $spaceId, int $limit, string $reason): void

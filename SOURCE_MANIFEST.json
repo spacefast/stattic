@@ -1,7 +1,7 @@
 {
-  "revision": "6e6fdb4fc22b6bb4a29d08dc25eb200164d632a7",
-  "sourceHash": "4b494d851af6a9f3b2648cdb34c03e589a123f34ea53ec21b63104aa802d69f5",
-  "manifestSha256": "c80d2cab58767e1932efa486963f220e660755d09733108ddd8e3110950fdb93",
+  "revision": "3f303db1fe1a93831093c8ef4ee84ec17ab9efe4",
+  "sourceHash": "c77f602e48807e20af2dabcc6cc4098e9d1594ca3a2fb50f843ac98894714413",
+  "manifestSha256": "0ff64ab41f4b8ff818d41e1ad1cf539e693941c02d005b6a8674568282a65553",
   "files": [
     {
       "path": ".gitignore",
@@ -13,15 +13,15 @@
     },
     {
       "path": "Cargo.toml",
-      "sha256": "f20c5e27383fe9f427b808eae6aef19523124d4f4e7b039ec23d57e6a3b663a6"
+      "sha256": "bee5269c608896185083e12363d3cfe7386f3726d3ba22500810f625ea4ff2b5"
     },
     {
       "path": "README.md",
-      "sha256": "d651fbbf1ee9e41307576f3484bc60d11e5de47870c661b2f6de4ce1e43db385"
+      "sha256": "6e5545e6bd8550f9fbb9ed38faeb992e479495923e3a336bf875098d2ef84c5a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "0916a279044c3d35d0783a94140b9d068a706565d489ded73ace813ea20f504a"
+      "sha256": "56607c3ea096cf67d1a93cf5c839f30cdbcf5e0eefc9bc657f44afd238bcdab5"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29969,7 +29969,7 @@
     },
     {
       "path": "runtime/engine/runtime/functions-purge.php",
-      "sha256": "3ed967619b093781103e56ae127e9141adde3b5bab89221a3313f819abe218ec"
+      "sha256": "ab8b8b6dd1eadbbef339ef16024d88a0daa3fb79f93da4d6478ac240c2912e3d"
     },
     {
       "path": "runtime/engine/runtime/functions-relay.php",
@@ -30061,7 +30061,7 @@
     },
     {
       "path": "runtime/engine/shared/admission.php",
-      "sha256": "14af6a781158b2696a26ec2cf4ba522947759460b406d799d4bf1c9bec36347f"
+      "sha256": "db82d3c0378b867bdc0fbf342964f3c8e035841fb1aca32b71c20777cc8e34a6"
     },
     {
       "path": "runtime/engine/shared/application-journal.php",
@@ -31009,7 +31009,7 @@
     },
     {
       "path": "scripts/build-runtime-wasi.mjs",
-      "sha256": "9d214f87e9a4eda58acbc6c364314a6edd204fa5c86e971dfd42050b99618a5f"
+      "sha256": "da50cf77ad60265f7cbb096d9a46d067939c75bd23021b2f937401117bab99c6"
     },
     {
       "path": "scripts/check-finalizer-protocol.mjs",

@@ -1590,6 +1590,9 @@ test("an own release on a site that states a chroot lane installs, and says noth
     },
   );
   expect(install.exitCode, install.stderr).toBe(0);
+  // wp.cloud SSH returns stderr on stdout, ahead of the receipt: a warning on
+  // stderr would break the control plane's parse.
+  expect(install.stderr).toBe("");
   expect(JSON.parse(install.stdout)).toMatchObject({
     warning: "runtime_engine_release_unserved:chroot_binary_missing",
   });

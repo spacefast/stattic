@@ -3279,8 +3279,9 @@ if ($chrootSite) {
     // so an operator can stage one before switching the site to `site`.
     $statedLane = installer_selected_chroot();
     if (!in_array($statedLane['reason'], ['unselected', 'no_persistent_data', 'site'], true)) {
+        // The receipt carries it, never stderr: wp.cloud SSH hands stderr back
+        // on stdout, ahead of the receipt the control plane parses.
         $GLOBALS['spacefast_install_warning'] = 'runtime_engine_release_unserved:' . $statedLane['reason'];
-        fwrite(STDERR, $GLOBALS['spacefast_install_warning'] . "\n");
     }
 }
 $publication = reserve_engine_publication(

@@ -168,9 +168,10 @@ naming the `lane`, the `reason` (`chroot_missing`, `chroot_engine_unsupported`, 
 with `lane` null) and the `chroot_revision` the channel resolved to. A command gets `source`
 `unavailable` from `engine-selection.php` and exits. The installer's `--chroot-site` mode lays
 down just the loader copies and public files of the revision the site's chroot serves and removes
-any release. An own install on a site that states a channel still installs, but writes
-`runtime_engine_release_unserved:<reason>` to stderr, since nothing serves that release until the
-site states `site`. Health and the engine-update receipt report `engine_source`. Health also
+any release. An own install on a site that states a channel still installs, but its receipt carries
+`warning: runtime_engine_release_unserved:<reason>`, since nothing serves that release until the
+site states `site`. It writes nothing to stderr: wp.cloud SSH returns stderr on stdout, ahead of
+the receipt. Health and the engine-update receipt report `engine_source`. Health also
 reports `engine_source_reason` (`chroot`, `site`, `unselected` or `no_persistent_data`), the
 `chroot_revision` the selected channel resolved to, and the `loader_version` that handed the
 request over.

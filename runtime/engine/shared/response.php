@@ -116,11 +116,27 @@ function _stattic_send_document_isolation_headers(): void
         header(STATTIC_REFUSAL_HEADER . ': ' . $refusal, true);
     }
     $policies = [];
+    $frameAncestors = false;
     foreach (headers_list() as $line) {
         $separator = strpos($line, ':');
-        if ($separator !== false && strtolower(trim(substr($line, 0, $separator))) === 'permissions-policy') {
-            $policies[] = trim(substr($line, $separator + 1));
+        if ($separator === false) {
+            continue;
         }
+        $name = strtolower(trim(substr($line, 0, $separator)));
+        if ($name === 'permissions-policy') {
+            $policies[] = trim(substr($line, $separator + 1));
+        } elseif ($name === 'content-security-policy'
+            && preg_match('/(?:^|[;,])\s*frame-ancestors(?:\s|;|,|$)/i', substr($line, $separator + 1)) === 1) {
+            $frameAncestors = true;
+        }
+    }
+    // frame-ancestors is the framing policy wherever one is stated: the
+    // dashboard frames the editor (wp-admin, SpacePress /wp-admin/new/) by
+    // it, while WordPress core adds `X-Frame-Options: SAMEORIGIN` on every
+    // admin and login screen. Browsers already let CSP win; sending both only
+    // misleads caches, scanners and older clients about which one applies.
+    if ($frameAncestors) {
+        header_remove('X-Frame-Options');
     }
     // These controls have no effect on non-document responses. Stating them on
     // every response also covers HTML produced with PHP's default media type.

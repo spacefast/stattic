@@ -80,6 +80,53 @@ function _stattic_spacepress_version_manifest(string $versionRoot): ?array
     return $root === null ? null : _stattic_spacepress_manifest($root);
 }
 
+/**
+ * Where a SpacePress build's browser files live on disk: the Space's private
+ * storage, never the public document root. Atomic's Nginx serves anything
+ * under `wp-content/` itself, before `serve.php` runs, so a copy there would
+ * be readable on a private Space, behind a gated path, and on version and
+ * preview hosts. `SP_ASSETS_URL` still names them; PHP answers it after the
+ * access check (_stattic_spacepress_try_serve_asset).
+ */
+function _stattic_spacepress_assets_dir(string $privateRoot, string $spaceId): string
+{
+    $root = rtrim($privateRoot, '/');
+    return preg_match('/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/D', $spaceId) === 1
+        ? $root . '/spaces/' . $spaceId . '/spacepress-assets'
+        : $root . '/spacepress-assets';
+}
+
+/**
+ * Remove the public-docroot asset copy earlier engines placed under
+ * `wp-content/spacepress-assets`. It only ever mirrored bytes the version store
+ * still holds, and while it exists Nginx serves it past every access rule, so
+ * a Space that turns private must not keep it. One stat when absent.
+ */
+function _stattic_spacepress_retire_public_assets(string $privateRoot): void
+{
+    if ($privateRoot === '') {
+        return;
+    }
+    $public = dirname(rtrim($privateRoot, '/'), 2) . '/wp-content/spacepress-assets';
+    if (!is_link($public) && !file_exists($public)) {
+        return;
+    }
+    $remove = static function (string $path) use (&$remove): void {
+        // A link is removed, never followed: it may point anywhere.
+        if (is_link($path) || !is_dir($path)) {
+            @unlink($path);
+            return;
+        }
+        foreach (scandir($path) ?: [] as $entry) {
+            if ($entry !== '.' && $entry !== '..') {
+                $remove($path . '/' . $entry);
+            }
+        }
+        @rmdir($path);
+    };
+    $remove($public);
+}
+
 /** Define SpacePress host constants before the app loader runs. */
 function _stattic_spacepress_define_host_constants(string $privateRoot): void
 {
@@ -96,11 +143,10 @@ function _stattic_spacepress_define_host_constants(string $privateRoot): void
         define('SP_AUTH_PREFIX', SPACEFAST_SPACEPRESS_AUTH_PREFIX);
     }
     if (!defined('SP_ASSETS_DIR')) {
-        $wpContent = defined('WP_CONTENT_DIR') && is_string(WP_CONTENT_DIR) && WP_CONTENT_DIR !== ''
-            ? rtrim(WP_CONTENT_DIR, '/')
-            : dirname($privateRoot, 2) . '/wp-content';
-        define('SP_ASSETS_DIR', $wpContent . '/spacepress-assets');
+        $spaceId = (string) ($GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']['space_id'] ?? ($GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] ?? ''));
+        define('SP_ASSETS_DIR', _stattic_spacepress_assets_dir($privateRoot, $spaceId));
     }
+    _stattic_spacepress_retire_public_assets($privateRoot);
     if (!defined('SP_ASSETS_URL')) {
         define('SP_ASSETS_URL', SPACEFAST_SPACEPRESS_ASSETS_URL);
     }
@@ -214,6 +260,11 @@ function _stattic_spacepress_bind_wordpress(): void
         add_filter('sp_auth_prefix', static fn (): string => SP_AUTH_PREFIX);
         add_filter('sp_assets_dir', static fn (): string => SP_ASSETS_DIR);
         add_filter('sp_assets_url', static fn (): string => SP_ASSETS_URL);
+        // No document-root links to the app's `public/` files: Nginx would
+        // serve them past the access check. Finalize already publishes
+        // `public/*` as the Space's own files, which serve.php gates.
+        add_filter('tp_public_root', static fn (): string => '');
+        add_filter('sp_public_root', static fn (): string => '');
         add_filter('sp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
         add_filter('tp_mail_transport', static fn (mixed $accepted, array $message): bool => _stattic_spacepress_mail_transport($message), 10, 2);
         add_filter('sp_connectors_call', '_stattic_spacepress_connectors_call', 10, 5);
@@ -958,11 +1009,13 @@ function _stattic_spacepress_try_serve_asset(array $context, string $root, array
         _stattic_problem_response(404, 'not_found', 'No such SpacePress asset.');
     }
 
+    // Only private storage: the request reached here through the access check,
+    // and a public-docroot copy is exactly what that check cannot cover.
     $resolved = null;
-    $wpAssetsDir = realpath(dirname((string) $context['private_root'], 2) . '/wp-content/spacepress-assets');
-    if (is_string($wpAssetsDir)) {
-        $candidate = realpath($wpAssetsDir . '/' . $relative);
-        if (is_string($candidate) && str_starts_with($candidate, $wpAssetsDir . '/') && is_file($candidate)) {
+    $assetsDir = realpath(_stattic_spacepress_assets_dir((string) $context['private_root'], (string) $context['space_id']));
+    if (is_string($assetsDir)) {
+        $candidate = realpath($assetsDir . '/' . $relative);
+        if (is_string($candidate) && str_starts_with($candidate, $assetsDir . '/') && is_file($candidate)) {
             $resolved = $candidate;
         }
     }

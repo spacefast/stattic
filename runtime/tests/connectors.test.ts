@@ -45,7 +45,8 @@ const EXCHANGE_CREDENTIAL = "runtime-connectors-exchange-credential-0123456789";
 // What the runtime sends upstream: a call frame or a visitor-connection frame.
 const forwardedBodySchema = z.looseObject({
   role: z.string(),
-  visitor: z.object({ subject: z.string() }).nullable().optional(),
+  visitor: z.object({ subject: z.string(), proof: z.string().optional() }).nullable().optional(),
+  visitorProof: z.string().optional(),
 });
 type Forwarded = {
   path: string;
@@ -911,6 +912,54 @@ test("the service broker reads the same credential with the visitor the runtime 
     SPACEFAST_SERVICE_CONNECTORS_VISITOR: JSON.stringify(result.visitor),
   });
   expect(result.other).toBe(false);
+});
+
+test("a handoff visitorProof rides the sfv2_ cookie and forwards on connector calls and visitor connections", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const sidB64 = createHash("sha256").update(randomUUID()).digest("base64url");
+  const sigB64 = Buffer.alloc(64, 7).toString("base64url");
+  const proof = `vp1.${visitor.kid}.${sidB64}.0.${now + 3600}.${sigB64}`;
+  const handoff = await redeemHandoff(
+    rt,
+    HOST,
+    signEd25519Jwt(visitorKey.privateKey, visitor.kid, {
+      sub: "member:mem_crm",
+      purpose: "handoff",
+      grants: ["member:mem_crm"],
+      authorities: ["member:mem_crm"],
+      iss: "spacefast-api",
+      aud: SPACE_ID,
+      host: HOST,
+      sv: 0,
+      generation: 1,
+      spaceId: SPACE_ID,
+      principal: "account:usr_crm",
+      visitorProof: proof,
+      sid: createHash("sha256").update(randomUUID()).digest("hex"),
+      iat: now,
+      nbf: now,
+      exp: now + 3600,
+      jti: randomUUID(),
+    }),
+  );
+  expect(handoff.status).toBe(303);
+  const provedCookie = (handoff.headers.get("set-cookie") ?? "").split(";", 1)[0] ?? "";
+  expect(provedCookie).toContain("sfv2_");
+
+  forwarded.length = 0;
+  const pageCall = await get(rt, HOST, "/__spacefast/connectors/crm/deals.list", {
+    headers: { cookie: provedCookie, "sec-fetch-site": "same-origin" },
+  });
+  expect(pageCall.status).toBe(200);
+  expect(forwarded[0]?.body.visitor).toEqual({ subject: "account:usr_crm", proof });
+
+  forwarded.length = 0;
+  const connectCall = await get(rt, HOST, "/__spacefast/connectors/crm/connect", {
+    headers: { cookie: provedCookie },
+  });
+  expect(connectCall.status).toBe(302);
+  expect(forwarded[0]?.path).toBe("/v1/runtime/connectors/visitor-connections/start");
+  expect(forwarded[0]?.body.visitorProof).toBe(proof);
 });
 
 test("connector states and null results survive the Zero run envelopes", () => {

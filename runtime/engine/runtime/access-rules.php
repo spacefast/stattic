@@ -304,6 +304,45 @@ function _stattic_access_account_identity(array $claims): ?array
     return ['issuer' => $identity['issuer'], 'subject' => $identity['subject']];
 }
 
+function _stattic_access_visitor_proof(mixed $value): ?string
+{
+    if (
+        !is_string($value)
+        || $value === ''
+        || strlen($value) > 512
+        || preg_match('/\Avp1\.[A-Za-z0-9_-]{1,128}\.[A-Za-z0-9_-]{43}\.(?:0|[1-9][0-9]{0,9})\.[1-9][0-9]{0,12}\.[A-Za-z0-9_-]{86}\z/', $value) !== 1
+    ) {
+        return null;
+    }
+    return $value;
+}
+
+function _stattic_access_visitor_proof_exp(string $proof): ?int
+{
+    if (_stattic_access_visitor_proof($proof) === null) {
+        return null;
+    }
+    $parts = explode('.', $proof);
+    $exp = (int) $parts[4];
+    return $exp > 0 ? $exp : null;
+}
+
+function _stattic_access_identity_visitor_proof(?array $identity): ?string
+{
+    if (!is_array($identity)) {
+        return null;
+    }
+    $record = _stattic_access_identity_record($identity);
+    if ($record !== null) {
+        $proof = _stattic_access_visitor_proof($record['vp'] ?? null);
+        if ($proof !== null) {
+            return $proof;
+        }
+    }
+    $claims = is_array($identity['claims'] ?? null) ? $identity['claims'] : [];
+    return _stattic_access_visitor_proof($claims['vp'] ?? null);
+}
+
 function _stattic_access_principal_is_identified(string $principal): bool
 {
     return $principal !== STATTIC_SESSION_PRINCIPAL_ANONYMOUS;
@@ -697,6 +736,9 @@ function _stattic_access_session_decode(array $serving, string $host, string $cr
         return null;
     }
     if (array_key_exists('identity', $claims) && _stattic_access_account_identity($claims) === null) return null;
+    if (array_key_exists('vp', $claims) && _stattic_access_visitor_proof($claims['vp']) === null) {
+        unset($claims['vp']);
+    }
     if (array_key_exists('profile', $claims)) {
         $profile = _stattic_access_public_profile($claims['profile']);
         if ($profile === null) {
@@ -889,8 +931,24 @@ function _stattic_access_session_create(
         }
     }
     // A handoff that names nobody keeps the account it attaches to whole:
-    // its public profile and sign-in provider stay with its identity.
+    // its public profile and sign-in provider stay with its identity, unless
+    // its inherited visitor proof has already expired (in which case the
+    // carried account identity expires with it rather than lingering unproven).
     $names = _stattic_access_principal_from_claims($claims) !== null;
+    if (!$names) {
+        $inheritedVp = _stattic_access_visitor_proof($inherit['vp'] ?? null);
+        $inheritedVpExp = $inheritedVp !== null ? _stattic_access_visitor_proof_exp($inheritedVp) : null;
+        if ($inheritedVpExp !== null && $inheritedVpExp <= $now) {
+            unset(
+                $inherit['principal'],
+                $inherit['principalExpiresAt'],
+                $inherit['identity'],
+                $inherit['profile'],
+                $inherit['authProvider'],
+                $inherit['vp'],
+            );
+        }
+    }
     $profile = _stattic_access_public_profile($names ? ($claims['profile'] ?? null) : ($inherit['profile'] ?? null));
     $authProvider = $names ? ($claims['authProvider'] ?? null) : ($inherit['authProvider'] ?? null);
     $session = [
@@ -918,10 +976,20 @@ function _stattic_access_session_create(
     $principalDeadline = $names
         ? ($claims['authorityExpiresAt'] ?? null)
         : ($inherit['principalExpiresAt'] ?? null);
+    $visitorProof = _stattic_access_visitor_proof($names ? ($claims['visitorProof'] ?? null) : ($inherit['vp'] ?? null));
+    if ($visitorProof !== null) {
+        $proofExp = _stattic_access_visitor_proof_exp($visitorProof);
+        if ($proofExp !== null && $proofExp <= $now) {
+            $visitorProof = null;
+        } elseif ($proofExp !== null && (!is_int($principalDeadline) || $proofExp < $principalDeadline)) {
+            $principalDeadline = $proofExp;
+        }
+    }
     if (is_int($principalDeadline)) $session['principalExpiresAt'] = $principalDeadline;
     $accountIdentity = _stattic_access_account_identity($claims)
         ?? (_stattic_access_principal_from_claims($claims) === null ? _stattic_access_account_identity($inherit) : null);
     if ($accountIdentity !== null) $session['identity'] = $accountIdentity;
+    if ($visitorProof !== null) $session['vp'] = $visitorProof;
     // The record before the cookie: a cookie whose record never landed would be
     // denied at its first revalidation anyway.
     if (!_stattic_access_session_record_write($privateRoot, $sessionId, [
@@ -971,6 +1039,7 @@ function _stattic_access_session_inheritable(?array $identity): array
         'principal' => $record['principal'] ?? null,
         'principalExpiresAt' => $record['principalExpiresAt'] ?? null,
         'identity' => $record['identity'] ?? null,
+        'vp' => $record['vp'] ?? null,
         'profile' => $record['profile'] ?? null,
         'authProvider' => $record['authProvider'] ?? null,
         'anonymousId' => $record['anonymousId'] ?? null,
@@ -2962,7 +3031,7 @@ function _stattic_access_session_verify(
         && $claims['principalExpiresAt'] <= $now;
     if ($principalExpired) {
         $claims['principal'] = STATTIC_SESSION_PRINCIPAL_ANONYMOUS;
-        unset($claims['principalExpiresAt'], $claims['identity'], $claims['profile'], $claims['authProvider']);
+        unset($claims['principalExpiresAt'], $claims['identity'], $claims['profile'], $claims['authProvider'], $claims['vp']);
     }
     // An ended session (or an authority an ended session acquired) is gone
     // now, not when the claim set ages out.
@@ -2989,7 +3058,7 @@ function _stattic_access_session_verify(
         }
         if (!$hasAccountAuthority) {
             $claims['principal'] = STATTIC_SESSION_PRINCIPAL_ANONYMOUS;
-            unset($claims['principalExpiresAt'], $claims['identity'], $claims['profile'], $claims['authProvider']);
+            unset($claims['principalExpiresAt'], $claims['identity'], $claims['profile'], $claims['authProvider'], $claims['vp']);
         }
     }
     $retained = _stattic_access_session_retained_authority_entries($claims['authorities'], $now);

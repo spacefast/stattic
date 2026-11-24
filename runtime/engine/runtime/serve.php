@@ -1679,6 +1679,9 @@ function _stattic_v4_dispatch_functions_routes(array $context, string $requestPa
             // uncacheable-concurrency admission the Zero branch above does.
             require_once __DIR__ . '/../shared/admission.php';
             _stattic_admission_acquire_once((string) $context['private_root'], $context['serving'], 'zero');
+            // And one of the Space's Worker dispatch slots, a smaller cap, so
+            // dispatches leave FPM workers free for their own callbacks.
+            _stattic_admission_acquire_functions_dispatch((string) $context['private_root'], is_array($context['serving']) ? $context['serving'] : []);
             _stattic_functions_dispatch(
                 $versionDir,
                 (string) $context['space_id'],

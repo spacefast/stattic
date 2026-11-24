@@ -70,8 +70,17 @@ function _stattic_connectors_visitor(array $serving, string $host, bool $navigat
     if (_stattic_visitor_cookie_from_request() === '') {
         return null;
     }
-    $principal = _stattic_access_identity_principal(_stattic_verify_cookie_identity($serving, $host));
-    return _stattic_access_principal_is_identified($principal) ? ['subject' => $principal] : null;
+    $verified = _stattic_verify_cookie_identity($serving, $host);
+    $principal = _stattic_access_identity_principal($verified);
+    if (!_stattic_access_principal_is_identified($principal)) {
+        return null;
+    }
+    $visitor = ['subject' => $principal];
+    $proof = _stattic_access_identity_visitor_proof($verified);
+    if ($proof !== null) {
+        $visitor['proof'] = $proof;
+    }
+    return $visitor;
 }
 
 function _stattic_connectors_users_enabled(array $serving): bool
@@ -402,6 +411,9 @@ function _stattic_connectors_serve_visitor(array $serving, string $host, string 
         _stattic_access_redirect(_stattic_connectors_sign_in_url($serving, $return), 302, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
     }
     $payload = ['role' => $role, 'visitorSubject' => $visitor['subject']];
+    if (is_string($visitor['proof'] ?? null) && $visitor['proof'] !== '') {
+        $payload['visitorProof'] = $visitor['proof'];
+    }
     if ($operation === 'connect') {
         $payload['origin'] = 'https://' . _stattic_canonicalize_host($host);
         $payload['returnTo'] = $returnTo ?? '/';

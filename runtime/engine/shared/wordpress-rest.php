@@ -59,12 +59,17 @@ function _stattic_wordpress_identity_app_origin_allowed(string $route): bool
     if ($origin === '' || $origin === _stattic_runtime_request_origin((string) ($_SERVER['HTTP_HOST'] ?? ''))) {
         return false;
     }
-    // The bundled spacefast-identity REST API accepts only its own origin.
-    if (preg_match('~^/zero-identity/v1/(?!admin(?:/|$))~', $route) !== 1) {
+    // The bundled spacefast-identity REST API accepts only its own origin. Zero
+    // and SpacePress each ship their own identity plugin; an origin counts only
+    // for the plugin that owns the route's namespace.
+    $owners = [
+        'zero-identity' => [\Zero\Identity\Plugin::class, \Zero\Identity\OAuth::class],
+        'spacepress-identity' => [\TypedPress\Identity\Plugin::class, \TypedPress\Identity\OAuth::class],
+    ];
+    if (preg_match('~^/(zero-identity|spacepress-identity)/v1/(?!admin(?:/|$))~i', $route, $match) !== 1) {
         return false;
     }
-    $plugin = \Zero\Identity\Plugin::class;
-    $oauth = \Zero\Identity\OAuth::class;
+    [$plugin, $oauth] = $owners[strtolower($match[1])];
     return method_exists($oauth, 'allowedOrigin') && isset($plugin::$db)
         && $oauth::allowedOrigin($plugin::$db, $origin);
 }

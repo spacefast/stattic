@@ -12,7 +12,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -43,6 +43,10 @@ const HYBRID_VERSION = "ver_sp_hybrid_1";
 const LEGACY_PHP_HOST = "php-retired.test";
 const LEGACY_PHP_SPACE = "spc_php_retired";
 const LEGACY_PHP_VERSION = "ver_php_retired_1";
+
+const PRIVATE_HOST = "spacepress-private.test";
+const PRIVATE_SPACE = "spc_sp_private";
+const PRIVATE_VERSION = "ver_sp_private_1";
 
 const LEGACY_PREFIX_HOST = "spacepress-legacy-prefix.test";
 const LEGACY_PREFIX_SPACE = "spc_sp_legacy_prefix";
@@ -142,9 +146,15 @@ function writeSpacePressStub(
   const versionRoot = path.join(storageRoot, "spaces", spaceId, "versions", versionId);
   const compiled = path.join(versionRoot, ".spacepress-compiled");
   const runtimeDir = path.join(compiled, "store", "runtime", RUNTIME_REV);
-  const assetsDir = path.join(docRoot, "wp-content", "spacepress-assets");
+  // Browser files live in the Space's private storage. The public-docroot copy
+  // earlier engines kept is planted here as a stale leftover: Nginx would
+  // serve it past every access rule, so the engine must remove it.
+  const assetsDir = path.join(storageRoot, "spaces", spaceId, "spacepress-assets");
+  const staleDocrootAssets = path.join(docRoot, "wp-content", "spacepress-assets");
   mkdirSync(runtimeDir, { recursive: true });
   mkdirSync(assetsDir, { recursive: true });
+  mkdirSync(staleDocrootAssets, { recursive: true });
+  writeFileSync(path.join(staleDocrootAssets, "stale.js"), "console.log('stale-docroot');\n");
   mkdirSync(path.join(docRoot, "wp-includes"), { recursive: true });
 
   writeFileSync(
@@ -335,6 +345,12 @@ echo json_encode($server->response_to_data($res, false), JSON_UNESCAPED_SLASHES)
 declare(strict_types=1);
 http_response_code(200);
 header('Content-Type: application/json; charset=utf-8', true);
+// The admin frames itself by CSP while core still adds its own frame header
+// on every admin screen, as WordPress's send_frame_options_header does.
+if (str_starts_with((string) ($_SERVER['REQUEST_URI'] ?? ''), '/wp-admin/new/')) {
+    header('X-Frame-Options: SAMEORIGIN');
+    header("Content-Security-Policy: frame-ancestors 'self' https://my.spacefast.test");
+}
 echo json_encode([
     'surface' => 'spacepress-page',
     'uri' => $_SERVER['REQUEST_URI'] ?? '/',
@@ -469,6 +485,21 @@ beforeAll(async () => {
   });
   writeSpacePressStub(rt.storageRoot, rt.root, HYBRID_SPACE, HYBRID_VERSION);
 
+  // 2a. A private SpacePress Space: no public grant, so every request needs access.
+  await deploy(rt, {
+    spaceId: PRIVATE_SPACE,
+    versionId: PRIVATE_VERSION,
+    files: { "index.html": "<h1>Private Landing</h1>\n" },
+    activate: {
+      route_name: "production",
+      config: { mode: "website", site_title: "Private SpacePress", zero_generation: "spacepress" },
+      production_hostnames: [PRIVATE_HOST],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+  writeSpacePressStub(rt.storageRoot, rt.root, PRIVATE_SPACE, PRIVATE_VERSION);
+
   // 2b. Upgraded SpacePress (`spacepress.hosted.v1`) carrying `legacy_prefix: true`
   //     from route config through overlay and serving so `sfz_<sha>_` stays bound.
   await deploy(rt, {
@@ -581,7 +612,11 @@ test("static, CF Worker, and SpacePress hot-path requests load ZERO files under 
   expect(spRestBody.apiPrefix).toBe("/wp-json/spacepress/v1");
   expect(spRestBody.authPrefix).toBe("/__spacefast/auth");
   expect(spRestBody.assetsUrl).toBe("/wp-content/spacepress-assets");
-  expect(String(spRestBody.assetsDir)).toEndWith("/wp-content/spacepress-assets");
+  expect(spRestBody.assetsDir).toBe(
+    path.join(rt.storageRoot, "spaces", HYBRID_SPACE, "spacepress-assets"),
+  );
+  // Booting SpacePress removed the public-docroot copy Nginx would serve unchecked.
+  expect(existsSync(path.join(rt.root, "wp-content", "spacepress-assets"))).toBe(false);
 
   // SpacePress auth prefix (`/__spacefast/auth/*`), admin (`/wp-admin/new/*`), and declared page.
   for (const spPath of ["/__spacefast/auth/login", "/wp-admin/new/posts", "/app/dashboard"]) {
@@ -592,6 +627,13 @@ test("static, CF Worker, and SpacePress hot-path requests load ZERO files under 
     expect(json.surface).toBe("spacepress-page");
     expect(json.tablePrefix).toBe("wp_atomic_");
     expect(json.activePlugins).toEqual(["jetpack/jetpack.php", "woocommerce/woocommerce.php"]);
+    // frame-ancestors decides framing; a second, conflicting X-Frame-Options never leaves.
+    if (spPath.startsWith("/wp-admin/new/")) {
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+      expect(res.headers.get("x-frame-options")).toBeNull();
+    } else {
+      expect(res.headers.get("content-security-policy")).toBeNull();
+    }
   }
 
   // SpacePress asset under `/wp-content/spacepress-assets/*`.
@@ -601,6 +643,15 @@ test("static, CF Worker, and SpacePress hot-path requests load ZERO files under 
   expect(spAsset.status).toBe(200);
   expect(await spAsset.text()).toContain("spacepress-asset");
   expect(spAsset.headers.get("x-spacefast-test-deprecated-includes")).toBe("none");
+  // A private Space's SpacePress asset answers only after its access check.
+  const privateAsset = await get(rt, PRIVATE_HOST, "/wp-content/spacepress-assets/client.js");
+  expect(privateAsset.status).not.toBe(200);
+  expect(await privateAsset.text()).not.toContain("spacepress-asset");
+  // The retired docroot copy is never an asset source.
+  const staleAsset = await get(rt, HYBRID_HOST, "/wp-content/spacepress-assets/stale.js", {
+    headers: probeHeaders,
+  });
+  expect(staleAsset.status).toBe(404);
 
   // CF Worker route runs side-by-side after SpacePress with zero deprecated includes.
   const workerRes = await get(rt, HYBRID_HOST, "/worker/hello", { headers: probeHeaders });

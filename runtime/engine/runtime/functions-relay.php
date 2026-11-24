@@ -299,10 +299,17 @@ function _stattic_functions_relay_serve(string $privateRoot, string $spaceId, st
     $host = is_string($visitorHost) ? $visitorHost : (string) ($_SERVER['HTTP_HOST'] ?? '');
     // Read only the signed cookie. The Authorization header is the relay grant,
     // not a visitor credential, and must not shadow the cookie.
-    $identity = _stattic_zero_identity_from_principal(_stattic_current_session_identity_uncached(
+    $cookieIdentity = _stattic_current_session_identity_uncached(
         $serving, _stattic_normalize_hostname($host), null, _stattic_visitor_cookie_from_request()
-    ));
+    );
+    $identity = _stattic_zero_identity_from_principal($cookieIdentity);
     $visitor = $identity['isAuthenticated'] ? ['subject' => $identity['userId']] : null;
+    if ($visitor !== null) {
+        $proof = _stattic_access_identity_visitor_proof($cookieIdentity);
+        if ($proof !== null) {
+            $visitor['proof'] = $proof;
+        }
+    }
     if ($broker === 'zero') {
         require_once __DIR__ . '/../deprecated/legacy-serve.php';
         _stattic_legacy_serve_relay_zero($body, $visitor, $identity, $spaceId, $config, $versionRoot, $serving, $host);

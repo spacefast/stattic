@@ -22,6 +22,7 @@ import {
   apiJson,
   createDeclaredSession,
   deploy,
+  errorCode,
   finalize,
   finalizeRaw,
   get,
@@ -998,6 +999,39 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
     // paths that resolve to no file.
     const shell = await get(edgeRt, host, "/");
     expect(shell.status).toBe(200);
+
+    // A Space whose Worker dispatch slots are all held answers 503 at once and
+    // never reaches the edge: a dispatch that waited would hold the FPM worker
+    // its own callbacks need. The slots free again when the holders finish.
+    const counterPath = path.join(
+      edgeRt.storageRoot,
+      "runtime/admission/spc_fx_edge.functions-dispatch.json",
+    );
+    const generation = z
+      .object({ generation: z.string() })
+      .parse(JSON.parse(readFileSync(`${counterPath}.generation`, "utf8"))).generation;
+    const setHeld = (count: number) =>
+      writeFileSync(
+        `${counterPath}.${generation}`,
+        `${JSON.stringify({
+          count,
+          started_at: Math.floor(Date.now() / 1000),
+          updated_at: Math.floor(Date.now() / 1000),
+        })}\n`,
+      );
+    const attempts = connections.length;
+    setHeld(3);
+    const busy = await get(edgeRt, host, "/api/hello", { headers: { accept: "application/json" } });
+    expect(busy.status).toBe(503);
+    expect(busy.headers.get("retry-after")).toBe("2");
+    expect(await errorCode(busy)).toBe("functions_dispatch_busy");
+    expect(connections.length).toBe(attempts);
+    setHeld(2);
+    const admitted = await get(edgeRt, host, "/api/hello", {
+      headers: { accept: "application/json" },
+    });
+    expect(admitted.status).toBe(502);
+    expect(connections.length).toBeGreaterThan(attempts);
   } finally {
     edgeRt.stop();
     await new Promise<void>((resolve) => edge.close(() => resolve()));

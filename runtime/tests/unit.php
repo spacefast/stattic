@@ -5277,6 +5277,143 @@ if ($savedReentry !== null) {
 @unlink($cpRoot . '/wp-load.php');
 @rmdir($cpRoot);
 
+// --- identity app origins ------------------------------------------------------
+// Each identity plugin vouches only for its own REST namespace: SpacePress's
+// registered app origins open `spacepress-identity`, never `zero-identity`,
+// and no registered origin opens an admin route.
+require_once __DIR__ . '/../engine/shared/wordpress-rest.php';
+eval('namespace TypedPress\\Identity; class DB {} class Plugin { public static DB $db; } class OAuth { public static function allowedOrigin(DB $db, string $origin): bool { return $origin === "https://app.example.test"; } }');
+\TypedPress\Identity\Plugin::$db = new \TypedPress\Identity\DB();
+$savedOrigin = [$_SERVER['HTTP_ORIGIN'] ?? null, $_SERVER['HTTP_HOST'] ?? null];
+$_SERVER['HTTP_HOST'] = 'shop.space.test';
+$identityOrigin = static function (string $origin, string $route): bool {
+    $_SERVER['HTTP_ORIGIN'] = $origin;
+    return _stattic_wordpress_identity_app_origin_allowed($route);
+};
+check($identityOrigin('https://app.example.test', '/spacepress-identity/v1/account'), 'identity origin: a registered SpacePress app origin reads SpacePress identity');
+check(!$identityOrigin('https://other.example.test', '/spacepress-identity/v1/account'), 'identity origin: an unregistered origin is refused');
+check(!$identityOrigin('https://app.example.test', '/spacepress-identity/v1/admin/applications'), 'identity origin: a registered origin never opens SpacePress identity admin');
+check(!$identityOrigin('https://app.example.test', '/zero-identity/v1/account'), 'identity origin: SpacePress registrations do not vouch for Zero identity');
+check(!$identityOrigin('https://app.example.test', '/spacefast/v1/account'), 'identity origin: non-identity routes are never opened');
+[$_SERVER['HTTP_ORIGIN'], $_SERVER['HTTP_HOST']] = $savedOrigin;
+
+// --- functions dispatch limit scaling ------------------------------------------
+require_once __DIR__ . '/../engine/shared/admission.php';
+check(_stattic_admission_functions_dispatch_limit([]) === 3, 'functions dispatch limit: default serving uses 3 slots');
+check(
+    _stattic_admission_functions_dispatch_limit(['admission' => ['concurrency' => 20]]) === 17,
+    'functions dispatch limit: raised per-Space concurrency scales dispatch while keeping callback reserve'
+);
+check(
+    _stattic_admission_functions_dispatch_limit(['admission' => ['concurrency' => 2]]) === 1,
+    'functions dispatch limit: stays strictly below low Space concurrency'
+);
+
+// --- visitor proof expiry aligns principal lifetime ----------------------------
+$vpNow = time();
+$makeVp = static function (int $exp): string {
+    $sidB64 = rtrim(strtr(base64_encode(str_repeat('a', 32)), '+/', '-_'), '=');
+    $sigB64 = rtrim(strtr(base64_encode(str_repeat('s', 64)), '+/', '-_'), '=');
+    return 'vp1.spacefast-runtime-v1.' . $sidB64 . '.1.' . $exp . '.' . $sigB64;
+};
+$freshVp = $makeVp($vpNow + 600);
+$expiredVp = $makeVp($vpNow - 60);
+check(_stattic_access_visitor_proof_exp($freshVp) === $vpNow + 600, 'visitor proof exp: reads integer exp from compact vp1 proof');
+check(_stattic_access_visitor_proof_exp('not-a-proof') === null, 'visitor proof exp: rejects malformed tokens');
+
+$vpBase = realpath(sys_get_temp_dir()) . '/sf-vp-unit-' . bin2hex(random_bytes(5));
+$vpRoot = $vpBase . '/.stattic/storage';
+mkdir($vpRoot . '/runtime', 0775, true);
+$savedAccessPrivateRoot = $GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT'] ?? null;
+$savedPageServing = $GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null;
+_stattic_access_private_root($vpRoot);
+$vpServing = [
+    'space_id' => 'spc_vp_unit',
+    'session_version' => 1,
+    'authorization' => [
+        'generation' => 1,
+        'sessionKey' => bin2hex(random_bytes(32)),
+        'accessPage' => [
+            'displayName' => 'VP Unit',
+            'exchange' => [
+                'credential' => str_repeat('k', 32),
+                'passwordUrl' => 'https://api.spacefast.com/v1/access/password',
+                'requestUrl' => 'https://api.spacefast.com/v1/access/request',
+            ],
+        ],
+    ],
+];
+$GLOBALS['SPACEFAST_PAGE_SERVING'] = $vpServing;
+$vpSid1 = hash('sha256', 'vp-sid-1');
+$vpStored1 = null;
+$vpCred1 = _stattic_access_session_create(
+    $vpServing,
+    [
+        'sub' => 'account:usr_vp',
+        'exp' => $vpNow + 60,
+        'claims' => [
+            'spaceId' => 'spc_vp_unit',
+            'sid' => $vpSid1,
+            'principal' => 'account:usr_vp',
+            'visitorProof' => $freshVp,
+        ],
+    ],
+    'vp.space.test',
+    1,
+    ['generation' => 1],
+    [['reference' => 'member:usr_vp', 'generation' => hash('sha256', 'vp-gen'), 'openedAt' => $vpNow, 'lastSeenAt' => $vpNow]],
+    $vpStored1,
+    []
+);
+check($vpCred1 !== null && is_array($vpStored1), 'visitor proof session: issues session with proof');
+check(($vpStored1['principalExpiresAt'] ?? null) === $vpNow + 600, 'visitor proof session: caps principalExpiresAt at proof exp');
+check(($vpStored1['vp'] ?? null) === $freshVp, 'visitor proof session: stores fresh proof');
+
+$vpSid2 = hash('sha256', 'vp-sid-2');
+$vpStored2 = null;
+$vpCred2 = _stattic_access_session_create(
+    $vpServing,
+    [
+        'sub' => 'link:tok_vp',
+        'exp' => $vpNow + 60,
+        'claims' => [
+            'spaceId' => 'spc_vp_unit',
+            'sid' => $vpSid2,
+        ],
+    ],
+    'vp.space.test',
+    1,
+    ['generation' => 1],
+    [['reference' => 'link:tok_vp', 'generation' => hash('sha256', 'vp-gen'), 'openedAt' => $vpNow, 'lastSeenAt' => $vpNow]],
+    $vpStored2,
+    [
+        'principal' => 'account:usr_vp',
+        'identity' => ['accountId' => 'usr_vp', 'email' => 'vp@example.test', 'displayName' => 'VP'],
+        'vp' => $expiredVp,
+    ]
+);
+check($vpCred2 !== null && is_array($vpStored2), 'visitor proof inherit: attaches non-naming authority');
+check(!isset($vpStored2['vp']), 'visitor proof inherit: drops expired proof on attach');
+check(($vpStored2['principal'] ?? null) === STATTIC_SESSION_PRINCIPAL_ANONYMOUS, 'visitor proof inherit: clears expired account principal with expired proof');
+check(!isset($vpStored2['identity'], $vpStored2['principalExpiresAt']), 'visitor proof inherit: clears carried identity with expired proof');
+_stattic_access_session_record_delete($vpRoot, $vpSid1);
+_stattic_access_session_record_delete($vpRoot, $vpSid2);
+if ($savedPageServing === null) {
+    unset($GLOBALS['SPACEFAST_PAGE_SERVING']);
+} else {
+    $GLOBALS['SPACEFAST_PAGE_SERVING'] = $savedPageServing;
+}
+if ($savedAccessPrivateRoot === null) {
+    unset($GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT']);
+} else {
+    $GLOBALS['SPACEFAST_ACCESS_PRIVATE_ROOT'] = $savedAccessPrivateRoot;
+}
+@rmdir($vpRoot . '/runtime/access-sessions');
+@rmdir($vpRoot . '/runtime');
+@rmdir($vpRoot);
+@rmdir($vpBase . '/.stattic');
+@rmdir($vpBase);
+
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");
     foreach ($failures as $failure) {

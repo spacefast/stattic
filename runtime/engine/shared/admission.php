@@ -198,6 +198,67 @@ function _stattic_admission_counter_acquire(string $path, int $limit, int $stale
     }
 }
 
+// Concurrent Worker dispatches one Space may hold open. Each holds a PHP-FPM
+// worker for up to the dispatch timeout, often streaming, while the Worker's
+// own env.SPACE, D1, purge and log callbacks re-enter the same pool. Below the
+// uncacheable limit so dispatches alone can never take every worker the
+// callbacks need: otherwise a burst of streaming requests waits on callbacks
+// that wait on the requests.
+const STATTIC_FUNCTIONS_DISPATCH_DEFAULT_LIMIT = 3;
+
+function _stattic_admission_functions_dispatch_limit(array $serving): int
+{
+    $configured = _stattic_admission_configured_limit($serving);
+    $baseUncacheable = max(1, _stattic_config_int('SPACEFAST_UNCACHEABLE_CONC_PER_SPACE', STATTIC_ADMISSION_DEFAULT_LIMIT));
+    $defaultDispatch = _stattic_config_int('SPACEFAST_FUNCTIONS_DISPATCH_CONC_PER_SPACE', STATTIC_FUNCTIONS_DISPATCH_DEFAULT_LIMIT);
+    $reserve = max(1, $baseUncacheable - min($defaultDispatch, max(1, $baseUncacheable - 1)));
+    $limit = $configured > $baseUncacheable
+        ? max($defaultDispatch, $configured - $reserve)
+        : $defaultDispatch;
+    // Never as many as the Space's whole uncacheable allowance.
+    return max(1, min($limit, $configured - 1));
+}
+
+function _stattic_admission_functions_dispatch_path(string $privateRoot, string $spaceId): string
+{
+    return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.functions-dispatch.json';
+}
+
+/**
+ * Take one of the Space's Worker dispatch slots, or answer 503 with
+ * Retry-After. Never waits: a dispatch that queued here would hold an FPM
+ * worker while it waited, which is the exhaustion this cap prevents.
+ */
+function _stattic_admission_acquire_functions_dispatch(string $privateRoot, array $serving): void
+{
+    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
+    if ($spaceId === '') {
+        return;
+    }
+    $limit = _stattic_admission_functions_dispatch_limit($serving);
+    $release = _stattic_admission_counter_acquire(
+        _stattic_admission_functions_dispatch_path($privateRoot, $spaceId),
+        $limit,
+        _stattic_admission_stale_seconds(),
+    );
+    if ($release === false) {
+        require_once __DIR__ . '/errors.php';
+        _stattic_admission_record_shed($privateRoot, $spaceId, $limit, 'functions_dispatch');
+        _stattic_serve_page('tier-unavailable', [
+            'status' => 503,
+            'headers' => [
+                'Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE,
+                'Retry-After' => (string) STATTIC_ADMISSION_RETRY_AFTER_SECONDS,
+            ],
+            'message' => 'This Space is answering as many Worker requests as it can. Try again in a moment.',
+            'code' => 'functions_dispatch_busy',
+            'customizable' => true,
+        ]);
+        exit;
+    }
+    register_shutdown_function($release);
+}
+
 function _stattic_admission_record_shed(string $privateRoot, string $spaceId, int $limit, string $reason): void
 {
     if (random_int(1, 10) !== 1) {

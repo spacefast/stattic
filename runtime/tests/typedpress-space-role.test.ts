@@ -254,6 +254,7 @@ add_action('rest_api_init', static function () {
           spaceId: SPACE,
           sessionId: createHash("sha256").update(randomUUID()).digest("hex"),
           generation: 1,
+          sessionVersion: 0,
           audience: HOST,
           jti: `jti_${randomUUID()}`,
         });
@@ -284,6 +285,7 @@ add_action('rest_api_init', static function () {
           spaceId: SPACE,
           sessionId: createHash("sha256").update(randomUUID()).digest("hex"),
           generation: 1,
+          sessionVersion: 0,
           audience: HOST,
           jti: `jti_${randomUUID()}`,
         });

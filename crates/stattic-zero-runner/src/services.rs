@@ -391,6 +391,9 @@ fn connectors_call(
     if status >= 400 {
         let code = match value.get("code").and_then(Value::as_str) {
             Some("connector_write_in_read_handler") => "connector_write_in_read_handler",
+            Some("connector_preview_write_not_allowed") => "connector_preview_write_not_allowed",
+            Some("connector_visitor_proof_invalid") => "connector_visitor_proof_invalid",
+            Some("connector_write_sign_in_required") => "connector_write_sign_in_required",
             _ if status == 403 => "connector_forbidden",
             _ => "service_upstream_unavailable",
         };

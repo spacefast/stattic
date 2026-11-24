@@ -132,7 +132,13 @@ function _stattic_health_serving(string $privateRoot, string $requestHost): arra
         $spRoot = _stattic_spacepress_version_root($versionRoot);
         if ($spRoot !== null) {
             $isSpacepress = true;
-            if (in_array($generation, ['legacy_0_8', 'v2'], true) || !is_file($spRoot . '/ready.json')) {
+            // A SpacePress preview serves once finalized with its own variable
+            // set: it seeds a database of its own on its first visit.
+            require_once dirname(__DIR__) . '/shared/spacepress-preview.php';
+            $servable = _stattic_spacepress_is_preview($privateRoot, $resolved['space_id'], $versionId, $serving)
+                ? _stattic_spacepress_finalized($spRoot) && is_file($spRoot . '/variables-preview.json')
+                : is_file($spRoot . '/ready.json');
+            if (in_array($generation, ['legacy_0_8', 'v2'], true) || !$servable) {
                 return $none('pending');
             }
         }

@@ -182,6 +182,17 @@ if (!is_array($adminSession)) {
 }
 
 $mediaRoot = $privateRoot . '/spaces/' . $spaceId . '/content-media';
+// `_v/<version>/…` is a SpacePress preview's own media. Only that preview's
+// hostname serves it, and never while the version is the live one.
+if (preg_match('~\A_v/([^/]+)/(.+)\z~sD', $request['relative'], $previewPath) === 1) {
+    require_once $engineRoot . '/shared/spacepress-preview.php';
+    if (!is_array($target) || !_stattic_id_valid($previewPath[1]) || $target['version_id'] !== $previewPath[1]
+        || !_stattic_spacepress_is_preview($privateRoot, $spaceId, $previewPath[1], $target['serving'])) {
+        _stattic_content_media_refuse(404);
+    }
+    $mediaRoot = _stattic_spacepress_preview_dir($privateRoot, $spaceId, $previewPath[1]) . '/content-media';
+    $request['relative'] = $previewPath[2];
+}
 $rootReal = realpath($mediaRoot);
 $fileReal = realpath($mediaRoot . '/' . $request['relative']);
 if (

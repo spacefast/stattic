@@ -2548,6 +2548,214 @@ mod tests {
         }
     }
 
+    /// A raw SpacePress project with one table whose extra columns are `fields`, finalized as
+    /// `version` against the migration baseline `previous`.
+    fn finalize_spacepress(private: &Path, version: &str, fields: &str, previous: Option<&str>) {
+        let config = format!(
+            r#"import {{ defineConfig, table, integer, text }} from "spacepress";
+export const votes = table({{ weight: integer().default(1){fields} }});
+export default defineConfig({{ name: "hosted", admin: false }});"#
+        );
+        let files: [(&str, &[u8]); 2] = [
+            ("spacepress.config.ts", config.as_bytes()),
+            ("public/index.html", b"spacepress app"),
+        ];
+        let mut input = fixture_input(
+            private,
+            accept_blobs(private, &files),
+            json!({"mode":"website"}),
+            json!({"zero_generation":"spacepress", "spacepress_previous": previous}),
+        );
+        input.version_id = version.into();
+        finalize_site(input, false).unwrap_or_else(|error| panic!("{version}: {error:?}"));
+    }
+
+    fn spacepress_manifest(private: &Path, version: &str) -> Value {
+        serde_json::from_slice(
+            &fs::read(private.join(format!(
+                "spaces/s/versions/{version}/.zero-compiled/manifest.json"
+            )))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn spacepress_build(private: &Path, version: &str, build: &str) -> Value {
+        serde_json::from_slice(
+            &fs::read(private.join(format!(
+                "spaces/s/versions/{version}/.zero-compiled/store/build/{build}.json"
+            )))
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn spacepress_migrations(private: &Path, version: &str, app: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(private.join(format!(
+            "spaces/s/versions/{version}/.zero-compiled/store/app/{app}/migrations"
+        )))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+        names.sort();
+        names
+    }
+
+    // Every file under a migration's directory, by path relative to it.
+    fn spacepress_migration_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    let name = path
+                        .strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    files.push((name, fs::read(&path).unwrap()));
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn spacepress_recompile_moves_a_version_onto_a_newer_baseline_beside_its_old_build() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join(".stattic/storage");
+        // v1 is live; v2 and v3 were both published against it, each adding a field.
+        finalize_spacepress(&private, "v1", "", None);
+        finalize_spacepress(&private, "v2", ", summary: text().optional()", Some("v1"));
+        finalize_spacepress(&private, "v3", ", subtitle: text().optional()", Some("v1"));
+        let published = spacepress_manifest(&private, "v3");
+        let old_build = published["build"].as_str().unwrap().to_owned();
+        let v2 = spacepress_manifest(&private, "v2");
+        let v2_build = spacepress_build(&private, "v2", v2["build"].as_str().unwrap());
+        let v2_migrations = spacepress_migrations(&private, "v2", v2["appHash"].as_str().unwrap());
+        assert!(!v2_migrations.is_empty());
+
+        // v2 went live; v3 compiles again against it.
+        let recompiled = crate::spacepress::recompile(&private, "s", "v3", Some("v2")).unwrap();
+        assert_eq!(recompiled, spacepress_manifest(&private, "v3"));
+        let new_build = recompiled["build"].as_str().unwrap().to_owned();
+        assert_ne!(new_build, old_build);
+        let build = spacepress_build(&private, "v3", &new_build);
+        assert_eq!(build["baseline"], v2["build"]);
+        // Its migrations continue v2's ledger, v2's own files first, byte for byte.
+        let migrations =
+            spacepress_migrations(&private, "v3", recompiled["appHash"].as_str().unwrap());
+        assert!(migrations.len() > v2_migrations.len(), "{migrations:?}");
+        assert_eq!(migrations[..v2_migrations.len()], v2_migrations[..]);
+        for name in &v2_migrations {
+            let ours = spacepress_migration_files(&private.join(format!(
+                "spaces/s/versions/v3/.zero-compiled/store/app/{}/migrations/{name}",
+                recompiled["appHash"].as_str().unwrap()
+            )));
+            assert!(!ours.is_empty(), "{name}");
+            assert_eq!(
+                ours,
+                spacepress_migration_files(&private.join(format!(
+                    "spaces/s/versions/v2/.zero-compiled/store/app/{}/migrations/{name}",
+                    v2["appHash"].as_str().unwrap()
+                )))
+            );
+        }
+        assert_eq!(v2_build["app"], v2["appHash"]);
+        // The build a preview seeded stays in the store, whole.
+        let old = spacepress_build(&private, "v3", &old_build);
+        assert!(private
+            .join(format!(
+                "spaces/s/versions/v3/.zero-compiled/store/app/{}/plugins",
+                old["app"].as_str().unwrap()
+            ))
+            .is_dir());
+        // Nothing the version serves changed but its build.
+        let serves = |manifest: &Value| {
+            let mut manifest = manifest.clone();
+            for key in ["build", "appHash"] {
+                manifest.as_object_mut().unwrap().remove(key);
+            }
+            manifest
+        };
+        assert_eq!(serves(&recompiled), serves(&published));
+        // Back on the first baseline it serves what it published, with the published
+        // migration SQL. Migration IDs carry the compile's clock, so only the SQL is compared.
+        let again = crate::spacepress::recompile(&private, "s", "v3", Some("v1")).unwrap();
+        assert_eq!(serves(&again), serves(&published));
+        let migration_sql = |manifest: &Value| -> Vec<String> {
+            let app = manifest["appHash"].as_str().unwrap();
+            spacepress_migrations(&private, "v3", app)
+                .iter()
+                .map(|name| {
+                    fs::read_to_string(private.join(format!(
+                        "spaces/s/versions/v3/.zero-compiled/store/app/{app}/migrations/{name}/migration.sql"
+                    )))
+                    .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(migration_sql(&again), migration_sql(&published));
+        assert!(!private
+            .join("spaces/s/versions/.v3.spacepress-recompile")
+            .exists());
+    }
+
+    #[test]
+    fn spacepress_recompile_refuses_what_it_cannot_carry() {
+        let temp = tempdir().unwrap();
+        let private = temp.path().join(".stattic/storage");
+        finalize_spacepress(&private, "v1", "", None);
+        finalize_spacepress(&private, "v2", ", summary: text().optional()", Some("v1"));
+        let code = |result: Result<Value>| match result {
+            Err(FinalizeError::Invalid { code, .. }) => code,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        // A compile that would serve something else than the version published is refused, and
+        // the version keeps its build.
+        let manifest = private.join("spaces/s/versions/v2/.zero-compiled/manifest.json");
+        let mut edited = spacepress_manifest(&private, "v2");
+        edited["pagePaths"] = json!(["/elsewhere"]);
+        fs::write(&manifest, serde_json::to_vec(&edited).unwrap()).unwrap();
+        assert_eq!(
+            code(crate::spacepress::recompile(&private, "s", "v2", None)),
+            "spacepress_recompile_changed"
+        );
+        assert_eq!(spacepress_manifest(&private, "v2"), edited);
+        assert!(!private
+            .join("spaces/s/versions/.v2.spacepress-recompile")
+            .exists());
+        // A version published with another compiler would go live on code its
+        // preview never ran, so a recompile under this one is refused too.
+        let mut older = spacepress_manifest(&private, "v1");
+        older["compilerRevision"] = json!("an-older-compiler");
+        let v1 = private.join("spaces/s/versions/v1/.zero-compiled/manifest.json");
+        fs::write(&v1, serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(
+            code(crate::spacepress::recompile(&private, "s", "v1", None)),
+            "spacepress_recompile_changed"
+        );
+        // A version that is not SpacePress, and a baseline that does not exist.
+        fs::create_dir_all(private.join("spaces/s/versions/plain")).unwrap();
+        assert_eq!(
+            code(crate::spacepress::recompile(&private, "s", "plain", None)),
+            "spacepress_recompile_not_spacepress"
+        );
+        assert_eq!(
+            code(crate::spacepress::recompile(
+                &private,
+                "s",
+                "v1",
+                Some("gone")
+            )),
+            "spacepress_build_io"
+        );
+    }
+
     #[test]
     fn finalize_compiles_spacepress_and_coexists_with_frontend_and_functions() {
         let (_temp, private, result) = finalize_fixture(

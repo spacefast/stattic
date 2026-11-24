@@ -102,6 +102,13 @@ function spacefast_content_scope_upload_dir(array $uploads): array
     $spaceHash = substr(hash('sha256', $spaceId), 0, 32);
     $uploads['basedir'] = $privateRoot . '/spaces/' . $spaceId . '/content-media';
     $uploads['baseurl'] = '/__spacefast/content-media/' . $spaceHash;
+    // A SpacePress preview keeps its media with its database, and serves it
+    // under the same route with its version in the path.
+    $preview = $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] ?? null;
+    if (is_array($preview) && ($preview['space_id'] ?? null) === $spaceId) {
+        $uploads['basedir'] = $preview['dir'] . '/content-media';
+        $uploads['baseurl'] .= '/_v/' . rawurlencode($preview['version_id']);
+    }
     $uploads['path'] = $uploads['basedir'] . $subdir;
     $uploads['url'] = $uploads['baseurl'] . $subdir;
     return $uploads;

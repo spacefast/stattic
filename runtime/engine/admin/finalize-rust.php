@@ -168,8 +168,8 @@ function _stattic_runtime_finalize_with_rust(
     require_once __DIR__ . '/../shared/zero-v2.php';
     // The control plane owns generation and migration intent; the engine owns
     // baseline selection. Upload-session metadata is never authority.
-    $current = _stattic_runtime_read_json($canonicalPrivateRoot . '/spaces/' . $spaceId . '/zero-v2-current.json');
-    $body['zero_v2_previous'] = is_array($current) ? ($current['version_id'] ?? null) : null;
+    require_once __DIR__ . '/../shared/spacepress.php';
+    $body['zero_v2_previous'] = _stattic_spacepress_current_version($canonicalPrivateRoot, $spaceId);
     $input = [
         'format' => 'stattic.runtime.finalize.input.v2',
         // v2 is filesystem-rooted: `versionRoot` is the PRIVATE STORAGE ROOT,
@@ -290,6 +290,43 @@ function _stattic_runtime_finalize_with_rust(
         );
     }
     return $output;
+}
+
+/**
+ * Compile a finalized SpacePress version's migrations again against the
+ * version initialized on the Space's WordPress ($baseline; null when none is),
+ * and point the version's manifest at the new build. Returns the new build ID,
+ * or the native refusal's code and message when this version cannot be
+ * compiled again.
+ *
+ * @return array{build: string}|array{code: string, message: string}
+ */
+function _stattic_runtime_spacepress_recompile(string $privateRoot, string $spaceId, string $versionId, ?string $baseline): array
+{
+    $binary = _stattic_runtime_native_binary();
+    if ($binary === '' || !is_file($binary) || !is_executable($binary) || !function_exists('proc_open')) {
+        _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime finalizer is not installed.');
+    }
+    $canonicalPrivateRoot = realpath($privateRoot);
+    if (!is_string($canonicalPrivateRoot) || $canonicalPrivateRoot === '') {
+        _stattic_problem_response(500, 'runtime_finalizer_storage_invalid', 'The runtime private storage root is unavailable.');
+    }
+    $command = [$binary, 'spacepress-recompile', '--private-root', $canonicalPrivateRoot, '--space', $spaceId, '--version', $versionId];
+    if ($baseline !== null) array_push($command, '--baseline', $baseline);
+    $result = _stattic_runtime_run_subprocess($command, null, null, $canonicalPrivateRoot, 310000, 64 * 1024, 64 * 1024);
+    if (!$result['spawned'] || $result['timedOut']) {
+        _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime could not compile this version again.');
+    }
+    $output = json_decode((string) $result['stdout'], true);
+    if ($result['exitCode'] === 0 && is_array($output) && is_string($output['build'] ?? null)) {
+        return ['build' => $output['build']];
+    }
+    if ($result['exitCode'] === 1 && is_array($output) && is_string($output['code'] ?? null) && is_string($output['message'] ?? null)) {
+        return ['code' => $output['code'], 'message' => $output['message']];
+    }
+    error_log('spacefast spacepress recompile failed exit=' . $result['exitCode'] . ' reason='
+        . preg_replace('/[^A-Za-z0-9_.:\/ -]+/', '', substr(trim((string) $result['stderr']), 0, 500)));
+    _stattic_problem_response(500, 'runtime_finalizer_output_invalid', 'The native runtime returned an invalid recompile result.');
 }
 
 // A `.rust-previous` sibling means a replacement was in flight; the failed run's

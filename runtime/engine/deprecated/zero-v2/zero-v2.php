@@ -229,11 +229,11 @@ function _stattic_zero_v2_configure_spacefast_provider(string $compiledRoot): vo
 }
 
 /** Authenticated finalize values are private immutable inputs, including empty overrides. */
-function _stattic_zero_v2_write_variables(string $privateRoot, string $spaceId, string $versionId, mixed $variables): void
+function _stattic_zero_v2_write_variables(string $privateRoot, string $spaceId, string $versionId, mixed $variables, mixed $previewVariables = null): void
 {
     $versionRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
     if (_stattic_spacepress_version_manifest($versionRoot) !== null) {
-        _stattic_spacepress_write_variables($privateRoot, $spaceId, $versionId, $variables);
+        _stattic_spacepress_write_variables($privateRoot, $spaceId, $versionId, $variables, $previewVariables);
         return;
     }
     $root = $versionRoot . '/.zero-compiled';

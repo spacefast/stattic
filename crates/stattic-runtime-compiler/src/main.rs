@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 use stattic_runtime_core::{
-    finalize_site, read_site_finalize_input, site_finalize_error_envelope,
+    finalize_site, read_site_finalize_input, site_finalize_error_envelope, spacepress_recompile,
     write_site_finalize_error, write_site_finalize_output, FinalizeError,
     RuntimeDiagnosticSeverity, SiteFinalizeInput, SITE_FINALIZE_INPUT_FORMAT,
 };
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 enum Command {
     Finalize(FinalizeArgs),
+    SpacepressRecompile(RecompileArgs),
     Invoke,
     ServiceBroker,
     MarkdownToHtml,
@@ -24,6 +25,14 @@ struct FinalizeArgs {
     version_root: Option<String>,
     output: Option<PathBuf>,
     dry_run: bool,
+}
+
+#[derive(Debug, Default)]
+struct RecompileArgs {
+    private_root: PathBuf,
+    space: String,
+    version: String,
+    baseline: Option<String>,
 }
 
 #[derive(Debug)]
@@ -78,6 +87,7 @@ fn run() -> Result<(), CliError> {
     let command = parse_args(env::args().skip(1))?;
     match command {
         Command::Finalize(args) => finalize_site_command(args)?,
+        Command::SpacepressRecompile(args) => spacepress_recompile_command(args)?,
         Command::Invoke => stattic_zero_runner::legacy_zero::run_stdio(),
         Command::ServiceBroker => stattic_zero_runner::run_service_broker_stdio(),
         Command::MarkdownToHtml => markdown_to_html()?,
@@ -130,6 +140,29 @@ fn finalize_site_command(args: FinalizeArgs) -> Result<(), CliError> {
         return Err(error.into());
     }
     Ok(())
+}
+
+/// Compiles a finalized SpacePress version's migrations again against the
+/// version initialized on the Space's WordPress (`--baseline`; omitted when
+/// none is) and points its manifest
+/// at the new build. Prints `{"build": ...}`, or the finalize error envelope
+/// on stdout with exit status 1 when the version cannot be recompiled.
+fn spacepress_recompile_command(args: RecompileArgs) -> Result<(), CliError> {
+    match spacepress_recompile(
+        &args.private_root,
+        &args.space,
+        &args.version,
+        args.baseline.as_deref(),
+    ) {
+        Ok(manifest) => {
+            println!("{}", serde_json::json!({ "build": manifest["build"] }));
+            Ok(())
+        }
+        Err(error) => {
+            println!("{}", site_finalize_error_envelope(&error));
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Marks the stderr line that carries the failure envelope when `--output`
@@ -235,6 +268,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, CliErro
     }
     match command.as_str() {
         "finalize" => Ok(Command::Finalize(parse_finalize_args(args)?)),
+        "spacepress-recompile" => Ok(Command::SpacepressRecompile(parse_recompile_args(args)?)),
         "invoke" => no_operands(args, Command::Invoke),
         "service-broker" => no_operands(args, Command::ServiceBroker),
         "markdown-to-html" => no_operands(args, Command::MarkdownToHtml),
@@ -282,6 +316,32 @@ fn parse_finalize_args(args: impl IntoIterator<Item = String>) -> Result<Finaliz
     Ok(parsed)
 }
 
+fn parse_recompile_args(args: impl IntoIterator<Item = String>) -> Result<RecompileArgs, CliError> {
+    let mut parsed = RecompileArgs::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--private-root" => parsed.private_root = next_path(&mut args, "--private-root")?,
+            "--space" => parsed.space = next_value(&mut args, "--space")?,
+            "--version" => parsed.version = next_value(&mut args, "--version")?,
+            "--baseline" => parsed.baseline = Some(next_value(&mut args, "--baseline")?),
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "unknown argument {arg:?} for spacepress-recompile\n\n{}",
+                    usage()
+                )))
+            }
+        }
+    }
+    if parsed.private_root.as_os_str().is_empty()
+        || parsed.space.is_empty()
+        || parsed.version.is_empty()
+    {
+        return Err(CliError::Usage(usage()));
+    }
+    Ok(parsed)
+}
+
 fn next_path(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, CliError> {
     Ok(PathBuf::from(next_value(args, flag)?))
 }
@@ -294,6 +354,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 fn usage() -> String {
     "usage:
   stattic-runtime finalize --input <input.json> [--version-root <dir>] [--output <file>] [--dry-run]
+  stattic-runtime spacepress-recompile --private-root <dir> --space <id> --version <id> [--baseline <id>]
   stattic-runtime invoke
   stattic-runtime service-broker
   stattic-runtime markdown-to-html

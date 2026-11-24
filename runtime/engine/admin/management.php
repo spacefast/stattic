@@ -470,12 +470,35 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     }
     $zeroLock = _stattic_zero_v2_finalize_lock($privateRoot, $spaceId, $session);
     try {
+        // The migration baseline the compile reads (finalize-rust.php), under the same lock.
+        require_once __DIR__ . '/../shared/spacepress.php';
+        $baseline = _stattic_spacepress_current_version($privateRoot, $spaceId);
         $finalized = _stattic_runtime_finalize_with_rust($privateRoot, $spaceId, $versionId, $uploadId, $session, $body);
         try {
-            _stattic_zero_v2_write_variables($privateRoot, $spaceId, $versionId, $body['zero_v2']['variableValues'] ?? []);
+            _stattic_zero_v2_write_variables($privateRoot, $spaceId, $versionId, $body['zero_v2']['variableValues'] ?? [], $body['zero_v2']['previewVariableValues'] ?? null);
             require_once __DIR__ . '/../runtime/zero-v2-realtime.php';
             _stattic_zero_v2_write_realtime($privateRoot, $spaceId, $versionId, $body['zero_v2']['realtime'] ?? null);
-            _stattic_zero_v2_initialize($privateRoot, $spaceId, $versionId, $body);
+            require_once __DIR__ . '/../shared/spacepress.php';
+            $compiled = _stattic_spacepress_version_root(_stattic_version_root($privateRoot, $spaceId, $versionId));
+            if ($compiled !== null) {
+                // A SpacePress preview touches no database at finalize: it seeds a
+                // SQLite database of its own on its first visit. Only a version
+                // the production route selects initializes on the Space's
+                // WordPress, here or at promote, against the baseline its
+                // migrations were compiled for.
+                _stattic_runtime_write_json_atomic($compiled . '/finalized.json', [
+                    'version_id' => $versionId,
+                    'baseline_version_id' => $baseline,
+                ]);
+                if (isset($body['activate']) && is_array($body['activate']) && _stattic_runtime_activation_route_name($body['activate']) === 'production') {
+                    _stattic_zero_v2_initialize($privateRoot, $spaceId, $versionId, $body);
+                } else {
+                    require_once __DIR__ . '/../shared/spacepress-preview.php';
+                    _stattic_spacepress_preview_require_platform($privateRoot);
+                }
+            } else {
+                _stattic_zero_v2_initialize($privateRoot, $spaceId, $versionId, $body);
+            }
         } catch (Throwable $error) {
             _stattic_problem_response(422, 'zero_v2_initialize_failed', 'Zero could not initialize against this box WordPress platform.', ['details' => ['reason' => $error->getMessage()]]);
         }
@@ -576,7 +599,11 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
 {
     require_once __DIR__ . '/../shared/zero-v2.php';
     $metadata ??= _stattic_runtime_read_json($versionRoot . '/metadata.json');
-    if (_stattic_zero_v2_version_state($versionRoot) === 'uninitialized') {
+    require_once __DIR__ . '/../shared/spacepress-preview.php';
+    // A SpacePress version published as a preview is servable once finalized:
+    // it seeds a database of its own on its first visit.
+    $spacepressRoot = _stattic_spacepress_version_root($versionRoot);
+    if ($spacepressRoot !== null ? !_stattic_spacepress_finalized($spacepressRoot) : _stattic_zero_v2_version_state($versionRoot) === 'uninitialized') {
         _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
     }
     $readinessTarget = is_array($metadata) && is_array($metadata['readinessTarget'] ?? null)
@@ -1373,6 +1400,108 @@ function _stattic_runtime_route_updated_event(string $spaceId, string $routeName
     return $event;
 }
 
+/**
+ * Run a SpacePress version's production initialize (migrations, install, seed)
+ * on the Space's WordPress before the production route switches to it, and
+ * refuse the switch if it fails.
+ *
+ * The control plane sends the version's production variable set
+ * (`zero_v2.variableValues`), which becomes its `variables.json` here, once:
+ * an initialized version keeps the set it went live with, as every Zero
+ * version keeps the set it finalized with. Without the field (an older
+ * control plane) the version keeps its finalize set. Its migrations were
+ * compiled against the version that was initialized at its finalize. If
+ * another version initialized since, they no longer fit, so they are compiled
+ * again against the version initialized now. The new build goes beside the
+ * old one in the version's store; a preview that seeded the old build keeps
+ * it (spacepress-preview.php).
+ */
+function _stattic_runtime_spacepress_promote_initialize(string $privateRoot, string $spaceId, string $versionId, array $body): void
+{
+    require_once __DIR__ . '/../shared/zero-v2.php';
+    require_once __DIR__ . '/../shared/spacepress.php';
+    require_once __DIR__ . '/../shared/lock.php';
+    $values = is_array($body['zero_v2'] ?? null) && array_key_exists('variableValues', $body['zero_v2']) ? $body['zero_v2']['variableValues'] : null;
+    $lock = _stattic_zero_v2_lock($privateRoot, $spaceId);
+    try {
+        $compiled = (string) _stattic_spacepress_version_root(_stattic_version_root($privateRoot, $spaceId, $versionId));
+        clearstatcache();
+        if (is_file($compiled . '/ready.json')) return;
+        $finalized = _stattic_runtime_read_json($compiled . '/finalized.json');
+        $baseline = is_array($finalized) && array_key_exists('baseline_version_id', $finalized) ? $finalized['baseline_version_id'] : false;
+        $initialized = _stattic_spacepress_current_version($privateRoot, $spaceId);
+        // An initialize interrupted after it moved the baseline pointer to
+        // this version, and before its ready marker, resumes.
+        if ($baseline !== $initialized && $initialized !== $versionId) {
+            $recompiled = _stattic_runtime_spacepress_recompile($privateRoot, $spaceId, $versionId, $initialized);
+            if (in_array($recompiled['code'] ?? null, ['spacepress_build_io', 'runtime_storage_full', 'runtime_finalizer_io_error'], true)) {
+                // Storage trouble, not a version that can't be compiled again: retry.
+                _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime could not compile this version again. Retry shortly.', ['details' => ['reason' => $recompiled]]);
+            }
+            if (isset($recompiled['code'])) {
+                _stattic_problem_response(409, 'spacepress_promote_baseline_stale', 'Another version went live after this one was published, and this one could not be compiled again against it. Publish it again to promote it.', [
+                    'details' => [
+                        'baseline_version_id' => $baseline === false ? null : $baseline,
+                        'initialized_version_id' => $initialized,
+                        'reason' => ['code' => $recompiled['code'], 'message' => $recompiled['message']],
+                    ],
+                ]);
+            }
+            _stattic_runtime_write_json_atomic($compiled . '/finalized.json', ['version_id' => $versionId, 'baseline_version_id' => $initialized]);
+        }
+        if ($values !== null) _stattic_spacepress_write_variables($privateRoot, $spaceId, $versionId, $values);
+        try {
+            _stattic_zero_v2_initialize($privateRoot, $spaceId, $versionId, $body);
+        } catch (Throwable $error) {
+            _stattic_problem_response(422, 'zero_v2_initialize_failed', 'Zero could not initialize against this box WordPress platform.', ['details' => ['reason' => $error->getMessage()]]);
+        }
+    } finally {
+        _stattic_lock_release($lock);
+    }
+}
+
+/**
+ * The promote step on its own: run a SpacePress version's production
+ * initialize before the control plane moves the production route, under the
+ * finalize's timeout rather than a route write's. A version that is ready has
+ * nothing to do; one that isn't SpacePress isn't found.
+ */
+function _stattic_runtime_spacepress_initialize_route(string $privateRoot, string $spaceId, string $versionId, array $claims): void
+{
+    require_once __DIR__ . '/../shared/spacepress-preview.php';
+    $compiled = _stattic_spacepress_version_root(_stattic_version_root($privateRoot, $spaceId, $versionId));
+    if ($compiled === null || !_stattic_spacepress_finalized($compiled)) {
+        _stattic_problem_response(404, 'version_not_found', 'Version not found.');
+    }
+    $body = _stattic_json_body();
+    // Migrations run on live data only for the promote the control plane
+    // checked: production must still name the version it expected. A replay
+    // after its own route switch landed finds the version live, or already
+    // initialized, and has nothing left to migrate.
+    if (array_key_exists('expected_live_version_id', $body) && !is_file($compiled . '/ready.json')) {
+        $live = _stattic_runtime_read_json(_stattic_route_pointer_path($privateRoot, $spaceId, 'production'));
+        $liveVersion = is_array($live) && is_string($live['version_id'] ?? null) ? $live['version_id'] : null;
+        if ($liveVersion !== $body['expected_live_version_id'] && $liveVersion !== $versionId) {
+            _stattic_problem_response(409, 'spacepress_promote_live_changed', 'Another version went live while this one was being promoted. Promote it again.', [
+                'details' => ['expected_live_version_id' => $body['expected_live_version_id'], 'live_version_id' => $liveVersion],
+            ]);
+        }
+    }
+    $initialized = !is_file($compiled . '/ready.json');
+    if ($initialized) _stattic_runtime_spacepress_promote_initialize($privateRoot, $spaceId, $versionId, $body);
+    // Whether the version runs the values this call sent: written now, by an
+    // earlier attempt of the same promote, or never (a version initialized
+    // with another set keeps it).
+    $sent = is_array($body['zero_v2'] ?? null) ? ($body['zero_v2']['variableValues'] ?? null) : null;
+    $stored = _stattic_runtime_read_json($compiled . '/variables.json');
+    _stattic_json_response(200, [
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'initialized' => $initialized,
+        'variables_current' => is_array($sent) && is_array($stored) && _stattic_spacepress_same_variables($stored, $sent),
+    ]);
+}
+
 // The one route-pointer flip, for route PUT and finalize+activate alike. An
 // unchanged conditional write must stay fully silent. No journal event means no
 // edge purge for reconcile-sweep and plan-sync re-pushes.
@@ -1382,7 +1511,21 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
         ? $body['config_digest']
         : null;
     require_once __DIR__ . '/../shared/zero-v2.php';
-    if (_stattic_zero_v2_version_state(_stattic_version_root($privateRoot, $spaceId, $versionId)) === 'uninitialized') {
+    require_once __DIR__ . '/../shared/spacepress-preview.php';
+    $versionRoot = _stattic_version_root($privateRoot, $spaceId, $versionId);
+    $spacepressRoot = _stattic_spacepress_version_root($versionRoot);
+    if ($spacepressRoot !== null && !is_file($spacepressRoot . '/ready.json')) {
+        if (!_stattic_spacepress_finalized($spacepressRoot)) {
+            _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
+        }
+        // A SpacePress version published as a preview goes live only after
+        // `POST …/spacepress/initialize` ran its migrations, on its own long
+        // timeout and its live-version check. A route write never migrates:
+        // it is a short, retried request. Other routes serve previews.
+        if ($routeName === 'production') {
+            _stattic_problem_response(409, 'spacepress_promote_initialize_required', 'Initialize this SpacePress version before it goes live.');
+        }
+    } elseif ($spacepressRoot === null && _stattic_zero_v2_version_state($versionRoot) === 'uninitialized') {
         _stattic_problem_response(409, 'zero_v2_not_initialized', 'The Zero version has not initialized.');
     }
     $routePath = _stattic_route_pointer_path($privateRoot, $spaceId, $routeName);

@@ -36,6 +36,7 @@
     "engine/entrypoints/health.php",
     "engine/entrypoints/invoke.php",
     "engine/entrypoints/mail.php",
+    "engine/entrypoints/preview-cron.php",
     "engine/entrypoints/management.php",
     "engine/entrypoints/upload.php",
     "engine/init.php",
@@ -186,7 +187,10 @@
     "engine/shared/zero-db-scope.php",
     "engine/entrypoints/zero-worker.php",
     "engine/runtime/zero-v2-worker.php",
-    "engine/runtime/zero-v2-realtime.php"
+    "engine/runtime/zero-v2-realtime.php",
+    "engine/shared/spacepress-preview.php",
+    "engine/shared/wordpress-cache-scope.php",
+    "engine/wordpress/preview-db.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [
@@ -217,6 +221,11 @@
     {
       "source": "custom-redirects.php",
       "path": "__spacefast/mail.php"
+    },
+    {
+      "source": "custom-redirects.php",
+      "path": "__spacefast/preview-cron.php",
+      "const": "STATTIC_RUNTIME_PREVIEW_CRON_PATH"
     },
     {
       "source": "custom-redirects.php",

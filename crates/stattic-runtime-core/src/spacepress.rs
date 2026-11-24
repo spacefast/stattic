@@ -18,9 +18,14 @@
 use typedpress as compiler;
 
 use crate::{
-    finalize::{invalid, invalid_error, sha256, validate_id, FileMeta, Result},
+    catalog::read_version_catalog,
+    finalize::{
+        create_dir_all, invalid, invalid_error, remove_any, sha256, validate_id,
+        validate_relative_path, write_bytes_in_place, FileMeta, Result,
+    },
     model::SiteFinalizeInput,
     protocol::CONFIG_TYPESCRIPT_FILE,
+    storage::{blob_path, blob_root},
     zero_v2::{self, Compiled},
 };
 use oxc_allocator::Allocator;
@@ -45,6 +50,7 @@ pub(crate) const SPACEPRESS_VENDOR_BUNDLE: &str = ".spacepress-source/vendor.spa
 pub(crate) const SPACEPRESS_MANIFEST: &str = ".spacepress-source/manifest.json";
 const SPACEPRESS_ACTION_PREFIX: &str = "/wp-json/spacepress/v1/actions/";
 const SPACEPRESS_SOURCE_FORMAT: &str = "spacepress.source-bundle.v1";
+const SPACEPRESS_HOSTED_FORMAT: &str = "spacepress.hosted.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppKind {
@@ -549,127 +555,41 @@ pub(crate) fn compile(
     let store = output.join("store");
     fs::create_dir_all(&store).map_err(failure)?;
 
-    let capture_dir = stage.join(".spacepress-capture");
-    let compat_project_dir = stage.join(".spacepress-compat-project");
-    let compat_sources_dir = stage.join(".spacepress-compat-sources");
-
-    let sources_dir = match kind {
-        AppKind::Captured => prepare_captured_spacepress_sources(
-            &stage.join("files").join(SPACEPRESS_SOURCE_DIR),
-            &compat_sources_dir,
-        )?,
-        AppKind::Raw => {
-            if needs_pre_rename_shim() {
-                stage_compat_project(&stage.join("files"), &compat_project_dir, None)
-                    .map_err(failure)?;
-                compiler::host::sources(&compat_project_dir, &capture_dir)
-                    .map_err(map_capture_error)?;
-            } else {
-                compiler::host::sources(&stage.join("files"), &capture_dir)
-                    .map_err(map_capture_error)?;
-            }
-            capture_dir.clone()
-        }
-        AppKind::InlineConfig => {
-            let synthesized = inline_app_source.expect("checked above");
-            stage_compat_project(
-                &stage.join("files"),
-                &compat_project_dir,
-                Some((CONFIG_TYPESCRIPT_FILE, synthesized)),
-            )
-            .map_err(failure)?;
-            compiler::host::sources(&compat_project_dir, &capture_dir)
-                .map_err(map_capture_error)?;
-            capture_dir.clone()
-        }
-    };
-
-    let mut previous_build = None;
-    let previous_version = input
+    let previous_build = input
         .body
         .get("spacepress_previous")
         .or_else(|| input.body.get("zero_v2_previous"))
-        .and_then(Value::as_str);
-    if let Some(previous) = previous_version {
-        validate_id(previous, "zero_v2_previous")?;
-        let old = private
-            .join("spaces")
-            .join(&input.space_id)
-            .join("versions")
-            .join(previous)
-            .join(".zero-compiled");
-        let manifest: Value =
-            serde_json::from_slice(&fs::read(old.join("manifest.json")).map_err(failure)?)
-                .map_err(|e| invalid_error("spacepress_baseline_invalid", e.to_string()))?;
-        let build = manifest
-            .get("build")
-            .and_then(Value::as_str)
-            .filter(|s| compiler::store::valid_id(s))
-            .ok_or_else(|| {
-                invalid_error(
-                    "spacepress_migration_required",
-                    "Use a fresh Space; this baseline is not a SpacePress build.",
-                )
-            })?;
-        let old_store = old.join("store");
-        let build_file = format!("build/{build}.json");
-        let bytes = fs::read(old_store.join(&build_file)).map_err(failure)?;
-        let baseline: compiler::host::BuildManifest = serde_json::from_slice(&bytes)
-            .map_err(|e| invalid_error("spacepress_baseline_invalid", e.to_string()))?;
-        if !compiler::store::valid_id(&baseline.app) {
-            return invalid("spacepress_baseline_invalid", "Invalid baseline app hash.");
-        }
-        fs::create_dir_all(store.join("build")).map_err(failure)?;
-        fs::write(store.join(build_file), bytes).map_err(failure)?;
-        // Only trusted host-produced snapshot and migration metadata form the baseline.
-        let app = store.join("app").join(&baseline.app);
-        copy_tree(&old_store.join("app").join(&baseline.app), &app).map_err(failure)?;
-        previous_build = Some(build.to_owned());
-    }
+        .and_then(Value::as_str)
+        .map(|previous| seed_baseline(private, &input.space_id, previous, &store))
+        .transpose()?;
 
-    let compile_result = compiler::host::compile_to_store(
-        &sources_dir,
-        &store,
-        &stage.join("files"),
-        previous_build.as_deref(),
-    );
-
-    let captured_paths = matches!(kind, AppKind::Raw | AppKind::InlineConfig)
-        .then(|| captured_source_paths(&sources_dir));
-
+    let work = SourceWork::new(stage);
+    let compile_result = compiler_sources(kind, &work, &stage.join("files"), inline_app_source)
+        .and_then(|sources_dir| {
+            let build = compiler::host::compile_to_store(
+                &sources_dir,
+                &store,
+                &stage.join("files"),
+                previous_build.as_deref(),
+            )
+            .map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
+            let captured_paths = matches!(kind, AppKind::Raw | AppKind::InlineConfig)
+                .then(|| captured_source_paths(&sources_dir));
+            Ok((build, captured_paths))
+        });
     // Clean up temporary capture/compat directories so nothing extraneous lands in stage.
-    for temp_dir in [&capture_dir, &compat_project_dir, &compat_sources_dir] {
-        if temp_dir.exists() {
-            let _ = fs::remove_dir_all(temp_dir);
-        }
-    }
+    work.remove();
+    let (build, captured_paths) = compile_result?;
 
-    let build =
-        compile_result.map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
-
-    let app = store.join("app").join(&build.app_hash);
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(app.join("manifest.json")).map_err(failure)?)
-            .map_err(|e| invalid_error("spacepress_manifest_invalid", e.to_string()))?;
-    if manifest["hostContract"] != compiler::host_contract::HOST_CONTRACT {
-        return invalid(
-            "spacepress_host_contract",
-            "Unsupported SpacePress host contract.",
-        );
-    }
-    let pin = compiler_source_pin();
-    manifest["format"] = "spacepress.hosted.v1".into();
-    manifest["compilerRevision"] = pin["revision"].clone();
-    manifest["summary"]["clientPath"] = "/__zero/client.js".into();
-    manifest["summary"]["actionPathPrefix"] = SPACEPRESS_ACTION_PREFIX.into();
-    manifest["build"] = build.build_id.into();
-    manifest["runtimeRevision"] = build.runtime_revision.into();
-    manifest["appHash"] = build.app_hash.into();
+    let manifest = hosted_manifest(&store, build)?;
     fs::write(
         output.join("manifest.json"),
         serde_json::to_vec(&manifest).unwrap(),
     )
     .map_err(failure)?;
+    let app = store
+        .join("app")
+        .join(manifest["appHash"].as_str().unwrap_or_default());
     if app.join("client").is_dir() {
         copy_tree(&app.join("client"), &output.join("client")).map_err(failure)?;
     }
@@ -711,6 +631,306 @@ pub(crate) fn compile(
         manifest,
         private_paths,
     }))
+}
+
+/// Scratch directories the compiler's source capture and pre-rename shims write under a stage.
+struct SourceWork {
+    capture: PathBuf,
+    compat_project: PathBuf,
+    compat_sources: PathBuf,
+}
+
+impl SourceWork {
+    fn new(stage: &Path) -> Self {
+        Self {
+            capture: stage.join(".spacepress-capture"),
+            compat_project: stage.join(".spacepress-compat-project"),
+            compat_sources: stage.join(".spacepress-compat-sources"),
+        }
+    }
+
+    fn remove(&self) {
+        for dir in [&self.capture, &self.compat_project, &self.compat_sources] {
+            if dir.exists() {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
+    }
+}
+
+/// The source bundle directory the compiler reads for an app of `kind` whose files sit in
+/// `files_root`: the captured bundle, or one captured now from the raw or inline project.
+fn compiler_sources(
+    kind: AppKind,
+    work: &SourceWork,
+    files_root: &Path,
+    inline_app_source: Option<String>,
+) -> Result<PathBuf> {
+    let failure = |e: std::io::Error| invalid_error("spacepress_build_io", e.to_string());
+    match kind {
+        AppKind::Captured => prepare_captured_spacepress_sources(
+            &files_root.join(SPACEPRESS_SOURCE_DIR),
+            &work.compat_sources,
+        ),
+        AppKind::Raw => {
+            if needs_pre_rename_shim() {
+                stage_compat_project(files_root, &work.compat_project, None).map_err(failure)?;
+                compiler::host::sources(&work.compat_project, &work.capture)
+                    .map_err(map_capture_error)?;
+            } else {
+                compiler::host::sources(files_root, &work.capture).map_err(map_capture_error)?;
+            }
+            Ok(work.capture.clone())
+        }
+        AppKind::InlineConfig => {
+            let synthesized = inline_app_source.ok_or_else(|| {
+                invalid_error(
+                    "spacepress_source_layout",
+                    "spacefast.config.ts declares no SpacePress app.",
+                )
+            })?;
+            stage_compat_project(
+                files_root,
+                &work.compat_project,
+                Some((CONFIG_TYPESCRIPT_FILE, synthesized)),
+            )
+            .map_err(failure)?;
+            compiler::host::sources(&work.compat_project, &work.capture)
+                .map_err(map_capture_error)?;
+            Ok(work.capture.clone())
+        }
+    }
+}
+
+fn io_failure(e: std::io::Error) -> crate::finalize::FinalizeError {
+    invalid_error("spacepress_build_io", e.to_string())
+}
+
+/// Copy the baseline version's build manifest and app tree into `store`, and return its build ID.
+/// Only trusted host-produced snapshot and migration metadata form the baseline.
+fn seed_baseline(private: &Path, space_id: &str, previous: &str, store: &Path) -> Result<String> {
+    validate_id(previous, "zero_v2_previous")?;
+    let old = private
+        .join("spaces")
+        .join(space_id)
+        .join("versions")
+        .join(previous)
+        .join(".zero-compiled");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(old.join("manifest.json")).map_err(io_failure)?)
+            .map_err(|e| invalid_error("spacepress_baseline_invalid", e.to_string()))?;
+    let build = manifest
+        .get("build")
+        .and_then(Value::as_str)
+        .filter(|s| compiler::store::valid_id(s))
+        .ok_or_else(|| {
+            invalid_error(
+                "spacepress_migration_required",
+                "Use a fresh Space; this baseline is not a SpacePress build.",
+            )
+        })?;
+    let old_store = old.join("store");
+    let build_file = format!("build/{build}.json");
+    let bytes = fs::read(old_store.join(&build_file)).map_err(io_failure)?;
+    let baseline: compiler::host::BuildManifest = serde_json::from_slice(&bytes)
+        .map_err(|e| invalid_error("spacepress_baseline_invalid", e.to_string()))?;
+    if !compiler::store::valid_id(&baseline.app) {
+        return invalid("spacepress_baseline_invalid", "Invalid baseline app hash.");
+    }
+    // Store entries are content-addressed and never edited, so one already in
+    // place is these bytes. Each is staged under `.tmp/` and renamed in whole,
+    // so an interrupted copy never leaves a partial entry under its real name.
+    let staging = store.join(".tmp");
+    fs::create_dir_all(&staging).map_err(io_failure)?;
+    fs::create_dir_all(store.join("build")).map_err(io_failure)?;
+    fs::create_dir_all(store.join("app")).map_err(io_failure)?;
+    let unique = format!("{}-{}", std::process::id(), build);
+    if !store.join(&build_file).is_file() {
+        let staged = staging.join(format!("build-{unique}.json"));
+        fs::write(&staged, bytes).map_err(io_failure)?;
+        fs::rename(&staged, store.join(&build_file)).map_err(io_failure)?;
+    }
+    let app = store.join("app").join(&baseline.app);
+    if !app.is_dir() {
+        let staged = staging.join(format!("app-{unique}"));
+        if staged.exists() {
+            fs::remove_dir_all(&staged).map_err(io_failure)?;
+        }
+        copy_tree(&old_store.join("app").join(&baseline.app), &staged).map_err(io_failure)?;
+        if let Err(error) = fs::rename(&staged, &app) {
+            // Another promote placed the same entry first: those are these bytes.
+            let _ = fs::remove_dir_all(&staged);
+            if !app.is_dir() {
+                return Err(io_failure(error));
+            }
+        }
+    }
+    Ok(build.to_owned())
+}
+
+/// The version's `.zero-compiled/manifest.json` for a build in its store.
+fn hosted_manifest(store: &Path, build: compiler::host::StoredBuild) -> Result<Value> {
+    let app = store.join("app").join(&build.app_hash);
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(app.join("manifest.json")).map_err(io_failure)?)
+            .map_err(|e| invalid_error("spacepress_manifest_invalid", e.to_string()))?;
+    if manifest["hostContract"] != compiler::host_contract::HOST_CONTRACT {
+        return invalid(
+            "spacepress_host_contract",
+            "Unsupported SpacePress host contract.",
+        );
+    }
+    let pin = compiler_source_pin();
+    manifest["format"] = SPACEPRESS_HOSTED_FORMAT.into();
+    manifest["compilerRevision"] = pin["revision"].clone();
+    manifest["summary"]["clientPath"] = "/__zero/client.js".into();
+    manifest["summary"]["actionPathPrefix"] = SPACEPRESS_ACTION_PREFIX.into();
+    manifest["build"] = build.build_id.into();
+    manifest["runtimeRevision"] = build.runtime_revision.into();
+    manifest["appHash"] = build.app_hash.into();
+    Ok(manifest)
+}
+
+/// A recompile may change only which build a version names. A different runtime or compiler
+/// revision, page, route or generated client would put code its preview never ran on production.
+fn without_build_identity(manifest: &Value) -> Value {
+    let mut manifest = manifest.clone();
+    if let Some(object) = manifest.as_object_mut() {
+        for key in ["build", "appHash"] {
+            object.remove(key);
+        }
+    }
+    manifest
+}
+
+fn tree(root: &Path) -> std::io::Result<BTreeMap<String, Vec<u8>>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                walk(root, &entry.path(), out)?;
+            } else {
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(rel, fs::read(entry.path())?);
+            }
+        }
+        Ok(())
+    }
+    let mut out = BTreeMap::new();
+    if root.is_dir() {
+        walk(root, root, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn not_spacepress<T>() -> Result<T> {
+    invalid(
+        "spacepress_recompile_not_spacepress",
+        "This version is not a SpacePress build.",
+    )
+}
+
+/// Compile a finalized SpacePress version's migrations again, against `baseline` (the version
+/// currently initialized on the Space's WordPress; `None` when none is).
+///
+/// The compile reads the version's own committed sources from the Space's CAS: the captured
+/// `.spacepress-source/` bundle, or the raw or inline project it captures again, and `public/`.
+/// It writes the new build, app tree and baseline entries into the version's store beside the old
+/// ones, and points the version's manifest at the new build. Nothing it writes replaces a store
+/// entry, so a preview that seeded the old build keeps loading it. A recompile that would change
+/// anything the version serves besides its build (pages, routes, generated client, compiler or
+/// runtime revision) is refused: the version has to be published again.
+///
+/// The caller holds the Space's Zero v2 lock.
+pub fn recompile(
+    private: &Path,
+    space_id: &str,
+    version_id: &str,
+    baseline: Option<&str>,
+) -> Result<Value> {
+    validate_id(space_id, "space_id")?;
+    validate_id(version_id, "version_id")?;
+    let versions = private.join("spaces").join(space_id).join("versions");
+    let version = versions.join(version_id);
+    let compiled = version.join(".zero-compiled");
+    let manifest_path = compiled.join("manifest.json");
+    let current: Value = match fs::read(&manifest_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| invalid_error("spacepress_manifest_invalid", e.to_string()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return not_spacepress(),
+        Err(e) => return Err(io_failure(e)),
+    };
+    if current["format"] != SPACEPRESS_HOSTED_FORMAT {
+        return not_spacepress();
+    }
+    let catalog = read_version_catalog(&version)?.ok_or_else(|| {
+        invalid_error(
+            "spacepress_recompile_no_catalog",
+            "This version has no file catalog.",
+        )
+    })?;
+    let stage = versions.join(format!(".{version_id}.spacepress-recompile"));
+    remove_any(&stage)?;
+    let result = (|| {
+        let files = stage.join("files");
+        create_dir_all(&files)?;
+        // Compile inputs only: private sources, and the public/ tree the compile reads assets from.
+        let blobs = blob_root(private, space_id);
+        for (path, entry) in &catalog.paths {
+            if entry.public && !path.starts_with("public/") {
+                continue;
+            }
+            validate_relative_path(path)?;
+            let target = files.join(path);
+            create_dir_all(target.parent().unwrap())?;
+            fs::copy(blob_path(&blobs, &entry.source.sha256), &target).map_err(io_failure)?;
+        }
+        let inline_app_source = fs::read_to_string(files.join(CONFIG_TYPESCRIPT_FILE))
+            .ok()
+            .and_then(|source| extract_inline_app_config(&source));
+        let kind = if catalog
+            .paths
+            .keys()
+            .any(|path| path.starts_with(SPACEPRESS_SOURCE_PREFIX))
+        {
+            AppKind::Captured
+        } else if catalog.paths.contains_key(SPACEPRESS_CONFIG_FILE) {
+            AppKind::Raw
+        } else if inline_app_source.is_some() {
+            AppKind::InlineConfig
+        } else {
+            return not_spacepress();
+        };
+        let sources = compiler_sources(kind, &SourceWork::new(&stage), &files, inline_app_source)?;
+        let store = compiled.join("store");
+        let previous = baseline
+            .map(|previous| seed_baseline(private, space_id, previous, &store))
+            .transpose()?;
+        let build = compiler::host::compile_to_store(&sources, &store, &files, previous.as_deref())
+            .map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
+        let client =
+            tree(&store.join("app").join(&build.app_hash).join("client")).map_err(io_failure)?;
+        let manifest = hosted_manifest(&store, build)?;
+        if without_build_identity(&manifest) != without_build_identity(&current)
+            || client != tree(&compiled.join("client")).map_err(io_failure)?
+        {
+            return invalid(
+                "spacepress_recompile_changed",
+                "Compiling this version again would change what it serves. Publish it again to promote it.",
+            );
+        }
+        if manifest != current {
+            write_bytes_in_place(&manifest_path, &serde_json::to_vec(&manifest).unwrap())?;
+        }
+        Ok(manifest)
+    })();
+    remove_any(&stage)?;
+    result
 }
 
 fn map_capture_error(error: compiler::diag::Diag) -> crate::finalize::FinalizeError {

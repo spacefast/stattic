@@ -498,8 +498,16 @@ function _stattic_functions_spacepress_serve(
     $versionId = (string) $claims['version_id'];
     $serving['space_id'] = $spaceId;
     $serving['version_id'] = $versionId;
+    // The token names the version; the call arrives on the Space's default
+    // hostname whatever that version is. A version production does not serve
+    // runs on its own preview database, as on its own link, never on the site's.
+    require_once __DIR__ . '/../shared/spacepress-preview.php';
+    $selectServing = $serving;
+    if (_stattic_spacepress_production_version($privateRoot, $spaceId) !== $versionId) {
+        $selectServing['immutable'] = true;
+    }
     try {
-        $selected = _stattic_spacepress_select($privateRoot, $spaceId, $versionId, $serving);
+        $selected = _stattic_spacepress_select($privateRoot, $spaceId, $versionId, $selectServing);
     } catch (RuntimeException $error) {
         _stattic_problem_refused(503, 'spacepress_unavailable', $error->getMessage());
     }

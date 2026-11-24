@@ -9,14 +9,65 @@ import type { MysqlContainer } from "./mysql-container.ts";
 export const WORDPRESS_IMAGE =
   "wordpress@sha256:63eda59d220083d9ed1fd9685ffdd5e0405959fd2fec73a734b631487561e12f";
 
+/**
+ * A pinned WordPress.org plugin archive in `dir`, checked against its digest.
+ * downloads.wordpress.org answers the odd request with a 502 or drops a body
+ * mid-transfer, so network failures, interrupted body reads and 5xx responses
+ * are retried within one 60s deadline; the digest still checks whatever
+ * arrives, so a retry cannot hide a bad archive.
+ */
+export async function downloadPinnedPlugin(
+  dir: string,
+  slug: string,
+  version: string,
+  digest: string,
+): Promise<string> {
+  const target = path.join(dir, `${slug}.${version}.zip`);
+  if (!existsSync(target)) {
+    const url = `https://downloads.wordpress.org/plugin/${slug}.${version}.zip`;
+    const deadline = Date.now() + 60_000;
+    let failure = "deadline passed before the first attempt";
+    let done = false;
+    for (let attempt = 1; !done && deadline - Date.now() > 1_000; attempt += 1) {
+      const signal = AbortSignal.timeout(Math.min(20_000, deadline - Date.now()));
+      let response: Response | undefined;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- attempts are sequential retries
+        response = await fetch(url, { signal });
+        if (response.status === 200) {
+          // oxlint-disable-next-line no-await-in-loop -- the body read is part of the attempt
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          writeFileSync(target, bytes);
+          done = true;
+          break;
+        }
+        failure = `HTTP ${response.status}`;
+      } catch (cause) {
+        failure = String(cause);
+      }
+      // Release the connection of a refused or broken response before moving on.
+      // oxlint-disable-next-line no-await-in-loop -- cleanup belongs to this attempt
+      await response?.body?.cancel().catch(() => {});
+      if (response && response.status < 500 && response.status !== 200) break;
+      // oxlint-disable-next-line no-await-in-loop -- backoff between sequential retries
+      await Bun.sleep(Math.min(attempt * 2_000, Math.max(0, deadline - Date.now())));
+    }
+    if (!done) throw new Error(`${url}: ${failure}`);
+  }
+  assert.equal(new Bun.CryptoHasher("sha256").update(readFileSync(target)).digest("hex"), digest);
+  return target;
+}
+
 export async function installWordpress(
   rt: Runtime,
   work: string,
   db: MysqlContainer,
   host: string,
   // The Zero suites need their plugins; a suite of plain WordPress skips the
-  // downloads.
-  options: { plugins?: boolean } = {},
+  // downloads. `coreCron` leaves core's request-spawned cron on, which
+  // SpacePress previews run their jobs from; the other suites drive jobs only
+  // through the worker.
+  options: { plugins?: boolean; coreCron?: boolean } = {},
 ) {
   const cache = path.join(work, "cache");
   mkdirSync(cache, { recursive: true });
@@ -31,41 +82,6 @@ export async function installWordpress(
     if (result.exitCode !== 0)
       throw new Error(`${cmd[0]} failed:\n${result.stdout}\n${result.stderr}`);
     return result.stdout.toString();
-  }
-  // downloads.wordpress.org answers the odd request with a 502 or drops a body
-  // mid-transfer, so network failures and 5xx responses are retried. All
-  // downloads share one 60s deadline, started at the first download so image
-  // pulls do not spend it; the pinned digest below still checks whatever
-  // arrives, so a retry cannot hide a bad archive.
-  let downloadDeadline: number | undefined;
-  async function download(url: string, target: string) {
-    if (existsSync(target)) return;
-    const deadline = (downloadDeadline ??= Date.now() + 60_000);
-    let failure = "deadline passed before the first attempt";
-    for (let attempt = 1; deadline - Date.now() > 1_000; attempt += 1) {
-      const signal = AbortSignal.timeout(Math.min(20_000, deadline - Date.now()));
-      let response: Response | undefined;
-      try {
-        // oxlint-disable-next-line no-await-in-loop -- attempts are sequential retries
-        response = await fetch(url, { signal });
-        if (response.status === 200) {
-          // oxlint-disable-next-line no-await-in-loop -- the body read is part of the attempt
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          writeFileSync(target, bytes);
-          return;
-        }
-        failure = `HTTP ${response.status}`;
-      } catch (cause) {
-        failure = String(cause);
-      }
-      // Release the connection of a refused or broken response before moving on.
-      // oxlint-disable-next-line no-await-in-loop -- cleanup belongs to this attempt
-      await response?.body?.cancel().catch(() => {});
-      if (response && response.status < 500 && response.status !== 200) break;
-      // oxlint-disable-next-line no-await-in-loop -- backoff between sequential retries
-      await Bun.sleep(Math.min(attempt * 2_000, Math.max(0, deadline - Date.now())));
-    }
-    throw new Error(`${url}: ${failure}`);
   }
 
   const cliImage =
@@ -116,7 +132,7 @@ define('DB_NAME','wordpress'); define('DB_USER','root'); define('DB_PASSWORD','d
 define('DB_HOST',${php(database.host)}); define('DB_CHARSET','utf8mb4');
 $table_prefix='wp_'; define('WP_CONTENT_DIR',${php(path.join(rt.root, "wp-content"))});
 define('WP_CONTENT_URL','http://${host}/wp-content'); define('WP_DEBUG',true); define('WP_DEBUG_DISPLAY',false);
-define('DISABLE_WP_CRON',true); define('WP_ENVIRONMENT_TYPE','local');
+${options.coreCron ? "" : "define('DISABLE_WP_CRON',true); "}define('WP_ENVIRONMENT_TYPE','local');
 if (!defined('ABSPATH')) define('ABSPATH',__DIR__.'/'); require_once ABSPATH.'wp-settings.php';
 `,
   );
@@ -154,12 +170,8 @@ if (!defined('ABSPATH')) define('ABSPATH',__DIR__.'/'); require_once ABSPATH.'wp
     ],
     ["mcp-adapter", "0.7.1", "719d81aa1250615acfd8256f0acc8c13f1712f1ae398c3d5883c8b166024fe9b"],
   ]) {
-    const archive = path.join(cache, `${slug}.${version}.zip`);
-    await download(`https://downloads.wordpress.org/plugin/${slug}.${version}.zip`, archive);
-    assert.equal(
-      new Bun.CryptoHasher("sha256").update(readFileSync(archive)).digest("hex"),
-      digest,
-    );
+    // oxlint-disable-next-line no-await-in-loop -- plugins install in order
+    const archive = await downloadPinnedPlugin(cache, slug, version, digest);
     wp("plugin", "install", archive, "--activate");
   }
   return wp;

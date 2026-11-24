@@ -75,6 +75,14 @@ export const ENTRYPOINT_PROBES = entrypointProbeCatalog({
       }),
     verify: (response) => expectErrorCode(response, 401, "runtime_unauthorized"),
   },
+  "/__spacefast/preview-cron.php": {
+    request: (rt) =>
+      fetch(`${rt.baseUrl}/__spacefast/preview-cron.php`, {
+        method: "POST",
+        headers: { "spacefast-preview-cron": "forged.token" },
+      }),
+    verify: (response) => expectErrorCode(response, 403, "spacepress_preview_cron_refused"),
+  },
   "/__spacefast/mail.php": {
     request: (rt) =>
       fetch(`${rt.baseUrl}/__spacefast/mail.php`, {

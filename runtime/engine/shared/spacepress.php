@@ -126,11 +126,19 @@ function _stattic_spacepress_select(
     if (!$initializing && in_array($generation, ['legacy_0_8', 'v2'], true)) {
         throw new RuntimeException('This Space belongs to a legacy Zero runtime generation.');
     }
-    if (!$initializing && !is_file($root . '/ready.json')) {
-        throw new RuntimeException('SpacePress initialization is incomplete.');
-    }
     if (isset($GLOBALS['SPACEFAST_SPACEPRESS_ROOT']) && $GLOBALS['SPACEFAST_SPACEPRESS_ROOT'] !== $root) {
         throw new RuntimeException('Only one SpacePress version may load in a request.');
+    }
+    // A version on a version or branch hostname is a preview with a database
+    // of its own, unless it is the version in production.
+    require_once __DIR__ . '/spacepress-preview.php';
+    $preview = !$initializing && _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $authority);
+    if (!$initializing && !$preview && !is_file($root . '/ready.json')) {
+        throw new RuntimeException('SpacePress initialization is incomplete.');
+    }
+    if ($preview && !isset($GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'])) {
+        $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] = _stattic_spacepress_preview_bind($privateRoot, $spaceId, $versionId);
+        _stattic_spacepress_preview_hook_database();
     }
     $GLOBALS['SPACEFAST_SPACEPRESS_ROOT'] = $root;
     $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] = [
@@ -151,8 +159,8 @@ function _stattic_spacepress_select(
  * Bind SpacePress to WordPress on Atomic's native `$table_prefix`.
  *
  * Intentionally preserves `$wpdb->prefix`, `$table_prefix`, and `active_plugins`
- * so Jetpack (VideoPress, Akismet, Monitor, Stats, Mail), WooCommerce, SQLite
- * preview drop-ins (`wp-content/db.php`), and `wp-cli` share one WordPress.
+ * so Jetpack (VideoPress, Akismet, Monitor, Stats, Mail), WooCommerce, a
+ * site's `wp-content/db.php`, and `wp-cli` share one WordPress.
  */
 function _stattic_spacepress_bind_wordpress(): void
 {
@@ -174,7 +182,10 @@ function _stattic_spacepress_bind_wordpress(): void
     // `sfz_<sha>_` table isolation (`typedpress.hosted.v1` or `legacy_prefix`).
     $initializing = ($context['initializing'] ?? false) === true;
     $manifest = _stattic_spacepress_manifest($root);
-    $legacyPrefix = _stattic_spacepress_uses_legacy_prefix($manifest, $serving);
+    // A preview runs on its own SQLite database and never on the site's tables,
+    // legacy prefix or not.
+    $preview = $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] ?? null;
+    $legacyPrefix = !is_array($preview) && _stattic_spacepress_uses_legacy_prefix($manifest, $serving);
     if ($legacyPrefix && $spaceId !== '') {
         require_once __DIR__ . '/../deprecated/zero-v2/zero-v2-scope.php';
         _stattic_zero_v2_bind_legacy_prefix($spaceId, $initializing);
@@ -222,18 +233,25 @@ function _stattic_spacepress_bind_wordpress(): void
     if ($privateRoot !== '' && $spaceId !== '' && $versionId !== '') {
         require_once __DIR__ . '/preview.php';
         try {
-            $preview = _stattic_runtime_version_is_preview($privateRoot, $spaceId, $versionId);
+            // A request bound to a preview database is a preview, even if a
+            // promote moved the production route since it was bound.
+            $isPreview = is_array($preview) || _stattic_runtime_version_is_preview($privateRoot, $spaceId, $versionId);
         } catch (RuntimeException) {
             // No evidence this is live: hold its side effects rather than
             // refuse the request or let a preview send.
-            $preview = true;
+            $isPreview = true;
         }
-        if ($preview) {
-            $variables = is_file($root . '/variables.json')
-                ? json_decode((string) file_get_contents($root . '/variables.json'), true)
+        if ($isPreview) {
+            // The set this request resolved: a preview database's own, else the version's.
+            $variablesFile = $root . (is_array($preview) ? '/variables-preview.json' : '/variables.json');
+            $variables = is_file($variablesFile)
+                ? json_decode((string) file_get_contents($variablesFile), true)
                 : [];
             _stattic_preview_guard_side_effects($versionId, is_array($variables) ? $variables : []);
         }
+    }
+    if (is_array($preview)) {
+        _stattic_spacepress_preview_bind_wordpress($preview);
     }
 }
 
@@ -259,6 +277,11 @@ function _stattic_spacepress_mount(?string $root = null, ?array $manifest = null
         return;
     }
     $manifest ??= _stattic_spacepress_manifest($root);
+    // A preview loads the build it seeded (spacepress-preview.php).
+    $preview = $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] ?? null;
+    if (is_array($preview)) {
+        $manifest = $preview['manifest'];
+    }
     if ($manifest === null) {
         throw new RuntimeException('Invalid SpacePress manifest.');
     }
@@ -289,8 +312,13 @@ function _stattic_spacepress_mount(?string $root = null, ?array $manifest = null
     }
     require_once $loaderFile;
 
-    $variables = is_file($root . '/variables.json')
-        ? json_decode((string) file_get_contents($root . '/variables.json'), true, 32, JSON_THROW_ON_ERROR)
+    // A preview loads its own store and its own variable set, never production's.
+    $file = $root . (is_array($preview) ? '/variables-preview.json' : '/variables.json');
+    if (is_array($preview) && !is_file($file)) {
+        throw new RuntimeException('This SpacePress version has no preview variables.');
+    }
+    $variables = is_file($file)
+        ? json_decode((string) file_get_contents($file), true, 32, JSON_THROW_ON_ERROR)
         : [];
     if (!is_array($variables)) {
         throw new RuntimeException('Invalid SpacePress variables.');
@@ -312,7 +340,14 @@ function _stattic_spacepress_mount(?string $root = null, ?array $manifest = null
             'apiPrefix' => SP_API_PREFIX,
             'authPrefix' => SP_AUTH_PREFIX,
         ];
-    $loaderClass::load($root . '/store', $manifest['build'], $loadOptions);
+    // Seed writes queue no webhooks or mail. Production seeds behave as before.
+    $loadOptions['preview'] = is_array($preview);
+    $loaderClass::load(is_array($preview) ? $preview['store'] : $root . '/store', $manifest['build'], $loadOptions);
+    if (is_array($preview) && $preview['seeding']) {
+        // The seed runs once WordPress, its plugins and the app have loaded,
+        // as the production initialize does.
+        add_action('wp_loaded', '_stattic_spacepress_preview_seed', PHP_INT_MIN);
+    }
 }
 
 /** Read the Space overlay for the active SpacePress request. */
@@ -687,23 +722,41 @@ function _stattic_spacepress_connectors_relay(
     return $out;
 }
 
-/** Write private SpacePress runtime variables at finalize. */
-function _stattic_spacepress_write_variables(string $privateRoot, string $spaceId, string $versionId, mixed $variables): void
+/** Whether two variable sets hold the same names and the same exact values, in any order. */
+function _stattic_spacepress_same_variables(array $a, array $b): bool
+{
+    ksort($a, SORT_STRING);
+    ksort($b, SORT_STRING);
+    return $a === $b;
+}
+
+/**
+ * Write private SpacePress runtime variables at finalize. `variables.json` is
+ * the production binding's set; `variables-preview.json`, resolved without the
+ * production target, is the preview binding's.
+ */
+function _stattic_spacepress_write_variables(string $privateRoot, string $spaceId, string $versionId, mixed $variables, mixed $previewVariables = null): void
 {
     $versionRoot = $privateRoot . '/spaces/' . $spaceId . '/versions/' . $versionId;
     $root = _stattic_spacepress_version_root($versionRoot);
     if ($root === null) {
         return;
     }
-    if (!is_array($variables)) {
-        throw new RuntimeException('Invalid SpacePress variables.');
-    }
-    foreach ($variables as $name => $value) {
-        if (!is_string($name) || !is_string($value)) {
+    $valid = static function (mixed $set): array {
+        if (!is_array($set)) {
             throw new RuntimeException('Invalid SpacePress variables.');
         }
+        foreach ($set as $name => $value) {
+            if (!is_string($name) || !is_string($value)) {
+                throw new RuntimeException('Invalid SpacePress variables.');
+            }
+        }
+        return $set;
+    };
+    _stattic_runtime_write_json_atomic($root . '/variables.json', $valid($variables));
+    if ($previewVariables !== null) {
+        _stattic_runtime_write_json_atomic($root . '/variables-preview.json', $valid($previewVariables));
     }
-    _stattic_runtime_write_json_atomic($root . '/variables.json', $variables);
 }
 
 /** Initialize a finalized SpacePress version against the Space's WordPress. */
@@ -747,8 +800,29 @@ function _stattic_spacepress_initialize(string $privateRoot, string $spaceId, st
     }
     $loaderClass = _stattic_spacepress_loader_class();
     $loaderClass::initialize($root . '/store', $manifest['build']);
-    _stattic_runtime_write_json_atomic($root . '/ready.json', ['version_id' => $versionId]);
+    // The baseline pointer first: a version is never ready while the next
+    // finalize would still compile against the version before it. A retry
+    // after the pointer landed finds it naming this version and resumes.
     _stattic_runtime_write_json_atomic($privateRoot . '/spaces/' . $spaceId . '/spacepress-current.json', ['version_id' => $versionId]);
+    _stattic_runtime_write_json_atomic($root . '/ready.json', ['version_id' => $versionId]);
+}
+
+/**
+ * The version last initialized on the Space's WordPress: the next finalize's
+ * migration baseline. SpacePress records it in `spacepress-current.json`; a
+ * Space that ran Zero v2 or TypedPress before the rename has only
+ * `zero-v2-current.json` until its next initialize.
+ */
+function _stattic_spacepress_current_version(string $privateRoot, string $spaceId): ?string
+{
+    require_once __DIR__ . '/storage.php';
+    foreach (['spacepress-current.json', 'zero-v2-current.json'] as $name) {
+        $current = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/' . $name);
+        if (is_array($current)) {
+            return is_string($current['version_id'] ?? null) ? $current['version_id'] : null;
+        }
+    }
+    return null;
 }
 
 /** WP-CLI bootstrap snippet for scheduled worker runs on a SpacePress version. */
@@ -883,10 +957,22 @@ function _stattic_spacepress_try_serve_asset(array $context, string $root, array
     if ($resolved === null) {
         $store = realpath($root . '/store');
         $candidate = realpath($root . '/store/' . $relative);
-        $appHash = is_string($manifest['appHash'] ?? null) ? $manifest['appHash'] : '';
-        $runtimeRev = is_string($manifest['runtimeRevision'] ?? null) ? $manifest['runtimeRevision'] : '';
-        $allowed = ($appHash !== '' && str_starts_with($relative, 'app/' . $appHash . '/plugins/'))
-            || ($runtimeRev !== '' && str_starts_with($relative, 'runtime/' . $runtimeRev . '/'));
+        // The version's build, and the one its preview seeded if promote
+        // compiled the version again since: both are this version's code.
+        require_once __DIR__ . '/spacepress-preview.php';
+        $builds = array_filter([$manifest, _stattic_spacepress_manifest(_stattic_spacepress_preview_dir(
+            (string) $context['private_root'],
+            (string) $context['space_id'],
+            (string) $context['version_id']
+        ))]);
+        $allowed = false;
+        foreach ($builds as $build) {
+            $appHash = is_string($build['appHash'] ?? null) ? $build['appHash'] : '';
+            $runtimeRev = is_string($build['runtimeRevision'] ?? null) ? $build['runtimeRevision'] : '';
+            $allowed = $allowed
+                || ($appHash !== '' && str_starts_with($relative, 'app/' . $appHash . '/plugins/'))
+                || ($runtimeRev !== '' && str_starts_with($relative, 'runtime/' . $runtimeRev . '/'));
+        }
         if ($allowed && is_string($store) && is_string($candidate)
             && str_starts_with($candidate, $store . '/') && is_file($candidate)) {
             $resolved = $candidate;
@@ -1080,14 +1166,22 @@ function _stattic_spacepress_resolve_visitor(array $serving, string $host, strin
  * access to that folder or preview, not a role in the app, so only a Grant on
  * every path (`/**`, no excludes), on the live target, with no use limit,
  * network rule or frame origin counts. Capabilities never combine across
- * Grants. Null for an anonymous visitor, a runtime bearer, or a preview or
- * version host.
+ * Grants. Null for an anonymous visitor, a runtime bearer, or a version or
+ * branch host that serves the Space's own WordPress.
+ *
+ * A preview bound to its own database (spacepress-preview.php) is the
+ * exception: it starts with no accounts, so the person's live Space role is
+ * lent there too, and the Space's team runs its admin. The role reaches only
+ * that preview's data.
  *
  * @return array{role: string, issuer: string, subject: string}|null
  */
 function _stattic_spacepress_space_role(array $serving, string $host): ?array
 {
-    if (_stattic_platform_bearer_token_from_request() !== null || _stattic_grant_target($serving) !== ['kind' => 'live']) {
+    if (_stattic_platform_bearer_token_from_request() !== null) {
+        return null;
+    }
+    if (_stattic_grant_target($serving) !== ['kind' => 'live'] && !_stattic_spacepress_serves_preview($serving)) {
         return null;
     }
     $identity = _stattic_current_session_identity($serving, $host);
@@ -1104,6 +1198,24 @@ function _stattic_spacepress_space_role(array $serving, string $host): ?array
         is_array($identity['emailVerifiedAuthorities'] ?? null) ? $identity['emailVerifiedAuthorities'] : []
     );
     return $role === null ? null : ['role' => $role] + $account;
+}
+
+/**
+ * Whether this request runs on a preview's own database: the binder's rule
+ * (_stattic_spacepress_is_preview), so the WordPress REST door, which resolves
+ * the visitor before it selects the app, decides the same as the page lane.
+ */
+function _stattic_spacepress_serves_preview(array $serving): bool
+{
+    $privateRoot = _stattic_access_private_root();
+    $spaceId = $serving['space_id'] ?? null;
+    $versionId = $serving['version_id'] ?? null;
+    if ($privateRoot === '' || !is_string($spaceId) || !is_string($versionId)
+        || !_stattic_id_valid($spaceId) || !_stattic_id_valid($versionId)) {
+        return false;
+    }
+    require_once __DIR__ . '/spacepress-preview.php';
+    return _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $serving);
 }
 
 /**

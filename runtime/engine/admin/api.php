@@ -267,6 +267,7 @@ function _stattic_runtime_admin_management_routes(): array
         ['POST', '#^/spaces/([^/]+)/purge$#', 'purge_space', ['space_id' => 1], 'none', false, '_stattic_runtime_purge_space_route'],
         ['POST', '#^/spaces/([^/]+)/purge/settle$#', 'settle_space_purge', ['space_id' => 1], 'none', false, '_stattic_runtime_settle_space_purge_route'],
         ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/finalize$#', 'finalize_version', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_finalize_version'],
+        ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/spacepress/initialize$#', 'initialize_spacepress_version', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_spacepress_initialize_route'],
         ['POST', '#^/spaces/([^/]+)/versions/([^/]+)/zero/migrate$#', 'apply_zero_migrations', ['space_id' => 1, 'version_id' => 2], 'space', false, '_stattic_runtime_apply_version_zero_migrations'],
         ['DELETE', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'delete_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_delete_route'],
         ['PUT', '#^/spaces/([^/]+)/routes/([^/]+)$#', 'update_route', ['space_id' => 1, 'route_name' => 2], 'space', false, '_stattic_runtime_put_route'],

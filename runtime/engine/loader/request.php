@@ -197,6 +197,7 @@ return static function (array $loader): void {
             '/__spacefast/content.php' => true,
             '/__spacefast/health.php' => true,
             '/__spacefast/mail.php' => true,
+            '/__spacefast/preview-cron.php' => true,
             '/__spacefast/upload.php' => true,
         ];
         // END GENERATED runtime entrypoints
@@ -594,7 +595,7 @@ return static function (array $loader): void {
         _stattic_wordpress_page_resume_deferred_request();
     }
 
-    if (in_array($script, ['content-admin.php', 'content.php'], true)) {
+    if (in_array($script, ['content-admin.php', 'content.php', 'preview-cron.php'], true)) {
         $bindDatabasePassword();
     }
     $entrypoint = match ($script) {
@@ -605,6 +606,7 @@ return static function (array $loader): void {
         'content.php' => 'entrypoints/content.php',
         'health.php' => 'entrypoints/health.php',
         'mail.php' => 'entrypoints/mail.php',
+        'preview-cron.php' => 'entrypoints/preview-cron.php',
         'upload.php' => 'entrypoints/upload.php',
         default => 'init.php',
     };

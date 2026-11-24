@@ -1180,6 +1180,29 @@ export type DeploySpec = {
   finalize?: Record<string, unknown>;
 };
 
+/**
+ * A SpacePress promote's first step: the version runs its production migrations and
+ * seed while production still names `expectedLive`. The production route write
+ * that follows only moves the pointer.
+ */
+export async function initializeSpacePress(
+  rt: Runtime,
+  spaceId: string,
+  versionId: string,
+  expectedLive: string | null,
+  expectedStatus = 200,
+) {
+  return apiJson<{ initialized?: boolean; code?: string; details?: unknown }>(
+    rt,
+    "POST",
+    `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/versions/${versionId}/spacepress/initialize`,
+    "initialize_spacepress_version",
+    { space_id: spaceId, version_id: versionId },
+    { expected_live_version_id: expectedLive },
+    expectedStatus,
+  );
+}
+
 export async function deploy(rt: Runtime, spec: DeploySpec): Promise<void> {
   const session = await createDeclaredSession(rt, spec.spaceId, spec.versionId, spec.files, {
     ...spec.session,

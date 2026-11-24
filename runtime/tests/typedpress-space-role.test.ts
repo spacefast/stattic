@@ -14,9 +14,9 @@ import path from "node:path";
 import { z } from "zod";
 
 import { prepareZeroV2SourcePublish } from "../../packages/cli/src/zero-v2-source-publish.ts";
-import { deploy, get, putRoute, startRuntime } from "./harness.ts";
+import { deploy, get, initializeSpacePress, putRoute, startRuntime } from "./harness.ts";
 import { MYSQL_SETUP_TIMEOUT_MS, startMysqlContainer } from "./mysql-container.ts";
-import { installWordpress } from "./zero-wordpress.ts";
+import { downloadPinnedPlugin, installWordpress } from "./zero-wordpress.ts";
 
 // The real control-plane minter signs the sign-in handoffs, under a key this
 // test owns, so the runtime checks exactly what production sends. It caches
@@ -80,17 +80,28 @@ test(
       const runtime = rt;
       const wp = await installWordpress(runtime, work, db, HOST);
       // As a TypedPress box has it (typedpress-publish.test.ts pins the bytes).
-      const factor = await fetch("https://downloads.wordpress.org/plugin/two-factor.0.17.0.zip", {
-        signal: AbortSignal.timeout(60_000),
-      });
-      assert.equal(factor.status, 200);
-      const factorBytes = new Uint8Array(await factor.arrayBuffer());
-      assert.equal(
-        new Bun.CryptoHasher("sha256").update(factorBytes).digest("hex"),
-        "4d1b0f8e5d82e24876c2b4e86f119122e28a8dbaf76dfde495173226c3356f37",
+      wp(
+        "plugin",
+        "install",
+        await downloadPinnedPlugin(
+          work,
+          "two-factor",
+          "0.17.0",
+          "4d1b0f8e5d82e24876c2b4e86f119122e28a8dbaf76dfde495173226c3356f37",
+        ),
       );
-      writeFileSync(path.join(work, "two-factor.zip"), factorBytes);
-      wp("plugin", "install", path.join(work, "two-factor.zip"));
+      // A finalize that doesn't go live is a preview's, and needs the driver
+      // previews open their own database with.
+      wp(
+        "plugin",
+        "install",
+        await downloadPinnedPlugin(
+          work,
+          "sqlite-database-integration",
+          "3.1.3",
+          "f6ce35e8419d0b9326221a907627d905e25c2a5ba2afc86492811f14c851efe0",
+        ),
+      );
 
       // What the app's own code sees, from inside the request: who WordPress
       // says the visitor is, what TypedPress reads as their role, what they
@@ -229,6 +240,8 @@ add_action('rest_api_init', static function () {
             },
           },
         });
+      // Promote initializes the version on the site before its route moves.
+      await initializeSpacePress(runtime, SPACE, VERSION, null);
       await activate(1, { manager: "manager", editor: "editor", viewer: "viewer" });
 
       // Each person signs in the way the token endpoint's handoff does.

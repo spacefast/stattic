@@ -496,6 +496,9 @@ function _stattic_runtime_update_route_index(string $privateRoot, string $spaceI
         _stattic_runtime_sync_space_overlay($privateRoot, $spaceId, $beforePublish);
         _stattic_runtime_publish_route_index($privateRoot, $beforePublish);
     });
+    // A version's preview database and media go with its last hostname.
+    require_once __DIR__ . '/../shared/spacepress-preview.php';
+    _stattic_spacepress_preview_prune($privateRoot, $spaceId);
 }
 
 // Callers hold the index lock.

@@ -58,3 +58,5 @@ mod zero_v2;
 
 #[cfg(not(target_family = "wasm"))]
 mod spacepress;
+#[cfg(not(target_family = "wasm"))]
+pub use spacepress::recompile as spacepress_recompile;

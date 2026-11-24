@@ -194,7 +194,7 @@ test("invalidates exactly the rewritten-in-place serving aliases", async () => {
       { value: 2 },
       { value: 3 },
     ]);
-    expect(paths).toHaveLength(9);
+    expect(paths).toHaveLength(10);
     expect(paths).toEqual(
       expect.arrayContaining([
         `${root}/custom-redirects.php`,
@@ -204,6 +204,7 @@ test("invalidates exactly the rewritten-in-place serving aliases", async () => {
         `${root}/__spacefast/content.php`,
         `${root}/__spacefast/health.php`,
         `${root}/__spacefast/mail.php`,
+        `${root}/__spacefast/preview-cron.php`,
         `${root}/__spacefast/upload.php`,
         `${root}/wp-content/mu-plugins/spacefast-content.php`,
       ]),

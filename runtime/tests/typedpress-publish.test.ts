@@ -6,9 +6,16 @@ import os from "node:os";
 import path from "node:path";
 
 import { prepareZeroV2SourcePublish } from "../../packages/cli/src/zero-v2-source-publish.ts";
-import { deploy, get, putRoute, publicAccessConfig, startRuntime } from "./harness.ts";
+import {
+  deploy,
+  get,
+  initializeSpacePress,
+  putRoute,
+  publicAccessConfig,
+  startRuntime,
+} from "./harness.ts";
 import { startMysqlContainer } from "./mysql-container.ts";
-import { installWordpress } from "./zero-wordpress.ts";
+import { downloadPinnedPlugin, installWordpress } from "./zero-wordpress.ts";
 
 test("sf capture publishes a TypedPress page and action on an isolated compatible host", async () => {
   const work = mkdtempSync(path.join(os.tmpdir(), "sf-typedpress-proof-"));
@@ -56,9 +63,8 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         // A Space rewrite onto a TypedPress page.
         _redirects: "/welcome / 200\n",
       };
-      // The runtime's pinned WordPress takes TypedPress, and the fixture carries
-      // every other platform plugin, so the host check refuses only for the
-      // missing Two Factor, before any version activates.
+      // A preview finalize touches no database, but refuses a box that cannot
+      // give the version a preview database of its own.
       await assert.rejects(
         deploy(rt, {
           spaceId: "spc_unsupported",
@@ -66,21 +72,42 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
           files,
           finalize: { zero_generation: "none" },
         }),
+        /SQLite Database Integration/,
+      );
+      wp(
+        "plugin",
+        "install",
+        await downloadPinnedPlugin(
+          work,
+          "sqlite-database-integration",
+          "3.1.3",
+          "f6ce35e8419d0b9326221a907627d905e25c2a5ba2afc86492811f14c851efe0",
+        ),
+      );
+      await deploy(rt, {
+        spaceId: "spc_unsupported",
+        versionId: "ver_unsupported_preview",
+        files,
+        finalize: { zero_generation: "none" },
+      });
+      // The runtime's pinned WordPress takes TypedPress, and the fixture carries
+      // every other platform plugin, so the host check refuses only for the
+      // missing Two Factor, when the version would go live.
+      await assert.rejects(
+        initializeSpacePress(rt, "spc_unsupported", "ver_unsupported_preview", null),
         /check platform requirements/,
       );
-      const factor = await fetch("https://downloads.wordpress.org/plugin/two-factor.0.17.0.zip", {
-        signal: AbortSignal.timeout(60_000),
-      });
-      assert.equal(factor.status, 200);
-      const factorBytes = new Uint8Array(await factor.arrayBuffer());
-      assert.equal(
-        new Bun.CryptoHasher("sha256").update(factorBytes).digest("hex"),
-        "4d1b0f8e5d82e24876c2b4e86f119122e28a8dbaf76dfde495173226c3356f37",
-      );
-      const factorZip = path.join(work, "two-factor.zip");
-      writeFileSync(factorZip, factorBytes);
       // As box plugin repair leaves it: installed, active for no request but TypedPress's.
-      wp("plugin", "install", factorZip);
+      wp(
+        "plugin",
+        "install",
+        await downloadPinnedPlugin(
+          work,
+          "two-factor",
+          "0.17.0",
+          "4d1b0f8e5d82e24876c2b4e86f119122e28a8dbaf76dfde495173226c3356f37",
+        ),
+      );
       assert.ok(
         !String(wp("option", "get", "active_plugins", "--format=json")).includes("two-factor"),
       );
@@ -91,6 +118,7 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         files,
         finalize: { zero_generation: "none" },
       });
+      await initializeSpacePress(rt, "spc_typedpress", "ver_typedpress", null);
       await putRoute(rt, "spc_typedpress", "production", {
         version_id: "ver_typedpress",
         hostnames: [host],
@@ -189,6 +217,7 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
         files,
         finalize: { zero_generation: "spacepress" },
       });
+      await initializeSpacePress(rt, "spc_typedpress", "ver_typedpress_next", "ver_typedpress");
       await putRoute(rt, "spc_typedpress", "production", {
         version_id: "ver_typedpress_next",
         hostnames: [host],

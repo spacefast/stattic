@@ -4836,6 +4836,10 @@ check(_stattic_spacepress_uses_legacy_prefix($spManifest, ['legacy_prefix' => tr
 check(_stattic_spacepress_uses_legacy_prefix($spManifest, ['zero_generation' => 'tp_v1']), 'pre-sync tp_v1 overlay keeps sfz_<sha>_ prefix');
 check(str_contains(_stattic_spacepress_wp_bootstrap('/priv', 'spc_1', 'ver_1', false, true), "'legacy_prefix' => true"), 'SpacePress worker bootstrap carries legacy_prefix into child authority');
 check(!str_contains(_stattic_spacepress_wp_bootstrap('/priv', 'spc_1', 'ver_1', false, false), 'legacy_prefix'), 'native SpacePress worker bootstrap omits legacy_prefix');
+check(_stattic_spacepress_same_variables(['B' => '2', 'A' => '1'], ['A' => '1', 'B' => '2']), 'SpacePress variable sets match in any order');
+check(!_stattic_spacepress_same_variables(['A' => '1.0'], ['A' => '1']), 'SpacePress variable sets compare numeric strings exactly');
+check(!_stattic_spacepress_same_variables(['A' => '1e3'], ['A' => '1000']), 'SpacePress variable sets compare exponent strings exactly');
+check(!_stattic_spacepress_same_variables(['A' => '1'], ['A' => '1', 'B' => '2']), 'SpacePress variable sets differ by a missing name');
 check(_stattic_spacepress_path_claimed('/wp-json/spacepress/v1/actions/ping', $spManifest), 'SpacePress claims /wp-json/spacepress/v1/*');
 check(_stattic_spacepress_path_claimed('/wp-json/spacepress-identity/v1/session', $spManifest), 'SpacePress claims /wp-json/spacepress-identity/v1/*');
 check(_stattic_spacepress_path_claimed('/__spacefast/auth/login', $spManifest), 'SpacePress claims /__spacefast/auth/*');

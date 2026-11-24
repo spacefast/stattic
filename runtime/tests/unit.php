@@ -5396,6 +5396,22 @@ check($vpCred2 !== null && is_array($vpStored2), 'visitor proof inherit: attache
 check(!isset($vpStored2['vp']), 'visitor proof inherit: drops expired proof on attach');
 check(($vpStored2['principal'] ?? null) === STATTIC_SESSION_PRINCIPAL_ANONYMOUS, 'visitor proof inherit: clears expired account principal with expired proof');
 check(!isset($vpStored2['identity'], $vpStored2['principalExpiresAt']), 'visitor proof inherit: clears carried identity with expired proof');
+$otherFreshVp = $makeVp($vpNow + 900);
+check(
+    _stattic_access_identity_visitor_proof(['claims' => ['visitorProof' => $freshVp]]) === $freshVp,
+    'visitor proof identity: reads visitorProof from bearer claims'
+);
+check(
+    _stattic_access_identity_visitor_proof(['claims' => ['vp' => $freshVp]]) === $freshVp,
+    'visitor proof identity: falls back to vp in claims when visitorProof is absent'
+);
+check(
+    _stattic_access_identity_visitor_proof([
+        'sessionRecord' => ['vp' => $freshVp],
+        'claims' => ['visitorProof' => $otherFreshVp],
+    ]) === $freshVp,
+    'visitor proof identity: prefers sessionRecord vp over claims fallback'
+);
 _stattic_access_session_record_delete($vpRoot, $vpSid1);
 _stattic_access_session_record_delete($vpRoot, $vpSid2);
 if ($savedPageServing === null) {

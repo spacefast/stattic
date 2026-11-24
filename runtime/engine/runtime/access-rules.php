@@ -340,6 +340,10 @@ function _stattic_access_identity_visitor_proof(?array $identity): ?string
         }
     }
     $claims = is_array($identity['claims'] ?? null) ? $identity['claims'] : [];
+    $proof = _stattic_access_visitor_proof($claims['visitorProof'] ?? null);
+    if ($proof !== null) {
+        return $proof;
+    }
     return _stattic_access_visitor_proof($claims['vp'] ?? null);
 }
 

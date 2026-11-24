@@ -1,7 +1,7 @@
 {
-  "revision": "c92ea3cb6b8f7c88260a682312ecca8039b3f074",
-  "sourceHash": "7cf39c80dd3abb56ccbbda37bf4a56d57bef58bf444572c129b752c28ba52b8e",
-  "manifestSha256": "40c7efabcd6b5e16f8ee6e893f9840d8b15ffda74f6d0bef12139880f96c711b",
+  "revision": "6e6fdb4fc22b6bb4a29d08dc25eb200164d632a7",
+  "sourceHash": "4b494d851af6a9f3b2648cdb34c03e589a123f34ea53ec21b63104aa802d69f5",
+  "manifestSha256": "c80d2cab58767e1932efa486963f220e660755d09733108ddd8e3110950fdb93",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "3c8565ac60da5b0d9b1c44509db2014b71adf4bf289ad16343a323369036f97d"
+      "sha256": "d651fbbf1ee9e41307576f3484bc60d11e5de47870c661b2f6de4ce1e43db385"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "06ae3f6d2262a0bce02e2f6e6426586d9290f6d835adf6adb4566f4ccb0cd585"
+      "sha256": "0916a279044c3d35d0783a94140b9d068a706565d489ded73ace813ea20f504a"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29937,7 +29937,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "8778e537f3160a814df27ce5fec518994ac4685850148646c332dbb41d8920d0"
+      "sha256": "88488d5a0b39ff4b6bff2a27a55da10e728014df473f2c147535ed3f85fa036f"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -30025,7 +30025,7 @@
     },
     {
       "path": "runtime/engine/runtime/space-client/sdk.js",
-      "sha256": "0d05a84a6680d22b7c0b0e1dad87b436fe91ba028a1ef523e91941814c0ea236"
+      "sha256": "0dfed99ddc18bdcf3777e21050d94146387024250d36ed31962c53f7bbfcd5ac"
     },
     {
       "path": "runtime/engine/runtime/space-users.php",
@@ -30857,7 +30857,7 @@
     },
     {
       "path": "runtime/tests/space-users-http.ts",
-      "sha256": "4542ad8d2067434ca568018d3d9d69a9a4b2ca989042a10a751dedcec47455f6"
+      "sha256": "2aab67e844cd2747091ad53685c037236a7ffadb372a56cec42f51225524e98d"
     },
     {
       "path": "runtime/tests/space-users-verify.test.ts",

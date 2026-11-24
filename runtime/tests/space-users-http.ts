@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   spaceUserAbilityRequest,
   type SpaceUserAbilityName,
-} from "../../apps/control-plane/src/space-users/ability-request.js";
+} from "../../apps/control-plane/src/deprecated/space-users/ability-request.js";
 import { contentRestResponseSchema } from "../../packages/common/src/contracts/content.js";
 import {
   spaceUserAccountSchema,

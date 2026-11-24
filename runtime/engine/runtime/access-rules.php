@@ -245,6 +245,34 @@ function _stattic_access_session_shows_bar(array $serving, ?array $identity, str
 }
 
 /**
+ * Whether an anonymous session holds a live `claim-preview:` authority for
+ * this unclaimed Space (from opening `/__#<sfc_...>` or `/__/<sfc_...>`).
+ * Used only to tell `sdk.js` to load the anonymous-owner Space bar frame; no
+ * secret ever leaves the HttpOnly cookies.
+ */
+function _stattic_access_session_has_claim_preview(array $serving, ?array $identity): bool
+{
+    if (!is_array($identity) || ($serving['authorization']['spaceClaimed'] ?? false) === true) {
+        return false;
+    }
+    $index = $serving['authorization']['grantIndex'] ?? null;
+    $authorities = is_array($index) && is_array($index['authorities'] ?? null)
+        ? $index['authorities']
+        : [];
+    if ($authorities === []) {
+        return false;
+    }
+    $entries = is_array($identity['authorityEntries'] ?? null) ? $identity['authorityEntries'] : [];
+    foreach ($entries as $entry) {
+        $reference = is_array($entry) && is_string($entry['reference'] ?? null) ? $entry['reference'] : '';
+        if (str_starts_with($reference, 'claim-preview:') && isset($authorities[$reference])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * The account-identity issuer this runtime accepts.
  *
  * The claim arrives inside a cookie this runtime signed, so this is a shape
@@ -5227,6 +5255,7 @@ function _stattic_access_exchange_link_token(array $serving, string $requestHost
         'body' => $body,
         'fields' => $fields,
         'handoff' => is_array($fields) && is_string($fields['token'] ?? null) ? $fields['token'] : '',
+        'ownerBar' => is_array($body) && is_array($body['ownerBar'] ?? null) ? $body['ownerBar'] : null,
         'exchange' => $exchange,
         'host' => $host,
     ];
@@ -5917,6 +5946,15 @@ function _stattic_access_handle_session(array $serving, string $requestHost): ne
         if (_stattic_spacefast_bar_projected($serving)) {
             $session['bar'] = _stattic_access_session_shows_bar($serving, $identity, $principal);
         }
+    } else {
+        require_once __DIR__ . '/../shared/bootstrap-config.php';
+        require_once __DIR__ . '/space-bar.php';
+        if (
+            _stattic_spacefast_bar_projected($serving)
+            && _stattic_access_session_has_claim_preview($serving, $identity)
+        ) {
+            $session['bar'] = true;
+        }
     }
     // The returning-account marker only says "ask the session". Once the
     // session says nobody is signed in with an account, asking again on every
@@ -6322,7 +6360,7 @@ function _stattic_access_handle_unlock_post(array $serving, string $requestHost,
         if (!_stattic_access_same_origin_post($requestHost)) {
             _stattic_render_json_or_deny('access_origin_invalid', 'Cross-origin access submissions are not accepted.');
         }
-        if (preg_match('/\Asfl_[A-Za-z0-9_-]{16,512}\z/D', $link) !== 1) {
+        if (preg_match('/\A(?:sfl|sfc)_[A-Za-z0-9_-]{16,512}\z/D', $link) !== 1) {
             _stattic_render_access_route_not_found();
         }
         // Trampoline links carry their own return: the link's landing path
@@ -6354,7 +6392,7 @@ function _stattic_access_handle_link_trampoline(): never
         _stattic_method_not_allowed('GET, HEAD');
     }
     $script = '(function(){'
-        . 'var h=location.hash.slice(1),m=/^(sfl_[A-Za-z0-9_-]{16,512})(!?)(?:\?r=([^#]*))?$/.exec(h);'
+        . 'var h=location.hash.slice(1),m=/^((?:sfl|sfc)_[A-Za-z0-9_-]{16,512})(!?)(?:\?r=([^#]*))?$/.exec(h);'
         . 'try{history.replaceState(null,"",location.pathname)}catch(e){}'
         . 'var f=document.getElementById("sf-link"),c=document.getElementById("sf-link-continue"),n=document.getElementById("sf-link-none");'
         . 'if(!m||!f){if(n)n.hidden=false;return;}'
@@ -6397,6 +6435,80 @@ function _stattic_access_handle_link_trampoline(): never
  * redirect `_stattic_access_redeem_link_entry` gives a GET, without the GET's
  * method check.
  */
+/**
+ * Bridges an anonymous-owner preview redemption to the Space bar frame origin
+ * via a short-lived auto-submitting POST form so the frame origin sets its
+ * HttpOnly owner cookie without ever exposing `sfc_...` to Space page JS or
+ * putting any token in a URL.
+ */
+function _stattic_access_render_owner_bar_handoff(?array $ownerBar, string $returnPath): void
+{
+    if (!is_array($ownerBar)) {
+        return;
+    }
+    $action = is_string($ownerBar['action'] ?? null) ? trim($ownerBar['action']) : '';
+    $handoff = is_string($ownerBar['handoff'] ?? null) ? trim($ownerBar['handoff']) : '';
+    if ($action === '' || $handoff === '' || strlen($action) > 2048 || strlen($handoff) > 8192) {
+        return;
+    }
+    $parts = parse_url($action);
+    $scheme = is_array($parts) && is_string($parts['scheme'] ?? null) ? strtolower($parts['scheme']) : '';
+    $host = is_array($parts) && is_string($parts['host'] ?? null) ? $parts['host'] : '';
+    require_once __DIR__ . '/space-bar.php';
+    if (
+        $host === ''
+        || ($scheme !== 'https' && !($scheme === 'http' && _stattic_spacefast_sdk_host_is_local($host)))
+        || preg_match('/[\x00-\x20"\'<>`\\\\]/', $action) === 1
+    ) {
+        return;
+    }
+    $port = is_array($parts) && isset($parts['port']) ? ':' . (int) $parts['port'] : '';
+    $actionOrigin = $scheme . '://' . $host . $port;
+    $actionOriginJson = json_encode($actionOrigin, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES);
+    $returnPathJson = json_encode($returnPath, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES);
+    // Submit inside a hidden iframe hosted on the Space's own top-level page so
+    // the frame origin's Partitioned owner cookie lands in the Space-site CHIPS
+    // partition that the Space bar iframe reads.
+    $script = '(function(){'
+        . 'var f=document.getElementById("sf-owner-bar");'
+        . 'var r=' . $returnPathJson . ';'
+        . 'if(!f){location.replace(r);return;}'
+        . 'var done=false;var sent=false;var go=function(){if(done)return;done=true;location.replace(r);};'
+        . 'var fr=document.createElement("iframe");fr.name="sf-owner-bar-frame";fr.hidden=true;fr.setAttribute("aria-hidden","true");'
+        . 'fr.addEventListener("load",function(){if(sent){setTimeout(go,150);}});'
+        . 'document.body.appendChild(fr);'
+        . 'var m=document.createElement("input");m.type="hidden";m.name="mode";m.value="embed";f.appendChild(m);'
+        . 'f.target="sf-owner-bar-frame";'
+        . 'window.addEventListener("message",function(e){'
+        . 'if(e.origin===' . $actionOriginJson . '&&e.source===fr.contentWindow&&e.data&&e.data.type==="spacefast:owner-session-ready"){go();}'
+        . '});'
+        . 'setTimeout(go,10000);'
+        . 'sent=true;f.submit();'
+        . '})();';
+    $hash = base64_encode(hash('sha256', $script, true));
+    $html = '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        . '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
+        . '<title>Opening…</title>'
+        . '<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#fff;color:#111}'
+        . '@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}'
+        . 'main{max-width:22rem;padding:24px;text-align:center}a{display:inline-block;font:inherit;padding:12px 20px;border-radius:999px;background:#1efe57;color:#030303;text-decoration:none;width:100%;box-sizing:border-box}</style>'
+        . '</head><body><main>'
+        . '<form id="sf-owner-bar" method="post" action="' . _stattic_html_escape($action) . '">'
+        . '<input type="hidden" name="handoff" value="' . _stattic_html_escape($handoff) . '">'
+        . '<input type="hidden" name="return" value="' . _stattic_html_escape($returnPath) . '">'
+        . '</form>'
+        . '<noscript><p>Continue to your preview.<br><br><a href="' . _stattic_html_escape($returnPath) . '">Continue</a></p></noscript>'
+        . '</main><script>' . $script . '</script></body></html>';
+    _stattic_response_send(200, $html, 'text/html; charset=utf-8', [
+        'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
+        'Referrer-Policy' => 'no-referrer',
+        'X-Robots-Tag' => 'noindex, nofollow',
+        'X-Content-Type-Options' => 'nosniff',
+        'Content-Security-Policy' => "default-src 'none'; script-src 'sha256-" . $hash . "'; style-src 'unsafe-inline'; form-action " . $actionOrigin . "; frame-src " . $actionOrigin . "; base-uri 'none'; frame-ancestors 'none'",
+    ]);
+}
+
 function _stattic_access_redeem_link_entry_post(
     array $serving,
     string $requestHost,
@@ -6412,6 +6524,7 @@ function _stattic_access_redeem_link_entry_post(
         $credential = _stattic_access_consume_handoff_token($serving, $redeemed['host'], $redeemed['handoff']);
         if ($credential !== null) {
             _stattic_access_set_session_cookie($credential);
+            _stattic_access_render_owner_bar_handoff($redeemed['ownerBar'] ?? null, $returnPath);
             _stattic_access_redirect($returnPath, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
         }
     }

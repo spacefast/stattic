@@ -5612,7 +5612,7 @@
           },
           "authorId": {
             "anyOf": [
-              { "type": ["integer", "null"] },
+              { "type": ["integer", "string", "object", "null"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Author" },
@@ -5894,7 +5894,7 @@
           "id": { "type": "integer" },
           "postId": {
             "anyOf": [
-              { "type": "integer" },
+              { "type": ["integer", "string", "object"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Post" },

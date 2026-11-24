@@ -6,9 +6,17 @@
 // so client components and form inputs in the page keep their state: the router diffs, it doesn't
 // rebuild. An unchanged answer touches nothing.
 import { createClient, pageRead } from "@typedpress/client";
-import { getConfig } from "@wordpress/interactivity";
 
-const client = createClient({ nonce: getConfig("tp/live").nonce || undefined });
+// A signed-in visitor's nonce from the page's client data, given explicitly: a client an app built
+// before reading that data itself sends it too.
+const client = createClient((() => {
+  try {
+    const nonce = JSON.parse(document.querySelector('script[type="application/json"][id="wp-script-module-data-@typedpress/client"]')?.textContent || "{}").nonce;
+    return typeof nonce === "string" ? { nonce, wordpress: true } : {};
+  } catch {
+    return {};
+  }
+})());
 
 const html = new Map(); // region id → the HTML now on the page
 

@@ -19,7 +19,33 @@ final class Fetch
 {
     public const TIMEOUT = 10;
     public const MAX_BODY = 1048576;
+    /** Relaxed limits inside background jobs (e.g. LLM / vision / bank API calls). */
+    public const JOB_TIMEOUT = 60;
+    public const JOB_MAX_BODY = 16777216;
     public const MAX_REDIRECTS = 3;
+    private static bool $inJob = false;
+
+    /** Run `$fn` with background-job outbound fetch limits (`JOB_TIMEOUT`, `JOB_MAX_BODY`). */
+    public static function inJob(callable $fn): mixed
+    {
+        $previous = self::$inJob;
+        self::$inJob = true;
+        try {
+            return $fn();
+        } finally {
+            self::$inJob = $previous;
+        }
+    }
+
+    public static function timeout(): int
+    {
+        return self::$inJob ? self::JOB_TIMEOUT : self::TIMEOUT;
+    }
+
+    public static function maxBody(): int
+    {
+        return self::$inJob ? self::JOB_MAX_BODY : self::MAX_BODY;
+    }
     private const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
     private const DROP_REQUEST = ['connection', 'content-length', 'host', 'keep-alive', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
     private const DROP_RESPONSE = ['connection', 'keep-alive', 'proxy-authenticate', 'set-cookie', 'set-cookie2', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
@@ -80,13 +106,14 @@ final class Fetch
         } elseif ($body !== null) {
             throw new JsError('fetch() body must be a string or URLSearchParams', 'TypeError');
         }
-        if ($body !== null && strlen($body) > self::MAX_BODY) {
+        $maxBody = self::maxBody();
+        if ($body !== null && strlen($body) > $maxBody) {
             throw self::refuse('tp_fetch_payload_too_large', 'The fetch request body is too large.');
         }
         if ($body !== null && in_array($method, ['GET', 'HEAD'], true)) {
             throw new JsError("Request with $method method cannot have body.", 'TypeError');
         }
-        $deadline = microtime(true) + self::TIMEOUT;
+        $deadline = microtime(true) + self::timeout();
         for ($hop = 0; ; $hop++) {
             [$host, $port, $address] = self::target($url, $hosts);
             $remaining = $deadline - microtime(true);
@@ -271,6 +298,7 @@ final class Fetch
         };
         add_action('http_api_curl', $pin, PHP_INT_MAX);
         add_action('requests-requests.before_request', $force, PHP_INT_MAX, 5);
+        $maxBody = self::maxBody();
         try {
             $response = wp_remote_request($url, [
                 'method' => $method,
@@ -278,7 +306,7 @@ final class Fetch
                 'body' => $body,
                 'timeout' => max(1, (int) ceil($timeout)),
                 'redirection' => 0,
-                'limit_response_size' => self::MAX_BODY + 1,
+                'limit_response_size' => $maxBody + 1,
                 'reject_unsafe_urls' => false,
                 'sslverify' => true,
                 'user-agent' => 'TypedPress (WordPress)',
@@ -297,7 +325,7 @@ final class Fetch
             throw self::refuse('tp_fetch_upstream_unavailable', 'The fetch target could not be reached.');
         }
         $raw = (string) wp_remote_retrieve_body($response);
-        if (strlen($raw) > self::MAX_BODY) {
+        if (strlen($raw) > $maxBody) {
             throw self::refuse('tp_fetch_response_too_large', 'The fetch response is too large.');
         }
         $out = [];

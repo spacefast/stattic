@@ -189,7 +189,7 @@ pub fn render_doc() -> String {
     for (path, what) in RESERVED_PATHS {
         out.push_str(&format!("| `{path}` | {what} |\n"));
     }
-    out.push_str(&format!("\nThe app API is `{API_PREFIX}`; actions are `POST {ACTION_PREFIX}<name>`. The generated client is a file of the compiled tree (`client/client.js`); the host chooses the URL it serves it at.\n\n"));
+    out.push_str(&format!("\nThe app API is `{API_PREFIX}`; actions are `POST {ACTION_PREFIX}<name>`. The generated client runs each kind, action and global operation as the app's WordPress Ability at core's run route, `/wp-json/wp-abilities/v1/abilities/<app>/<name>/run`, and uses the app API for media, revisions, `me`, uploads, file streams, live subscriptions and sign-in: route `/wp-json/*` to WordPress and never cache it. The client is a file of the compiled tree (`client/client.js`); the host chooses the URL it serves it at.\n\n"));
     out.push_str("### Mount and lifecycle\n\n| Call | When |\n|---|---|\n");
     for (call, when) in MOUNT {
         out.push_str(&format!("| `{call}` | {when} |\n"));

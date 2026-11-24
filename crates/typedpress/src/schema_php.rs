@@ -565,13 +565,20 @@ pub fn render(schema: &Schema) -> String {
                     .collect();
                 format!(", 'assets' => [{}]", entries.join(", "))
             };
+            // `client`: the store runs its actions through the typed client (`TypedPress\Islands`
+            // gives a store built before that its action URLs and nonce instead).
             let _ = writeln!(
                 out,
-                "        {} => ['file' => {}, 'actions' => [{}]{assets}{}],",
+                "        {} => ['file' => {}, 'actions' => [{}]{assets}{}{}],",
                 php_str(namespace),
                 php_str(&island.file),
                 island.actions.iter().map(|a| php_str(a)).collect::<Vec<_>>().join(", "),
-                if island.live { ", 'live' => true" } else { "" }
+                if island.live { ", 'live' => true" } else { "" },
+                if island.actions.is_empty() && island.uploads.is_empty() {
+                    ""
+                } else {
+                    ", 'client' => true"
+                }
             );
         }
     }

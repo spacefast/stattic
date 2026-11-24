@@ -120,6 +120,19 @@ function _stattic_content_access_authorization_header(?string $token): string
         : '';
 }
 
+/** Whether the target's version is a SpacePress build, whatever runtime its route names. */
+function _stattic_content_target_is_spacepress(string $privateRoot, array $target): bool
+{
+    if ($target['kind'] !== 'present') {
+        return false;
+    }
+    require_once __DIR__ . '/context.php';
+    require_once __DIR__ . '/spacepress.php';
+    return _stattic_spacepress_version_manifest(
+        _stattic_version_root($privateRoot, $target['space_id'], $target['version_id'])
+    ) !== null;
+}
+
 /** A declared application route owns the request before WordPress's default routes. */
 function _stattic_content_deployment_claims_path(string $privateRoot, string $host, string $path, string $method, ?array $target = null): bool
 {
@@ -137,8 +150,10 @@ function _stattic_content_deployment_claims_path(string $privateRoot, string $ho
         return true;
     }
     if (_stattic_version_has_functions($versionDir)) {
+        require_once __DIR__ . '/spacepress.php';
         require_once __DIR__ . '/../runtime/functions-dispatch.php';
-        if (_stattic_resolve_functions_route_action($versionDir, ltrim($path, '/'), $method) !== null) {
+        if (!_stattic_spacepress_owns_rest_path($versionDir, $path)
+            && _stattic_resolve_functions_route_action($versionDir, ltrim($path, '/'), $method) !== null) {
             return true;
         }
     }

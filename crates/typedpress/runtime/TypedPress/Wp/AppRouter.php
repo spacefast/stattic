@@ -51,6 +51,8 @@ final class AppRouter
 
     public static function register(Plugin $plugin): void
     {
+        add_action('wp_ajax_typedpress_rest_nonce', [\TypedPress\Islands::class, 'renewClientNonce']);
+        add_action('wp_ajax_nopriv_typedpress_rest_nonce', [\TypedPress\Islands::class, 'renewClientNonce']);
         $app = $plugin->schema->app();
         if (!is_array($app) || self::$instance !== null) {
             return;
@@ -1370,8 +1372,12 @@ final class AppRouter
                     $src = implode('#', $parts);
                 }
             }
-            wp_register_script_module($handle, self::absolute($src), Plugin::instance()?->schema->commerce() !== null && \TypedPress\Islands::registerClient() ? [\TypedPress\Islands::CLIENT] : [], null);
+            $client = Plugin::instance()?->schema->commerce() !== null && \TypedPress\Islands::registerClient();
+            wp_register_script_module($handle, self::absolute($src), $client ? [\TypedPress\Islands::CLIENT] : [], null);
             wp_enqueue_script_module($handle);
+            if ($client) {
+                \TypedPress\Islands::useClient();
+            }
         }
     }
 

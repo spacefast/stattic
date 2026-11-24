@@ -94,6 +94,32 @@ final class Reads
     }
 
     /**
+     * Re-record dependencies captured by a previous {@see during()} call into the active render,
+     * e.g. when a memoized access rule returns without re-running its database reads.
+     *
+     * @param array<string, array{ids: list<int|string>, listed: bool}> $reads
+     * @param list<string> $also
+     */
+    public static function replay(array $reads, array $also): void
+    {
+        if (self::$current === null) {
+            return;
+        }
+        foreach ($reads as $collection => $source) {
+            self::$current[$collection] ??= ['ids' => [], 'listed' => false];
+            $entry = &self::$current[$collection];
+            $entry['listed'] = $entry['listed'] || $source['listed'];
+            foreach ($source['ids'] as $id) {
+                $entry['ids'][is_int($id) ? $id : ':' . $id] = $id;
+            }
+            unset($entry);
+        }
+        foreach ($also as $dep) {
+            self::$also[$dep] = true;
+        }
+    }
+
+    /**
      * Runs $fn and fills $reads with the rows it read, and $also with what it read besides
      * (`global:<name>`).
      *

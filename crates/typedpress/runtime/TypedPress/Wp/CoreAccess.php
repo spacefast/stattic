@@ -84,6 +84,7 @@ final class CoreAccess
         self::$members = [];
         self::$readable = [];
         self::$generation++;
+        Access::clearCache();
     }
 
     /**

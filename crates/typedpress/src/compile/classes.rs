@@ -368,7 +368,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
         self.classes.get_mut(&id).unwrap().accessors = accessors;
         let env = self.class_environment(class);
         // Helpers are shared across callers; class_access_guard rejects execution in access rules.
-        let no_db = false;
+        let db_mode = super::DbMode::Full;
         let constructing_env = Scope::new(Some(env.clone()), env.module);
         constructing_env.vars.borrow_mut().insert(
             ":constructing".into(),
@@ -401,7 +401,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                     } else {
                         initializing_instance(&instance)
                     };
-                    self.compile_function(&closure, &helper, Some(vec![initializing]), None, no_db)?;
+                    self.compile_function(&closure, &helper, Some(vec![initializing]), None, db_mode)?;
                     let Ty::Fn(_, result) = &self.helper_types[&closure_key(&closure)] else {
                         unreachable!()
                     };
@@ -444,7 +444,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 &helper,
                 Some(std::iter::once(receiver_ty(&instance)).chain(params).collect()),
                 None,
-                no_db,
+                db_mode,
             )?;
             format!(
                 "\\Closure::fromCallable({})",
@@ -479,7 +479,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 vec![receiver]
             };
             let closure = Rc::new(Closure::new(accessor.func.clone(), env.clone()));
-            self.compile_function(&closure, &helper, Some(params), None, no_db)?;
+            self.compile_function(&closure, &helper, Some(params), None, db_mode)?;
             if !accessor.setter && !javascript {
                 let Ty::Fn(_, ret) = self.helper_types[&closure_key(&closure)].clone() else {
                     unreachable!()
@@ -540,7 +540,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
                 &helper,
                 Some(std::iter::once(receiver).chain(params).collect()),
                 None,
-                no_db,
+                db_mode,
             )?;
             let Ty::Fn(mut params, ret) = self.helper_types[&closure_key(&closure)].clone() else {
                 unreachable!()
@@ -589,7 +589,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             let helper = self.unique_name(&format!("{}_symbol_method", c.name));
             let closure = Rc::new(Closure::new(method.func.clone(), env.clone()));
             let params = vec![Ty::Dynamic; method.func.params.len()];
-            self.compile_function(&closure, &helper, Some(params), None, no_db)?;
+            self.compile_function(&closure, &helper, Some(params), None, db_mode)?;
             let key = self.symbol_php(key);
             symbol_entries[method.is_static as usize].push(format!(
                 "[{}, \\Closure::fromCallable({})]",
@@ -769,7 +769,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
     }
 
     fn class_access_guard(&self, span: Span) -> Result<()> {
-        if self.fx.as_ref().is_some_and(|f| f.no_db) {
+        if self.fx.as_ref().is_some_and(|f| f.db_mode.is_restricted()) {
             // Until method effects participate in access-rule authority, refuse the seam entirely.
             return err_help(
                 span,

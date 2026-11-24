@@ -3,6 +3,67 @@
 
 export const SCHEMA = {
   "name": "kitchen-sink",
+  "app": "kitchen-sink",
+  "abilities": {
+    "actions": {
+      "bookSeats": {
+        "ability": "book-seats"
+      },
+      "contactKitchen": {
+        "ability": "contact-kitchen"
+      },
+      "cancelSeats": {
+        "ability": "cancel-seats"
+      },
+      "upcoming": {
+        "ability": "upcoming",
+        "readonly": true,
+        "idempotent": true
+      },
+      "closeRegistration": {
+        "ability": "close-registration"
+      },
+      "scheduleAgain": {
+        "ability": "schedule-again"
+      },
+      "cancelWorkshop": {
+        "ability": "cancel-workshop",
+        "destructive": true
+      },
+      "restoreWorkshop": {
+        "ability": "restore-workshop"
+      },
+      "purgeWorkshop": {
+        "ability": "purge-workshop",
+        "destructive": true
+      },
+      "workshopHistory": {
+        "ability": "workshop-history",
+        "readonly": true,
+        "idempotent": true
+      },
+      "revertWorkshop": {
+        "ability": "revert-workshop"
+      },
+      "postAnnouncement": {
+        "ability": "post-announcement"
+      },
+      "draftRecap": {
+        "ability": "draft-recap"
+      },
+      "checkSchedule": {
+        "ability": "check-schedule"
+      },
+      "scheduleMetrics": {
+        "ability": "schedule-metrics",
+        "readonly": true,
+        "idempotent": true
+      }
+    },
+    "globals": {
+      "settings": "settings"
+    }
+  },
   "collections": {
     "events": {
       "path": "events",
@@ -33,6 +94,7 @@ export const SCHEMA = {
       "files": [
         "handout"
       ],
+      "ability": "events",
       "showIf": {
         "demoUrl": {
           "when": {
@@ -51,7 +113,8 @@ export const SCHEMA = {
       "relations": {},
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "posts"
     },
     "recipes": {
       "path": "recipes",
@@ -69,7 +132,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "recipes"
     },
     "handbook": {
       "path": "handbook",
@@ -92,7 +156,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "handbook"
     },
     "registrations": {
       "path": "registrations",
@@ -115,7 +180,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "registrations"
     },
     "activity": {
       "path": "activity",
@@ -133,7 +199,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "activity"
     },
     "members": {
       "path": "members",
@@ -151,7 +218,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "members"
     },
     "topics": {
       "path": "topics",
@@ -196,7 +264,8 @@ export const SCHEMA = {
       "mediaList": [
         "images"
       ],
-      "files": []
+      "files": [],
+      "ability": "supplies"
     },
     "supplyCategories": {
       "path": "supply_categories",
@@ -244,7 +313,8 @@ export const SCHEMA = {
       "relations": {},
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "orders"
     }
   },
   "globals": [

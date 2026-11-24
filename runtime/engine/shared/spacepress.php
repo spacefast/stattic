@@ -844,6 +844,18 @@ function _stattic_spacepress_wp_bootstrap(
 }
 
 /**
+ * Whether `$path` is WordPress's REST API on a SpacePress version, which no
+ * Functions route may claim: the app's client calls more of `/wp-json` than
+ * the app API (core's ability run route, identity), and a worker that claims
+ * the whole site must not answer any of it.
+ */
+function _stattic_spacepress_owns_rest_path(string $versionRoot, string $path): bool
+{
+    return ($path === '/wp-json' || str_starts_with($path, '/wp-json/'))
+        && _stattic_spacepress_version_manifest($versionRoot) !== null;
+}
+
+/**
  * Whether `$path` is claimed by this SpacePress build:
  * - `/wp-json/spacepress/v1/*`
  * - `/wp-json/spacepress-identity/v1/*`

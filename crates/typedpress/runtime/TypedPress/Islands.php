@@ -99,9 +99,95 @@ final class Islands
         }
         // The file has a fixed name: its version is a digest of its bytes, written by `typedpress build`.
         $version = is_file($plugin->dir . '/tp/app/client-version.php') ? (string) require $plugin->dir . '/tp/app/client-version.php' : null;
+        // The client runs each operation as an Ability at core's run route, with what the page prints
+        // for it ({@see clientData()}): it needs no other module or script.
         wp_register_script_module(self::CLIENT, $plugin->url('tp/app/client/typedpress-client.js'), [], $version);
+        // WordPress prints a module's data only on a page that imports the module. The Interactivity
+        // router swaps a later page in without its head, so a page with a router region prints it
+        // itself when nothing on it imports the client ({@see printClientData()}).
+        add_filter('script_module_data_' . self::CLIENT, [self::class, 'clientData']);
+        static $hooked = false;
+        if (!$hooked) {
+            $hooked = true;
+            add_action('wp_footer', [self::class, 'printClientData'], 1);
+        }
 
         return true;
+    }
+
+    /**
+     * {@see clientData()} on a page with a router region where no module imports the client: the
+     * first page's data is what a client created after a client-side navigation reads (and what
+     * `typedpress export --site` points at the hosted site). A page that does import it gets
+     * WordPress's own copy.
+     */
+    public static function printClientData(): void
+    {
+        if (self::$clientUsed || !Render\Navigation::active()) {
+            return;
+        }
+        $data = self::clientData([]);
+        wp_print_inline_script_tag(
+            (string) wp_json_encode($data, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES),
+            ['type' => 'application/json', 'id' => 'wp-script-module-data-' . self::CLIENT],
+        );
+    }
+
+    /**
+     * What `createClient()` reads on the page (`wp-script-module-data-@typedpress/client`): the REST
+     * root as a path on this site, the app API's namespace, and for a signed-in visitor the REST
+     * nonce. A signed-out render is cached, prebuilt and exported, so it carries no nonce and no
+     * origin (`typedpress export --site` points `root` at the hosted site).
+     *
+     * @return array{root: string, api: string, nonce?: string, nonceEndpoint?: string, nonceSession?: string}
+     */
+    public static function clientData(array $data): array
+    {
+        $root = rest_url();
+        $parts = wp_parse_url($root);
+        $relative = ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : '');
+        $data += ['root' => $relative, 'api' => '/' . Wp\Facade::apiNamespace()];
+        if (is_user_logged_in()) {
+            $data['nonce'] = wp_create_nonce('wp_rest');
+            $session = self::clientNonceSession();
+            if ($session !== null) {
+                $data['nonceEndpoint'] = admin_url('admin-ajax.php?action=typedpress_rest_nonce');
+                $data['nonceSession'] = $session;
+            }
+        }
+
+        return $data;
+    }
+
+    /** The page can renew its nonce for the WordPress login session that rendered it. */
+    public static function renewClientNonce(): void
+    {
+        $session = self::clientNonceSession();
+        if ($session === null || !hash_equals($session, (string) ($_SERVER['HTTP_X_TYPEDPRESS_REST_SESSION'] ?? ''))
+            || wp_validate_auth_cookie('', 'logged_in') !== get_current_user_id()) {
+            wp_die('', '', ['response' => 409]);
+
+            return;
+        }
+
+        wp_die(wp_create_nonce('wp_rest'), '', ['response' => 200]);
+    }
+
+    private static function clientNonceSession(): ?string
+    {
+        $token = wp_get_session_token();
+        $user = get_current_user_id();
+
+        return $token === '' || $user === 0 ? null : wp_hash("typedpress_rest_nonce|$user|$token", 'nonce', 'sha256');
+    }
+
+    /** Whether a module this page enqueues imports the client (WordPress then prints its data itself). */
+    private static bool $clientUsed = false;
+
+    /** A module this page enqueues imports the client. */
+    public static function useClient(): void
+    {
+        self::$clientUsed = true;
     }
 
     /**
@@ -128,9 +214,9 @@ final class Islands
         if (!self::registerClient()) {
             return $done = false;
         }
-        wp_register_script_module(self::LIVE, plugins_url('tp/Render/client/live.js', Wp\Runtime::file()), [self::CLIENT, '@wordpress/interactivity'], self::runtimeVersion());
-        // The live reads go as the visitor: a signed-in visitor's cookie needs the REST nonce.
-        wp_interactivity_config('tp/live', ['nonce' => is_user_logged_in() ? wp_create_nonce('wp_rest') : '']);
+        wp_register_script_module(self::LIVE, plugins_url('tp/Render/client/live.js', Wp\Runtime::file()), [self::CLIENT], self::runtimeVersion());
+        // The live reads go as the visitor, with the nonce the page prints for a signed-in one.
+        self::useClient();
 
         return $done = true;
     }
@@ -164,7 +250,7 @@ final class Islands
         return new JsObject(['data' => Js::decodeJson((string) ($result['json'] ?? 'null')), 'error' => JsUndefined::Value, 'loading' => false, '$live' => $live]);
     }
 
-    /** Registers and enqueues each rendered component's store, with its action endpoints and a REST nonce. */
+    /** Registers and enqueues each rendered component's store, and the typed client a store that calls an action runs. */
     public static function enqueue(): void
     {
         $plugin = Wp\Runtime::plugin();
@@ -182,18 +268,38 @@ final class Islands
             if (($island['live'] ?? false) === true && self::registerLive()) {
                 $deps[] = self::LIVE;
             }
+            // A store that calls a server action imports the typed client, which runs it as the
+            // action's Ability (`client.actions.<name>()`) with the nonce the page prints for it.
+            $viaClient = ($island['client'] ?? false) === true;
+            if ($viaClient && self::registerClient()) {
+                $deps[] = self::CLIENT;
+                self::useClient();
+            }
             wp_register_script_module($handle, $plugin->url('tp/app/client/' . $island['file']), $deps, null);
             wp_enqueue_script_module($handle);
             // A <Link> that swaps the router region onto this page loads the store then
             // (core marks the tag `data-wp-router-options`), and merges this page's config.
             wp_interactivity()->add_client_navigation_support_to_script_module($handle);
-            $actions = [];
-            foreach ($island['actions'] as $action) {
-                $actions[$action] = Wp\Facade::url('/actions/' . rawurlencode((string) $action));
+            // Each action the store calls, by name. A store that runs them through the typed client
+            // gets its Ability's run route (`typedpress export` reads it to refuse or keep the call on
+            // --site). One built before that (no `client`) posts to the API's action URL itself, with
+            // the REST nonce, and reads `{ data }` back.
+            $config = [];
+            if (($island['actions'] ?? []) !== []) {
+                $app = Wp\Abilities\Register::kebab($plugin->schema->name());
+                $actions = [];
+                foreach ($island['actions'] as $action) {
+                    $actions[$action] = $viaClient
+                        ? rest_url('wp-abilities/v1/abilities/' . $app . '/' . Wp\Abilities\Register::kebab((string) $action) . '/run')
+                        : Wp\Facade::url('/actions/' . rawurlencode((string) $action));
+                }
+                $config['actions'] = (object) $actions;
+                // Only a signed-in visitor needs one: a signed-out page is cached and prebuilt, past a
+                // nonce's lifetime, and an expired one would refuse its calls.
+                if (!$viaClient && is_user_logged_in()) {
+                    $config['nonce'] = wp_create_nonce('wp_rest');
+                }
             }
-            // A prebuilt page is the same file for days, past a nonce's lifetime, and only signed-out
-            // visitors get it: they need no nonce, and an expired one would refuse their calls.
-            $config = ['actions' => (object) $actions];
             if (is_array($island['assets'] ?? null) && $island['assets'] !== []) {
                 $assets = [];
                 foreach ($island['assets'] as $name => $entry) {
@@ -210,10 +316,9 @@ final class Islands
                 }
                 $config['assets'] = (object) $assets;
             }
-            if (!\TypedPress\Render\Prebuilt::prerendering()) {
-                $config['nonce'] = wp_create_nonce('wp_rest');
+            if ($config !== []) {
+                wp_interactivity_config($namespace, $config);
             }
-            wp_interactivity_config($namespace, $config);
         }
     }
 }

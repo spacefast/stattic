@@ -319,6 +319,22 @@ add_action('rest_api_init', static function () {
           .object({ data: z.object({ role: z.string().nullable() }) })
           .parse(await response.json()).data.role;
       };
+      // The generated client runs the same action as the app's Ability.
+      const runWhoami = async (cookie: string) => {
+        const response = await get(
+          runtime,
+          HOST,
+          "/wp-json/wp-abilities/v1/abilities/roles/whoami/run",
+          {
+            method: "POST",
+            headers: { cookie, "content-type": "application/json", ...sameOrigin },
+            body: JSON.stringify({ input: {} }),
+          },
+        );
+        assert.equal(response.status, 200, (await response.clone().text()) + runtime.diagnostics());
+        assert.equal(response.headers.get("cache-control"), "private, no-store");
+        return z.object({ role: z.string().nullable() }).parse(await response.json()).role;
+      };
 
       const cookies = {
         manager: await signIn("manager"),
@@ -365,6 +381,8 @@ add_action('rest_api_init', static function () {
       // TypedPress's own action lane reads the same role.
       assert.equal(await whoami(cookies.manager), "admin");
       assert.equal(await whoami(cookies.viewer), "subscriber");
+      assert.equal(await runWhoami(cookies.manager), "admin");
+      assert.equal(await runWhoami(cookies.viewer), "subscriber");
 
       // A real-authority member session: capped at view and comment on the
       // page, yet the app is lent the person's live role from the team's

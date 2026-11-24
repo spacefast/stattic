@@ -8,16 +8,18 @@ use TypedPress\Wp\Facade;
 
 /**
  * A TypedPress ability. Core's run route serves only abilities that are `show_in_rest`; an `agents: false`
- * one is hidden from REST discovery and MCP, but it is still the app's own operation, so for the
- * facade's own dispatches (`/wp-json/typedpress/v1/actions/<name>`, spec §3a) it reports itself shown and
- * the run route serves it with core's checks: input, permission, execution, output.
+ * one is hidden from REST discovery (`/wp-abilities/v1/abilities`) and MCP, but it is still the app's
+ * own operation, which its typed client and the facade (`/wp-json/typedpress/v1/actions/<name>`, spec
+ * §3a) run. So while core's run route is running this ability by name, it reports itself shown, and
+ * the run route serves it with core's checks: input, permission, execution, output. Listing it,
+ * describing it and MCP still read `show_in_rest` as registered.
  */
 final class TypedPressAbility extends \WP_Ability
 {
     public function get_meta_item(string $key, $default_value = null)
     {
-        if ($key === 'show_in_rest' && Facade::running() === $this->get_name()) {
-            return true; // the one named elevation: the app's own API runs its own ability
+        if ($key === 'show_in_rest' && in_array($this->get_name(), [Facade::running(), Register::running()], true)) {
+            return true; // the one named elevation: the app's own client runs its own ability
         }
 
         return parent::get_meta_item($key, $default_value);

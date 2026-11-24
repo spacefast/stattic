@@ -11683,7 +11683,7 @@
           "title": { "type": "string", "minLength": 1, "maxLength": 120 },
           "slug": { "type": ["string", "null"], "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 200 },
           "description": { "type": ["string", "null"] },
-          "startsOn": { "type": "string", "format": "date" },
+          "startsOn": { "type": "string" },
           "venue": { "type": "string" },
           "poster": { "type": ["integer", "object", "null"] },
           "gallery": {
@@ -12290,7 +12290,7 @@
           "content": { "type": ["string", "null"] },
           "parent": {
             "anyOf": [
-              { "type": ["integer", "null"] },
+              { "type": ["integer", "string", "object", "null"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Handbook" },
@@ -12388,7 +12388,7 @@
           "id": { "type": "integer" },
           "eventId": {
             "anyOf": [
-              { "type": "integer" },
+              { "type": ["integer", "string", "object"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Event" },
@@ -12399,7 +12399,7 @@
           },
           "memberId": {
             "anyOf": [
-              { "type": "integer" },
+              { "type": ["integer", "string", "object"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Member" },
@@ -12415,7 +12415,7 @@
             "x-typedpress-access": { "read": "admin" },
             "description": "Absent for callers who may not read it. Users with the `admin` role or a higher one may read this field."
           },
-          "bookedOn": { "type": "string", "format": "date" },
+          "bookedOn": { "type": "string" },
           "updatedAt": { "type": "string", "format": "date-time" },
           "author": { "type": ["integer", "null"] },
           "createdAt": { "type": "string", "format": "date-time" },
@@ -12487,7 +12487,7 @@
           "id": { "type": "integer" },
           "eventId": {
             "anyOf": [
-              { "type": ["integer", "null"] },
+              { "type": ["integer", "string", "object", "null"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Event" },
@@ -12859,7 +12859,7 @@
           "name": { "type": "string" },
           "slug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 200 },
           "description": { "type": "string" },
-          "parent": { "type": ["integer", "null"] },
+          "parent": { "type": ["integer", "string", "object", "null"] },
           "count": { "type": "integer" },
           "url": { "type": ["string", "null"] },
           "supplies": {

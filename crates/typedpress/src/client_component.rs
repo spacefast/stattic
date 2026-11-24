@@ -29,6 +29,7 @@ pub const HOOKS: &[&str] = &[
     "useRef",
     "sharedState",
     "useLive",
+    "uploadFile",
 ];
 
 /// What a reference in a client component's markup or code reads.
@@ -48,6 +49,8 @@ pub enum Binding {
     Ref,
     /// A server action the file imports (its registered name): called through `fetch`.
     ServerAction(String),
+    /// `uploadFile` imported from `"typedpress/client"`: uploads to a `files()` bucket via `@typedpress/client`.
+    UploadFile,
     /// `sharedState` exported from this module: the namespace's global `state`.
     Shared,
     /// An imported CSS module's class map, known at build time: inlined as a JavaScript object.
@@ -77,6 +80,8 @@ pub struct Analysis {
     pub events: Vec<(String, String, String)>,
     /// Server actions called from handlers.
     pub server_actions: BTreeSet<String>,
+    /// Private file buckets uploaded to via `uploadFile(bucket, file, opts?)`.
+    pub file_uploads: BTreeSet<String>,
     /// Static assets imported by this client component (resolved through `getConfig(ns).assets`).
     pub assets: BTreeMap<String, crate::schema::IslandAsset>,
     /// Module-level `export const x = sharedState({...})`: (name, initial object).
@@ -129,13 +134,15 @@ pub fn imports(module: &Module, client_module: &str) -> (BTreeMap<String, &'stat
 }
 
 /// Analyses one client component: `f` is its function, `module` its module, `actions` the
-/// registered server action names its imports may bind.
+/// registered server action names its imports may bind, and `file_buckets` the registered
+/// `files()` bucket names `uploadFile(...)` may target.
 pub fn analyse(
     namespace: String,
     f: &Func,
     module: &Module,
     client_module: &str,
     server_actions: &BTreeSet<String>,
+    file_buckets: &BTreeSet<String>,
     assets: &[(String, &crate::assets::Asset)],
 ) -> Result<Analysis> {
     let (hooks, imported) = imports(module, client_module);
@@ -186,6 +193,11 @@ pub fn analyse(
                 }
             }
             crate::assets::Kind::Css => {}
+        }
+    }
+    for (local, name) in &hooks {
+        if *name == "uploadFile" {
+            a.bindings.insert(local.clone(), Binding::UploadFile);
         }
     }
     for (local, name) in imported {
@@ -596,20 +608,68 @@ pub fn analyse(
             "end the body with `return <div>…</div>;`",
         ));
     }
-    // The server actions this component can call: their endpoints go into the store's config.
+    // The server actions and file buckets this component calls: their endpoints/client go into the store.
     let mut called = BTreeSet::new();
+    let mut uploads = BTreeSet::new();
+    let mut upload_err: Option<Diag> = None;
     let mut scan = |e: &Expr| {
-        if let ExprKind::Call { callee, .. } = &e.kind
+        if let ExprKind::Call { callee, args, .. } = &e.kind
             && let ExprKind::Ident(n) = &callee.kind
-            && let Some(Binding::ServerAction(name)) = a.bindings.get(n)
         {
-            called.insert(name.clone());
+            match a.bindings.get(n) {
+                Some(Binding::ServerAction(name)) => {
+                    called.insert(name.clone());
+                }
+                Some(Binding::UploadFile) if upload_err.is_none() => {
+                    match args.as_slice() {
+                        [
+                            ArrEl::Item(Expr {
+                                kind: ExprKind::Str(bucket),
+                                span,
+                            }),
+                            ArrEl::Item(_),
+                        ]
+                        | [
+                            ArrEl::Item(Expr {
+                                kind: ExprKind::Str(bucket),
+                                span,
+                            }),
+                            ArrEl::Item(_),
+                            ArrEl::Item(_),
+                        ] => {
+                            if file_buckets.contains(bucket) {
+                                uploads.insert(bucket.clone());
+                            } else {
+                                let mut d = Diag::new(*span, format!("unknown file bucket `{bucket}`"));
+                                if let Some(s) = crate::diag::suggest(bucket, file_buckets.iter().map(String::as_str)) {
+                                    d = d.help(format!("did you mean `{s}`?"));
+                                } else {
+                                    d = d.help("export a private bucket first: `export const inbox = files({ accept, maxBytes })`");
+                                }
+                                upload_err = Some(d);
+                            }
+                        }
+                        _ => {
+                            upload_err = Some(refuse(
+                                e.span,
+                                "`uploadFile` takes a bucket name literal, a File/Blob, and optional `{ filename }`",
+                                "write `await uploadFile(\"inbox\", file)`",
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     };
     for stmt in body {
         stmt_exprs(stmt, &mut |e| visit_deep(e, &mut scan));
     }
+    if let Some(err) = upload_err {
+        return Err(err);
+    }
     a.server_actions = called;
+    a.file_uploads = uploads;
     Ok(a)
 }
 
@@ -693,6 +753,12 @@ impl Analysis {
         if !self.live.is_empty() {
             out.push_str("import { live } from \"@typedpress/live\";\n");
         }
+        // Server actions and file uploads run through the app's typed client, with the REST root
+        // and nonce the page prints for `@typedpress/client`.
+        let uses_client = !self.server_actions.is_empty() || !self.file_uploads.is_empty();
+        if uses_client {
+            out.push_str("import { createClient } from \"@typedpress/client\";\n");
+        }
         let _ = writeln!(out, "const ns = {};", js_str(&self.namespace));
         if !self.refs.is_empty() {
             // `ref={name}` rendered `data-tp-ref="name"`. The running directive's element is in
@@ -700,7 +766,18 @@ impl Analysis {
             // nested client component (its own root) is never this component's ref.
             out.push_str("const attached = (name) => {\n  const root = getElement().ref?.closest(\"[data-wp-interactive]\");\n  if (!root) return null;\n  const selector = `[data-tp-ref=\"${name}\"]`;\n  if (root.matches(selector)) return root;\n  for (const element of root.querySelectorAll(selector)) {\n    if (element.closest(\"[data-wp-interactive]\") === root) return element;\n  }\n  return null;\n};\n");
         }
-        out.push_str("const call = async (name, input) => {\n  const config = getConfig(ns);\n  const response = await fetch(config.actions[name], { method: \"POST\", credentials: \"same-origin\", headers: config.nonce ? { \"content-type\": \"application/json\", \"x-wp-nonce\": config.nonce } : { \"content-type\": \"application/json\" }, body: JSON.stringify(input ?? {}) });\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.detail ?? result?.error?.message ?? `action ${name} failed`);\n  return result.data;\n};\n\n");
+        if uses_client {
+            out.push_str("let client;\n");
+            if !self.server_actions.is_empty() {
+                out.push_str("const call = (name, input) => (client ??= createClient()).actions[name](input);\n");
+            }
+            if !self.file_uploads.is_empty() {
+                out.push_str(
+                    "const __tpUpload = (bucket, file, opts) => (client ??= createClient()).files[bucket].upload(file, opts);\n",
+                );
+            }
+            out.push('\n');
+        }
         let _ = writeln!(out, "const {{ state, actions }} = store(ns, {{");
         out.push_str("  state: {\n");
         for (name, init) in &self.shared {
@@ -772,6 +849,7 @@ impl Analysis {
             "stopPropagation",
             "stopImmediatePropagation",
             "currentTarget",
+            "dataTransfer",
         ]
         .iter()
         .any(|m| body.contains(&format!(".{m}")));
@@ -904,7 +982,7 @@ impl Analysis {
                     "(() => {{ throw new Error({}) }})()",
                     js_str("call handlers from markup")
                 ),
-                Some(Binding::Setter { .. } | Binding::ServerAction(_)) => {
+                Some(Binding::Setter { .. } | Binding::ServerAction(_) | Binding::UploadFile) => {
                     return Err(refuse(
                         e.span,
                         format!("`{n}` can only be called"),
@@ -1078,6 +1156,30 @@ impl Analysis {
                             };
                             format!("call({}, {input})", js_str(action))
                         }
+                        Some(Binding::UploadFile) => match args.as_slice() {
+                            [
+                                ArrEl::Item(Expr {
+                                    kind: ExprKind::Str(bucket),
+                                    ..
+                                }),
+                                ArrEl::Item(file),
+                            ] => format!("__tpUpload({}, {})", js_str(bucket), js(file)?),
+                            [
+                                ArrEl::Item(Expr {
+                                    kind: ExprKind::Str(bucket),
+                                    ..
+                                }),
+                                ArrEl::Item(file),
+                                ArrEl::Item(opts),
+                            ] => format!("__tpUpload({}, {}, {})", js_str(bucket), js(file)?, js(opts)?),
+                            _ => {
+                                return Err(refuse(
+                                    e.span,
+                                    "`uploadFile` takes a bucket name literal, a File/Blob, and optional `{ filename }`",
+                                    "write `await uploadFile(\"inbox\", file)`",
+                                ));
+                            }
+                        },
                         // Another handler of this component, run in the same scope.
                         Some(Binding::Action) => format!("(yield* actions.{n}({}))", argv()?),
                         _ => format!("{}{}({})", js(callee)?, if *optional { "?." } else { "" }, argv()?),

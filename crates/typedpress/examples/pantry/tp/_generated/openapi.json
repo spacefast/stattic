@@ -4213,11 +4213,11 @@
           "quantity": { "type": "integer" },
           "unit": { "type": "string", "enum": ["pcs", "g", "kg", "ml", "l"] },
           "lowStockAt": { "type": "integer" },
-          "expiresOn": { "type": ["string", "null"], "format": "date" },
+          "expiresOn": { "type": ["string", "null"] },
           "opened": { "type": "boolean" },
           "locationId": {
             "anyOf": [
-              { "type": ["integer", "null"] },
+              { "type": ["integer", "string", "object", "null"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Location" },
@@ -4333,7 +4333,7 @@
           "id": { "type": "integer" },
           "itemId": {
             "anyOf": [
-              { "type": ["integer", "null"] },
+              { "type": ["integer", "string", "object", "null"] },
               {
                 "anyOf": [
                   { "$ref": "#/components/schemas/Item" },

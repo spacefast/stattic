@@ -3,6 +3,22 @@
 
 export const SCHEMA = {
   "name": "blog",
+  "app": "blog",
+  "abilities": {
+    "actions": {
+      "approveComment": {
+        "ability": "approve-comment"
+      },
+      "publishedCount": {
+        "ability": "published-count",
+        "readonly": true,
+        "idempotent": true
+      }
+    },
+    "globals": {
+      "settings": "settings"
+    }
+  },
   "collections": {
     "authors": {
       "path": "authors",
@@ -22,7 +38,8 @@ export const SCHEMA = {
         "avatar"
       ],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "authors"
     },
     "posts": {
       "path": "posts",
@@ -50,6 +67,7 @@ export const SCHEMA = {
       "files": [
         "deck"
       ],
+      "ability": "posts",
       "showIf": {
         "seo": {
           "when": {
@@ -74,7 +92,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "comments"
     },
     "members": {
       "path": "members",
@@ -86,7 +105,8 @@ export const SCHEMA = {
       "relations": {},
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "members"
     }
   },
   "globals": [

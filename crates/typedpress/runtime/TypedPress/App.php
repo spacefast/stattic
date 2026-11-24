@@ -67,7 +67,7 @@ final class App
             $this->db->setActor(null);
         } else {
             if ($viewer !== null) {
-                Access::require($action['access'] ?? Access::DEFAULT_WRITE, $viewer, 'create', null, "run $name");
+                $this->db->current(static fn () => Access::require($action['access'] ?? Access::DEFAULT_WRITE, $viewer, 'create', null, "run $name"));
             }
             Extensions::action($action, $name, $rawBody, array_change_key_case($headers, CASE_LOWER), $viewer);
         }

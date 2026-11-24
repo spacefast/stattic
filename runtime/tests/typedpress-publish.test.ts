@@ -209,6 +209,16 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
       const actionBody = await action.text();
       assert.equal(action.status, 200, actionBody);
       assert.deepEqual(JSON.parse(actionBody), { data: { message: "pong" } });
+      // The generated client runs the same action as the app's WordPress
+      // Ability, at core's run route, with the app selected.
+      const run = await get(rt, host, "/wp-json/wp-abilities/v1/abilities/hosted/ping/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: {} }),
+      });
+      const runBody = await run.text();
+      assert.equal(run.status, 200, runBody + rt.diagnostics());
+      assert.deepEqual(JSON.parse(runBody), { message: "pong" });
       const source = await get(rt, host, "/.spacepress-source/app.spacepress.json");
       assert.equal(source.status, 403);
       await deploy(rt, {

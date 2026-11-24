@@ -3,6 +3,20 @@
 
 export const SCHEMA = {
   "name": "pantry",
+  "app": "pantry",
+  "abilities": {
+    "actions": {
+      "consume": {
+        "ability": "consume"
+      },
+      "expiringSoon": {
+        "ability": "expiring-soon",
+        "readonly": true,
+        "idempotent": true
+      }
+    },
+    "globals": {}
+  },
   "collections": {
     "locations": {
       "path": "locations",
@@ -20,7 +34,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "locations"
     },
     "items": {
       "path": "items",
@@ -43,7 +58,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "items"
     },
     "shoppingList": {
       "path": "shopping_list",
@@ -61,7 +77,8 @@ export const SCHEMA = {
       },
       "media": [],
       "mediaList": [],
-      "files": []
+      "files": [],
+      "ability": "shopping-list"
     }
   },
   "globals": [],

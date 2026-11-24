@@ -36,6 +36,8 @@ pub fn column(c: &Column, output: bool) -> Value {
         }
     };
     let mut s = match c.ty {
+        // A `ref()` column, as the runtime's ability output: `with` loads the related row in its place.
+        ColType::Integer if output && c.references.is_some() => json!({ "type": ["integer", "string", "object"] }),
         ColType::Integer => json!({ "type": "integer" }),
         ColType::Real => json!({ "type": "number" }),
         ColType::Text | ColType::RichText | ColType::Email => json!({ "type": "string" }),
@@ -46,7 +48,8 @@ pub fn column(c: &Column, output: bool) -> Value {
         ColType::Timestamp if output => json!({ "type": "string", "format": "date-time" }),
         // The API also accepts epoch milliseconds and any date string TypedPress parses.
         ColType::Timestamp => json!({ "type": ["string", "integer"] }),
-        ColType::Date if output => json!({ "type": "string", "format": "date" }),
+        // No `format: date`, as the runtime's ability schemas: `@wordpress/abilities` validates with
+        // ajv, which knows date-time, email, hostname, ipv4, ipv6, uri and uuid, and refuses others.
         ColType::Date => json!({ "type": "string" }),
         ColType::Json => c.shape.clone().unwrap_or_else(|| json!({ "type": ANY })),
         ColType::Media | ColType::File => media(),

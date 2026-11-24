@@ -783,6 +783,11 @@ pub fn schema_ts(schema: &Schema) -> String {
             "mediaList": media_multiple,
             "files": files,
         });
+        // The kind's abilities, `<app>/<ability>-list`, `-get`, `-create`, … (runtime
+        // `Abilities\Register::collection`). A taxonomy has none: the client uses its REST route.
+        if c.taxonomy.is_none() {
+            entry["ability"] = serde_json::json!(crate::wordpress::abilities::kebab(&c.table));
+        }
         // Editor conditions (§4.3), so a frontend form can mirror the editor; only when present.
         let conditions = show_if(&c.columns);
         if conditions.as_object().is_some_and(|o| !o.is_empty()) {
@@ -792,8 +797,36 @@ pub fn schema_ts(schema: &Schema) -> String {
     }
     let globals: Vec<serde_json::Value> = schema.globals.keys().map(|g| serde_json::json!(g)).collect();
     let actions: Vec<serde_json::Value> = schema.actions.keys().map(|a| serde_json::json!(a)).collect();
+    let kebab = crate::wordpress::abilities::kebab;
+    // Each action's ability and how core's run route takes it: GET for a readonly ability, DELETE
+    // for a destructive and idempotent one, POST otherwise (the client outside WordPress picks).
+    let action_abilities: serde_json::Map<String, serde_json::Value> = schema
+        .actions
+        .iter()
+        .map(|(name, a)| {
+            let mut entry = serde_json::json!({ "ability": kebab(name) });
+            if a.readonly {
+                entry["readonly"] = true.into();
+            }
+            if a.destructive {
+                entry["destructive"] = true.into();
+            }
+            if a.idempotent || a.readonly {
+                entry["idempotent"] = true.into();
+            }
+            (name.clone(), entry)
+        })
+        .collect();
+    let global_abilities: serde_json::Map<String, serde_json::Value> = schema
+        .globals
+        .keys()
+        .map(|g| (g.clone(), serde_json::json!(kebab(g))))
+        .collect();
     let descriptor = serde_json::json!({
         "name": schema.name,
+        // The abilities' namespace: `<app>/<name>`.
+        "app": kebab(&schema.name),
+        "abilities": { "actions": action_abilities, "globals": global_abilities },
         "collections": collections,
         "globals": globals,
         "actions": actions,

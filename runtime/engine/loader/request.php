@@ -460,7 +460,10 @@ return static function (array $loader): void {
                     $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = $principal;
                     $GLOBALS['SPACEFAST_CONTENT_WORDPRESS_ROLE'] = $principal['wordpress_role'];
                 }
-                if (in_array($accessTarget['serving']['zero_generation'] ?? null, ['v2', 'tp_v1', 'spacepress'], true)) {
+                // A SpacePress version is SpacePress before its Space's first
+                // promote too, while the route still names the previous runtime.
+                if (in_array($accessTarget['serving']['zero_generation'] ?? null, ['v2', 'tp_v1', 'spacepress'], true)
+                    || _stattic_content_target_is_spacepress($privateRoot, $accessTarget)) {
                     // The Space role the session holds, for the Spacefast
                     // SpacePress plugin to lend on this request; the same
                     // resolver the page lane runs (shared/spacepress.php).

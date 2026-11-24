@@ -98,6 +98,8 @@ pub enum Ty {
     /// `db.globals` and `db.globals.<key>`.
     DbGlobals,
     DbGlobal(String),
+    /// A `files({ ... })` private file bucket: `bucket.get(id)`, `bucket.readText(id)`, `bucket.readBase64(id)`.
+    FileBucket(String),
     Builder(Box<Builder>),
 }
 
@@ -345,6 +347,7 @@ impl Ty {
             Ty::KindRevisions(t, _) => format!("revisions of \"{t}\""),
             Ty::DbGlobals => "db.globals".into(),
             Ty::DbGlobal(g) => format!("db.globals.{g}"),
+            Ty::FileBucket(b) => format!("file bucket \"{b}\""),
             Ty::Builder(b) => format!("an unfinished db.{:?} for \"{}\"", b.kind, b.table).to_lowercase(),
         }
     }

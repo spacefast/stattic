@@ -789,6 +789,9 @@ function _stattic_content_access_target(string $root, string $host): array {
 function _stattic_content_deployment_claims_path(string $root, string $host, string $path, string $method, ?array $target = null): bool {
   return false;
 }
+function _stattic_content_target_is_spacepress(string $root, array $target): bool {
+  return false;
+}
 function _stattic_content_version_model_revision(string $root, string $spaceId, string $versionId): ?string {
   return null;
 }

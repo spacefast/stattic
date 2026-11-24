@@ -18,7 +18,9 @@ use TypedPress\Wp\Runtime;
  *   rule [rule, op, what], data? (input → rule data), defer? (rule needs the pipeline),
  *   call (input → [method, path, query, body]) and result? (data → output), or run (input → output).
  * A post kind with revisions also gets one ability per staged-version step ({@see staged()}).
- * `agents: false` keeps the ability registered (PHP, `wp typedpress run`) but out of core REST and MCP.
+ * `agents: false` keeps the ability registered (PHP, `wp typedpress run`) but out of core REST
+ * discovery and MCP; core's run route still serves an operation of the app's own schema to its typed
+ * client ({@see running()}).
  */
 final class Register
 {
@@ -101,14 +103,14 @@ final class Register
             return $valid;
         }
 
-        if (in_array(self::$sanitizing, ['GET', 'DELETE'], true)) {
+        if (in_array(self::$sanitizing, ['GET', 'DELETE'], true) && !self::$typedQuery) {
             // Core sanitizes (types) a query string only when all of it validates; remember which.
             self::$untyped = $valid === true ? null : ($valid instanceof \WP_Error ? $valid->get_error_message() : 'Invalid input');
         }
 
-        return match (self::$sanitizing) {
-            null => true,
-            'GET', 'DELETE' => $valid,
+        return match (true) {
+            self::$sanitizing === null => true,
+            in_array(self::$sanitizing, ['GET', 'DELETE'], true) && !self::$typedQuery => $valid,
             default => new \WP_Error('tp_raw_input', 'TypedPress validates JSON input itself'),
         };
     }
@@ -125,29 +127,124 @@ final class Register
         return self::$untyped;
     }
 
-    /** rest_pre_dispatch … rest_request_before_callbacks brackets core's argument sanitizing. */
-    public static function sanitizing(bool $on): \Closure
+    /**
+     * rest_pre_dispatch (before {@see startSanitizing()}): a GET or DELETE run of one of the app's
+     * abilities may carry its input as JSON, `?input={"limit":5,"where":{…}}` (what the typed client
+     * sends), as well as in core's bracketed form (`input[limit]=5`, what `wp.url` builds).
+     *
+     * A kind's read (`-list`, `-get`) is decoded into the bracketed form's shape, with `where`, `with`
+     * and `orderBy` as the strings the list query takes, so core and the pipeline read both forms the
+     * same way. Any other ability (a readonly action, a revision read) takes its JSON as sent, as a
+     * POSTed run does: its values keep their types and `{}` stays an object ({@see sentInput()}).
+     */
+    public static function jsonInput(mixed $result, mixed $server, \WP_REST_Request $request): mixed
     {
-        return static function (mixed $passthrough, mixed $server = null, mixed $request = null) use ($on): mixed {
-            self::$sanitizing = $on && $request instanceof \WP_REST_Request ? $request->get_method() : null;
-            if ($on) {
-                self::$method = self::$sanitizing;
-                self::$untyped = null;
-                self::$responded = [];
-                self::$headers = null;
-                if ($request instanceof \WP_REST_Request && preg_match('#^/wp-abilities/v1/abilities/(.+)/run$#', (string) $request->get_route(), $m)) {
-                    $headers = [];
-                    foreach ($request->get_headers() as $name => $values) {
-                        $headers[str_replace('_', '-', strtolower((string) $name))] = implode(', ', (array) $values);
-                    }
-                    self::$headers = [urldecode($m[1]), $headers];
-                }
-                // The run body's own input, or (for the facade's GET/DELETE runs) what withSentInput set.
-                self::$raw = ($request instanceof \WP_REST_Request ? self::rawInput($request) : null) ?? self::$raw;
+        if (!empty($result) || ($name = self::runNameForDispatch($request)) === null) {
+            return $result;
+        }
+        $selected = $request->get_param('name');
+        if ($selected !== null && $selected !== $name) {
+            return self::wrongRunName();
+        }
+        self::$stack[] = [$request, self::state()];
+        self::$typedQuery = false;
+        self::$queried = null;
+        if (!in_array($request->get_method(), ['GET', 'HEAD', 'DELETE'], true)) {
+            return $result;
+        }
+        $query = $request->get_query_params();
+        if (!is_string($query['input'] ?? null) || !str_starts_with(ltrim($query['input']), '{')) {
+            return $result;
+        }
+        $op = null;
+        foreach (self::operations() as $candidate) {
+            if ($candidate['name'] === $name) {
+                $op = $candidate;
+                break;
             }
+        }
+        $input = json_decode($query['input'], true);
+        if ($op === null || !is_array($input)) {
+            return $result;
+        }
+        if (($op['shape']['type'] ?? null) !== 'query') {
+            try {
+                $sent = \TypedPress\Js::decodeJson($query['input']);
+            } catch (\JsonException) {
+                return $result;
+            }
+            self::$typedQuery = true;
+            self::$queried = [$name, $sent];
+            $query['input'] = $input;
+            $request->set_query_params($query);
 
+            return $result;
+        }
+        // `where` and `with` as the JSON strings the list query takes, from the input as sent, so an
+        // empty object operand (`{ meta: { eq: {} } }`) stays `{}` and doesn't become `[]`.
+        try {
+            $sent = \TypedPress\Js::decodeJson($query['input']);
+        } catch (\JsonException) {
+            return $result;
+        }
+        foreach (['where', 'with'] as $key) {
+            if (is_array($input[$key] ?? null) && $sent instanceof \TypedPress\JsObject && array_key_exists($key, $sent->p)) {
+                $input[$key] = (string) \TypedPress\Js::jsonStringify($sent->p[$key]);
+            }
+        }
+        if (is_array($input['orderBy'] ?? null)) {
+            $input['orderBy'] = implode(',', array_map(static fn ($col, $dir): string => ($dir === 'desc' ? '-' : '') . $col, array_keys($input['orderBy']), $input['orderBy']));
+        }
+        // Scalars as a query string carries them: core types them by the ability's schema.
+        array_walk_recursive($input, static function (mixed &$v): void {
+            $v = is_bool($v) ? ($v ? 'true' : 'false') : (is_scalar($v) ? (string) $v : $v);
+        });
+        $query['input'] = $input;
+        $request->set_query_params($query);
+
+        return $result;
+    }
+
+    /** The ability name of a request to core's run route (`/wp-abilities/v1/abilities/<name>/run`), or null. */
+    private static function runRoute(\WP_REST_Request $request): ?string
+    {
+        return self::runName($request->get_route());
+    }
+
+    private static function runName(string $route): ?string
+    {
+        // Match core's case-insensitive route and keep the ability name as captured.
+        return preg_match('#^/wp-abilities/v1/abilities/([a-z0-9/-]+?)/run$#i', $route, $m) ? $m[1] : null;
+    }
+
+    private static function runNameForDispatch(\WP_REST_Request $request): ?string
+    {
+        // These are core's run handlers, including its fallback from HEAD to GET. A method
+        // miss returns before the cleanup hooks run, so only prepare requests core can match.
+        return in_array($request->get_method(), ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'], true)
+            ? self::runRoute($request) : null;
+    }
+
+    /** rest_pre_dispatch starts the run before WordPress sanitizes its input. */
+    public static function startSanitizing(mixed $passthrough, mixed $server, \WP_REST_Request $request): mixed
+    {
+        if (!empty($passthrough) || ($name = self::runNameForDispatch($request)) === null) {
             return $passthrough;
-        };
+        }
+        self::$sanitizing = $request->get_method();
+        self::$method = self::$sanitizing;
+        self::$untyped = null;
+        self::$responded = [];
+        self::$runRoute = !\TypedPress\Wp\Facade::dispatching() && self::clientOperation($name) ? $name : null;
+        $headers = [];
+        foreach ($request->get_headers() as $key => $values) {
+            $headers[str_replace('_', '-', strtolower((string) $key))] = implode(', ', (array) $values);
+        }
+        self::$headers = [$name, $headers];
+        self::$raw = self::rawInput($request) ?? self::$queried;
+        self::$queried = null;
+
+        return $passthrough;
     }
 
     /**
@@ -157,7 +254,7 @@ final class Register
      */
     private static function rawInput(\WP_REST_Request $request): ?array
     {
-        if ($request->get_method() !== 'POST' || !preg_match('#^/wp-abilities/v1/abilities/(.+)/run$#', (string) $request->get_route(), $m)) {
+        if ($request->get_method() !== 'POST' || ($ran = self::runRoute($request)) === null) {
             return null;
         }
         try {
@@ -166,7 +263,7 @@ final class Register
             return null;
         }
 
-        return $body instanceof \TypedPress\JsObject && array_key_exists('input', $body->p) ? [urldecode($m[1]), $body->p['input']] : null;
+        return $body instanceof \TypedPress\JsObject && array_key_exists('input', $body->p) ? [$ran, $body->p['input']] : null;
     }
 
     /**
@@ -175,52 +272,177 @@ final class Register
      */
     public static function withSentInput(string $name, string $json, callable $fn): mixed
     {
-        $previous = self::$raw;
+        $previous = self::$given;
         try {
             $decoded = trim($json) === '' ? new \TypedPress\JsObject() : \TypedPress\Js::decodeJson($json);
         } catch (\JsonException) {
             $decoded = null;
         }
-        self::$raw = $decoded === null ? null : [$name, $decoded];
+        self::$given = $decoded === null ? null : [$name, $decoded];
         try {
             return $fn();
         } finally {
-            self::$raw = $previous;
+            self::$given = $previous;
         }
     }
 
-    /** The executing ability's input as sent, when the REST run endpoint carried it. */
+    /** The executing ability's input as sent: the facade's own ({@see withSentInput()}), else the run request's. */
     public static function sentInput(string $name, mixed $input): mixed
     {
-        return self::$raw !== null && self::$raw[0] === $name ? self::$raw[1] : $input;
+        foreach ([self::$given, self::$raw] as $sent) {
+            if ($sent !== null && $sent[0] === $name) {
+                return $sent[1];
+            }
+        }
+
+        return $input;
     }
 
+    /** @var array{string, mixed}|null the facade's input as sent for one ability it runs ({@see withSentInput()}) */
+    private static ?array $given = null;
+    /** @var array{string, mixed}|null a GET/DELETE run's JSON query input, for the request {@see startSanitizing()} starts next */
+    private static ?array $queried = null;
+
     /** rest_post_dispatch: the request that carried the input is over; its operation's headers go out with it. */
-    public static function dispatched(mixed $response): mixed
+    public static function dispatched(mixed $response, mixed $server = null, mixed $request = null): mixed
     {
-        self::$method = null;
-        self::$untyped = null;
-        self::$raw = null;
-        self::$headers = null;
         if ($response instanceof \WP_REST_Response) {
             foreach (self::$responded as $name => $value) {
                 $response->header($name, $value);
             }
+            // A run of the app's own ability answers for whoever asks, as the app API does: never a
+            // shared copy (Batcache keeps what a request without a WordPress cookie prints otherwise).
+            if ($request instanceof \WP_REST_Request && ($name = self::runRoute($request)) !== null && self::clientOperation($name)) {
+                $response->header('Cache-Control', 'private, no-store');
+                $response->header('Vary', 'Origin, Cookie, Authorization');
+                if (function_exists('batcache_cancel')) {
+                    batcache_cancel();
+                }
+            }
         }
-        self::$responded = [];
+        self::restore($request);
 
         return $response;
     }
 
-    /** rest_request_after_callbacks: the operation's own headers (`Idempotent-Replayed`) on its response. */
-    public static function answered(mixed $response): mixed
+    /**
+     * @var list<array{\WP_REST_Request, array}> the requests being dispatched, innermost last, each with
+     * the state of the request it interrupted
+     */
+    private static array $stack = [];
+
+    /** @return array this request's state, as {@see restore()} puts it back */
+    private static function state(): array
     {
+        return [self::$sanitizing, self::$method, self::$untyped, self::$raw, self::$headers, self::$responded, self::$runRoute, self::$typedQuery, self::$queried];
+    }
+
+    /**
+     * An ordinary REST request gets its own state once its route matches. A route miss leaves
+     * the enclosing Ability run's state in place.
+     */
+    public static function beginCallbacks(mixed $response, mixed $handler, \WP_REST_Request $request): mixed
+    {
+        if (self::runRoute($request) === null && self::$stack !== []) {
+            self::$stack[] = [$request, self::state()];
+            self::$method = self::$untyped = self::$runRoute = null;
+            self::$raw = self::$headers = self::$queried = null;
+            self::$responded = [];
+            self::$typedQuery = false;
+        }
+        self::$sanitizing = null;
+
+        return $response;
+    }
+
+    public static function discardShortCircuit(mixed $response, mixed $server, \WP_REST_Request $request): mixed
+    {
+        if (!empty($response)) {
+            self::restore($request);
+        }
+
+        return $response;
+    }
+
+    public static function beforePermission(mixed $response, mixed $handler, \WP_REST_Request $request): mixed
+    {
+        return self::beforeExecute($response, $request);
+    }
+
+    public static function beforeExecute(mixed $response, \WP_REST_Request $request): mixed
+    {
+        self::resume($request);
+        // The run controller reads the merged name. Route-scoped credentials and visibility use
+        // the path, so permission checks and execution must use the same name.
+        $name = self::runRoute($request);
+
+        return !is_wp_error($response) && $name !== null && $request->get_param('name') !== $name
+            ? self::wrongRunName() : $response;
+    }
+
+    private static function wrongRunName(): \WP_Error
+    {
+        return new \WP_Error('rest_ability_not_found', 'Ability not found.', ['status' => 404]);
+    }
+
+    /** Drop frames left by a nested dispatch that returned before its callbacks ran. */
+    private static function resume(\WP_REST_Request $request): void
+    {
+        $count = count(self::$stack);
+        for ($i = $count - 1; $i >= 0; $i--) {
+            if (self::$stack[$i][0] === $request) {
+                if ($i < $count - 1) {
+                    // The frame above holds this request's state as the first abandoned request saved it.
+                    [self::$sanitizing, self::$method, self::$untyped, self::$raw, self::$headers, self::$responded, self::$runRoute, self::$typedQuery, self::$queried] = self::$stack[$i + 1][1];
+                    array_splice(self::$stack, $i + 1);
+                }
+
+                return;
+            }
+        }
+    }
+
+    /** Restore the enclosing request's state when the current request finishes. */
+    private static function restore(mixed $request): void
+    {
+        for ($i = count(self::$stack) - 1; $i >= 0; $i--) {
+            if (self::$stack[$i][0] === $request) {
+                [self::$sanitizing, self::$method, self::$untyped, self::$raw, self::$headers, self::$responded, self::$runRoute, self::$typedQuery, self::$queried] = self::$stack[$i][1];
+                array_splice(self::$stack, $i);
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * rest_request_after_callbacks: the operation's own headers (`Idempotent-Replayed`) on its
+     * response. Core's run route stamps 401/403 over any error a permission check returns; one of
+     * TypedPress's own (`tp_*`: 503 while storage is behind, a scope refusal) keeps the status and
+     * pointer it was made with.
+     */
+    public static function answered(mixed $response, mixed $handler = null, mixed $request = null): mixed
+    {
+        // An ability that answers null (signed-out `me`, an action that returns nothing) is a 204:
+        // core would send 200 with an empty body, which is not JSON to a client that parses it.
+        if ($response instanceof \WP_REST_Response && $response->get_data() === null && $response->get_status() === 200
+            && $request instanceof \WP_REST_Request && ($name = self::runRoute($request)) !== null && isset(self::$names[$name])) {
+            $response->set_status(204);
+        }
+        if ($response instanceof \WP_Error && str_starts_with((string) $response->get_error_code(), 'tp_')) {
+            $data = $response->get_all_error_data();
+            if (count($data) > 1 && is_array($data[0]) && isset($data[0]['status'])) {
+                $response->add_data($data[0]);
+            }
+        }
         if ($response instanceof \WP_REST_Response) {
             foreach (self::$responded as $name => $value) {
                 $response->header($name, $value);
             }
         }
         self::$responded = [];
+        // An internal dispatch skips rest_post_dispatch: its state ends with its callbacks.
+        self::restore($request);
 
         return $response;
     }
@@ -249,11 +471,50 @@ final class Register
         self::$responded = array_filter($headers, static fn ($v, $k): bool => is_string($v) && strcasecmp((string) $k, 'Content-Type') !== 0, ARRAY_FILTER_USE_BOTH);
     }
 
-    /** Whether the executing ability's input arrived as a query string (core's GET/DELETE run). */
+    /**
+     * Whether the executing ability's input arrived as a query string (core's GET/DELETE run), whose
+     * values core types. JSON input in the query of a non-query ability is read as sent instead.
+     */
     public static function queryString(): bool
     {
-        return in_array(self::$method, ['GET', 'DELETE'], true);
+        return in_array(self::$method, ['GET', 'DELETE'], true) && !self::$typedQuery;
     }
+
+    /** This run's query carries an ability's JSON input as sent ({@see jsonInput()}). */
+    private static bool $typedQuery = false;
+
+    /**
+     * One of the app's abilities core's run route is serving in this request, as {@see startSanitizing()}
+     * recorded it: an operation of the app's own schema, which its typed client calls even when it is
+     * `agents: false`. One a feature or plugin adds (`tp_ability_operations`: WooCommerce's stock and
+     * order steps) is not: hidden from agents, it has no HTTP route either.
+     */
+    public static function running(): ?string
+    {
+        return self::$runRoute;
+    }
+
+    private static function clientOperation(string $name): bool
+    {
+        self::operations();
+
+        return isset(self::$client[$name]);
+    }
+
+    /** tp_identity_rest_cookie_route: core's run route of an operation the app's schema declares. */
+    public static function cookieRoute(mixed $allowed, mixed $route): bool
+    {
+        if ($allowed || !is_string($route) || ($name = self::runName($route)) === null) {
+            return (bool) $allowed;
+        }
+
+        return self::clientOperation($name);
+    }
+
+    /** @var array<string, true> the operations the app's schema declares, by ability name */
+    private static array $client = [];
+
+    private static ?string $runRoute = null;
 
     /** Public view of one descriptor: what core receives, minus callbacks. */
     public static function describe(array $op): array
@@ -305,6 +566,8 @@ final class Register
             array_push($ops, ...self::global($app, $label, (string) $name, $global));
         }
         array_push($ops, ...self::media($app, $label));
+        // What the app's schema declares: the operations its typed client runs ({@see running()}).
+        self::$client = array_fill_keys(array_column($ops, 'name'), true);
         // Features add their own operations here (runtime schema changes: TypedPress\RuntimeSchema\Surfaces).
         $ops = apply_filters('tp_ability_operations', $ops, $app);
         if (($enqueue = Module::enqueuer()) !== null) {
@@ -335,7 +598,7 @@ final class Register
             } else {
                 $op['shape'] = [];
             }
-            $op['bodyShape'] = $op['op'] === 'update' && isset($first['collection']) ? $op['shape']['patch'] : $op['shape'];
+            $op['bodyShape'] = $op['op'] === 'update' && isset($first['collection']) ? ($op['shape']['patch'] ?? []) : $op['shape'];
         }
         unset($op);
 
@@ -352,7 +615,8 @@ final class Register
         $row = JsonSchema::row($spec);
         $pk = $spec['columns'][$spec['primaryKey']]['type'] === 'integer' ? ['type' => 'integer'] : ['type' => 'string'];
         $localized = (bool) ($spec['localized'] ?? false);
-        $locale = $localized ? ['locale' => ['type' => 'string', 'enum' => $locales]] : [];
+        // A read's `locale`: one of the app's, or `*` for every row.
+        $locale = $localized ? ['locale' => ['type' => 'string', 'enum' => [...$locales, '*']]] : [];
         // Virtual create inputs other features consume before column validation (§6.2, §7.3).
         $virtual = ($localized ? ['translationOf' => $pk] : []) + (($spec['auth'] ?? false) ? ['password' => ['type' => 'string']] : []);
         $with = ($spec['relations'] ?? []) !== [] || self::hasMedia($spec) ? ['with' => JsonSchema::with($spec)] : [];

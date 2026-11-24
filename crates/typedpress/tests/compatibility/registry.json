@@ -311,8 +311,8 @@
       "status": "refused",
       "code": "F4101",
       "fixture": "tests/fixtures/reject-access-query",
-      "message": "access rules can't query",
-      "guidance": "Return a row filter; put database effects in a hook or action."
+      "message": "access rules can't write to the database",
+      "guidance": "Access rules may run read-only `db.query.*` and `db.globals.*.get()` lookups, but writes belong in a hook or action."
     },
     {
       "id": "field-ui-width",

@@ -22,6 +22,12 @@ final class Navigation
         self::$used = true;
     }
 
+    /** Whether this page renders a router region the Interactivity router may swap a later page into. */
+    public static function active(): bool
+    {
+        return self::$used;
+    }
+
     public static function reset(): void
     {
         self::$used = false;

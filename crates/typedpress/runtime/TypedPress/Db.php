@@ -47,6 +47,15 @@ final class Db
     public static function setInstance(self $db): void
     {
         self::$instance = $db;
+        Access::clearCache();
+    }
+
+    /** Identity of the active Db instance (0 when none is bound), for Access cache scoping. */
+    public static function currentId(): int
+    {
+        $db = self::$current ?? self::$instance;
+
+        return $db !== null ? spl_object_id($db) : 0;
     }
 
     /**
@@ -148,7 +157,14 @@ final class Db
     /** Run $fn in one store transaction (joins an open one). Any throwable rolls back. */
     public function transaction(callable $fn): mixed
     {
-        return $this->current(fn () => $this->store->transaction($fn));
+        return $this->current(function () use ($fn): mixed {
+            try {
+                return $this->store->transaction($fn);
+            } catch (\Throwable $e) {
+                Access::clearCache();
+                throw $e;
+            }
+        });
     }
 
     /**
@@ -1021,7 +1037,7 @@ final class Db
             }
         }
         if ($viewer !== null) {
-            Access::require(Access::collectionRules($spec)['create'], $viewer, 'create', $data, "create $collection rows", $columns);
+            $this->current(fn () => Access::require(Access::collectionRules($spec)['create'], $viewer, 'create', $data, "create $collection rows", $columns));
         }
         $write = fn (): array => $this->persistCreate($collection, $spec, $data, $viewer);
 
@@ -1085,6 +1101,7 @@ final class Db
         } catch (\Throwable $e) {
             throw $this->store->mapError($e);
         }
+        Access::clearCache();
         [$row, $raw] = $this->readByPk($collection, $spec, $pk);
         $pkColumn = $spec['primaryKey'];
         $allocatedKey = ($columns[$pkColumn]['autoIncrement'] ?? false) && !array_key_exists($pkColumn, $insert);
@@ -1186,6 +1203,7 @@ final class Db
         } catch (\Throwable $e) {
             throw $this->store->mapError($e);
         }
+        Access::clearCache();
         [$row, $raw] = $this->readByPk($collection, $spec, $pkValue);
         $this->recordRevision($collection, $spec, $pkValue, $raw, 'update', $previous, $row);
         $this->hook($collection, $spec, 'afterUpdate', $row, $previous);
@@ -1252,6 +1270,7 @@ final class Db
                 } catch (\Throwable $e) {
                     throw $this->store->mapError($e);
                 }
+                Access::clearCache();
                 $row['deletedAt'] = $at;
                 $row['deletedBy'] = is_int($userId) ? $userId : null;
                 if (array_key_exists('deletedGroup', $row)) {
@@ -1277,6 +1296,7 @@ final class Db
             } catch (\Throwable $e) {
                 throw $this->store->mapError($e);
             }
+            Access::clearCache();
             $this->deleted[$collection][$pk] = ++$this->deleteSequence;
             $this->deletedRows[$collection][$pk] = $row;
             $this->hook($collection, $spec, 'afterDelete', $row);
@@ -1299,6 +1319,7 @@ final class Db
         } catch (\Throwable $e) {
             throw $this->store->mapError($e);
         }
+        Access::clearCache();
         if ($cascadeChildren && !$this->restoringGroup && $group !== null) {
             $this->restoreGroupChildren($collection, $pkValue, $group, $viewer);
         }
@@ -2648,6 +2669,7 @@ final class Db
                 $values[$field] = Schema::store($fields[$field], $v);
             }
             $this->store->globalWrite($name, $values);
+            Access::clearCache();
 
             return $this->globalGet($name);
         }));

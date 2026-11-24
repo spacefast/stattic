@@ -26,7 +26,8 @@ final class JsonSchema
     {
         $type = $col['type'];
         $s = match ($type) {
-            'integer' => ['type' => 'integer'],
+            // A `ref()` column: `with` loads the related row in its place.
+            'integer' => $output && isset($col['references']) ? ['type' => ['integer', 'string', 'object']] : ['type' => 'integer'],
             'real' => ['type' => 'number'],
             'text', 'richText' => ['type' => 'string'],
             // Input carries no `format`: core's run endpoint sanitizes by format (sanitize_url on
@@ -37,7 +38,9 @@ final class JsonSchema
             'boolean' => ['type' => 'boolean'],
             // REST also accepts epoch milliseconds and any date string TypedPress parses.
             'timestamp' => $output ? ['type' => 'string', 'format' => 'date-time'] : ['type' => ['string', 'integer']],
-            'date' => $output ? ['type' => 'string', 'format' => 'date'] : ['type' => 'string'],
+            // No `format: date`: `@wordpress/abilities` validates with ajv, which knows date-time, email,
+            // hostname, ipv4, ipv6, uri and uuid only, and refuses a schema naming any other format.
+            'date' => ['type' => 'string'],
             'json' => $col['shape'] ?? ['type' => self::ANY],
             'media', 'file' => $output ? ['type' => ['integer', 'object']] : ['type' => 'integer'],
             'mediaList' => ['type' => 'array', 'items' => $output ? ['type' => ['integer', 'object']] : ['type' => 'integer']],

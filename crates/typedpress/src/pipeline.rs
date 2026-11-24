@@ -352,6 +352,7 @@ pub fn build(
                 source,
                 shipped,
                 actions: analysis.server_actions.iter().cloned().collect(),
+                uploads: analysis.file_uploads.iter().cloned().collect(),
                 assets: analysis.assets.clone(),
                 live: !analysis.live.is_empty(),
             },
@@ -453,8 +454,8 @@ pub fn build(
         &program.app,
         &schema
             .collections
-            .iter()
-            .filter_map(|(name, c)| c.url.clone().map(|u| (name.clone(), u)))
+            .values()
+            .filter_map(|c| c.url.clone().map(|u| (c.key.clone(), u)))
             .collect::<Vec<_>>(),
     );
     let references = schema

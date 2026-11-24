@@ -1075,6 +1075,8 @@ pub struct Island {
     /// What the app plugin ships: `source` minified (`crate::minify`).
     pub shipped: String,
     pub actions: Vec<String>,
+    /// Private file buckets uploaded to via `uploadFile(bucket, file, opts?)`.
+    pub uploads: Vec<String>,
     /// Static assets imported by this client component, passed via `wp_interactivity_config`.
     pub assets: std::collections::BTreeMap<String, IslandAsset>,
     /// The store keeps `useLive` reads current: the page also loads `@typedpress/live`.

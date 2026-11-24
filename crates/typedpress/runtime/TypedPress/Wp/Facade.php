@@ -129,7 +129,10 @@ final class Facade
         add_filter('request', [self::class, 'decoded']);
         add_filter('rest_authentication_errors', [self::class, 'authenticate'], 1); // after AgentScope::booted()
         add_filter('rest_pre_serve_request', [self::class, 'served'], 100, 3);
-        add_filter('rest_allowed_cors_headers', static fn (array $headers, mixed $request = null): array => $request instanceof \WP_REST_Request && self::below((string) $request->get_route()) !== null
+        // The API's own headers, and the same on core's ability run route, where the typed client runs
+        // the app's actions (an Idempotency-Key, a TypedPress-Signature).
+        add_filter('rest_allowed_cors_headers', static fn (array $headers, mixed $request = null): array => $request instanceof \WP_REST_Request
+            && (self::below((string) $request->get_route()) !== null || preg_match('#^/wp-abilities/v1/abilities/.+/run/?$#', (string) $request->get_route()) === 1)
             ? array_merge($headers, ['Idempotency-Key', 'TypedPress-Signature']) : $headers, 10, 2);
     }
 
@@ -178,9 +181,15 @@ final class Facade
             if (!$result instanceof \WP_REST_Response || !$result->is_error()) {
                 return $served; // core's own answer: a preflight's route description
             }
-            $problem = \TypedPress\App::problem(self::fromWpError($result->as_error(), $result->get_status()));
+            $error = $result->as_error();
+            $problem = \TypedPress\App::problem(self::fromWpError($error, $result->get_status()));
             $form = self::formAction($request->get_method(), $path);
             $answer = $form !== null ? \TypedPress\Render\Forms::redirect($form, $request->get_body(), null, $problem) : self::problemAnswer($problem);
+            // Core refused an expired REST nonce: the problem keeps core's reason, so a page's client
+            // can get a new nonce and send the request again.
+            if ($form === null && $error->get_error_code() === 'rest_cookie_invalid_nonce') {
+                $answer[1]['TypedPress-Reason'] = 'rest_cookie_invalid_nonce';
+            }
         }
         [$status, $headers, $body] = $answer;
         status_header($status);
@@ -790,11 +799,15 @@ final class Facade
      * REST (at `init`; while plugins load under Polylang), so without application passwords, and its
      * REST server drops that visitor. Left alone, the next resolve is core's cookie check at priority
      * 100, after the outcome was read, and a refused password (wrong, suspended, out of scope) would
-     * go on as a visitor instead of answering its error. Other REST routes keep core's order.
+     * go on as a visitor instead of answering its error. The same holds on core's ability run route
+     * (`/wp-abilities/v1/abilities/<name>/run`), where the typed client runs the app's operations.
+     * Other REST routes keep core's order.
      */
     public static function authenticate(mixed $result): mixed
     {
-        if (self::path() !== null && isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])) {
+        $route = $GLOBALS['wp']->query_vars['rest_route'] ?? null;
+        $runs = is_string($route) && defined('REST_REQUEST') && REST_REQUEST && preg_match('#^/wp-abilities/v1/abilities/.+/run/?$#', $route) === 1;
+        if ((self::path() !== null || $runs) && isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])) {
             wp_get_current_user(); // a no-op when the request's user is already resolved
         }
 

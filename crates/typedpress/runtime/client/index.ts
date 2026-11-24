@@ -2,7 +2,13 @@
 // (interfaces) and `schema.ts` (the SCHEMA descriptor) in `tp/_generated/client/`. Do not edit the copy.
 //
 // No dependencies; `fetch`-based; erasable TypeScript only, so Node (type stripping), Bun, Deno and
-// bundlers run it as-is. Wire format: design §4.8 / §7.
+// bundlers run it as-is. A kind's list, get, create, update, delete, paginate and staged steps, an
+// action and a global are the app's WordPress Abilities, run through core's run route
+// (`/wp-json/wp-abilities/v1/abilities/<app>/<name>/run`). The app's own REST routes
+// (`/wp-json/typedpress/v1/…`) carry the rest: `count()` and subscriptions (`_live`), media,
+// revisions, soft-delete restore and purge, `auth.me()`, uploads, file streams, sign-in, the schema,
+// and every call on a kind that has no abilities (a taxonomy). On a WordPress page `createClient()` reads the site's REST root, the
+// app API's namespace and, for a signed-in visitor, the REST nonce the page prints for it.
 
 import { SCHEMA } from "./schema.ts";
 import type { Actions, Collections, Globals, Locale, Media, PrivateFile, RevisionDiff, RevisionSummary, Status, User } from "./types.ts";
@@ -279,7 +285,7 @@ export type Client = { readonly [K in CollectionKey]: CollectionClient<K> } & {
   readonly actions: ActionsClient;
   readonly globals: GlobalsClient;
   readonly auth: AuthClient;
-  /** `GET /wp-json/typedpress/v1`: the app's schema (kinds, fields, globals, actions), as `typedpress pull` reads it. */
+  /** `GET /wp-json/typedpress/v1`: the app's description (kinds, fields, globals, actions), as `typedpress pull` reads it. */
   schema(): Promise<unknown>;
 };
 
@@ -338,8 +344,27 @@ export function registerRealtimeTransport(transport: RealtimeTransport): void {
 }
 
 export interface ClientOptions {
-  /** Base URL including the API prefix: "https://x.test/wp-json/typedpress/v1". Default: `/wp-json/typedpress/v1` on the page's origin. */
+  /**
+   * The site's REST root: "https://x.test/wp-json" (or "https://x.test/?rest_route=" without pretty
+   * permalinks; WordPress names it in the `Link: <…>; rel="https://api.w.org/"` header of every page).
+   * The app's API URL ("https://x.test/wp-json/typedpress/v1") is accepted too, and a site URL without
+   * either is taken as its `/wp-json`. Default: the root a TypedPress page names for the client, else
+   * `/wp-json` on the page's origin.
+   */
   url?: string;
+  /**
+   * The app API's route below the REST root, when the site serves it somewhere other than
+   * `/typedpress/v1` (`sp_api_namespace`). With it, `url` is taken as the REST root as given, so a
+   * site with another REST prefix (`https://x.test/api`) works too. A TypedPress page names both.
+   */
+  api?: string;
+  /**
+   * Use what a WordPress page prints for the client (`wp-script-module-data-@typedpress/client`): its
+   * REST root and the app API's namespace (unless `url` is given), and a signed-in visitor's REST
+   * nonce (unless `fetch`, `headers`, `nonce` or `auth` brings another credential; `true` uses it
+   * anyway). Default: on; `false` ignores the page.
+   */
+  wordpress?: boolean;
   /** WordPress cookie auth: the REST nonce; sent as `X-WP-Nonce` with `credentials: "same-origin"`. */
   nonce?: string;
   fetch?: typeof fetch;
@@ -498,6 +523,115 @@ function liveArgs(q: Json | undefined): Json {
 
 const seg = (v: string | number) => encodeURIComponent(String(v));
 
+/** A GET or DELETE ability's input, as core's run route reads it: `?input=<JSON>` (Abilities\Register::jsonInput). */
+function inputQuery(input: Json): URLSearchParams | undefined {
+  return Object.keys(input).length === 0 ? undefined : new URLSearchParams({ input: JSON.stringify(input) });
+}
+
+/** The opaque cursor of the page that starts at `offset`: the same `{ offset }` the server's paginate issues. */
+function encodeCursor(offset: number): string {
+  return btoa(JSON.stringify({ offset })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeCursor(cursor: string): number {
+  try {
+    // Only the token the server issues: `{"offset":<digits>}`. `1e2` or `1.0` decode to integers in
+    // JavaScript, but the server refuses them, so the client does too.
+    const text = atob(cursor.replace(/-/g, "+").replace(/_/g, "/"));
+    const m = /^\{"offset":([1-9][0-9]{0,14})\}$/.exec(text);
+    if (m) return Number(m[1]);
+  } catch {
+    // refused below
+  }
+  throw invalidQuery("cursor is not one paginate() returned", "/cursor");
+}
+
+/** A page argument refused before anything is sent, as the app API refuses it. */
+function invalidQuery(detail: string, pointer: string): TypedPressError {
+  return new TypedPressError({ type: "about:blank", title: "Invalid query", status: 400, code: "invalid_query", detail, pointer });
+}
+
+/** The app's API namespace under the REST root when `url` names none (a host may serve it elsewhere: `sp_api_namespace`). */
+const DEFAULT_API = "/typedpress/v1";
+
+/**
+ * `url` as the REST root and the app's API route below it (TypedPress's own routes: uploads, files,
+ * `_live`, sign-in). `…/wp-json` and `…?rest_route=` are roots; a route after either
+ * (`…/wp-json/typedpress/v1`, the app's API URL) names the API; a URL ending in the default API
+ * namespace is that API on a custom REST prefix; any other URL is a site, whose root is `/wp-json`.
+ */
+function endpoints(url: string): { root: string; api: string } {
+  const [path, search = ""] = url.split(/\?(.*)/s, 2);
+  const trimmed = path.replace(/\/+$/, "");
+  const suffix = search ? `?${search}` : "";
+  const params = new URLSearchParams(search);
+  const restRoute = params.get("rest_route");
+  if (restRoute !== null) {
+    const route = restRoute.replace(/^\/*/, "/").replace(/\/+$/, "");
+    params.set("rest_route", "");
+    return { root: `${path}?${params}`, api: route || DEFAULT_API };
+  }
+  const prefix = /\/wp-json(?=\/|$)/.exec(trimmed);
+  if (prefix) {
+    const split = prefix.index + "/wp-json".length;
+    const route = trimmed.slice(split).replace(/^\/*/, "/").replace(/\/+$/, "");
+    return { root: trimmed.slice(0, split) + suffix, api: route || DEFAULT_API };
+  }
+  if (trimmed.endsWith(DEFAULT_API)) return { root: trimmed.slice(0, -DEFAULT_API.length) + suffix, api: DEFAULT_API };
+  return { root: `${trimmed}/wp-json` + suffix, api: DEFAULT_API };
+}
+
+/**
+ * `root` + `/route?query`. Under `?rest_route=` the route is that parameter's value (after any prefix
+ * it already has), set by name so the root's other parameters (`&lang=de`) keep theirs, and the
+ * route's own query follows with `&`.
+ */
+function restUrl(root: string, route: string, query?: string): string {
+  const [path, search = ""] = root.split(/\?(.*)/s, 2);
+  const params = new URLSearchParams(search);
+  const restRoute = params.get("rest_route");
+  if (restRoute !== null) {
+    params.set("rest_route", restRoute.replace(/\/+$/, "") + route);
+    return `${path}?${params}${query ? `&${query}` : ""}`;
+  }
+  const suffix = [search, query].filter(Boolean).join("&");
+  return path.replace(/\/+$/, "") + route + (suffix ? `?${suffix}` : "");
+}
+
+/**
+ * What a TypedPress page prints for the client (`TypedPress\Islands::clientData`): the REST root as a
+ * path on the site, the app API's namespace, and a signed-in visitor's REST nonce. A signed-out page
+ * (cached, prebuilt, exported) has no nonce. Read once per client.
+ */
+interface PageData {
+  root?: string;
+  api?: string;
+  nonce?: string;
+  nonceEndpoint?: string;
+  /** Proof that the nonce belongs to the WordPress login session that rendered the page. */
+  nonceSession?: string;
+}
+function pageData(): PageData | null {
+  // The script element WordPress prints, by tag and type as well as id: post content may carry an
+  // element with the same id (kses allows `id`), which getElementById would find first.
+  const doc = (globalThis as { document?: { querySelector(selector: string): { textContent: string | null } | null } }).document;
+  const text = doc?.querySelector?.('script[type="application/json"][id="wp-script-module-data-@typedpress/client"]')?.textContent;
+  if (!text) return null;
+  try {
+    const v: unknown = JSON.parse(text);
+    return isObject(v) ? (v as PageData) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How core's run route takes an ability: GET when readonly, DELETE when destructive and idempotent, else POST. */
+interface Annotations {
+  readonly?: boolean;
+  destructive?: boolean;
+  idempotent?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -510,6 +644,8 @@ interface Send {
   anonymous?: boolean;
   /** Return the whole `{ data, cursor }` envelope of a list instead of `data`. */
   envelope?: boolean;
+  /** The answer is the route's own JSON (an ability's output), not a TypedPress `{ data }` envelope. */
+  raw?: boolean;
 }
 
 /** What `auth.session()` exposes, plus what refresh and sign-out need. Stored as JSON under `typedpress.auth:<base>`. */
@@ -569,7 +705,22 @@ function authError(status: number, code: string, detail: string): TypedPressErro
 const refreshes = new Map<string, Promise<boolean>>();
 
 export function createClient(options: ClientOptions = {}): Client {
+  // Where the client calls: `url` when given; else, on a TypedPress page, the REST root and API
+  // namespace the page prints for it (whatever credential the client brings: `auth`, `headers`).
+  const site = options.wordpress === false || options.url !== undefined ? null : pageData();
+  const pageRoot = typeof site?.root === "string" && site.root !== "" ? site.root : null;
+  const given = options.api !== undefined && options.url !== undefined ? { root: options.url, api: "/" + options.api.replace(/^\/+|\/+$/g, "") } : null;
+  const resolved = given ?? endpoints(options.url ?? "/wp-json");
+  const root = pageRoot ?? resolved.root;
+  const API = options.api !== undefined ? "/" + options.api.replace(/^\/+|\/+$/g, "") : typeof site?.api === "string" && site.api.startsWith("/") ? site.api : resolved.api;
+  // The page's own REST nonce only for a client that brings no credential of its own;
+  // `wordpress: true` asks for it explicitly.
+  const cookie = site !== null && (options.wordpress === true || (options.fetch === undefined && options.headers === undefined && options.nonce === undefined && options.auth === undefined));
+  let nonce = options.nonce ?? (cookie ? site?.nonce : undefined);
+  const pageNonce = cookie && options.nonce === undefined;
+  // Session storage is keyed as before the client ran abilities: by `url`, else the default API URL.
   const base = (options.url ?? "/wp-json/typedpress/v1").replace(/\/+$/, "");
+  const app: string = SCHEMA.app;
   const authOpts = options.auth ?? {};
   const doFetch = (input: string, init: RequestInit) => (options.fetch ?? globalThis.fetch)(input, init);
 
@@ -638,12 +789,16 @@ export function createClient(options: ClientOptions = {}): Client {
     }
   }
 
+  /** One REST request: `route` below the REST root (`/typedpress/v1/me`, `/wp-abilities/v1/…`). */
   async function request<T>(method: string, path: string, send: Send = {}, retried = false): Promise<T> {
-    const headers: Record<string, string> = {};
+    const qs = send.query?.toString();
+    const headers: Record<string, string> = { accept: "application/json" };
     const tokens = send.anonymous ? null : held();
     const started = currentSid();
     if (tokens) headers.authorization = `Bearer ${tokens.accessToken}`;
-    if (options.nonce !== undefined) headers["x-wp-nonce"] = options.nonce;
+    // A held Bearer authenticates on its own. An explicit nonce is sent as given.
+    const sendNonce = nonce !== undefined && (options.nonce !== undefined || !tokens);
+    if (sendNonce && nonce !== undefined) headers["x-wp-nonce"] = nonce;
     let body: string | FormData | undefined;
     if (send.form) body = send.form;
     else if (send.json !== undefined) {
@@ -652,16 +807,34 @@ export function createClient(options: ClientOptions = {}): Client {
     }
     for (const [k, v] of Object.entries(options.headers ?? {})) headers[k.toLowerCase()] = v;
 
-    const qs = send.query?.toString();
     const init: RequestInit = { method, headers, body };
-    if (options.nonce !== undefined) init.credentials = "same-origin";
-    const { res, parsed } = await call(base + path + (qs ? `?${qs}` : ""), init, `${method} ${path}`);
-    if (res.ok) {
-      if (!isObject(parsed) || !("data" in parsed)) throw networkError(`${method} ${path}: response has no data`);
-      return (send.envelope ? { rows: parsed.data, cursor: parsed.cursor ?? null } : parsed.data) as T;
+    if (sendNonce) init.credentials = "same-origin";
+    else if (tokens) init.credentials = "omit";
+    const sentPageNonce = pageNonce && sendNonce && headers["x-wp-nonce"] === nonce;
+    const address = restUrl(root, path, qs);
+    const label = `${method} ${path}`;
+    let { res, parsed } = await call(address, init, label);
+    // The app API puts WordPress's nonce error code in a header.
+    const expired = res.status === 403 && (
+      (isObject(parsed) && parsed.code === "rest_cookie_invalid_nonce") || res.headers?.get("typedpress-reason") === "rest_cookie_invalid_nonce"
+    );
+    if (expired && sentPageNonce && !retried && currentSid() === started) {
+      const fresh = await freshNonce();
+      if (fresh !== null && currentSid() === started) {
+        nonce = fresh;
+        headers["x-wp-nonce"] = fresh;
+        ({ res, parsed } = await call(address, init, label));
+        retried = true;
+      }
     }
+    // Core sends a fresh nonce with every cookie-authenticated answer: keep it for the next request.
+    const renewed = sentPageNonce ? res.headers?.get("x-wp-nonce") : null;
+    if (renewed) nonce = renewed;
+    if (res.ok) return unwrapped<T>(parsed, send, label);
     const error = toError(res, parsed);
-    if (error.status === 401 && error.code === "unauthenticated" && !send.anonymous && !retried) {
+    // `unauthenticated` from the app API; Identity's own `invalid_token` from any other REST route
+    // (core's ability run route), for a Bearer that has expired.
+    if (error.status === 401 && (error.code === "unauthenticated" || error.code === "invalid_token") && !send.anonymous && !retried) {
       // Only a 401 for the Bearer this client holds is ours to repair, and only for the identity
       // that sent it: after a sign-in or sign-out in between, the request fails as it was sent.
       if (tokens && headers.authorization === `Bearer ${tokens.accessToken}`) {
@@ -677,6 +850,49 @@ export function createClient(options: ClientOptions = {}): Client {
       }
     }
     throw error;
+  }
+
+  /** The server issues a fresh nonce only while the page's WordPress login session is active. */
+  async function freshNonce(): Promise<string | null> {
+    const endpoint = site?.nonceEndpoint;
+    const session = site?.nonceSession;
+    if (typeof endpoint !== "string" || typeof session !== "string") return null;
+    try {
+      const res = await doFetch(endpoint, {
+        credentials: "same-origin",
+        mode: "same-origin",
+        cache: "no-store",
+        headers: { "x-typedpress-rest-session": session },
+      });
+      if (res.status === 409) throw authError(409, "session_changed", "The WordPress login session changed. Reload the page.");
+      const text = res.ok ? (await res.text()).trim() : "";
+      return /^[a-z0-9]{10}$/i.test(text) ? text : null;
+    } catch (error) {
+      if (error instanceof TypedPressError) throw error;
+      return null;
+    }
+  }
+
+  /** A route's answer: an ability's own output, or TypedPress's `{ data }` envelope. */
+  function unwrapped<T>(parsed: unknown, send: Send, label: string): T {
+    if (send.raw) return (parsed === undefined ? null : parsed) as T;
+    if (!isObject(parsed) || !("data" in parsed)) throw networkError(`${label}: response has no data`);
+    return (send.envelope ? { rows: parsed.data, cursor: parsed.cursor ?? null } : parsed.data) as T;
+  }
+
+  /**
+   * Runs the app's ability `<app>/<name>` with `input` at core's run route, with the method its
+   * annotations ask for. The server checks its input schema, its permission and its output, and
+   * answers TypedPress's own errors (with their pointer). `@wordpress/abilities` is not used: its
+   * browser-side schema check refuses values the server accepts (a URL with `[]` or `|`), and its
+   * GET encoding drops `null`, `[]` and `{}`.
+   */
+  async function ability<T>(name: string, input: Json, annotations: Annotations = {}): Promise<T> {
+    const full = `${app}/${name}`;
+    const route = `/wp-abilities/v1/abilities/${full}/run`;
+    const method = annotations.readonly ? "GET" : annotations.destructive && annotations.idempotent ? "DELETE" : "POST";
+    if (method === "POST") return request<T>("POST", route, { json: { input }, raw: true });
+    return request<T>(method, route, { query: inputQuery(input), raw: true });
   }
 
   // One refresh at a time across every client on the same storage: refresh tokens rotate, and
@@ -747,7 +963,7 @@ export function createClient(options: ClientOptions = {}): Client {
   function startGuest(from: string): Promise<User> {
     const existing = guestings.get(from);
     if (existing) return existing;
-    const started: Promise<User> = request<Issued>("POST", "/auth/guest", { json: {}, anonymous: true })
+    const started: Promise<User> = request<Issued>("POST", `${API}/auth/guest`, { json: {}, anonymous: true })
       .then((out) => {
         const user = adopt(out, from);
         guestFromSid = from;
@@ -764,7 +980,7 @@ export function createClient(options: ClientOptions = {}): Client {
   let issuerUrl: string | undefined = authOpts.issuer?.replace(/\/+$/, "");
   async function issuer(): Promise<string> {
     if (issuerUrl === undefined) {
-      const config = await request<{ issuer: string | null }>("GET", "/auth/config", { anonymous: true });
+      const config = await request<{ issuer: string | null }>("GET", `${API}/auth/config`, { anonymous: true });
       if (typeof config.issuer !== "string") throw authError(400, "not_supported", "This app has no sign-in issuer");
       issuerUrl = config.issuer.replace(/\/+$/, "");
     }
@@ -869,7 +1085,10 @@ export function createClient(options: ClientOptions = {}): Client {
       const { handoff } = await issuerPost<{ handoff: string }>("/handoff", {}, current.accessToken);
       return redirectToIssuer(undefined, { handoff });
     },
-    me: () => request<User | null>("GET", "/me"),
+    // An app built before `<app>/me` was the signed-in user may have its own `me` action; its
+    // `auth.me()` reads the app API's `/me` instead.
+    // The app API's `/me`: the user with their member row's fields on it, as before abilities.
+    me: () => request<User | null>("GET", `${API}/me`),
     async signOut(opts = {}) {
       const current = held();
       const from = currentSid();
@@ -1139,7 +1358,7 @@ export function createClient(options: ClientOptions = {}): Client {
             s.sent = number;
           }
           try {
-            const out = await request<{ results?: unknown[]; poll?: { minMs?: unknown; maxMs?: unknown } }>("POST", "/_live", {
+            const out = await request<{ results?: unknown[]; poll?: { minMs?: unknown; maxMs?: unknown } }>("POST", `${API}/_live`, {
               json: { queries: batch.map(([, s]) => (s.token === undefined ? s.descriptor : { ...s.descriptor, token: s.token })) },
             });
             // Sent as a visitor who has since signed in or out: the new visitor's request is already due.
@@ -1319,7 +1538,7 @@ export function createClient(options: ClientOptions = {}): Client {
   }
   /** One answer to one read through `/_live`, for reads with no route of their own. */
   async function once<T>(descriptor: ReadCall): Promise<T> {
-    const out = await request<{ results?: unknown[] }>("POST", "/_live", { json: { queries: [descriptor] } });
+    const out = await request<{ results?: unknown[] }>("POST", `${API}/_live`, { json: { queries: [descriptor] } });
     const result = out.results?.[0];
     if (isObject(result) && isObject(result.error)) throw toError(new Response(null, { status: typeof result.error.status === "number" && result.error.status >= 400 ? result.error.status : 500 }), result.error);
     if (!isObject(result) || !("data" in result)) throw networkError("POST /_live: the answer has no result");
@@ -1350,45 +1569,82 @@ export function createClient(options: ClientOptions = {}): Client {
     return read as Query<T>;
   }
 
-  /** A DELETE's write conditions travel in its query: `?_rev=…&takeover=1`. */
-  function conditions(options?: WriteConditions): URLSearchParams | undefined {
-    if (!options) return undefined;
-    const query = new URLSearchParams();
-    if (options._rev !== undefined) query.set("_rev", options._rev);
-    if (options.takeover) query.set("takeover", "1");
-    return query;
+  /** A write's conditions (`_rev`, `takeover`) as ability input. */
+  function conditions(options?: WriteConditions): Json {
+    const out: Json = {};
+    if (options?._rev !== undefined) out._rev = options._rev;
+    if (options?.takeover) out.takeover = true;
+    return out;
   }
 
+  /** A patch with its write conditions taken out: `{ patch, _rev?, takeover? }` as the update ability takes it. */
+  function patchInput(id: string | number, patch: unknown): Json {
+    const { _rev, takeover, ...fields } = (isObject(patch) ? patch : {}) as Json & WriteConditions;
+    return { id, patch: fields, ...conditions({ _rev, takeover }) };
+  }
+
+  const readonly: Annotations = { readonly: true, idempotent: true };
+  const destructive: Annotations = { destructive: true };
+
   function collection(key: CollectionKey) {
-    const desc: { path: string } = SCHEMA.collections[key];
-    const path = `/${seg(desc.path)}`;
+    const desc: { path: string; ability?: string } = SCHEMA.collections[key];
+    // The kind's own REST routes, for what has no ability: soft-delete restore and purge, a revision
+    // diff, and every operation of a kind without abilities (a taxonomy).
+    const path = `${API}/${seg(desc.path)}`;
     const one = (id: string | number) => `${path}/${seg(id)}`;
+    const kind = desc.ability;
+    const op = (suffix: string) => `${kind}-${suffix}`;
     const reads = (q: Json | undefined) => dependencies(key, q?.with, q?.where);
-    const list = (q?: Json) => query({ kind: key, op: "list", args: liveArgs(q) }, reads(q), () => request("GET", path, { query: listParams(q) }));
-    const paginate = (q?: Json) =>
-      // A subscribed page is reached by `cursor`: the endpoint's paginate takes no `offset`.
-      query({ kind: key, op: "paginate", args: liveArgs(q && { ...q, offset: undefined }) }, reads(q), () => {
-        const params = listParams(q);
-        if (typeof q?.cursor === "string") params.set("cursor", q.cursor);
-        return request("GET", path, { query: params, envelope: true });
-      }, typeof q?.offset === "number" ? "paginate({ offset }) can be awaited but not subscribed to: page by cursor" : undefined, typeof q?.offset === "number" ? { offset: q.offset } : undefined);
+    // A read's input is the subscription's: `status` folded into `where`, `orderBy` as an object (liveArgs).
+    const rows = async (q: Json | undefined) => (await ability<{ rows: unknown[] }>(op("list"), liveArgs(q), readonly)).rows;
+    // At most 100 rows, as a subscribed list and the app API's lists answer (the ability allows 200).
+    const capped = (q: Json | undefined) => (typeof q?.limit === "number" && q.limit > 100 ? { ...q, limit: 100 } : q);
+    const list = (q?: Json) =>
+      query({ kind: key, op: "list", args: liveArgs(q) }, reads(q), () => (kind === undefined ? request("GET", path, { query: listParams(q) }) : rows(capped(q))));
+    const paginate = (q?: Json) => {
+      const run = async () => {
+        if (kind === undefined) {
+          const params = listParams(q);
+          if (typeof q?.cursor === "string") params.set("cursor", q.cursor);
+          return request("GET", path, { query: params, envelope: true });
+        }
+        // One row past the page says whether another follows; the cursor is the next page's offset.
+        // A page's arguments are refused as the app API refuses them: 400 invalid_query.
+        if (q?.limit !== undefined && !(Number.isInteger(q.limit) && (q.limit as number) >= 1)) throw invalidQuery("limit must be a positive integer", "/limit");
+        if (q?.offset !== undefined && !(Number.isInteger(q.offset) && (q.offset as number) >= 0)) throw invalidQuery("offset must be a non-negative integer", "/offset");
+        const limit = Math.min(typeof q?.limit === "number" ? q.limit : 50, 100);
+        const offset = typeof q?.cursor === "string" ? decodeCursor(q.cursor) : typeof q?.offset === "number" ? q.offset : 0;
+        const page = await rows({ ...(q ?? {}), cursor: undefined, offset, limit: limit + 1 });
+        return { rows: page.slice(0, limit), cursor: page.length > limit ? encodeCursor(offset + limit) : null };
+      };
+      // A subscribed page is reached by `cursor`: the subscription's paginate takes no `offset`.
+      return query({ kind: key, op: "paginate", args: liveArgs(q && { ...q, offset: undefined }) }, reads(q), run,
+        typeof q?.offset === "number" ? "paginate({ offset }) can be awaited but not subscribed to: page by cursor" : undefined, typeof q?.offset === "number" ? { offset: q.offset } : undefined);
+    };
+    const getOne = (id: string | number, q?: Json) =>
+      kind === undefined
+        ? request("GET", one(id), { query: listParams(q ? { with: q.with, locale: q.locale } : undefined) })
+        : ability(op("get"), { id, ...liveArgs(q ? { with: q.with, locale: q.locale } : undefined) }, readonly);
     return {
       list,
       paginate,
       watch: (q: Json | undefined, onRows: (rows: unknown) => void, onError?: (error: TypedPressError) => void) => list(q).subscribe(onRows, onError),
       get: (id: string | number, q?: Json) =>
-        query({ kind: key, op: "get", id, args: liveArgs(q ? { with: q.with, locale: q.locale } : undefined) }, reads(q), () =>
-          request("GET", one(id), { query: listParams(q ? { with: q.with, locale: q.locale } : undefined) }),
-        ),
+        query({ kind: key, op: "get", id, args: liveArgs(q ? { with: q.with, locale: q.locale } : undefined) }, reads(q), () => getOne(id, q)),
       count: (q?: Json) => {
         const descriptor: ReadCall = { kind: key, op: "count", args: liveArgs(q ? { where: q.where, status: q.status, locale: q.locale } : undefined) };
         return query<number>(descriptor, dependencies(key, undefined, q?.where), () => once(descriptor));
       },
-      create: (data: unknown) => wrote(request("POST", path, { json: data }), key),
-      update: (id: string | number, patch: unknown) => wrote(request("PATCH", one(id), { json: patch }), key),
-      delete: (id: string | number, options?: WriteConditions) => wrote(request("DELETE", one(id), { query: conditions(options) }), key),
+      create: (data: unknown) =>
+        wrote(kind === undefined ? request("POST", path, { json: data }) : ability(op("create"), isObject(data) ? data : {}), key),
+      update: (id: string | number, patch: unknown) =>
+        wrote(kind === undefined ? request("PATCH", one(id), { json: patch }) : ability(op("update"), patchInput(id, patch)), key),
+      delete: (id: string | number, options?: WriteConditions) =>
+        wrote(kind === undefined ? request("DELETE", one(id)) : ability(op("delete"), { id, ...conditions(options) }, destructive), key),
       restore: (id: string | number) => wrote(request("POST", `${one(id)}/restore`), key),
       purge: (id: string | number) => wrote(request("DELETE", `${one(id)}/purge`), key),
+      // Revisions on the app API's routes, which page them, guard a restore against another editor's
+      // lock (`_rev`) and read each one as this viewer may.
       revisions: {
         // Every revision, newest first: the API pages them ({ data, cursor }), this follows the cursor.
         list: async (id: string | number) => {
@@ -1408,58 +1664,59 @@ export function createClient(options: ClientOptions = {}): Client {
           request("GET", `${one(id)}/revisions/diff`, { query: new URLSearchParams({ from: String(from), to: String(to) }) }),
         restore: (id: string | number, rid: number) => wrote(request("POST", `${one(id)}/revisions/${seg(rid)}/restore`), key),
       },
-      stage: (id: string | number, patch: unknown) => request("PATCH", `${one(id)}/staged`, { json: patch }),
-      staged: (id: string | number) => request("GET", `${one(id)}/staged`),
-      compare: (id: string | number) => request("GET", `${one(id)}/staged/compare`),
-      promote: (id: string | number, options?: { at?: string | null } & WriteConditions) => request("POST", `${one(id)}/staged/promote`, { json: options ?? {} }),
-      discard: (id: string | number, options?: WriteConditions) => request("DELETE", `${one(id)}/staged`, { query: conditions(options) }),
-      previewLink: (id: string | number, options?: { ttl?: number }) => request("POST", `${one(id)}/staged/preview`, { json: options ?? {} }),
+      stage: (id: string | number, patch: unknown) => ability(op("stage"), patchInput(id, patch)),
+      staged: (id: string | number) => ability(op("staged-get"), { id }, readonly),
+      compare: (id: string | number) => ability(op("staged-compare"), { id }, readonly),
+      promote: (id: string | number, options?: { at?: string | null } & WriteConditions) =>
+        wrote(ability(op("staged-promote"), { id, ...(options && "at" in options ? { at: options.at } : {}), ...conditions(options) }), key),
+      discard: (id: string | number, options?: WriteConditions) => ability(op("staged-discard"), { id, ...conditions(options) }),
+      previewLink: (id: string | number, options?: { ttl?: number }) => ability(op("staged-preview"), { id, ...(options?.ttl !== undefined ? { ttl: options.ttl } : {}) }),
     };
   }
 
+  /** A multipart upload to one of TypedPress's REST routes (abilities carry no files). */
+  const upload = (route: string, file: Blob, fields: Record<string, string>, filename?: string) => {
+    const form = new FormData();
+    form.append("file", file, filename ?? ("name" in file && typeof file.name === "string" ? file.name : "upload"));
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    return request("POST", route, { form });
+  };
+
   const client: Json = {
+    // Media on the app API's routes, which read each item as WordPress lets this viewer see it
+    // (an attachment of a draft only for those who may read the draft).
     media: {
-      list: (q?: Json) => request("GET", "/media", { query: listParams(q) }),
-      get: (id: number) => request("GET", `/media/${seg(id)}`),
-      upload(file: Blob, opts: { alt?: string; filename?: string } = {}) {
-        const form = new FormData();
-        const name = opts.filename ?? ("name" in file && typeof file.name === "string" ? file.name : "upload");
-        form.append("file", file, name);
-        if (opts.alt !== undefined) form.append("alt", opts.alt);
-        return request("POST", "/media", { form });
-      },
-      update: (id: number, patch: unknown) => request("PATCH", `/media/${seg(id)}`, { json: patch }),
-      delete: (id: number) => request("DELETE", `/media/${seg(id)}`),
+      list: (q?: Json) => request("GET", `${API}/media`, { query: listParams(q) }),
+      get: (id: number) => request("GET", `${API}/media/${seg(id)}`),
+      upload: (file: Blob, opts: { alt?: string; filename?: string } = {}) => upload(`${API}/media`, file, opts.alt !== undefined ? { alt: opts.alt } : {}, opts.filename),
+      update: (id: number, patch: unknown) => request("PATCH", `${API}/media/${seg(id)}`, { json: patch }),
+      delete: (id: number) => request("DELETE", `${API}/media/${seg(id)}`),
     },
     files: Object.fromEntries(
       SCHEMA.buckets.map((bucket: string) => [
         bucket,
         {
-          upload(file: Blob, opts: { filename?: string } = {}) {
-            const form = new FormData();
-            form.append("file", file, opts.filename ?? ("name" in file && typeof file.name === "string" ? file.name : "upload"));
-            return request("POST", `/files/${seg(bucket)}`, { form });
-          },
-          get: (id: number) => request("GET", `/files/${seg(bucket)}/${seg(id)}`),
-          delete: (id: number) => request("DELETE", `/files/${seg(bucket)}/${seg(id)}`),
+          upload: (file: Blob, opts: { filename?: string } = {}) => upload(`${API}/files/${seg(bucket)}`, file, {}, opts.filename),
+          get: (id: number) => request("GET", `${API}/files/${seg(bucket)}/${seg(id)}`),
+          delete: (id: number) => request("DELETE", `${API}/files/${seg(bucket)}/${seg(id)}`),
         },
       ]),
     ),
     actions: Object.fromEntries(
       // An action may write any kind: every subscribed read is asked for once it returns.
-      SCHEMA.actions.map((name: string) => [name, (input?: unknown) => wrote(request("POST", `/actions/${seg(name)}`, { json: input ?? {} }))]),
+      SCHEMA.actions.map((name: string) => {
+        const meta: { ability: string } & Annotations = (SCHEMA.abilities.actions as Record<string, { ability: string } & Annotations>)[name];
+        return [name, (input?: unknown) => wrote(ability(meta.ability, isObject(input) ? input : {}, meta))];
+      }),
     ),
     globals: Object.fromEntries(
-      SCHEMA.globals.map((name: string) => [
-        name,
-        {
-          get: () => request("GET", `/${seg(name)}`),
-          update: (patch: unknown) => request("PATCH", `/${seg(name)}`, { json: patch }),
-        },
-      ]),
+      SCHEMA.globals.map((name: string) => {
+        const k: string = (SCHEMA.abilities.globals as Record<string, string>)[name];
+        return [name, { get: () => ability(`global-${k}-get`, {}, readonly), update: (patch: unknown) => ability(`global-${k}-update`, isObject(patch) ? patch : {}) }];
+      }),
     ),
     auth,
-    schema: () => request("GET", ""),
+    schema: () => request("GET", API),
   };
   for (const key of Object.keys(SCHEMA.collections)) client[key] = collection(key as CollectionKey);
   hubs.set(client, realtime);
@@ -1560,8 +1817,66 @@ function dependencies(key: string, w: unknown, where?: unknown, seen = new Set<s
   return [...seen];
 }
 
+/** WordPress's error codes as the client's: the status and code callers already handle. */
+function wordPressError(wpCode: string, message: string, givenStatus: number, body: Json, data: Json): TypedPressError {
+  // TypedPress's own errors travel through core as `tp_<code>`, with their status and pointer.
+  let code = wpCode.startsWith("tp_") ? wpCode.slice(3) : wpCode;
+  let status = givenStatus;
+  switch (code) {
+    // Core answers 401 to a caller it doesn't know and 403 to one it does (rest_authorization_required_code).
+    case "ability_permission_denied":
+    case "ability_invalid_permissions":
+    case "rest_ability_cannot_execute":
+    case "rest_forbidden":
+    case "rest_cannot_create":
+    case "rest_cannot_edit":
+    case "rest_cannot_delete":
+    case "rest_cannot_read":
+      code = status === 401 ? "unauthenticated" : "forbidden";
+      status = code === "unauthenticated" ? 401 : 403;
+      break;
+    case "ability_invalid_input":
+    case "rest_invalid_param":
+    case "rest_missing_callback_param":
+      code = "invalid_input";
+      status = status && status !== 400 ? status : 422;
+      break;
+    case "rest_ability_not_found":
+    case "rest_no_route":
+    case "rest_post_invalid_id":
+      code = "not_found";
+      status = 404;
+      break;
+    case "rest_ability_invalid_method":
+    case "rest_no_route_method":
+      code = "method_not_allowed";
+      status = 405;
+      break;
+    case "rest_cookie_invalid_nonce":
+      code = "forbidden";
+      status = 403;
+      break;
+    default:
+      if (code === "") code = status ? "http_error" : "error";
+  }
+  const pointer = typeof data.pointer === "string" ? data.pointer : typeof body.pointer === "string" ? body.pointer : undefined;
+  return new TypedPressError({
+    type: typeof body.type === "string" ? body.type : "about:blank",
+    title: typeof body.title === "string" ? body.title : code,
+    status: status || 500,
+    code,
+    detail: message,
+    ...(pointer !== undefined ? { pointer } : {}),
+  });
+}
+
 /** Problem documents map field by field; WordPress core errors (`{ code, message, data: { status } }`) are mapped onto the same shape. */
 function toError(res: Response, body: unknown): TypedPressError {
+  // A WordPress error (`{ code, message, data }`, no `detail`): core's codes as the client's.
+  if (isObject(body) && typeof body.code === "string" && typeof body.detail !== "string" && typeof body.message === "string") {
+    const data = isObject(body.data) ? body.data : {};
+    return wordPressError(body.code, body.message, typeof data.status === "number" ? data.status : res.status, body, data);
+  }
   if (isObject(body) && typeof body.code === "string") {
     const detail = typeof body.detail === "string" ? body.detail : typeof body.message === "string" ? body.message : res.statusText;
     return new TypedPressError({

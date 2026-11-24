@@ -110,8 +110,9 @@ final class Live
 
     /**
      * On a page with a `<Live>` region: the browser module, which imports the app's typed client
-     * (`@typedpress/client`) and loads the Interactivity router when an answer changed. A signed-in
-     * visitor's reads carry the REST nonce; a signed-out page carries none and stays cacheable.
+     * (`@typedpress/client`) and loads the Interactivity router when an answer changed. The client
+     * reads the REST root and a signed-in visitor's nonce the page prints for it; a signed-out page
+     * carries none and stays cacheable ({@see \TypedPress\Islands::clientData()}).
      */
     public static function enqueue(): void
     {
@@ -124,7 +125,7 @@ final class Live
             ['id' => '@wordpress/interactivity-router', 'import' => 'dynamic'],
         ], null);
         wp_enqueue_script_module('typedpress-live-region');
-        wp_interactivity_config('tp/live', ['nonce' => is_user_logged_in() ? wp_create_nonce('wp_rest') : '']);
+        \TypedPress\Islands::useClient();
         // The region the router swaps: the page's main region, processed as Navigation does.
         Navigation::used();
     }

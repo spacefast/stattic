@@ -72,7 +72,7 @@ final class Runner
                         $fn = '\\TypedPressApp\\' . $spec['handler'];
                         $input = \TypedPress\Seam::toJs(is_array($input) ? $input : [], $spec['input'] ?? []);
                         $ctx = \TypedPress\Seam::ctx($ctx);
-                        \TypedPress\Timers::run(static fn (): mixed => $fn($input, $ctx));
+                        \TypedPress\Fetch::inJob(static fn (): mixed => \TypedPress\Timers::run(static fn (): mixed => $fn($input, $ctx)));
                     }
                     Storage::run('UPDATE {jobs} SET "state" = \'done\', "attempts" = ?, "dedupe" = NULL, "lockedAt" = NULL, "lastError" = NULL, "doneAt" = ? WHERE "id" = ?', [$attempt, Js::iso(Js::now()), $id]);
                 });

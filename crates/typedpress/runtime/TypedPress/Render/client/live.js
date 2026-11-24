@@ -2,12 +2,23 @@
 // of a store calls `live(context, field)` from its `data-wp-init` callback: it subscribes, through
 // the app's typed client (`@typedpress/client`, the same client every other caller runs), to the read
 // the server already answered, and writes each new answer into the field. One client per page, so
-// every subscription on the page travels in one request.
+// every subscription on the page travels in one request, with the REST root and a signed-in visitor's
+// nonce the page prints for the client.
 import { createClient } from "@typedpress/client";
-import { getConfig } from "@wordpress/interactivity";
 
 let client;
-const page = () => (client ??= createClient({ nonce: getConfig("tp/live").nonce || undefined }));
+// A signed-in visitor's nonce from the page's client data, given explicitly: a client an app built
+// before reading that data itself sends it too.
+const page = () => (client ??= createClient(pageNonce()));
+
+function pageNonce() {
+  try {
+    const nonce = JSON.parse(document.querySelector('script[type="application/json"][id="wp-script-module-data-@typedpress/client"]')?.textContent || "{}").nonce;
+    return typeof nonce === "string" ? { nonce, wordpress: true } : {};
+  } catch {
+    return {};
+  }
+}
 
 export function live(context, field) {
   const value = context[field];

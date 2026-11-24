@@ -35,7 +35,7 @@ impl Compiler<'_, '_> {
     pub(super) fn host_use(&mut self, what: HostUse<'_>, span: Span) -> Result<()> {
         match what {
             HostUse::Fetch(host) => {
-                if self.fx().no_db {
+                if self.fx().db_mode.is_restricted() {
                     return err_help(
                         span,
                         "access rules can't use fetch()",

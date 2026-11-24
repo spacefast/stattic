@@ -149,6 +149,61 @@ final class Files
         return self::present($row);
     }
 
+    /** Maximum file size read into memory by trusted server handlers (`readText` / `readBase64`). */
+    public const MAX_READ_BYTES = 16_777_216;
+
+    /** Trusted server metadata read (+ signed url) as a JsObject, or null when missing / wrong bucket. */
+    public static function getOrNull(string $name, int $id): ?\TypedPress\JsObject
+    {
+        self::bucket($name);
+        $row = self::storage()->getMany([$id])[$id] ?? null;
+        if ($row === null || $row['bucket'] !== $name) {
+            return null;
+        }
+
+        return new \TypedPress\JsObject(self::present($row));
+    }
+
+    /** Trusted server read of raw file bytes from the configured local or S3 storage backend. */
+    public static function readBytes(string $name, int $id, int $maxBytes = self::MAX_READ_BYTES): string
+    {
+        self::bucket($name);
+        $row = self::find($name, $id);
+        if ($row['size'] > $maxBytes) {
+            throw new HttpError(413, 'file_too_large', "File $id exceeds the {$maxBytes}-byte read limit");
+        }
+        $stream = self::storage()->stream($row['path']);
+        ob_start();
+        try {
+            $stream();
+            $bytes = (string) ob_get_contents();
+        } finally {
+            ob_end_clean();
+        }
+        if (strlen($bytes) > $maxBytes) {
+            throw new HttpError(413, 'file_too_large', "File $id exceeds the {$maxBytes}-byte read limit");
+        }
+
+        return $bytes;
+    }
+
+    /** Trusted server read of a private file as validated UTF-8 text. */
+    public static function readText(string $name, int $id): string
+    {
+        $bytes = self::readBytes($name, $id);
+        if (!mb_check_encoding($bytes, 'UTF-8')) {
+            throw new HttpError(422, 'invalid_utf8', "File $id is not valid UTF-8 text");
+        }
+
+        return $bytes;
+    }
+
+    /** Trusted server read of a private file as standard base64. */
+    public static function readBase64(string $name, int $id): string
+    {
+        return base64_encode(self::readBytes($name, $id));
+    }
+
     /** Delete a file: null every `file` column holding it (hooks + revisions apply), then the row. */
     public static function delete(string $name, int $id, ?Viewer $viewer): array
     {

@@ -202,7 +202,7 @@ add_action('rest_api_init', static function () {
         target: { kind: target },
         source: { kind: "managed", reference: `test:${id}` },
       });
-      await putRoute(runtime, SPACE, "production", {
+      const route = {
         version_id: "ver_live",
         hostnames: [LIVE],
         production_hostnames: [LIVE],
@@ -253,7 +253,8 @@ add_action('rest_api_init', static function () {
             ],
           },
         },
-      });
+      };
+      await putRoute(runtime, SPACE, "production", route);
 
       // Each person signs in on the host they visit, the way the token
       // endpoint's handoff does: the team member with a real-authority member
@@ -370,6 +371,45 @@ add_action('rest_api_init', static function () {
         ).trim(),
         "0",
       );
+
+      // Before a Space's first SpacePress promote its route still names the
+      // previous runtime. The preview is SpacePress all the same: the app API
+      // and core's ability run route lend the team member the preview's admin
+      // role and keep the answer out of the edge cache.
+      await putRoute(runtime, SPACE, "production", {
+        ...route,
+        config: { ...route.config, zero_generation: "none" },
+      });
+      for (const restPath of [
+        "/wp-json/spacepress/v1/actions/whoami",
+        "/wp-json/wp-abilities/v1/abilities/signin/whoami/run",
+      ]) {
+        // oxlint-disable-next-line no-await-in-loop -- one request at a time
+        const response = await get(runtime, preview, restPath, {
+          method: "POST",
+          headers: {
+            cookie: cookies.member,
+            "content-type": "application/json",
+            origin: `http://${preview}`,
+            "sec-fetch-site": "same-origin",
+          },
+          body: restPath.endsWith("/run") ? JSON.stringify({ input: {} }) : "{}",
+        });
+        const text = await response.text();
+        assert.equal(response.status, 200, `${restPath}: ${text}`);
+        assert.equal(response.headers.get("a8c-edge-cache"), "no-cache", restPath);
+        const body: unknown = JSON.parse(text);
+        const role = z
+          .union([
+            z
+              .object({ data: z.object({ role: z.string().nullable() }) })
+              .transform((v) => v.data.role),
+            z.object({ role: z.string().nullable() }).transform((v) => v.role),
+          ])
+          .parse(body);
+        assert.equal(role, "admin", restPath);
+      }
+      await putRoute(runtime, SPACE, "production", route);
 
       // A version link that serves the live version runs on the site's own
       // WordPress, where a version host lends no role.

@@ -444,7 +444,11 @@ beforeAll(async () => {
             sha256: "sha256:" + "0".repeat(64),
             size: 16,
           },
-          routes: [{ method: null, path: "/worker", subtree: true }],
+          routes: [
+            { method: null, path: "/worker", subtree: true },
+            // WordPress owns /wp-json on a SpacePress version: this route never wins.
+            { method: null, path: "/wp-json", subtree: true },
+          ],
           bypassCookies: [],
           capabilities: { logging: false },
           platform: { nextCache: false },
@@ -604,6 +608,27 @@ test("static, CF Worker, and SpacePress hot-path requests load ZERO files under 
   expect(workerRes.headers.get("x-spacefast-test-deprecated-includes")).toBe("none");
   expect(await workerRes.json()).toEqual({ surface: "cf-worker", path: "/worker/hello" });
   expect(workerRequests).toContainEqual({ path: "/worker/hello", method: "GET" });
+
+  // A worker route never takes WordPress's REST API from a SpacePress version:
+  // the app API and core's ability run route, which the generated client uses.
+  // WordPress answers each one: it dispatches the route below `/wp-json`.
+  for (const restPath of [
+    "/wp-json",
+    "/wp-json/spacepress/v1/actions/ping",
+    "/wp-json/wp-abilities/v1/abilities/hybrid/ping/run",
+  ]) {
+    const res = await get(rt, HYBRID_HOST, restPath, {
+      method: "POST",
+      headers: probeHeaders,
+      body: "{}",
+    });
+    expect(res.status, `${restPath}: ${await res.clone().text()}`).toBe(200);
+    expect(res.headers.get("cache-control"), restPath).toBe("private, no-store");
+    expect(spRestBodySchema.parse(await res.json()).route, restPath).toBe(
+      restPath.slice("/wp-json".length),
+    );
+  }
+  expect(workerRequests.filter((r) => r.path.startsWith("/wp-json"))).toEqual([]);
 
   // Retired PHP Functions return inline 410 `php_functions_retired` without loading deprecated files.
   const retired = await get(rt, LEGACY_PHP_HOST, "/hello", { headers: probeHeaders });

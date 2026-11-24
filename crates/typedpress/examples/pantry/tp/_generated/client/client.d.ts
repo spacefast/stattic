@@ -674,6 +674,20 @@ export interface Actions {
 }
 export declare const SCHEMA: {
 	readonly name: "pantry";
+	readonly app: "pantry";
+	readonly abilities: {
+		readonly actions: {
+			readonly consume: {
+				readonly ability: "consume";
+			};
+			readonly expiringSoon: {
+				readonly ability: "expiring-soon";
+				readonly readonly: true;
+				readonly idempotent: true;
+			};
+		};
+		readonly globals: {};
+	};
 	readonly collections: {
 		readonly locations: {
 			readonly path: "locations";
@@ -692,6 +706,7 @@ export declare const SCHEMA: {
 			readonly media: readonly [];
 			readonly mediaList: readonly [];
 			readonly files: readonly [];
+			readonly ability: "locations";
 		};
 		readonly items: {
 			readonly path: "items";
@@ -715,6 +730,7 @@ export declare const SCHEMA: {
 			readonly media: readonly [];
 			readonly mediaList: readonly [];
 			readonly files: readonly [];
+			readonly ability: "items";
 		};
 		readonly shoppingList: {
 			readonly path: "shopping_list";
@@ -733,6 +749,7 @@ export declare const SCHEMA: {
 			readonly media: readonly [];
 			readonly mediaList: readonly [];
 			readonly files: readonly [];
+			readonly ability: "shopping-list";
 		};
 	};
 	readonly globals: readonly [];
@@ -1019,7 +1036,7 @@ export type Client = { readonly [K in CollectionKey]: CollectionClient<K> } & {
 	readonly actions: ActionsClient;
 	readonly globals: GlobalsClient;
 	readonly auth: AuthClient;
-	/** `GET /wp-json/typedpress/v1`: the app's schema (kinds, fields, globals, actions), as `typedpress pull` reads it. */
+	/** `GET /wp-json/typedpress/v1`: the app's description (kinds, fields, globals, actions), as `typedpress pull` reads it. */
 	schema(): Promise<unknown>;
 };
 /** One committed transaction's changes, as the runtime's `tp_realtime_changes` hook sends them. */
@@ -1063,8 +1080,27 @@ export interface RealtimeOptions {
 /** For host scripts: every client on this page, created before or after, uses this transport by default. */
 export declare function registerRealtimeTransport(transport: RealtimeTransport): void;
 export interface ClientOptions {
-	/** Base URL including the API prefix: "https://x.test/wp-json/typedpress/v1". Default: `/wp-json/typedpress/v1` on the page's origin. */
+	/**
+	* The site's REST root: "https://x.test/wp-json" (or "https://x.test/?rest_route=" without pretty
+	* permalinks; WordPress names it in the `Link: <…>; rel="https://api.w.org/"` header of every page).
+	* The app's API URL ("https://x.test/wp-json/typedpress/v1") is accepted too, and a site URL without
+	* either is taken as its `/wp-json`. Default: the root a TypedPress page names for the client, else
+	* `/wp-json` on the page's origin.
+	*/
 	url?: string;
+	/**
+	* The app API's route below the REST root, when the site serves it somewhere other than
+	* `/typedpress/v1` (`sp_api_namespace`). With it, `url` is taken as the REST root as given, so a
+	* site with another REST prefix (`https://x.test/api`) works too. A TypedPress page names both.
+	*/
+	api?: string;
+	/**
+	* Use what a WordPress page prints for the client (`wp-script-module-data-@typedpress/client`): its
+	* REST root and the app API's namespace (unless `url` is given), and a signed-in visitor's REST
+	* nonce (unless `fetch`, `headers`, `nonce` or `auth` brings another credential; `true` uses it
+	* anyway). Default: on; `false` ignores the page.
+	*/
+	wordpress?: boolean;
 	/** WordPress cookie auth: the REST nonce; sent as `X-WP-Nonce` with `credentials: "same-origin"`. */
 	nonce?: string;
 	fetch?: typeof fetch;

@@ -48,9 +48,9 @@ static CONTENT: LazyLock<regex::Regex> = LazyLock::new(|| pattern(r#"(?i)\bconte
 static STYLE: LazyLock<regex::Regex> = LazyLock::new(|| pattern(r#"(?s)(<style[^>]*>)(.*?)(</style>)"#));
 static IMPORT_MAP: LazyLock<regex::Regex> =
     LazyLock::new(|| pattern(r#"(?s)(<script[^>]*type="importmap"[^>]*>)(.*?)(</script>)"#));
-static MODULE_DATA: LazyLock<regex::Regex> = LazyLock::new(|| {
-    pattern(r#"(?s)(<script id="wp-script-module-data-([^"]+)" type="application/json">)(.*?)(</script>)"#)
-});
+// A script module's data, whatever other attributes a plugin adds to the tag (`wp_inline_script_attributes`).
+static MODULE_DATA: LazyLock<regex::Regex> =
+    LazyLock::new(|| pattern(r#"(?s)(<script\b[^>]*\bid="wp-script-module-data-([^"]+)"[^>]*>)(.*?)(</script>)"#));
 static CSS_REFERENCE: LazyLock<regex::Regex> =
     LazyLock::new(|| pattern(r#"url\(\s*['"]?([^'")]+)['"]?\s*\)|@import\s+['"]([^'"]+)['"]"#));
 static NOINDEX: LazyLock<regex::Regex> =
@@ -850,6 +850,14 @@ impl<'a> Export<'a> {
     /// is refused.
     fn config(&self, html: &str, page: &str, refusals: &mut Vec<String>) -> String {
         MODULE_DATA.replace_all(html, |c: &regex::Captures| {
+            if !c[1].contains(r#"type="application/json""#) {
+                return c[0].to_string();
+            }
+            // The typed client's data (`Islands::clientData`) names the site's REST API. Without
+            // --site a static site has none (an action call is refused below), so it goes.
+            if &c[2] == "@typedpress/client" && self.flags.site.is_none() {
+                return String::new();
+            }
             let Ok(mut data) = serde_json::from_str::<Value>(&c[3]) else { return c[0].to_string() };
             let mut changed = false;
             // core/router's server URL: the page's address where the export is served.
@@ -859,6 +867,14 @@ impl<'a> Export<'a> {
                 let (path, suffix) = split_suffix(&local);
                 let served = format!("{}{}", self.flags.site_url.as_deref().unwrap_or(""), self.flags.base);
                 data["state"]["core/router"]["url"] = Value::String(format!("{served}{path}{suffix}"));
+                changed = true;
+            }
+            // With --site, the typed client's REST root is the hosted site, where the page's actions run.
+            if &c[2] == "@typedpress/client"
+                && let (Some(site), Some(root)) = (&self.flags.site, data.get("root").and_then(Value::as_str))
+                && let Some(local) = self.local_path(root)
+            {
+                data["root"] = Value::String(format!("{}{local}", site.trim_end_matches('/')));
                 changed = true;
             }
             if let Some(namespaces) = data.get_mut("config").and_then(Value::as_object_mut) {

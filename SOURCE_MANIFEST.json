@@ -1,7 +1,7 @@
 {
-  "revision": "2db19e73e69581ce08acc953751bcaf48de541d6",
-  "sourceHash": "31902215b25bd115fce4f4cc94dd215bf3ae7fabd62fc5e658b3cbe5a854ebf3",
-  "manifestSha256": "9dfa45ab490c8b4ea519cc8577dd6c5a2ec0196d05863a95fd8e5c03ed4080ed",
+  "revision": "ef842d668f3a986cb26a02a7001d35516a91a936",
+  "sourceHash": "1fa98631348fcd3a9cca717a5fe788092a455612f0484c0370749bb36b9cabaa",
+  "manifestSha256": "219f67fb50e8eec32e7f08f10d22f8f35b7a48e79731b49ff25a9e1111bb1ee9",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "f420a11d60ca2295af9e0d618b85fe1cd10119644543b0a90ded71f686ecc8a9"
+      "sha256": "a7191fde221219991fc837baad4066967534982081a5203278e12430b4fecec1"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "10bc2ad5ac658dc5636cb5cff9d50c4d9b7cc1418c9b868c801540323f8feda0"
+      "sha256": "c4e4c8f13a749013b5f468d418e0b9e696b00a3903ce9bb502ce0884149c69e0"
     },
     {
       "path": "crates/stattic-runtime-compiler/Cargo.toml",
@@ -29685,7 +29685,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "14c90caa67f6c08eaa2b41eaa3093107976b452fa7e80846b06989016a88466a"
+      "sha256": "153e26c3335edb44eb655e891f48c48196c17aa9a0ad21c21205cb8cbee00c01"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -29717,7 +29717,7 @@
     },
     {
       "path": "runtime/engine/admin/upload.php",
-      "sha256": "4b93df2c230290a86f6a17158afa96319f2bff0f57805cb58fe569568a7d27fa"
+      "sha256": "06fc1b821564cbcef86df75164a00ce4edc3f51c41650833a0302f06a4d3f050"
     },
     {
       "path": "runtime/engine/admin/zero-db.php",
@@ -30933,7 +30933,7 @@
     },
     {
       "path": "runtime/tests/uploads.test.ts",
-      "sha256": "cb212142270206f5c3e2ccf2f692c52b3c645857145eca33d920f3625164adb0"
+      "sha256": "47649cb88f2ad71f30e54f39e5368663e63e55849915750a8adbd04d60ef4e1f"
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",

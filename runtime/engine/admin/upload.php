@@ -229,6 +229,58 @@ function _stattic_runtime_publish_session_replace(string $privateRoot, string $s
     return $updated;
 }
 
+// Synchronize lazy-session retention fields under the session stripe lock so
+// completeness sees any overlapping final PUT, while skipping disk rewrites
+// when retention is unchanged and the blob pin already exists.
+function _stattic_runtime_publish_session_sync_retention(
+    string $privateRoot,
+    string $spaceId,
+    string $uploadId,
+    array $retainedFiles,
+    ?string $reusableVersionId,
+    string $retention,
+): array {
+    $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
+    $pins = _stattic_runtime_publish_pins_store($privateRoot, $spaceId);
+    $pinId = _stattic_runtime_publish_pin_id($uploadId);
+    $updated = _stattic_record_store_mutate(
+        $store,
+        $uploadId,
+        static function (?array $session) use (
+            $privateRoot,
+            $spaceId,
+            $uploadId,
+            $store,
+            $pins,
+            $pinId,
+            $retainedFiles,
+            $reusableVersionId,
+            $retention,
+        ): array {
+            if ($session === null) {
+                _stattic_problem_response(404, 'upload_not_found', 'Publish session not found.');
+            }
+            $unchanged = array_key_exists('retained_files', $session)
+                && $session['retained_files'] === $retainedFiles
+                && array_key_exists('reusable_version_id', $session)
+                && $session['reusable_version_id'] === $reusableVersionId
+                && ($session['retention'] ?? null) === $retention;
+            if ($unchanged && _stattic_record_store_get($pins, $pinId) !== null) {
+                return $session;
+            }
+            $session['retained_files'] = $retainedFiles;
+            $session['reusable_version_id'] = $reusableVersionId;
+            $session['retention'] = $retention;
+            _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $session);
+            return _stattic_runtime_publish_session_store_record($store, $uploadId, $session);
+        },
+    );
+    if (!is_array($updated)) {
+        _stattic_problem_response(503, 'upload_session_lock_unavailable', 'Publish session is busy.');
+    }
+    return $updated;
+}
+
 function _stattic_runtime_publish_session_bind_sha(string $privateRoot, string $spaceId, string $uploadId, string $filePath, string $sha, int $size): array
 {
     return _stattic_runtime_publish_session_replace($privateRoot, $spaceId, $uploadId, static function (array $session) use ($filePath, $sha, $size): array {

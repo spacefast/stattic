@@ -432,25 +432,27 @@ function _stattic_runtime_finalize_version(string $privateRoot, string $spaceId,
     if (($session['lazy'] ?? false) === true && is_array($body['session'] ?? null)) {
         $descriptor = $body['session'];
         if (($descriptor['upload_id'] ?? null) === $uploadId && ($descriptor['space_id'] ?? null) === $spaceId && ($descriptor['version_id'] ?? null) === $versionId) {
-            if (array_key_exists('retained_files', $descriptor)) {
-                $session['retained_files'] = _stattic_runtime_manifest_files($descriptor['retained_files'], true);
-            }
-            if (array_key_exists('reusable_version_id', $descriptor)) {
-                $session['reusable_version_id'] = is_string($descriptor['reusable_version_id'])
+            $nextRetainedFiles = array_key_exists('retained_files', $descriptor)
+                ? _stattic_runtime_manifest_files($descriptor['retained_files'], true)
+                : (is_array($session['retained_files'] ?? null) ? $session['retained_files'] : []);
+            $nextReusableVersionId = array_key_exists('reusable_version_id', $descriptor)
+                ? (is_string($descriptor['reusable_version_id'])
                     ? _stattic_runtime_id($descriptor['reusable_version_id'], 'reusable_version_id')
-                    : null;
-            }
-            $session['retention'] = _stattic_runtime_retention_mode(
+                    : null)
+                : (is_string($session['reusable_version_id'] ?? null) ? $session['reusable_version_id'] : null);
+            $nextRetention = _stattic_runtime_retention_mode(
                 $descriptor['retention'] ?? null,
-                is_string($session['reusable_version_id'] ?? null) ? $session['reusable_version_id'] : null,
-                is_array($session['retained_files'] ?? null) ? $session['retained_files'] : [],
+                $nextReusableVersionId,
+                $nextRetainedFiles,
             );
-            $session = _stattic_runtime_publish_session_replace($privateRoot, $spaceId, $uploadId, static function (array $current) use ($session): array {
-                $current['retained_files'] = $session['retained_files'];
-                $current['reusable_version_id'] = $session['reusable_version_id'];
-                $current['retention'] = $session['retention'];
-                return $current;
-            });
+            $session = _stattic_runtime_publish_session_sync_retention(
+                $privateRoot,
+                $spaceId,
+                $uploadId,
+                $nextRetainedFiles,
+                $nextReusableVersionId,
+                $nextRetention,
+            );
         }
     }
 

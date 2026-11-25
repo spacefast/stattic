@@ -717,6 +717,58 @@ test("retained-only lazy finalize preserves the empty accepted object", async ()
   expect(finalized.status).toBe(200);
 });
 
+test("lazy finalize refreshes the locked session and restores a missing blob pin when retention is unchanged", async () => {
+  const versionId = "ver_lazy_pin_recover";
+  const uploadId = "upl_lazy_pin_recover";
+  const files = {
+    "index.html": "<h1>lazy pin recovery</h1>\n",
+    "second.html": "<h1>second file</h1>\n",
+  };
+  const manifest = manifestFor(files);
+  const descriptor = {
+    upload_id: uploadId,
+    space_id: SPACE,
+    version_id: versionId,
+    files: manifest,
+    retention: "none",
+    retained_files: [],
+    reusable_version_id: null,
+  };
+  const token = uploadToken(SPACE, uploadId, versionId, { session: descriptor });
+  const firstSha = sha256(files["index.html"]);
+  const secondSha = sha256(files["second.html"]);
+  expect((await putBlob(rt, SPACE, token, firstSha, files["index.html"])).status).toBe(200);
+
+  // Confirm the real pin record exists, then delete it to simulate an
+  // interrupted session creation that persisted the session without its pin.
+  const pinPath = storagePath(rt, "spaces", SPACE, "pins", `publish-${uploadId}.json`);
+  expect(existsSync(pinPath)).toBe(true);
+  rmSync(pinPath);
+  expect(existsSync(pinPath)).toBe(false);
+
+  // Finalize while second.html is still missing: `_stattic_runtime_publish_session_sync_retention`
+  // runs before the completeness refusal and must restore the missing pin on disk.
+  const incomplete = await finalize(rt, SPACE, versionId, {
+    upload_id: uploadId,
+    session: descriptor,
+  });
+  expect(incomplete.status).toBe(409);
+  expect(existsSync(pinPath)).toBe(true);
+  const restoredPin = z
+    .object({ shas: z.array(z.string()) })
+    .parse(JSON.parse(readFileSync(pinPath, "utf8")));
+  expect(restoredPin.shas).toContain(firstSha);
+
+  // Uploading the remaining file and finalizing completes cleanly and releases the pin.
+  expect((await putBlob(rt, SPACE, token, secondSha, files["second.html"])).status).toBe(200);
+  const finalized = await finalize(rt, SPACE, versionId, {
+    upload_id: uploadId,
+    session: descriptor,
+  });
+  expect(finalized.status).toBe(200);
+  expect(existsSync(pinPath)).toBe(false);
+});
+
 test("naming a reusable version without a retention mode is refused", async () => {
   const refused = await api(
     rt,

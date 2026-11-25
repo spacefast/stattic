@@ -69,9 +69,19 @@ function _stattic_spacefast_bar_projected(array $serving): bool
     return _stattic_spacefast_bar_projection($serving) !== null;
 }
 
+function _stattic_spacefast_bar_url_valid(string $url): bool
+{
+    $scheme = parse_url($url, PHP_URL_SCHEME);
+    return ($scheme === 'https'
+            || ($scheme === 'http' && _stattic_spacefast_sdk_host_is_local(parse_url($url, PHP_URL_HOST))))
+        && preg_match('/[\x00-\x20"\'<>`\\\\]/', $url) !== 1
+        && strlen($url) <= 2000;
+}
+
 /**
  * The projected bar's URLs, checked, plus whether it may show on a Space
- * anyone may open; null when there is none or a URL is not a platform URL.
+ * anyone may open and any white-label presentation; null when there is none
+ * or a URL is not a platform URL.
  */
 function _stattic_spacefast_bar_projection(array $serving): ?array
 {
@@ -80,20 +90,33 @@ function _stattic_spacefast_bar_projection(array $serving): ?array
         return null;
     }
     $frame = is_string($bar['frame_url'] ?? null) ? $bar['frame_url'] : '';
-    $dashboard = is_string($bar['dashboard_url'] ?? null) ? $bar['dashboard_url'] : '';
-    foreach ([$frame, $dashboard] as $url) {
-        $scheme = parse_url($url, PHP_URL_SCHEME);
-        if (
-            ($scheme !== 'https' && !($scheme === 'http' && _stattic_spacefast_sdk_host_is_local(parse_url($url, PHP_URL_HOST))))
-            || preg_match('/[\x00-\x20"\'<>`\\\\]/', $url) === 1
-            || strlen($url) > 2000
-        ) {
+    if (!_stattic_spacefast_bar_url_valid($frame)) {
+        return null;
+    }
+    $rawDashboard = $bar['dashboard_url'] ?? null;
+    $dashboard = null;
+    if ($rawDashboard !== null && $rawDashboard !== '') {
+        if (!is_string($rawDashboard) || !_stattic_spacefast_bar_url_valid($rawDashboard)) {
             return null;
         }
+        $dashboard = $rawDashboard;
     }
+    $brandName = is_string($bar['brand_name'] ?? null) && trim($bar['brand_name']) !== ''
+        ? substr(trim($bar['brand_name']), 0, 255)
+        : null;
+    $rawBrandLogo = is_string($bar['brand_logo'] ?? null) ? trim($bar['brand_logo']) : '';
+    $brandLogo = $rawBrandLogo !== ''
+        && parse_url($rawBrandLogo, PHP_URL_SCHEME) === 'https'
+        && preg_match('/[\x00-\x20"\'<>`\\\\]/', $rawBrandLogo) !== 1
+        && strlen($rawBrandLogo) <= 2000
+        ? $rawBrandLogo
+        : null;
     return [
         'frame' => $frame,
         'dashboard' => $dashboard,
         'public' => ($bar['public_spaces'] ?? false) === true,
+        'white_label' => ($bar['white_label'] ?? false) === true,
+        'brand_name' => $brandName,
+        'brand_logo' => $brandLogo,
     ];
 }

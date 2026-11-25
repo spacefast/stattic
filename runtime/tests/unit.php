@@ -5277,6 +5277,71 @@ if ($savedReentry !== null) {
 @unlink($cpRoot . '/wp-load.php');
 @rmdir($cpRoot);
 
+// --- Per-Space brand override & white-label Space Bar config ------------------------
+require_once __DIR__ . '/../engine/shared/brand.php';
+require_once __DIR__ . '/../engine/runtime/space-bar.php';
+$baseBrand = _stattic_brand();
+$partnerServing = [
+    'brand' => [
+        'name' => 'Acme Cloud',
+        'url' => 'https://acme.example/help',
+        'helpUrl' => 'https://acme.example/help',
+        'problemDocsBaseUrl' => 'https://acme.example/docs/errors',
+        'fonts' => [],
+    ],
+];
+$partnerBrand = _stattic_brand($partnerServing);
+check(
+    $partnerBrand['name'] === 'Acme Cloud'
+        && $partnerBrand['url'] === 'https://acme.example/help'
+        && $partnerBrand['help_url'] === 'https://acme.example/help'
+        && $partnerBrand['problem_docs_base_url'] === 'https://acme.example/docs/errors'
+        && $partnerBrand['fonts'] === [],
+    'per-Space serving brand overrides name, url, help_url, problem_docs_base_url, and fonts'
+);
+check(
+    _stattic_brand()['name'] === $baseBrand['name'],
+    'per-Space brand override does not mutate the box-level brand singleton'
+);
+$wlBar = _stattic_spacefast_bar_projection([
+    'sdk' => [
+        'config' => [
+            'bar' => [
+                'frame_url' => 'https://handoff.acme.example/bar/spc_wl',
+                'dashboard_url' => null,
+                'public_spaces' => true,
+                'white_label' => true,
+                'brand_name' => 'Acme Cloud',
+                'brand_logo' => 'https://cdn.acme.example/logo.svg',
+            ],
+        ],
+    ],
+]);
+check(
+    is_array($wlBar)
+        && $wlBar['frame'] === 'https://handoff.acme.example/bar/spc_wl'
+        && $wlBar['dashboard'] === null
+        && $wlBar['white_label'] === true
+        && $wlBar['brand_name'] === 'Acme Cloud'
+        && $wlBar['brand_logo'] === 'https://cdn.acme.example/logo.svg',
+    'space-bar.php accepts white-label bar config with nullable dashboard_url'
+);
+$invalidWlBar = _stattic_spacefast_bar_projection([
+    'sdk' => [
+        'config' => [
+            'bar' => [
+                'frame_url' => 'https://handoff.acme.example/bar/spc_wl',
+                'dashboard_url' => 'javascript:alert(1)',
+                'white_label' => true,
+            ],
+        ],
+    ],
+]);
+check(
+    $invalidWlBar === null,
+    'space-bar.php rejects non-https dashboard_url even on white-label bar config'
+);
+
 // --- identity app origins ------------------------------------------------------
 // Each identity plugin vouches only for its own REST namespace: SpacePress's
 // registered app origins open `spacepress-identity`, never `zero-identity`,

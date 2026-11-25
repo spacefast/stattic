@@ -897,6 +897,7 @@ function _stattic_v4_legacy_serving(string $spaceId, ?string $versionId, array $
         'billing' => is_array($overlay['billing'] ?? null) ? $overlay['billing'] : [],
         'email' => is_array($overlay['email'] ?? null) ? $overlay['email'] : null,
         'admission' => is_array($overlay['admission'] ?? null) ? $overlay['admission'] : [],
+        'brand' => is_array($overlay['brand'] ?? null) ? $overlay['brand'] : null,
         'route_name' => is_string($hostEntry['route_name'] ?? null) ? $hostEntry['route_name'] : null,
         'immutable' => !empty($hostEntry['immutable']),
         // Absent/malformed -> null -> no restriction: the policy is opt-in.

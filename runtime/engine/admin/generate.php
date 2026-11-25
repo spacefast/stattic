@@ -1454,6 +1454,7 @@ function _stattic_runtime_sync_space_overlay(string $privateRoot, string $spaceI
         'billing' => is_array($config['billing'] ?? null) ? $config['billing'] : [],
         'email' => is_array($config['email'] ?? null) ? $config['email'] : null,
         'admission' => is_array($config['admission'] ?? null) ? $config['admission'] : [],
+        'brand' => is_array($config['brand'] ?? null) ? $config['brand'] : null,
         // Read at serve time so a `planGated` proxy rule follows the current
         // plan, not what publish baked.
         'entitlements' => _stattic_runtime_stored_entitlements($privateRoot, $spaceId),

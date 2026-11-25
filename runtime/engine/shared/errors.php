@@ -102,10 +102,6 @@ function _stattic_page_artifact(array $context, string $pageId): ?string
 // declares no fonts and these emit nothing.
 function _stattic_page_font_faces(): string
 {
-    static $css = null;
-    if (is_string($css)) {
-        return $css;
-    }
     $css = '';
     foreach (_stattic_brand()['fonts'] as $font) {
         $css .= '@font-face{font-family:"' . $font['family'] . '";src:url("' . $font['url'] . '") format("woff2");font-style:normal;font-weight:' . $font['weight'] . ';font-display:optional}';
@@ -118,10 +114,6 @@ function _stattic_page_font_faces(): string
 // mode, and a mismatched preload is discarded.
 function _stattic_page_font_preloads(): string
 {
-    static $html = null;
-    if (is_string($html)) {
-        return $html;
-    }
     $html = '';
     foreach (_stattic_brand()['fonts'] as $font) {
         if ($font['preload']) {

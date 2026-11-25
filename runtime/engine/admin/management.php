@@ -2098,6 +2098,25 @@ function _stattic_runtime_route_config(mixed $raw): array
             $config['admission'] = ['concurrency' => max(1, (int) $concurrency)];
         }
     }
+    if (array_key_exists('brand', $raw)) {
+        require_once __DIR__ . '/../shared/brand.php';
+        $rawBrand = $raw['brand'];
+        if (is_array($rawBrand) && !array_is_list($rawBrand)) {
+            $sanitized = [];
+            foreach (STATTIC_BRAND_STRING_MEMBERS as $wireName => $_key) {
+                $val = $rawBrand[$wireName] ?? null;
+                if (is_string($val) && trim($val) !== '' && strlen(trim($val)) <= 2048) {
+                    $sanitized[$wireName] = trim($val);
+                }
+            }
+            if (is_array($rawBrand['fonts'] ?? null) && array_is_list($rawBrand['fonts'])) {
+                $sanitized['fonts'] = _stattic_brand_fonts(array_slice($rawBrand['fonts'], 0, 16));
+            }
+            $config['brand'] = $sanitized !== [] ? $sanitized : null;
+        } else {
+            $config['brand'] = null;
+        }
+    }
     if (array_key_exists('sdk', $raw)) {
         // `config` is carried verbatim (the serve path validates each field it
         // reads); only the envelope and the body ceiling are enforced here.

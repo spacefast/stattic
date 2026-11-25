@@ -44,6 +44,18 @@ pub fn json_schema() -> Value {
                 "name": { "type": "string", "description": "Partner display name." },
                 "logo": https_url,
                 "supportUrl": https_url,
+                "termsUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://",
+                    "description": "Partner Terms of Service URL shown on white-label preview gates."
+                },
+                "privacyUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https://",
+                    "description": "Partner Privacy Policy URL shown on white-label preview gates."
+                },
                 "claimOrigin": https_url,
                 "accessHandoffOrigin": https_url,
                 "problemDocsBaseUrl": https_url,
@@ -53,6 +65,37 @@ pub fn json_schema() -> Value {
                     "additionalProperties": { "type": "string" }
                 }
             })),
+            "spaceBar": {
+                "type": "object",
+                "description": "Opt-in Space Bar settings for a partner tenant's Spaces.",
+                "required": ["enabled"],
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Explicit opt-in for the Space Bar on partner Spaces (off by default)."
+                    },
+                    "panels": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["share", "comments", "menu"]
+                        },
+                        "uniqueItems": true,
+                        "description": "Allowlist of panels shown in the Space Bar; defaults to comments and menu when omitted."
+                    },
+                    "dashboardUrlTemplate": {
+                        "type": "string",
+                        "format": "uri",
+                        "pattern": "^https://",
+                        "description": "Partner dashboard URL template (https://) with optional {spaceId} and {slug} placeholders."
+                    },
+                    "askYourAgent": {
+                        "type": "boolean",
+                        "description": "Whether to show Ask Your Agent in the Space Bar menu (default false)."
+                    }
+                },
+                "additionalProperties": false
+            },
             "hostnames": closed(json!({
                 "apex": { "type": "string", "description": "Apex hostname for the white-label surface." }
             })),
@@ -66,7 +109,7 @@ pub fn json_schema() -> Value {
             })),
             "tokenIssuers": {
                 "type": "array",
-                "description": "Trusted token issuers registered for the tenant.",
+                "description": "One trusted token issuer registered for the tenant. Omit or declare an empty array to revoke it.",
                 "items": {
                     "type": "object",
                     "required": ["issuer", "keys"],
@@ -79,12 +122,16 @@ pub fn json_schema() -> Value {
                                 "required": ["kid", "publicKey"],
                                 "properties": {
                                     "kid": { "type": "string", "minLength": 1, "description": "Key id." },
-                                    "publicKey": { "type": "string", "minLength": 1, "description": "Public key material (PEM or JWK)." }
+                                    "publicKey": { "type": "string", "minLength": 1, "description": "Raw Ed25519 public key (43-character base64url)." }
                                 },
                                 "additionalProperties": false
                             }
                         },
-                        "proof": { "type": "string", "description": "Ownership proof completing a two-publish activation." }
+                        "proofs": {
+                            "type": "array",
+                            "items": { "type": "string", "minLength": 1 },
+                            "description": "Signed challenge JWTs, one per new key, to activate the issuer or rotate keys."
+                        }
                     },
                     "additionalProperties": false
                 }
@@ -125,10 +172,25 @@ pub fn json_schema() -> Value {
                                     "type": "integer",
                                     "minimum": 0,
                                     "description": "Max spaces a principal on this plan may own. Omitted = no space-count cap."
+                                },
+                                "storageBytes": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Max measured bytes stored by the principal. Omitted = no storage cap."
+                                },
+                                "buildMinutesPerMonth": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Max build minutes in one UTC month. Omitted = no monthly build cap."
+                                },
+                                "customDomains": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Max active custom domains. Omitted = no custom-domain cap."
                                 }
                             },
                             "additionalProperties": false,
-                            "description": "Enforced quotas. Space-count only; usage metering is deferred."
+                            "description": "Quotas checked at the mutation that can exceed each limit."
                         },
                         "quotaPolicy": {
                             "type": "string",

@@ -6670,7 +6670,7 @@ function _stattic_access_public_preview(array $serving, string $host): array
     if (($raw['hideDetails'] ?? false) === true) {
         require_once __DIR__ . '/../shared/brand.php';
         // The platform's own name, a partner's white label included.
-        return ['title' => 'Private Space on ' . _stattic_brand_value('name'), 'description' => null, 'image' => null];
+        return ['title' => 'Private Space on ' . _stattic_brand_value('name', $serving), 'description' => null, 'image' => null];
     }
     $text = static function (mixed $value, int $max): ?string {
         if (!is_string($value)) {
@@ -6714,7 +6714,7 @@ function _stattic_access_render_unfurl_card_if_unfurler(array $serving, string $
         . '<meta name="robots" content="noindex,nofollow">'
         . '<title>' . _stattic_html_escape($preview['title']) . '</title>'
         . $meta('og:title', $preview['title'])
-        . $meta('og:site_name', _stattic_brand_value('name'))
+        . $meta('og:site_name', _stattic_brand_value('name', $serving))
         . $meta('og:type', 'website')
         . ($preview['description'] === null ? '' : $meta('og:description', $preview['description'])
             . '<meta name="description" content="' . _stattic_html_escape($preview['description']) . '">')

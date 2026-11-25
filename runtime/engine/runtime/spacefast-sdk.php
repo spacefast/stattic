@@ -273,8 +273,11 @@ function _stattic_spacefast_sdk_page_config(
         require_once __DIR__ . '/share-oauth.php';
         $config['bar'] = [
             'frame' => $bar['frame'],
-            'dashboard' => $bar['dashboard'],
+            ...($bar['dashboard'] !== null ? ['dashboard' => $bar['dashboard']] : []),
             'module' => rtrim($collabBase, '/') . $modules['bar'],
+            ...(($bar['white_label'] ?? false) === true ? ['whiteLabel' => true] : []),
+            ...(is_string($bar['brand_name'] ?? null) ? ['brandName' => $bar['brand_name']] : []),
+            ...(is_string($bar['brand_logo'] ?? null) ? ['brandLogo' => $bar['brand_logo']] : []),
             // A Space anyone may open: only a browser with the returning-account
             // marker asks the session, so a visitor without one costs nothing,
             // and anyone it does not draw the frame for gets the mark: Sign in
@@ -300,7 +303,7 @@ function _stattic_spacefast_sdk_page_config(
                 && !isset($_GET['review'])
                 && $review === null
                 && !_stattic_spacefast_preview_surface($serving),
-            'brand' => _stattic_brand()['name'],
+            'brand' => _stattic_brand($serving)['name'],
         ];
     }
     return $config;

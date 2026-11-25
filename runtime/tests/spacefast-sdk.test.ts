@@ -223,8 +223,11 @@ const bootConfigSchema = z
     bar: z
       .object({
         frame: z.string(),
-        dashboard: z.string(),
+        dashboard: z.string().nullable().optional(),
         module: z.string(),
+        whiteLabel: z.boolean().optional(),
+        brandName: z.string().optional(),
+        brandLogo: z.string().optional(),
         public: z.object({ marker: z.string() }).optional(),
         mark: z
           .object({
@@ -3073,4 +3076,60 @@ test("a pinned mount's page follows its own version, while sdk.js and t.js follo
   expect(await (await get(runtime, host, RUNTIME_TRACKER_SCRIPT_PATH)).text()).toBe(
     "/* No Spacefast analytics here. */\n",
   );
+});
+
+test("sdk.js applies per-Space brand override and white-label Space Bar config without dashboard URL", async () => {
+  const runtime = await startRuntime({
+    atomicData: { SPACEFAST_CAST_API_URL: "https://cast.example.test" },
+  });
+  runtimes.push(runtime);
+  const host = "partner-wl-sdk.site.test";
+  const config = {
+    ...publicAccessConfig({ mode: "website", site_title: "Partner App" }),
+    brand: {
+      name: "Acme Cloud",
+      helpUrl: "https://acme.example/help",
+      fonts: [],
+    },
+  };
+  config.sdk = {
+    revision: "sdk-wl-bar-1",
+    config: {
+      cast_api_base: "https://cast.example.test",
+      bar: {
+        frame_url: "https://handoff.acme.example/bar/spc_wl_sdk",
+        dashboard_url: null,
+        public_spaces: true,
+        white_label: true,
+        brand_name: "Acme Cloud",
+        brand_logo: "https://cdn.acme.example/logo.svg",
+      },
+    },
+  };
+  await deploy(runtime, {
+    spaceId: "spc_wl_sdk",
+    versionId: "ver_wl_sdk_1",
+    files: { "index.html": "<html><head><title>Partner</title></head><body>Hi</body></html>\n" },
+    activate: {
+      route_name: "production",
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+
+  const response = await get(runtime, host, "/__spacefast/sdk.js");
+  expect(response.status).toBe(200);
+  const booted = bootConfig(await response.text());
+  expect(booted?.runtime).toEqual({ live: true, brand: "Acme Cloud" });
+  expect(booted?.bar).toEqual({
+    frame: "https://handoff.acme.example/bar/spc_wl_sdk",
+    module: "https://cast.example.test/sdk/v2/bar.js",
+    whiteLabel: true,
+    brandName: "Acme Cloud",
+    brandLogo: "https://cdn.acme.example/logo.svg",
+    public: { marker: "spacefast_returning_dev=" },
+    mark: { links: [] },
+  });
 });

@@ -79,17 +79,60 @@ const STATTIC_BRAND_STRING_MEMBERS = [
 ];
 
 /**
- * The document this site resolves to, once per request.
+ * Layer a decoded override map onto an existing resolved brand document.
+ *
+ * @param array<string,mixed> $brand
+ * @param array<string,mixed> $overrides
+ * @return array<string,mixed>
+ */
+function _stattic_brand_apply_overrides(array $brand, array $overrides): array
+{
+    if (array_is_list($overrides)) {
+        return $brand;
+    }
+    foreach (STATTIC_BRAND_STRING_MEMBERS as $wireName => $key) {
+        $value = $overrides[$wireName] ?? null;
+        if (is_string($value) && trim($value) !== '') {
+            $brand[$key] = trim($value);
+        }
+    }
+    // Fonts are the one member an override may legitimately empty.
+    if (is_array($overrides['fonts'] ?? null) && array_is_list($overrides['fonts'])) {
+        $brand['fonts'] = _stattic_brand_fonts($overrides['fonts']);
+    }
+    return $brand;
+}
+
+/**
+ * The per-Space brand override carried on the active serving projection, if any.
+ *
+ * @return array<string,mixed>|null
+ */
+function _stattic_serving_brand_override(?array $serving = null): ?array
+{
+    $active = $serving ?? (is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null) ? $GLOBALS['SPACEFAST_PAGE_SERVING'] : null);
+    $override = is_array($active) ? ($active['brand'] ?? null) : null;
+    return is_array($override) && $override !== [] && !array_is_list($override) ? $override : null;
+}
+
+/**
+ * The document this site (and active Space, when overridden) resolves to.
  *
  * @return array<string,mixed>
  */
-function _stattic_brand(): array
+function _stattic_brand(?array $serving = null): array
 {
-    static $brand = null;
-    if (!is_array($brand)) {
-        $brand = _stattic_brand_resolve(_stattic_config_value(STATTIC_BRAND_CONFIG_KEY));
+    static $cachedDoc = null;
+    static $cachedBase = null;
+    $doc = _stattic_config_value(STATTIC_BRAND_CONFIG_KEY);
+    if ($cachedDoc !== $doc || !is_array($cachedBase)) {
+        $cachedDoc = $doc;
+        $cachedBase = _stattic_brand_resolve($doc);
     }
-    return $brand;
+    $override = _stattic_serving_brand_override($serving);
+    return $override !== null
+        ? _stattic_brand_apply_overrides($cachedBase, $override)
+        : $cachedBase;
 }
 
 /**
@@ -109,17 +152,7 @@ function _stattic_brand_resolve(string $document): array
     if (!is_array($decoded) || array_is_list($decoded)) {
         return $brand;
     }
-    foreach (STATTIC_BRAND_STRING_MEMBERS as $wireName => $key) {
-        $value = $decoded[$wireName] ?? null;
-        if (is_string($value) && trim($value) !== '') {
-            $brand[$key] = trim($value);
-        }
-    }
-    // Fonts are the one member an override may legitimately empty.
-    if (is_array($decoded['fonts'] ?? null) && array_is_list($decoded['fonts'])) {
-        $brand['fonts'] = _stattic_brand_fonts($decoded['fonts']);
-    }
-    return $brand;
+    return _stattic_brand_apply_overrides($brand, $decoded);
 }
 
 /**
@@ -150,9 +183,9 @@ function _stattic_brand_fonts(array $entries): array
 }
 
 /** One member of the resolved document, as a string. */
-function _stattic_brand_value(string $key): string
+function _stattic_brand_value(string $key, ?array $serving = null): string
 {
-    $value = _stattic_brand()[$key] ?? '';
+    $value = _stattic_brand($serving)[$key] ?? '';
     return is_string($value) ? $value : '';
 }
 
@@ -161,7 +194,15 @@ function _stattic_brand_value(string $key): string
  * Zero runner), or '' when this site is on the compiled-in defaults and the
  * subprocess would resolve the same document from nothing.
  */
-function _stattic_brand_config_env(): string
+function _stattic_brand_config_env(?array $serving = null): string
 {
-    return _stattic_config_value(STATTIC_BRAND_CONFIG_KEY);
+    $override = _stattic_serving_brand_override($serving);
+    $boxDoc = _stattic_config_value(STATTIC_BRAND_CONFIG_KEY);
+    if ($override === null) {
+        return $boxDoc;
+    }
+    $base = json_decode($boxDoc, true);
+    $merged = is_array($base) && !array_is_list($base) ? array_merge($base, $override) : $override;
+    $encoded = json_encode($merged, JSON_UNESCAPED_SLASHES);
+    return is_string($encoded) ? $encoded : $boxDoc;
 }

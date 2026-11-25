@@ -66,6 +66,131 @@ function _stattic_share_oauth_set_pending(array $serving, string $host, array $p
     _stattic_set_cookie($name, $cookie, 600);
 }
 
+// A desktop app signs in through the person's own browser (RFC 8252). The app
+// starts the sign-in from native code, so the pending cookie is the app's; the
+// browser only carries the person to Spacefast and back. It comes back to this
+// Space's callback without that cookie, so the state itself names the loopback
+// port the app listens on: 16 random bytes, the port, and a MAC over both under
+// this Space's key. The callback hands such a response on to the app, which
+// finishes the sign-in with the cookie it kept.
+const STATTIC_SHARE_OAUTH_DESKTOP_HEADER = 'Spacefast-Desktop-Sign-In';
+
+/** The loopback port a desktop app asked to be answered on (`desktop_port`), or null. */
+function _stattic_share_oauth_desktop_port_asked(): ?int
+{
+    $port = $_GET['desktop_port'] ?? null;
+    if (!is_string($port) || preg_match('/\A[1-9][0-9]{3,4}\z/D', $port) !== 1) return null;
+    $port = (int) $port;
+    return $port >= 1024 && $port <= 65535 ? $port : null;
+}
+
+function _stattic_share_oauth_desktop_mac(string $key, string $head): string
+{
+    return substr(hash_hmac('sha256', 'share-oauth-desktop:' . $head, $key), 0, 28);
+}
+
+function _stattic_share_oauth_desktop_state(string $key, int $port): string
+{
+    $head = bin2hex(random_bytes(16)) . sprintf('%04x', $port);
+    return $head . _stattic_share_oauth_desktop_mac($key, $head);
+}
+
+/** The port a state names, when this Space made it for a desktop app. */
+function _stattic_share_oauth_desktop_port(array $serving, string $state): ?int
+{
+    if (preg_match('/\A[a-f0-9]{64}\z/D', $state) !== 1) return null;
+    $key = _stattic_access_session_hmac_key($serving, 'share-oauth');
+    if ($key === null) return null;
+    $head = substr($state, 0, 36);
+    if (!hash_equals(_stattic_share_oauth_desktop_mac($key, $head), substr($state, 36))) return null;
+    $port = (int) hexdec(substr($head, 32));
+    return $port >= 1024 ? $port : null;
+}
+
+// The response goes to the app as it arrived. Only this computer answers at
+// the address, and the code is worth nothing without the verifier, which the
+// callback derives for whoever holds the pending cookie.
+function _stattic_share_oauth_desktop_relay(int $port): never
+{
+    $params = [];
+    foreach (['code', 'state', 'iss', 'error'] as $name) {
+        $value = $_GET[$name] ?? null;
+        if (is_string($value) && $value !== '' && strlen($value) <= 512) $params[$name] = $value;
+    }
+    _stattic_access_redirect(
+        'http://127.0.0.1:' . $port . '/?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986),
+        302,
+        STATTIC_CACHE_CONTROL_NO_STORE,
+        true
+    );
+}
+
+// A phone app signs in the same way, in the phone's own browser. Nothing
+// listens on a phone, so the browser is sent back to the app by address, and
+// only to one the Space can name for itself: Expo Go showing the app this
+// Space serves under /mobile, for an iPhone or for Android. The state names
+// which, under its own MAC label, so a desktop state is never read as a
+// phone's.
+const STATTIC_SHARE_OAUTH_MOBILE_HEADER = 'Spacefast-Mobile-Sign-In';
+// Where a published mobile app's files are served. Mirrors MOBILE_PUBLISH_PATH
+// in packages/common/src/contracts/mobile.ts.
+const STATTIC_SHARE_OAUTH_MOBILE_APP_PATH = '/mobile';
+const STATTIC_SHARE_OAUTH_MOBILE_TARGETS = ['expo-ios' => 1, 'expo-android' => 2];
+
+/** The way back a phone app asked for (`mobile_return`), or null. */
+function _stattic_share_oauth_mobile_target_asked(): ?string
+{
+    $target = $_GET['mobile_return'] ?? null;
+    return is_string($target) && isset(STATTIC_SHARE_OAUTH_MOBILE_TARGETS[$target]) ? $target : null;
+}
+
+function _stattic_share_oauth_mobile_mac(string $key, string $head): string
+{
+    return substr(hash_hmac('sha256', 'share-oauth-mobile:' . $head, $key), 0, 28);
+}
+
+function _stattic_share_oauth_mobile_state(string $key, string $target): string
+{
+    $head = bin2hex(random_bytes(16)) . sprintf('%04x', STATTIC_SHARE_OAUTH_MOBILE_TARGETS[$target]);
+    return $head . _stattic_share_oauth_mobile_mac($key, $head);
+}
+
+/** The way back a state names, when this Space made it for a phone app. */
+function _stattic_share_oauth_mobile_target(array $serving, string $state): ?string
+{
+    if (preg_match('/\A[a-f0-9]{64}\z/D', $state) !== 1) return null;
+    $key = _stattic_access_session_hmac_key($serving, 'share-oauth');
+    if ($key === null) return null;
+    $head = substr($state, 0, 36);
+    if (!hash_equals(_stattic_share_oauth_mobile_mac($key, $head), substr($state, 36))) return null;
+    $target = array_search((int) hexdec(substr($head, 32)), STATTIC_SHARE_OAUTH_MOBILE_TARGETS, true);
+    return is_string($target) ? $target : null;
+}
+
+/** The app's address for a way back: built from this Space's hostname alone, never from the request. */
+function _stattic_share_oauth_mobile_return(string $host, string $target): string
+{
+    $platform = $target === 'expo-ios' ? 'ios' : 'android';
+    return 'exps://' . $host . STATTIC_SHARE_OAUTH_MOBILE_APP_PATH . '/' . $platform . '.json/--/sign-in';
+}
+
+// As with a desktop app, the response goes on as it arrived, and the code is
+// worth nothing without the pending cookie the app kept.
+function _stattic_share_oauth_mobile_relay(string $host, string $target): never
+{
+    $params = [];
+    foreach (['code', 'state', 'iss', 'error'] as $name) {
+        $value = $_GET[$name] ?? null;
+        if (is_string($value) && $value !== '' && strlen($value) <= 512) $params[$name] = $value;
+    }
+    _stattic_access_redirect(
+        _stattic_share_oauth_mobile_return($host, $target) . '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986),
+        302,
+        STATTIC_CACHE_CONTROL_NO_STORE,
+        true
+    );
+}
+
 // How long the gate's proof that it started a sign-in lives (`sf_gate`).
 const STATTIC_SHARE_GATE_PROOF_SECONDS = 120;
 
@@ -114,8 +239,12 @@ function _stattic_share_gate_proof(array $serving, string $host, string $deniedR
 // visitor cannot open, which it names, and that start carries the gate's
 // proof; `/__spacefast/sign-in` (an app's `signIn()`, the bar's "Switch
 // account", a returning account's renewal) never passes it, since any page or
-// app on the Space can send a browser there.
-function _stattic_share_oauth_begin(array $serving, string $host, string $returnPath, bool $silent, bool $expired = false, ?string $deniedResource = null): never
+// app on the Space can send a browser there. $desktopPort is a desktop app's
+// start: the state names the port, and a header tells the app this engine
+// will hand the response back to it. $mobileTarget is a phone app's start: it
+// cannot stop a redirect to read where it leads, so the answer is the
+// authorization URL as JSON, for the app to open in the phone's browser.
+function _stattic_share_oauth_begin(array $serving, string $host, string $returnPath, bool $silent, bool $expired = false, ?string $deniedResource = null, ?int $desktopPort = null, ?string $mobileTarget = null): never
 {
     header('Referrer-Policy: no-referrer');
     $url = _stattic_share_oauth_url($serving);
@@ -128,9 +257,14 @@ function _stattic_share_oauth_begin(array $serving, string $host, string $return
     // else; the PKCE verifier and the nonce are derived from it under this
     // Space's key. A callback carrying another browser's code and state finds no
     // entry here and signs nobody in (login CSRF).
-    $state = bin2hex(random_bytes(32));
     $key = _stattic_access_session_hmac_key($serving, 'share-oauth');
     if ($key === null) _stattic_render_access_route_not_found();
+    $state = match (true) {
+        $mobileTarget !== null => _stattic_share_oauth_mobile_state($key, $mobileTarget),
+        $desktopPort !== null => _stattic_share_oauth_desktop_state($key, $desktopPort),
+        default => bin2hex(random_bytes(32)),
+    };
+    if ($mobileTarget === null && $desktopPort !== null) header(STATTIC_SHARE_OAUTH_DESKTOP_HEADER . ': loopback');
     $returnPath = _stattic_safe_return_path($returnPath) ?? '/';
     // Keep three entries below the browser's 4 KiB cookie limit, including JSON escaping.
     if (strlen(json_encode($returnPath, JSON_THROW_ON_ERROR)) > 512) $returnPath = '/';
@@ -170,6 +304,14 @@ function _stattic_share_oauth_begin(array $serving, string $host, string $return
             : ((($_GET['prompt'] ?? null) === 'select_account' || ($_GET['addAccount'] ?? null) === '1')
                 ? ['prompt' => 'select_account'] : [])),
     ]);
+    if ($mobileTarget !== null) {
+        header(STATTIC_SHARE_OAUTH_MOBILE_HEADER . ': return');
+        header('Cache-Control: ' . STATTIC_CACHE_CONTROL_NO_STORE, true);
+        header('X-Robots-Tag: noindex, nofollow', true);
+        header('Content-Type: application/json; charset=utf-8', true);
+        echo json_encode(['data' => ['url' => $redirect]], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        exit;
+    }
     _stattic_access_redirect($redirect, 302, STATTIC_CACHE_CONTROL_NO_STORE, true);
 }
 
@@ -226,7 +368,15 @@ function _stattic_share_oauth_callback(array $serving, string $requestHost): nev
     }
     $state = is_string($_GET['state'] ?? null) ? $_GET['state'] : '';
     $record = _stattic_share_oauth_consume($serving, $host, $state);
-    if ($record === null) _stattic_share_oauth_restart();
+    if ($record === null) {
+        // The person's browser, coming back for a desktop app.
+        $desktopPort = _stattic_share_oauth_desktop_port($serving, $state);
+        if ($desktopPort !== null) _stattic_share_oauth_desktop_relay($desktopPort);
+        // Or their phone's browser, coming back for a phone app.
+        $mobileTarget = _stattic_share_oauth_mobile_target($serving, $state);
+        if ($mobileTarget !== null) _stattic_share_oauth_mobile_relay($host, $mobileTarget);
+        _stattic_share_oauth_restart();
+    }
     $returnPath = _stattic_safe_return_path($record['return'] ?? '/') ?? '/';
     $code = is_string($_GET['code'] ?? null) ? $_GET['code'] : '';
     if ($code === '' || strlen($code) > 512) {

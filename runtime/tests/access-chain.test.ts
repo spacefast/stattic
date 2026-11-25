@@ -686,6 +686,160 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
     keepCookies(response);
   }
   expect([...jar.keys()].filter((name) => name.startsWith("__Host-spacefast_oauth_"))).toEqual([]);
+  // A desktop app signs in through the person's own browser. The app starts
+  // the sign-in and keeps the pending cookie. The browser comes back without
+  // one and is sent on to the app, on this computer and nowhere else; the app
+  // finishes with the cookie it kept.
+  const desktopStart = await get(
+    runtime,
+    OAUTH_HOST,
+    "/__spacefast/sign-in?desktop_port=49152&prompt=select_account",
+  );
+  expect(desktopStart.status).toBe(302);
+  expect(desktopStart.headers.get("spacefast-desktop-sign-in")).toBe("loopback");
+  const desktopAuthorize = new URL(desktopStart.headers.get("location") ?? "");
+  expect(desktopAuthorize.origin + desktopAuthorize.pathname).toBe(OAUTH_AUTHORIZE_URL);
+  expect(desktopAuthorize.searchParams.get("prompt")).toBe("select_account");
+  const desktopState = desktopAuthorize.searchParams.get("state") ?? "";
+  expect(desktopState).toMatch(/^[a-f0-9]{64}$/);
+  const appCookie = desktopStart.headers
+    .getSetCookie()
+    .map((header) => header.split(";")[0] ?? "")
+    .join("; ");
+  const issuerParam = encodeURIComponent(OAUTH_ISSUER);
+  const desktopCallback = `/__spacefast/callback?code=one-use-code-desktop&state=${desktopState}&iss=${issuerParam}`;
+  const exchangesBeforeDesktop = exchangeCount;
+  const inBrowser = await get(runtime, OAUTH_HOST, desktopCallback, {
+    headers: { cookie: cookies() },
+  });
+  expect(inBrowser.status).toBe(302);
+  expect(inBrowser.headers.get("location")).toBe(
+    `http://127.0.0.1:49152/?code=one-use-code-desktop&state=${desktopState}&iss=${issuerParam}`,
+  );
+  expect(inBrowser.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(inBrowser.headers.get("cache-control")).toBe("no-store");
+  expect(inBrowser.headers.getSetCookie()).toEqual([]);
+  const refusedInBrowser = await get(
+    runtime,
+    OAUTH_HOST,
+    `/__spacefast/callback?error=access_denied&state=${desktopState}&iss=${issuerParam}`,
+  );
+  expect(refusedInBrowser.headers.get("location")).toBe(
+    `http://127.0.0.1:49152/?state=${desktopState}&iss=${issuerParam}&error=access_denied`,
+  );
+  // The port is under the Space's key: a state that names another is no app's.
+  const otherPort = `${desktopState.slice(0, 32)}c001${desktopState.slice(36)}`;
+  const forged = await get(
+    runtime,
+    OAUTH_HOST,
+    `/__spacefast/callback?code=one-use-code-desktop&state=${otherPort}&iss=${issuerParam}`,
+  );
+  expect(forged.status).toBe(403);
+  expect(await forged.text()).toContain("Start sign-in again in this browser.");
+  expect(exchangeCount).toBe(exchangesBeforeDesktop);
+  expectedChallenge = desktopAuthorize.searchParams.get("code_challenge") ?? "";
+  nonceForCode.set("one-use-code-desktop", desktopAuthorize.searchParams.get("nonce") ?? "");
+  const inApp = await get(runtime, OAUTH_HOST, desktopCallback, { headers: { cookie: appCookie } });
+  expect(inApp.status).toBe(303);
+  expect(exchangeCount).toBe(exchangesBeforeDesktop + 1);
+  const appSession =
+    inApp.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("__Host-spacefast_session="))
+      ?.split(";")[0] ?? "";
+  expect(sessionOf(appSession).principal).toBe("account:usr_oauth_chain");
+  // A start that names no usable port is a browser's own, and says so.
+  for (const query of [
+    "",
+    "?desktop_port=80",
+    "?desktop_port=70000",
+    "?desktop_port=49152&silent=1",
+  ]) {
+    const web = await get(runtime, OAUTH_HOST, `/__spacefast/sign-in${query}`);
+    expect(web.status).toBe(302);
+    expect(web.headers.has("spacefast-desktop-sign-in")).toBe(false);
+  }
+  // A phone app signs in the same way, in the phone's own browser. It cannot
+  // stop a redirect, so its start answers with the authorization URL as JSON.
+  // The browser comes back without the app's pending cookie and is sent to
+  // Expo Go showing this Space's own app, an address built from the Space's
+  // hostname alone; the app finishes there.
+  const ways: Array<[string, string]> = [
+    ["expo-ios", `exps://${OAUTH_HOST}/mobile/ios.json/--/sign-in`],
+    ["expo-android", `exps://${OAUTH_HOST}/mobile/android.json/--/sign-in`],
+  ];
+  for (const [way, address] of ways) {
+    const mobileStart = await get(
+      runtime,
+      OAUTH_HOST,
+      `/__spacefast/sign-in?mobile_return=${way}&prompt=select_account`,
+    );
+    expect(mobileStart.status).toBe(200);
+    expect(mobileStart.headers.get("spacefast-mobile-sign-in")).toBe("return");
+    expect(mobileStart.headers.get("cache-control")).toBe("no-store");
+    expect(mobileStart.headers.has("location")).toBe(false);
+    const started = z
+      .object({ data: z.object({ url: z.string() }) })
+      .parse(await mobileStart.json());
+    const mobileAuthorize = new URL(started.data.url);
+    expect(mobileAuthorize.origin + mobileAuthorize.pathname).toBe(OAUTH_AUTHORIZE_URL);
+    expect(mobileAuthorize.searchParams.get("prompt")).toBe("select_account");
+    const mobileState = mobileAuthorize.searchParams.get("state") ?? "";
+    expect(mobileState).toMatch(/^[a-f0-9]{64}$/);
+    const phoneCookie = mobileStart.headers
+      .getSetCookie()
+      .map((header) => header.split(";")[0] ?? "")
+      .join("; ");
+    const code = `one-use-code-${way}`;
+    const mobileCallback = `/__spacefast/callback?code=${code}&state=${mobileState}&iss=${issuerParam}`;
+    const exchangesBefore = exchangeCount;
+    const inPhoneBrowser = await get(runtime, OAUTH_HOST, mobileCallback);
+    expect(inPhoneBrowser.status).toBe(302);
+    expect(inPhoneBrowser.headers.get("location")).toBe(
+      `${address}?code=${code}&state=${mobileState}&iss=${issuerParam}`,
+    );
+    expect(inPhoneBrowser.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(inPhoneBrowser.headers.getSetCookie()).toEqual([]);
+    // The way back is under the Space's key: a state that names another is no app's.
+    const otherWay = `${mobileState.slice(0, 32)}${way === "expo-ios" ? "0002" : "0001"}${mobileState.slice(36)}`;
+    const forgedWay = await get(
+      runtime,
+      OAUTH_HOST,
+      `/__spacefast/callback?code=${code}&state=${otherWay}&iss=${issuerParam}`,
+    );
+    expect(forgedWay.status).toBe(403);
+    expect(exchangeCount).toBe(exchangesBefore);
+    expectedChallenge = mobileAuthorize.searchParams.get("code_challenge") ?? "";
+    nonceForCode.set(code, mobileAuthorize.searchParams.get("nonce") ?? "");
+    const inPhoneApp = await get(runtime, OAUTH_HOST, mobileCallback, {
+      headers: { cookie: phoneCookie },
+    });
+    expect(inPhoneApp.status).toBe(303);
+    expect(exchangeCount).toBe(exchangesBefore + 1);
+    const phoneSession =
+      inPhoneApp.headers
+        .getSetCookie()
+        .find((value) => value.startsWith("__Host-spacefast_session="))
+        ?.split(";")[0] ?? "";
+    expect(sessionOf(phoneSession).principal).toBe("account:usr_oauth_chain");
+  }
+  // A desktop state is never read as a phone's, and the other way round.
+  const desktopAsPhone = await get(
+    runtime,
+    OAUTH_HOST,
+    `/__spacefast/callback?code=x&state=${desktopState.slice(0, 32)}0001${desktopState.slice(36)}&iss=${issuerParam}`,
+  );
+  expect(desktopAsPhone.status).toBe(403);
+  // A way back the Space cannot name, or a silent start, is a browser's own.
+  for (const query of [
+    "?mobile_return=exp%3A%2F%2Fevil.example",
+    "?mobile_return=app",
+    "?mobile_return=expo-ios&silent=1",
+  ]) {
+    const web = await get(runtime, OAUTH_HOST, `/__spacefast/sign-in${query}`);
+    expect(web.status).toBe(302);
+    expect(web.headers.has("spacefast-mobile-sign-in")).toBe(false);
+  }
   const handoff = (claims: { sub: string; principal?: string }) => {
     const now = Math.floor(Date.now() / 1000);
     return signEd25519Jwt(platformKey.privateKey, runtimeJwks().keys[0]?.kid ?? "", {

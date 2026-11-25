@@ -4359,7 +4359,15 @@ function _stattic_access_handle_account_start(array $serving, string $requestHos
         _stattic_render_access_route_not_found();
     }
     if (_stattic_share_oauth_url($serving) !== null) {
-        _stattic_share_oauth_begin($serving, _stattic_canonicalize_host($requestHost), $returnPath, $silent);
+        _stattic_share_oauth_begin(
+            $serving,
+            _stattic_canonicalize_host($requestHost),
+            $returnPath,
+            $silent,
+            // Nobody waits in a browser for a silent start, so it is never an app's.
+            desktopPort: $silent ? null : _stattic_share_oauth_desktop_port_asked(),
+            mobileTarget: $silent ? null : _stattic_share_oauth_mobile_target_asked()
+        );
     }
     _stattic_access_legacy_account_start_redirect(
         $accountUrl,

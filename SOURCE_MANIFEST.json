@@ -1,7 +1,7 @@
 {
-  "revision": "334421c60396186349d54053749b423d0b2ed4e3",
-  "sourceHash": "481e6dc19f3156464a45a272d93f19fed6fc310074f9cf329a20e194404cb42f",
-  "manifestSha256": "7adc66c611bb4b02512f90a624a0159e15f4c4c3c3e041d281b0f18cad4b8aee",
+  "revision": "d33601218e4730858b094fa0ae55bce590bcadea",
+  "sourceHash": "2916d5394ef7ef2a825ddbcd761f8d3ddea9c00a708960e54ffdfed27e27bd37",
+  "manifestSha256": "e55e9c609537a228bcb0ae87ccf05876f0c0ce8de77e9d4c092c0e5e54bd2324",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4da9d5f1a90992a7a8a84f27b8a54f9279da308e3e32f7cc902e3e19f9cdf849"
+      "sha256": "a3c907240ee68cb9edc80ae1f4ce4a842538c294ce78f9892046dfff6a62e6bd"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f72d24708296761428cc5c54ee0560034cbbce1fc17f40e027a11896914c8390"
+      "sha256": "207a2727cf0ba7f56620161befd4f2a75a87dba5b36b71c4a25c8de0062f3924"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -30013,7 +30013,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "614a165457bc6b7d0049a9ef26134038cc9d31bc96e4beb03e4dc9d1ee6ee441"
+      "sha256": "ea7fe2689f74caeeaa5d9069d11e4c280677de63bb87eb7fac9f9d23eef02cf4"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -30093,7 +30093,7 @@
     },
     {
       "path": "runtime/engine/runtime/share-oauth.php",
-      "sha256": "32b43112893749f68b4dbf3e6830a9a8842f2f3570c94e44f406dddd26d1b93c"
+      "sha256": "9a76de4b5bfdb23d0118ea29f146c27d8695de8b8f0660b15a4c63c0a9cdfc73"
     },
     {
       "path": "runtime/engine/runtime/space-bar.php",
@@ -30469,7 +30469,7 @@
     },
     {
       "path": "runtime/tests/access-chain.test.ts",
-      "sha256": "a1f26553db3fa803813e544c55b14f65cee31355e63a9abd85a2c53fea3a19d9"
+      "sha256": "a464502aa66dbe9cbecaa8ca3ed42415305619c88294c11c1529e114f57e33d5"
     },
     {
       "path": "runtime/tests/access-page.test.ts",

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blog</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; color: #222; }
+    h1 { margin-bottom: 0; } .tagline { color: #666; margin-top: .25rem; }
+    article { border-top: 1px solid #ddd; padding: 1rem 0; } .meta { color: #666; font-size: .875rem; }
+    form { display: grid; gap: .5rem; margin-top: .5rem; } textarea { min-height: 4rem; }
+    .error { color: #b00020; } .who { float: right; font-size: .875rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="who">
+      <span id="me"></span> <button id="auth">Sign in</button>
+    </span>
+    <h1 id="title">Blog</h1><p class="tagline" id="tagline"></p>
+  </header>
+  <main id="posts"><p>Loading…</p></main>
+  <script type="module">
+    // The generated browser client, copied by `node build-client.mjs` (no bundler).
+    import { createClient, SpacePressError } from "./client/index.js";
+
+    // Sessions survive reloads (sessionStorage). Readers sign in on the site's /identity screens:
+    // register this page once with
+    // `spacepress identity app add --name=Blog --id=app_blog --redirect=<this page's URL> --origin=<its origin>`.
+    const first = createClient({
+      url: "/wp-json/spacepress/v1",
+      auth: { storage: "session", clientId: "app_blog", redirectUri: location.origin + location.pathname },
+    });
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+    async function renderMe() {
+      const me = await first.auth.me();
+      $("me").textContent = me ? `Hi, ${me.member?.name ?? me.name}` : "";
+      $("auth").textContent = me ? "Sign out" : "Sign in";
+    }
+
+    $("auth").addEventListener("click", async () => {
+      if (await first.auth.me()) {
+        await first.auth.signOut();
+        await Promise.all([renderMe(), render()]);
+      } else {
+        await first.auth.signIn({ returnTo: location.href }); // leaves the page
+      }
+    });
+
+    // Only the latest render paints: a slower, older one is dropped.
+    let renders = 0;
+    async function render() {
+      const mine = ++renders;
+      try {
+        await paint(mine);
+      } catch (err) {
+        if (mine === renders) $("posts").innerHTML = `<p class="error">${esc(err.detail ?? err.message)}</p>`;
+      }
+    }
+
+    async function paint(mine) {
+      const settings = await first.globals.settings.get();
+      if (mine !== renders) return;
+      document.title = $("title").textContent = settings.siteTitle;
+      $("tagline").textContent = settings.tagline ?? "";
+      const posts = await first.posts.list({ orderBy: { publishedAt: "desc" }, limit: settings.postsPerPage, with: { author: true, comments: true, cover: true } });
+      if (mine !== renders) return;
+      $("posts").innerHTML = posts.length === 0 ? "<p>No posts yet.</p>" : posts.map((p) => `
+        <article>
+          ${p.cover ? `<img src="${esc(p.cover.sizes.card?.url ?? p.cover.url)}" alt="${esc(p.cover.alt)}" width="600" height="400">` : ""}
+          <h2>${esc(p.title)}</h2>
+          <p class="meta">${esc(p.author?.name ?? "Anonymous")} · ${new Date(p.publishedAt).toLocaleDateString()} · ${p.tags.map(esc).join(", ")}</p>
+          ${p.body ?? `<p>${esc(p.excerpt)}</p>`}
+          <h3>${p.comments.length} comment${p.comments.length === 1 ? "" : "s"}</h3>
+          ${p.comments.map((c) => `<p><strong>${esc(c.name)}</strong>: ${esc(c.body)}</p>`).join("")}
+          <form data-post="${p.id}">
+            <input name="name" placeholder="Name" required>
+            <textarea name="body" placeholder="Say something nice" required></textarea>
+            <button>Comment</button><span class="error"></span>
+          </form>
+        </article>`).join("");
+    }
+
+    $("posts").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target, out = form.querySelector(".error");
+      try {
+        await first.comments.create({ postId: Number(form.dataset.post), name: form.name.value, body: form.body.value });
+        form.reset();
+        out.textContent = "Thanks! Your comment shows up once it's approved.";
+      } catch (err) {
+        out.textContent = err instanceof SpacePressError ? err.detail : "Couldn't reach the server.";
+      }
+    });
+
+    // Back from the sign-in screens: finish the sign-in, then drop ?code&state from the URL.
+    async function start() {
+      if (new URLSearchParams(location.search).has("code")) {
+        await first.auth.handleCallback();
+        history.replaceState(null, "", location.pathname);
+      }
+      await Promise.all([renderMe(), render()]);
+    }
+    start().catch((err) => { $("me").textContent = err.detail ?? err.message; });
+  </script>
+</body>
+</html>

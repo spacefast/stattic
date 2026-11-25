@@ -1,1 +1,0 @@
-<?php return array('name' => '@typedpress-admin/dataviews', 'dependencies' => array('react', 'react-dom', 'wp-data', 'wp-date', 'wp-hooks', 'wp-i18n'), 'moduleDependencies' => array(), 'version' => '334ee6a753b3357e51d2');

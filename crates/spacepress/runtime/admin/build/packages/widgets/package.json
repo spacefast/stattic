@@ -1,0 +1,24 @@
+{
+	"name": "@spacepress-admin/widgets",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.tsx"
+	},
+	"license": "GPL-2.0-or-later",
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@spacepress-admin/boot": "workspace:*",
+		"@spacepress-admin/dashboard": "workspace:*",
+		"@spacepress-admin/schema": "workspace:*",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"react": "catalog:"
+	}
+}

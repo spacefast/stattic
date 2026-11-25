@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/schema', 'dependencies' => array('react', 'wp-api-fetch', 'wp-components', 'wp-element', 'wp-html-entities', 'wp-primitives'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/attachment-importer', '@spacepress-admin/views', '@wordpress/route'), 'version' => '6ca436a23daace852761');

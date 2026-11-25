@@ -1,0 +1,16 @@
+{
+	"name": "@spacepress-admin/route-identity",
+	"version": "1.0.0",
+	"private": true,
+	"license": "GPL-2.0-or-later",
+	"route": {
+		"path": "/identity"
+	},
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"react": "catalog:"
+	}
+}

@@ -68,13 +68,13 @@ async function problem(response: Response) {
 const query = (rt: Runtime, table: string, extra: { [key: string]: Json } = {}) =>
   call(rt, "POST", "rows/query", "space_db_rows_query", { table, ...extra });
 
-test("the secret names mirror TypedPress's unreadable options", () => {
+test("the secret names mirror SpacePress's unreadable options", () => {
   const read = (file: string) =>
     JSON.parse(readFileSync(path.resolve(import.meta.dirname, "..", "..", file), "utf8"));
   const guard = z
     .object({ options: z.array(ruleSchema.extend({ read: z.boolean().optional() }).loose()) })
     .loose()
-    .parse(read("crates/typedpress/runtime/TypedPress/Wp/guard.json"));
+    .parse(read("crates/spacepress/runtime/SpacePress/Wp/guard.json"));
   const secrets = z
     .object({ names: z.array(ruleSchema) })
     .loose()
@@ -127,6 +127,10 @@ for (const flavor of ["mysql", "mariadb"] as const) {
           "CREATE TABLE wp_usermeta (umeta_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL, meta_key VARCHAR(255), meta_value LONGTEXT)",
           "INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (1, 'nickname', 'ada'), (1, 'session_tokens', 'tok'), (1, 'api_token', NULL), (2, NULL, 'tok'), (3, CONCAT('nickname', CHAR(9)), 'tabbed')",
           "CREATE TABLE wp_sfi_sessions (id INT PRIMARY KEY, secret_hash VARCHAR(64))",
+          "CREATE TABLE wp_sp__jobs (id INT PRIMARY KEY)",
+          "CREATE TABLE wp_sp_identity_accounts (id INT PRIMARY KEY)",
+          "CREATE TABLE wp_sp_items (id INT PRIMARY KEY)",
+          "CREATE TABLE wp_sp_spacefast_migrations (space_id VARCHAR(64) PRIMARY KEY)",
           "CREATE TABLE wp_tp__jobs (id INT PRIMARY KEY)",
           "CREATE TABLE wp_tp_identity_accounts (id INT PRIMARY KEY)",
           "CREATE TABLE wp_tp_items (id INT PRIMARY KEY)",
@@ -191,6 +195,7 @@ for (const flavor of ["mysql", "mariadb"] as const) {
           ["uuid_items", "app", false],
           [`${ZERO_V2}options`, "wordpress", true],
           ["wp_options", "wordpress", true],
+          ["wp_sp_items", "app", true],
           ["wp_tp_items", "app", true],
           ["wp_usermeta", "wordpress", true],
           ["wp_users", "wordpress", true],
@@ -707,6 +712,9 @@ for (const flavor of ["mysql", "mariadb"] as const) {
         "_spacefast_application_journal",
         D1_LEDGER,
         "wp_sfi_sessions",
+        "wp_sp__jobs",
+        "wp_sp_identity_accounts",
+        "wp_sp_spacefast_migrations",
         "wp_tp__jobs",
         "wp_tp_identity_accounts",
         `wp_zero_${CONTENT_HASH}_migrations`,

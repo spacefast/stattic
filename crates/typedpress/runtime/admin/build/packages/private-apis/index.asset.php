@@ -1,1 +1,0 @@
-<?php return array('name' => '@typedpress-admin/private-apis', 'dependencies' => array('wp-private-apis'), 'moduleDependencies' => array(), 'version' => '30c093c2210bf08e5de7');

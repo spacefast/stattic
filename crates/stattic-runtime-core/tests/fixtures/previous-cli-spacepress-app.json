@@ -1,0 +1,19 @@
+{
+  "files": {
+    "typedpress.config.ts": "import { collection, defineConfig, text, richText, slug } from \"typedpress\";\n                    const pattern = \"tp/content/posts/*.md\";\n                    export const posts = collection({ title: text(), slug: slug({ source: \"title\" }), body: richText().optional() }, { title: \"title\", content: \"body\", uid: true, sync: pattern });\n                    export { ping } from \"./tp/index\"; export default defineConfig({ name: \"hosted\", admin: false });",
+    "tp/content/posts/hello.md": "---\ntitle: Hello\nslug: hello\n---\nFirst post.\n",
+    "tp/_generated/frontend-styles.json": "{\"styles\":{\"tp/app/site.css\":\"/typedpress-styles/assets/site.css\"}}",
+    "tp/app/page.tsx": "import \"./site.css\"; import \"./local.css\"; export default function Home() { return <h1>Legacy SpacePress page</h1>; }",
+    "tp/app/local.css": "@import \"../../tp/tokens.css\";",
+    "tp/tokens.css": "h1 { font-size: 2rem; }",
+    "tp/app/site.css": "@import \"tailwindcss\";",
+    "tp/index.ts": "export { ping } from \"../tp/actions\";",
+    "tp/actions.ts": "import { mutation } from \"typedpress\"; export const ping = mutation({ access: \"anyone\" }, async () => ({ ok: true }));"
+  },
+  "canonical": {
+    "typedpress.config.ts": "typedpress.config.ts",
+    "tp": "tp",
+    "tp/index.ts": "tp/index.ts",
+    "tp/actions.ts": "tp/actions.ts"
+  }
+}

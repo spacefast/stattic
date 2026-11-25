@@ -1,0 +1,1 @@
+<?php return array('name' => 'dashboard', 'dependencies' => array('wp-data'), 'moduleDependencies' => array('@spacepress-admin/boot', '@wordpress/route'), 'version' => '66e7573ab881545e9b82');

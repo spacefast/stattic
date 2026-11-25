@@ -325,14 +325,13 @@ fn render_file_viewer(
     )
 }
 
-/// `has_worker` is the version's Functions signal: a worker owns every
-/// unresolved request, `/` included, so a Functions version with no inferable
-/// root HTML serves neither an index nor a directory listing.
+/// If a worker or an app page handles the root, keep the usual static index and explicit
+/// serving configuration, but don't infer a directory listing in front of the app.
 pub fn resolve_serving_config(
     config: &Map<String, Value>,
     files: &BTreeMap<String, FileMeta>,
     private: &BTreeSet<String>,
-    has_worker: bool,
+    dynamic_homepage: bool,
 ) -> Result<Map<String, Value>> {
     if config.get("index").is_some_and(|index| match index {
         Value::String(path) => path.trim().trim_start_matches('/').is_empty(),
@@ -388,7 +387,7 @@ pub fn resolve_serving_config(
         file_config: Some(file_config),
         overlay: None,
         template_entries: Vec::new(),
-        has_worker,
+        has_worker: dynamic_homepage,
     });
     if effective
         .issues

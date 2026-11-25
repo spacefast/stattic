@@ -5355,7 +5355,11 @@ $identityOrigin = static function (string $origin, string $route): bool {
     $_SERVER['HTTP_ORIGIN'] = $origin;
     return _stattic_wordpress_identity_app_origin_allowed($route);
 };
-check($identityOrigin('https://app.example.test', '/spacepress-identity/v1/account'), 'identity origin: a registered SpacePress app origin reads SpacePress identity');
+check($identityOrigin('https://app.example.test', '/spacepress-identity/v1/account'), 'identity origin: previously compiled SpacePress sites keep registered origins');
+eval('namespace SpacePress\\Identity; class DB {} class Plugin { public static DB $db; } class OAuth { public static function allowedOrigin(DB $db, string $origin): bool { return $origin === "https://new.example.test"; } }');
+\SpacePress\Identity\Plugin::$db = new \SpacePress\Identity\DB();
+check(!$identityOrigin('https://app.example.test', '/spacepress-identity/v1/account'), 'identity origin: current plugin owns the route');
+check($identityOrigin('https://new.example.test', '/spacepress-identity/v1/account'), 'identity origin: a registered SpacePress app origin reads SpacePress identity');
 check(!$identityOrigin('https://other.example.test', '/spacepress-identity/v1/account'), 'identity origin: an unregistered origin is refused');
 check(!$identityOrigin('https://app.example.test', '/spacepress-identity/v1/admin/applications'), 'identity origin: a registered origin never opens SpacePress identity admin');
 check(!$identityOrigin('https://app.example.test', '/zero-identity/v1/account'), 'identity origin: SpacePress registrations do not vouch for Zero identity');

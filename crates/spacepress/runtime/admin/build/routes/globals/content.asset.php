@@ -1,0 +1,1 @@
+<?php return array('name' => 'globals', 'dependencies' => array(), 'moduleDependencies' => array('@spacepress-admin/schema'), 'version' => '3f62ee5a304fbe8d965b');

@@ -1,1 +1,0 @@
-<?php return array('name' => '@typedpress-admin/ai-agent', 'dependencies' => array('react', 'wp-api-fetch', 'wp-core-data', 'wp-data', 'wp-element', 'wp-i18n', 'wp-theme'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/private-apis', '@wordpress/route'), 'version' => '68e3b29f076a249f2781');

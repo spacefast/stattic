@@ -1,1 +1,0 @@
-<?php return array('name' => 'design-styles', 'dependencies' => array('react', 'wp-block-editor', 'wp-blocks', 'wp-components', 'wp-core-data', 'wp-data', 'wp-editor', 'wp-element', 'wp-i18n', 'wp-media-utils'), 'moduleDependencies' => array('@typedpress-admin/global-styles-engine', '@wordpress/route'), 'version' => '7383134b1da2102243e4');

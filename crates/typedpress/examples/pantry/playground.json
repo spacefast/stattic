@@ -1,5 +1,0 @@
-{
-  "title": "Pantry",
-  "summary": "A pantry tracker. Three SQL tables, a hook that writes the shopping list, two actions and a background job.",
-  "landing": "/wp-json/typedpress/v1/shopping_list"
-}

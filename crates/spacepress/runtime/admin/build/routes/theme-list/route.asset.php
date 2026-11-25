@@ -1,0 +1,1 @@
+<?php return array('name' => 'theme-list', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@spacepress-admin/core-data-next', '@spacepress-admin/views'), 'version' => 'a98bdf8abe3557a93a03');

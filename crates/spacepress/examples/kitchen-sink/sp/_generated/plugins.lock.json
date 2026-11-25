@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "plugins": {
+    "policy": {
+      "package": "spacepress-plugin-kitchen-policy",
+      "version": "1.0.0",
+      "integrity": "sha256-41c44ca45e26530a20228ae22f8677dd5def4e7552cff80ffc7084c71a240ad4",
+      "grant": {
+        "read": [
+          "recipes"
+        ],
+        "write": [
+          "recipes.excerpt",
+          "recipes.title"
+        ],
+        "delete": [],
+        "hooks": [
+          "recipes.beforeCreate"
+        ],
+        "actions": [],
+        "http": [],
+        "env": [],
+        "mail": [],
+        "connectors": [],
+        "jobs": [],
+        "timers": [],
+        "abilities": [],
+        "wpHooks": [],
+        "php": []
+      }
+    }
+  }
+}

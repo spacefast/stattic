@@ -1005,6 +1005,12 @@ function _stattic_spacepress_try_serve_asset(array $context, string $root, array
         'woff' => 'font/woff',
         'woff2' => 'font/woff2',
     ];
+    // Imported documents are public build assets. Other documents bundled
+    // inside the runtime or a plugin are not part of the app's asset surface.
+    if (preg_match('~^app/[a-f0-9]{64}/plugins/[^/]+/(?:sp|tp)/app/assets/[A-Za-z0-9_-]+-[a-f0-9]{16}\.(?:pdf|csv)$~D', $relative) === 1) {
+        $types['pdf'] = 'application/pdf';
+        $types['csv'] = 'text/csv';
+    }
     if (!isset($types[$extension]) || str_contains($relative, "\0")) {
         _stattic_problem_response(404, 'not_found', 'No such SpacePress asset.');
     }

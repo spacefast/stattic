@@ -1,1 +1,0 @@
-<?php return array('name' => 'user-list', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@typedpress-admin/core-data-next', '@typedpress-admin/views'), 'version' => '8019bdd3358d04547c27');

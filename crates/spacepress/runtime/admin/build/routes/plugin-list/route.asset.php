@@ -1,0 +1,1 @@
+<?php return array('name' => 'plugin-list', 'dependencies' => array('wp-core-data', 'wp-data', 'wp-i18n'), 'moduleDependencies' => array('@spacepress-admin/core-data-next'), 'version' => '42a9ec653b28b39b1c2a');

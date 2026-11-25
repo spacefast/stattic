@@ -1,1 +1,0 @@
-<?php return array('name' => '@typedpress-admin/schema', 'dependencies' => array('react', 'wp-api-fetch', 'wp-components', 'wp-element', 'wp-html-entities', 'wp-primitives'), 'moduleDependencies' => array('@typedpress-admin/admin-toolkit', '@typedpress-admin/attachment-importer', '@typedpress-admin/views', '@wordpress/route'), 'version' => '1cd7b00e1a6e792b8309');

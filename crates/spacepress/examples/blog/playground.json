@@ -1,0 +1,5 @@
+{
+  "title": "Blog",
+  "summary": "A publication. Posts, authors, moderated comments, member accounts, image sizes, private files and signed webhooks.",
+  "landing": "/wp-admin/edit.php?post_type=sp_posts"
+}

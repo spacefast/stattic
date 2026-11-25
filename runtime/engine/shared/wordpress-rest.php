@@ -64,7 +64,9 @@ function _stattic_wordpress_identity_app_origin_allowed(string $route): bool
     // for the plugin that owns the route's namespace.
     $owners = [
         'zero-identity' => [\Zero\Identity\Plugin::class, \Zero\Identity\OAuth::class],
-        'spacepress-identity' => [\TypedPress\Identity\Plugin::class, \TypedPress\Identity\OAuth::class],
+        'spacepress-identity' => class_exists(\SpacePress\Identity\Plugin::class)
+            ? [\SpacePress\Identity\Plugin::class, \SpacePress\Identity\OAuth::class]
+            : [\TypedPress\Identity\Plugin::class, \TypedPress\Identity\OAuth::class],
     ];
     if (preg_match('~^/(zero-identity|spacepress-identity)/v1/(?!admin(?:/|$))~i', $route, $match) !== 1) {
         return false;

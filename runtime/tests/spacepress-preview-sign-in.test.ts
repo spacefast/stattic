@@ -142,17 +142,17 @@ add_action('rest_api_init', static function () {
       );
 
       const project = path.join(work, "app");
-      mkdirSync(path.join(project, "tp/app"), { recursive: true });
+      mkdirSync(path.join(project, "sp/app"), { recursive: true });
       writeFileSync(
         path.join(project, "spacepress.config.ts"),
         'import {defineConfig} from "spacepress"; export default defineConfig({name: "signin", admin: false});',
       );
       writeFileSync(
-        path.join(project, "tp/app/page.tsx"),
+        path.join(project, "sp/app/page.tsx"),
         "export default function Home(){return <main><h1>SpacePress sign-in page</h1></main>;}",
       );
       writeFileSync(
-        path.join(project, "tp/actions.ts"),
+        path.join(project, "sp/actions.ts"),
         'import {mutation} from "spacepress"; export const whoami = mutation({access:"anyone"}, async (_input: {}, ctx) => ({role: ctx.user === null ? null : ctx.user.role}));',
       );
       const step = await prepareZeroV2SourcePublish(project);

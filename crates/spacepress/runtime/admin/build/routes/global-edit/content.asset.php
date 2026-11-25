@@ -1,0 +1,1 @@
+<?php return array('name' => 'global-edit', 'dependencies' => array(), 'moduleDependencies' => array('@spacepress-admin/schema'), 'version' => '2e4d9f9fcb4ffe9935c7');

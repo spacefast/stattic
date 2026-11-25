@@ -35,8 +35,7 @@ tree-sitter-typescript = "=0.23.2"
 oxc_span = "=0.152.0"
 brotli = "8"
 flate2 = "1"
-# Flip `typedpress` -> `spacepress` (and `../typedpress` -> `../spacepress`) once Track 0's spacepress-source.zip lands.
-typedpress = { path = "../typedpress", default-features = false, features = ["host"] }
+spacepress = { path = "../spacepress", default-features = false, features = ["host"] }
 zero = { path = "../zero", default-features = false, features = ["host"] }
 stattic-zero-runner = { path = "../stattic-zero-runner" }
 

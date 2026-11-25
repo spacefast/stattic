@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": [],
+    "jsx": "react-jsx",
+    "jsxImportSource": "spacepress",
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "spacepress": ["../../types/spacepress/index.d.ts"],
+      "spacepress/*": ["../../types/spacepress/*.d.ts"],
+      "spacepress:db": ["../../types/spacepress/db.d.cts"],
+      "php/wordpress": ["../../types/spacepress/wordpress.d.ts"]
+    }
+  },
+  "include": ["spacepress.config.ts", "sp", "emails"]
+}

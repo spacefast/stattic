@@ -1,0 +1,33 @@
+{
+	"name": "@spacepress-admin/fields-next",
+	"version": "1.0.0",
+	"description": "Fields for SpacePress Admin",
+	"type": "module",
+	"wpModule": true,
+	"private": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@spacepress-admin/core-data-next": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@spacepress-admin/dataviews": "workspace:*",
+		"@wordpress/editor": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/url": "catalog:",
+		"clsx": "catalog:"
+	},
+	"devDependencies": {
+		"@testing-library/react": "catalog:"
+	},
+	"license": "GPL-2.0-or-later"
+}

@@ -1,0 +1,1 @@
+<?php return array('name' => 'media', 'dependencies' => array(), 'moduleDependencies' => array('@spacepress-admin/schema'), 'version' => '3b1b8e1c48cbd9f2dadd');

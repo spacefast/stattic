@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-theme-fields', 'dependencies' => array('react', 'wp-components', 'wp-html-entities', 'wp-i18n'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit'), 'version' => '202d07cf7914354a28fc');

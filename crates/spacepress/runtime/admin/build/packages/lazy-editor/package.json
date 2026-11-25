@@ -1,0 +1,27 @@
+{
+	"name": "@spacepress-admin/lazy-editor",
+	"version": "1.0.0",
+	"description": "A lazy editor loader that provides editor settings and assets loading hooks.",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"files": [
+		"build"
+	],
+	"dependencies": {
+		"@spacepress-admin/core-data-next": "workspace:*",
+		"@spacepress-admin/global-styles-engine": "workspace:*",
+		"@spacepress-admin/load-assets": "workspace:*",
+		"@wordpress/theme": "catalog:",
+		"@spacepress-admin/private-apis": "workspace:*",
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"react": "catalog:",
+		"@wordpress/global-styles-engine": "catalog:"
+	},
+	"license": "GPL-2.0-or-later"
+}

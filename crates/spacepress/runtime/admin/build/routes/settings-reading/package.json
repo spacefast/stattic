@@ -1,0 +1,27 @@
+{
+	"name": "@spacepress-admin/route-settings-reading",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/settings/reading",
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "settings_reading"
+			}
+		}
+	},
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@spacepress-admin/design-system": "workspace:*",
+		"@spacepress-admin/dataviews": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/preferences": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:"
+	}
+}

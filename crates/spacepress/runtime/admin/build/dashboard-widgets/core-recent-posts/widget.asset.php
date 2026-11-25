@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-recent-posts', 'dependencies' => array('wp-i18n'), 'moduleDependencies' => array(), 'version' => '58c15a9a8cef0aa52911');

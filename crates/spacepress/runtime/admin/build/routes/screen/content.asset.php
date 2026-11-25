@@ -1,0 +1,1 @@
+<?php return array('name' => 'screen', 'dependencies' => array('react'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/screens', '@wordpress/route'), 'version' => 'c5a2f0eb131cb677b714');

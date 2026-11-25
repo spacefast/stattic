@@ -3019,6 +3019,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "spacepress"
+version = "0.3.0"
+dependencies = [
+ "boon",
+ "imagesize",
+ "indexmap",
+ "oxc-css-parser",
+ "oxc_allocator 0.158.0",
+ "oxc_ast 0.158.0",
+ "oxc_ast_visit 0.158.0",
+ "oxc_codegen 0.158.0",
+ "oxc_isolated_declarations 0.158.0",
+ "oxc_minifier",
+ "oxc_parser 0.158.0",
+ "oxc_semantic 0.158.0",
+ "oxc_span 0.158.0",
+ "oxc_syntax 0.158.0",
+ "oxc_transformer 0.158.0",
+ "pulldown-cmark",
+ "regex",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "ureq",
+ "url",
+ "zip",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3067,6 +3098,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "spacefast-secret-scan",
+ "spacepress",
  "stattic-runtime-egress",
  "stattic-runtime-policy",
  "stattic-zero-runner",
@@ -3074,7 +3106,6 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-typescript",
- "typedpress",
  "unicode-normalization",
  "url",
  "walkdir",
@@ -3575,37 +3606,6 @@ name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
-
-[[package]]
-name = "typedpress"
-version = "0.3.0"
-dependencies = [
- "boon",
- "imagesize",
- "indexmap",
- "oxc-css-parser",
- "oxc_allocator 0.158.0",
- "oxc_ast 0.158.0",
- "oxc_ast_visit 0.158.0",
- "oxc_codegen 0.158.0",
- "oxc_isolated_declarations 0.158.0",
- "oxc_minifier",
- "oxc_parser 0.158.0",
- "oxc_semantic 0.158.0",
- "oxc_span 0.158.0",
- "oxc_syntax 0.158.0",
- "oxc_transformer 0.158.0",
- "pulldown-cmark",
- "regex",
- "ryu-js",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tempfile",
- "ureq",
- "url",
- "zip",
-]
 
 [[package]]
 name = "typenum"

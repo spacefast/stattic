@@ -839,7 +839,14 @@ fn run_finalize_pipeline(
     // dispatch configuration rides in: the control plane sends `functions` only
     // for a version whose compiled metadata carries a worker.
     let has_worker = input.body.get("functions").is_some_and(Value::is_object);
-    let mut serving_config = resolve_serving_config(config, files, &private, has_worker)?;
+    // A declared SpacePress homepage also owns /. Its public stylesheet alone must
+    // not cause serving inference to generate a directory listing over that page.
+    let app_homepage = zero_v2
+        .as_ref()
+        .and_then(|compiled| compiled.manifest["pagePaths"].as_array())
+        .is_some_and(|paths| paths.iter().any(|path| path == "/"));
+    let mut serving_config =
+        resolve_serving_config(config, files, &private, has_worker || app_homepage)?;
     if let Some(pages) = pages {
         serving_config.remove("fallback");
         write_php(&stage_root.join("pages.php"), &json!(pages))?;
@@ -2833,10 +2840,10 @@ export default defineConfig({{ name: "hosted", admin: false }});"#
             &[
                 (
                     "spacepress.config.ts",
-                    br#"import { defineConfig } from "spacepress"; export { ping } from "./tp/actions"; export default defineConfig({ name: "hosted", admin: false });"#,
+                    br#"import { defineConfig } from "@spacefast/spacepress"; export { ping } from "./sp/actions"; export default defineConfig({ name: "hosted", admin: false });"#,
                 ),
                 (
-                    "tp/actions.ts",
+                    "sp/actions.ts",
                     br#"import { mutation } from "spacepress"; export const ping = mutation({ access: "anyone" }, async () => ({ ok: true }));"#,
                 ),
                 ("index.html", b"<!doctype html><html><body>astro home</body></html>"),
@@ -2864,7 +2871,7 @@ export default defineConfig({{ name: "hosted", admin: false }});"#
         let catalog = finalized_catalog(&private);
         for private_path in [
             "spacepress.config.ts",
-            "tp/actions.ts",
+            "sp/actions.ts",
             "public/favicon.svg",
             "functions/api.ts",
             "__spacefast/functions/bundles/abc123/bundle.json",
@@ -2988,6 +2995,46 @@ export default defineConfig({{ name: "hosted", admin: false }});"#
         assert_eq!(
             manifest["summary"]["actionPathPrefix"],
             "/wp-json/spacepress/v1/actions/"
+        );
+    }
+
+    #[test]
+    fn finalize_compiles_a_spacepress_bundle_from_the_previous_cli() {
+        let app = include_bytes!("../tests/fixtures/previous-cli-spacepress-app.json").as_slice();
+        let vendor = br#"{"files":{},"canonical":{}}"#;
+        let manifest = serde_json::to_vec(&json!({
+            "format": "spacepress.source-bundle.v1", "name": "hosted",
+            "app_sha256": sha256(app), "vendor_sha256": sha256(vendor)
+        }))
+        .unwrap();
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                (".spacepress-source/app.spacepress.json", app),
+                (".spacepress-source/vendor.spacepress.json", vendor),
+                (".spacepress-source/manifest.json", &manifest),
+                ("typedpress-styles/assets/site.css", b"h1 { color: red; }"),
+            ],
+            json!({"mode":"website"}),
+            json!({"zero_generation":"spacepress"}),
+        );
+        result.unwrap();
+        let compiled = private.join("spaces/s/versions/v/.zero-compiled");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(compiled.join("manifest.json")).unwrap()).unwrap();
+        assert!(finalized_catalog(&private).paths["typedpress-styles/assets/site.css"].public);
+        assert_eq!(
+            finalized_body(&private, "typedpress-styles/assets/site.css"),
+            b"h1 { color: red; }"
+        );
+        crate::spacepress::recompile(&private, "s", "v", None).unwrap();
+        let seed = compiled
+            .join("store/app")
+            .join(manifest["appHash"].as_str().unwrap())
+            .join("seed/posts.json");
+        let posts: Value = serde_json::from_slice(&fs::read(seed).unwrap()).unwrap();
+        assert_eq!(posts["records"][0]["fields"]["title"], "Hello");
+        assert!(
+            !finalized_catalog(&private).paths[".spacepress-source/app.spacepress.json"].public
         );
     }
 

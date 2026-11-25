@@ -1,0 +1,11 @@
+<?php
+
+declare(strict_types=1);
+
+namespace SpacePress\Vendor\Rowbot\URL\String\Exception;
+
+use SpacePress\Vendor\Rowbot\URL\Exception\URLException;
+
+class EncodingException extends URLException
+{
+}

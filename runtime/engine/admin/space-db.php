@@ -402,6 +402,9 @@ function _stattic_space_db_table_kind(string $table, array $scope): ?string
             || str_starts_with($rest, 'zero__')
             || str_starts_with($rest, 'zero_identity_')
             || str_starts_with($rest, 'zero_spacefast_')
+            || str_starts_with($rest, 'sp_spacefast_')
+            || str_starts_with($rest, 'sp__')
+            || str_starts_with($rest, 'sp_identity_')
             || str_starts_with($rest, 'tp_spacefast_')
             || str_starts_with($rest, 'tp__')
             || str_starts_with($rest, 'tp_identity_')
@@ -409,7 +412,7 @@ function _stattic_space_db_table_kind(string $table, array $scope): ?string
         ) {
             return null;
         }
-        return str_starts_with($rest, 'zero_') || str_starts_with($rest, 'tp_') ? 'app' : 'wordpress';
+        return str_starts_with($rest, 'zero_') || str_starts_with($rest, 'tp_') || str_starts_with($rest, 'sp_') ? 'app' : 'wordpress';
     }
     return 'app';
 }
@@ -485,12 +488,9 @@ function _stattic_space_db_secret_name(mixed $value): bool
  *
  * @return array{columns:list<string>, guard:?array{name:string,value:string}}
  */
-function _stattic_space_db_protection(string $table, string $kind, array $columns, array $scope): array
+function _stattic_space_db_protection(string $table, array $columns, array $scope): array
 {
     $none = ['columns' => [], 'guard' => null, 'binaryNames' => false];
-    if ($kind !== 'wordpress') {
-        return $none;
-    }
     $spelled = [];
     foreach (array_keys($columns) as $column) {
         $spelled[strtolower((string) $column)] = (string) $column;
@@ -664,7 +664,7 @@ function _stattic_space_db_table(string $tableName, array $scope): array
     if ($entry === null) {
         _stattic_problem_response(404, 'space_db_table_not_found', 'This Space\'s database has no table with this name.', ['details' => ['table' => $tableName]]);
     }
-    $protection = _stattic_space_db_protection($tableName, $kind, $entry['columns'], $scope);
+    $protection = _stattic_space_db_protection($tableName, $entry['columns'], $scope);
     if ($protection['guard'] !== null) {
         // Fail closed before any row of a guarded table is read.
         _stattic_space_db_secret_rules();
@@ -762,7 +762,7 @@ function _stattic_space_db_editable_table(string $tableName, array $scope): arra
 
 function _stattic_space_db_table_document(string $name, string $kind, array $entry, array $scope): array
 {
-    $protection = _stattic_space_db_protection($name, $kind, $entry['columns'], $scope);
+    $protection = _stattic_space_db_protection($name, $entry['columns'], $scope);
     $columns = [];
     foreach ($entry['columns'] as $column => $info) {
         $column = (string) $column;

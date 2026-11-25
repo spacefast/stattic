@@ -1,0 +1,1 @@
+<?php return array('name' => 'user', 'dependencies' => array(), 'moduleDependencies' => array('@spacepress-admin/core-data-next', '@wordpress/route'), 'version' => '41a9e92564b4071ec5da');

@@ -140,17 +140,17 @@ add_action('rest_api_init', static function () {
       );
 
       const project = path.join(work, "app");
-      mkdirSync(path.join(project, "tp/app"), { recursive: true });
+      mkdirSync(path.join(project, "sp/app"), { recursive: true });
       writeFileSync(
         path.join(project, "spacepress.config.ts"),
         'import {defineConfig, userProjection, text, email} from "spacepress"; export const members = userProjection({ email: email().unique().max(191), name: text().max(80) }, { access: { read: "self", update: "self", create: "anyone", delete: "admin" } }); export const users = { members }; export default defineConfig({name:"roles",admin:false});',
       );
       writeFileSync(
-        path.join(project, "tp/app/page.tsx"),
+        path.join(project, "sp/app/page.tsx"),
         "export default function Home(){return <main><h1>Role proof</h1></main>;}",
       );
       writeFileSync(
-        path.join(project, "tp/actions.ts"),
+        path.join(project, "sp/actions.ts"),
         'import {mutation} from "spacepress"; export const whoami = mutation({access:"anyone"}, async (_input: {}, ctx) => ({role: ctx.user === null ? null : ctx.user.role}));',
       );
       const step = await prepareZeroV2SourcePublish(project);

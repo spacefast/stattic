@@ -1,0 +1,32 @@
+{
+	"name": "@spacepress-admin/term-edit",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/taxonomies/$taxonomy/edit/$termId",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "term_details"
+			}
+		}
+	},
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@spacepress-admin/core-data-next": "workspace:*",
+		"@spacepress-admin/design-system": "workspace:*",
+		"@spacepress-admin/fields-next": "workspace:*",
+		"@spacepress-admin/views": "workspace:*",
+		"@wordpress/route": "catalog:",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@spacepress-admin/dataviews": "workspace:*",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@spacepress-admin/telemetry": "workspace:*"
+	}
+}

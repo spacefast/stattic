@@ -1,0 +1,1 @@
+<?php return array('name' => 'profile', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@spacepress-admin/core-data-next'), 'version' => 'cdfe598f0d1d14471a13');

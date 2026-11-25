@@ -1,1 +1,0 @@
-<?php return array('name' => 'collection-edit', 'dependencies' => array(), 'moduleDependencies' => array('@typedpress-admin/schema'), 'version' => '9ec35d18f4787c623e35');

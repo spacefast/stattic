@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/global-styles-engine', 'dependencies' => array('wp-blocks', 'wp-data', 'wp-i18n', 'wp-style-engine'), 'moduleDependencies' => array(), 'version' => 'fee9aa6082d76ad7eab8');

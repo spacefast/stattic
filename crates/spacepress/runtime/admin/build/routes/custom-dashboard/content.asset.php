@@ -1,0 +1,1 @@
+<?php return array('name' => 'custom-dashboard', 'dependencies' => array('react', 'wp-components', 'wp-data', 'wp-i18n', 'wp-preferences'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/boot', '@spacepress-admin/dashboard', '@spacepress-admin/widgets', '@wordpress/route'), 'version' => '58911bf1f56f243d345c');

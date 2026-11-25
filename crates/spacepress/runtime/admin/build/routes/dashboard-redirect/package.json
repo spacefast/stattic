@@ -1,0 +1,13 @@
+{
+	"name": "@spacepress-admin/dashboard-redirect",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/dashboard",
+		"beforeLoad": true
+	},
+	"license": "GPL-2.0-or-later",
+	"dependencies": {
+		"@wordpress/route": "catalog:"
+	}
+}

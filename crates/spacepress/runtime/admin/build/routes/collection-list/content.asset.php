@@ -1,0 +1,1 @@
+<?php return array('name' => 'collection-list', 'dependencies' => array(), 'moduleDependencies' => array('@spacepress-admin/schema'), 'version' => '7f1b746892e6ec266b43');

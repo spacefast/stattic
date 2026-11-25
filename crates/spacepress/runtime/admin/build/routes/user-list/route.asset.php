@@ -1,0 +1,1 @@
+<?php return array('name' => 'user-list', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@spacepress-admin/core-data-next', '@spacepress-admin/views'), 'version' => 'e421fcd2e6f948049639');

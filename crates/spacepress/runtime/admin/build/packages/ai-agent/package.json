@@ -1,0 +1,27 @@
+{
+	"name": "@spacepress-admin/ai-agent",
+	"version": "1.0.0",
+	"description": "AI Agent interface for SpacePress Admin",
+	"type": "module",
+	"wpModule": true,
+	"exports": {
+		".": "./src/index.tsx"
+	},
+	"files": [
+		"build"
+	],
+	"scripts": {
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@wordpress/theme": "catalog:",
+		"@spacepress-admin/private-apis": "workspace:*",
+		"@wordpress/route": "catalog:",
+		"@wordpress/abilities": "catalog:",
+		"@wordpress/api-fetch": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:"
+	}
+}

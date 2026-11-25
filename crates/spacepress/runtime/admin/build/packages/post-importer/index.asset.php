@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/post-importer', 'dependencies' => array('wp-blocks', 'wp-core-data', 'wp-i18n', 'wp-notices'), 'moduleDependencies' => array(), 'version' => '83f6e2697a5733ea4a10');

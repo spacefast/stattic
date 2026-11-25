@@ -1,0 +1,1 @@
+<?php return array('name' => 'term-edit', 'dependencies' => array('wp-core-data', 'wp-data'), 'moduleDependencies' => array('@spacepress-admin/core-data-next', '@wordpress/route'), 'version' => 'eb901f392a795a376e4d');

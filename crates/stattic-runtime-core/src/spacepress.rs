@@ -10,12 +10,7 @@
 //! coexist beside SpacePress in the same finalized version: SpacePress hides only its own
 //! source files and captured bundles, leaving static frontend assets and Functions intact.
 
-// Swap note when Track 0's `spacepress-source.zip` replaces `typedpress-source.zip`:
-// 1. Flip `crates/typedpress` -> `crates/spacepress` in root `Cargo.toml` and
-//    `typedpress = ...` -> `spacepress = ...` in `crates/stattic-runtime-core/Cargo.toml`.
-// 2. Flip this single import to `use spacepress as compiler;` and the `include_str!`
-//    path in `compiler_source_pin()` to `../../spacepress/SOURCE.json`.
-use typedpress as compiler;
+use spacepress as compiler;
 
 use crate::{
     catalog::read_version_catalog,
@@ -50,6 +45,15 @@ pub(crate) const SPACEPRESS_VENDOR_BUNDLE: &str = ".spacepress-source/vendor.spa
 pub(crate) const SPACEPRESS_MANIFEST: &str = ".spacepress-source/manifest.json";
 const SPACEPRESS_ACTION_PREFIX: &str = "/wp-json/spacepress/v1/actions/";
 const SPACEPRESS_SOURCE_FORMAT: &str = "spacepress.source-bundle.v1";
+const STYLE_DIRS: [&str; 2] = ["spacepress-styles/assets", "typedpress-styles/assets"];
+
+fn published_stylesheet(path: &str) -> bool {
+    let Some((parent, file)) = path.rsplit_once('/') else {
+        return false;
+    };
+    STYLE_DIRS.contains(&parent) && file.ends_with(".css")
+}
+
 const SPACEPRESS_HOSTED_FORMAT: &str = "spacepress.hosted.v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +99,7 @@ pub(crate) fn is_declared(stage: &Path, files: &BTreeMap<String, FileMeta>) -> b
 }
 
 fn compiler_source_pin() -> Value {
-    serde_json::from_str(include_str!("../../typedpress/SOURCE.json"))
+    serde_json::from_str(include_str!("../../spacepress/SOURCE.json"))
         .expect("checked-in SpacePress compiler SOURCE.json")
 }
 
@@ -157,7 +161,7 @@ pub(crate) fn extract_inline_app_config(source: &str) -> Option<String> {
         return None;
     }
 
-    let target_module = compiler::loader::TP_MODULE;
+    let target_module = compiler::loader::SP_MODULE;
     let mut out = String::new();
     let needs_define_wrap = matches!(unwrap_expr(app_expr), Expression::ObjectExpression(_));
     if needs_define_wrap {
@@ -181,7 +185,7 @@ pub(crate) fn extract_inline_app_config(source: &str) -> Option<String> {
                 }
                 let span = import.span;
                 if let Some(slice) = source.get(span.start as usize..span.end as usize) {
-                    out.push_str(&rewrite_module_specifiers(slice, target_module));
+                    out.push_str(slice);
                     out.push('\n');
                 }
             }
@@ -205,13 +209,10 @@ pub(crate) fn extract_inline_app_config(source: &str) -> Option<String> {
         }
     }
 
-    let rewritten_app = rewrite_module_specifiers(app_slice, target_module);
     if needs_define_wrap {
-        out.push_str(&format!(
-            "export default __sp_defineConfig({rewritten_app});\n"
-        ));
+        out.push_str(&format!("export default __sp_defineConfig({app_slice});\n"));
     } else {
-        out.push_str(&format!("export default {rewritten_app};\n"));
+        out.push_str(&format!("export default {app_slice};\n"));
     }
     Some(out)
 }
@@ -297,100 +298,81 @@ fn find_app_property<'a>(
     None
 }
 
-/// Pre-zip-swap helper: while the bundled compiler crate is still named `typedpress`,
-/// map `"spacepress"` / `"spacepress/*"` / `"spacepress:db"` imports to `"typedpress"`
-/// equivalents. Once `spacepress-source.zip` lands, `target_module == "spacepress"` and
-/// this becomes a no-op.
-fn rewrite_module_specifiers(source: &str, target_module: &str) -> String {
-    if target_module == "spacepress" {
-        return source.to_owned();
+// A released CLI can send a SpacePress envelope containing the TypedPress layout.
+// Adapt only paths and import/export specifiers. Keep arbitrary application strings intact.
+fn current_source_path(path: &str) -> String {
+    match path {
+        "typedpress.config.ts" => SPACEPRESS_CONFIG_FILE.into(),
+        "tp" => "sp".into(),
+        _ => path
+            .strip_prefix("tp/")
+            .map_or_else(|| path.into(), |rest| format!("sp/{rest}")),
     }
-    source
-        .replace("\"spacepress\"", &format!("\"{target_module}\""))
-        .replace("'spacepress'", &format!("'{target_module}'"))
-        .replace("\"spacepress/", &format!("\"{target_module}/"))
-        .replace("'spacepress/", &format!("'{target_module}/"))
-        .replace("\"spacepress:db\"", &format!("\"{target_module}:db\""))
-        .replace("'spacepress:db'", &format!("'{target_module}:db'"))
 }
 
-fn needs_pre_rename_shim() -> bool {
-    compiler::layout::CONFIG != SPACEPRESS_CONFIG_FILE
-        || compiler::bundle::APP_FILE != "app.spacepress.json"
-}
-
-fn stage_compat_project(
-    files_root: &Path,
-    compat_root: &Path,
-    config_override: Option<(&str, String)>,
-) -> std::io::Result<()> {
-    if compat_root.exists() {
-        fs::remove_dir_all(compat_root)?;
-    }
-    fs::create_dir_all(compat_root)?;
-    let target_module = compiler::loader::TP_MODULE;
-    let target_config = compiler::layout::CONFIG;
-    copy_project_for_compat(files_root, compat_root, target_module)?;
-    if let Some((_orig, content)) = config_override {
-        fs::write(compat_root.join(target_config), content)?;
-    } else if target_config != SPACEPRESS_CONFIG_FILE {
-        let spacepress_cfg = compat_root.join(SPACEPRESS_CONFIG_FILE);
-        if spacepress_cfg.is_file() {
-            let text = fs::read_to_string(&spacepress_cfg)?;
-            fs::write(
-                compat_root.join(target_config),
-                rewrite_module_specifiers(&text, target_module),
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_project_for_compat(from: &Path, to: &Path, target_module: &str) -> std::io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if matches!(
-            name_str.as_ref(),
-            ".spacepress-source" | ".zero-source" | ".zero-compiled" | ".spacepress-compiled"
-        ) {
-            continue;
-        }
-        let dest = to.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_project_for_compat(&entry.path(), &dest, target_module)?;
-        } else if target_module != "spacepress"
-            && matches!(
-                entry.path().extension().and_then(|e| e.to_str()),
-                Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs")
-            )
-        {
-            if let Ok(text) = fs::read_to_string(entry.path()) {
-                fs::write(&dest, rewrite_module_specifiers(&text, target_module))?;
-            } else {
-                fs::copy(entry.path(), &dest)?;
+// Rewrite only components reached at the bundle root. A nested tp/ is app-owned.
+fn current_relative_import(path: &str, name: &str) -> String {
+    let mut depth = path.matches('/').count() as isize;
+    let mut components: Vec<_> = name.split('/').collect();
+    let last = components.len() - 1;
+    for (index, part) in components.iter_mut().enumerate() {
+        match *part {
+            "." | "" => continue,
+            ".." => depth -= 1,
+            _ => {
+                if depth == 0 {
+                    *part = match *part {
+                        "tp" => "sp",
+                        "typedpress.config" if index == last => "spacepress.config",
+                        "typedpress.config.ts" if index == last => SPACEPRESS_CONFIG_FILE,
+                        other => other,
+                    };
+                }
+                depth += 1;
             }
-        } else {
-            fs::copy(entry.path(), &dest)?;
         }
     }
-    Ok(())
+    components.join("/")
 }
 
-/// Pre-zip-swap helper for `.spacepress-source/` bundles while `crates/typedpress`
-/// expects `app.typedpress.json`, `vendor.typedpress.json`, and `typedpress.source-bundle.v1`.
-fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> Result<PathBuf> {
-    if !needs_pre_rename_shim() {
-        return Ok(source_dir.to_path_buf());
+fn current_source_text(path: &str, mut text: String) -> String {
+    let Ok(kind) = SourceType::from_path(path) else {
+        return text;
+    };
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &text, kind).parse();
+    let mut edits = Vec::new();
+    for (specifier, requests) in &parsed.module_record.requested_modules {
+        let name = specifier.as_str();
+        let replacement =
+            if name == "typedpress" || name.starts_with("typedpress/") || name == "typedpress:db" {
+                name.replacen("typedpress", "spacepress", 1)
+            } else if name.starts_with("./") || name.starts_with("../") {
+                let mapped = current_relative_import(path, name);
+                if mapped == name {
+                    continue;
+                }
+                mapped
+            } else {
+                continue;
+            };
+        for request in requests {
+            edits.push((
+                request.span.start as usize + 1,
+                request.span.end as usize - 1,
+                replacement.clone(),
+            ));
+        }
     }
-    let failure = |e: std::io::Error| invalid_error("spacepress_build_io", e.to_string());
-    if compat_dir.exists() {
-        fs::remove_dir_all(compat_dir).map_err(failure)?;
+    edits.sort_by_key(|edit| edit.0);
+    for (start, end, replacement) in edits.into_iter().rev() {
+        text.replace_range(start..end, &replacement);
     }
-    fs::create_dir_all(compat_dir).map_err(failure)?;
+    text
+}
 
+fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> Result<PathBuf> {
+    let failure = |e: std::io::Error| invalid_error("spacepress_build_io", e.to_string());
     let manifest_bytes = fs::read(source_dir.join("manifest.json")).map_err(failure)?;
     let mut manifest: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| invalid_error("spacepress_source_layout", e.to_string()))?;
@@ -405,6 +387,19 @@ fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> 
     }
 
     let app_raw = fs::read(source_dir.join("app.spacepress.json")).map_err(failure)?;
+    let parse = |bytes: &[u8]| {
+        serde_json::from_slice::<compiler::bundle::SourceBundle>(bytes)
+            .map_err(|e| invalid_error("spacepress_source_layout", e.to_string()))
+    };
+    let app = parse(&app_raw)?;
+    if manifest["format"] == SPACEPRESS_SOURCE_FORMAT
+        && !app
+            .files
+            .keys()
+            .any(|path| path == "typedpress.config.ts" || path.starts_with("tp/"))
+    {
+        return Ok(source_dir.to_owned());
+    }
     let vendor_raw = fs::read(source_dir.join("vendor.spacepress.json")).map_err(failure)?;
     if manifest.get("app_sha256").and_then(Value::as_str) != Some(sha256(&app_raw).as_str())
         || manifest.get("vendor_sha256").and_then(Value::as_str)
@@ -413,35 +408,69 @@ fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> 
         return invalid("spacepress_compile_failed", "source bundle hash mismatch");
     }
 
-    let target_module = compiler::loader::TP_MODULE;
-    let target_config = compiler::layout::CONFIG;
-    let adapt_bundle = |bytes: &[u8]| -> Result<Vec<u8>> {
-        let mut bundle: compiler::bundle::SourceBundle = serde_json::from_slice(bytes)
-            .map_err(|e| invalid_error("spacepress_source_layout", e.to_string()))?;
-        let adapt_path = |p: String| {
-            if p == SPACEPRESS_CONFIG_FILE {
-                target_config.to_owned()
-            } else {
-                p
+    fn rename_map<T>(
+        entries: BTreeMap<String, T>,
+        adapt: impl Fn(&str, T) -> T,
+    ) -> Result<BTreeMap<String, T>> {
+        let mut renamed = BTreeMap::new();
+        for (path, value) in entries {
+            if renamed
+                .insert(current_source_path(&path), adapt(&path, value))
+                .is_some()
+            {
+                return invalid(
+                    "spacepress_source_layout",
+                    "Source bundle mixes old and new names.",
+                );
             }
-        };
-        bundle.files = bundle
+        }
+        Ok(renamed)
+    }
+    let adapt_bundle = |mut bundle: compiler::bundle::SourceBundle| -> Result<Vec<u8>> {
+        // CSS @import and url() are resolved by the compiler. Preserve the old lookup names
+        // while keeping one copy of each file at its new canonical path.
+        let aliases: BTreeMap<_, _> = bundle
             .files
-            .into_iter()
-            .map(|(k, v)| (adapt_path(k), rewrite_module_specifiers(&v, target_module)))
+            .keys()
+            .chain(bundle.binary.keys())
+            .chain(bundle.canonical.keys())
+            .filter(|path| path.starts_with("tp/"))
+            .map(|path| {
+                let target = bundle.canonical.get(path).unwrap_or(path);
+                (path.clone(), current_source_path(target))
+            })
             .collect();
-        bundle.canonical = bundle
-            .canonical
-            .into_iter()
-            .map(|(k, v)| (adapt_path(k), adapt_path(v)))
-            .collect();
+        if let Some(text) = bundle.files.get_mut("tp/_generated/frontend-styles.json") {
+            let invalid_styles = |e: serde_json::Error| {
+                invalid_error(
+                    "spacepress_source_layout",
+                    format!("Invalid frontend styles manifest: {e}"),
+                )
+            };
+            let mut manifest: Value = serde_json::from_str(text).map_err(invalid_styles)?;
+            if let Some(styles) = manifest.get_mut("styles") {
+                let entries: BTreeMap<String, String> =
+                    serde_json::from_value(styles.take()).map_err(invalid_styles)?;
+                *styles = serde_json::to_value(rename_map(entries, |_, url| url)?)
+                    .map_err(invalid_styles)?;
+            }
+            *text = serde_json::to_string(&manifest).map_err(invalid_styles)?;
+        }
+        bundle.files = rename_map(bundle.files, current_source_text)?;
+        bundle.binary = rename_map(bundle.binary, |_, bytes| bytes)?;
+        bundle.canonical = rename_map(bundle.canonical, |_, path| current_source_path(&path))?;
+        if !aliases.is_empty() {
+            bundle.canonical.extend(aliases);
+            // The compiler resolves evaluated sync globs against their original source root.
+            bundle.canonical.insert("tp".into(), "sp".into());
+        }
         serde_json::to_vec(&bundle)
             .map_err(|e| invalid_error("spacepress_source_layout", e.to_string()))
     };
-
-    let app_adapted = adapt_bundle(&app_raw)?;
-    let vendor_adapted = adapt_bundle(&vendor_raw)?;
-    manifest["format"] = Value::String("typedpress.source-bundle.v1".into());
+    let app_adapted = adapt_bundle(app)?;
+    let vendor_adapted = adapt_bundle(parse(&vendor_raw)?)?;
+    fs::create_dir_all(compat_dir).map_err(failure)?;
+    manifest["format"] = Value::String(SPACEPRESS_SOURCE_FORMAT.into());
     manifest["app_sha256"] = Value::String(sha256(&app_adapted));
     manifest["vendor_sha256"] = Value::String(sha256(&vendor_adapted));
 
@@ -464,12 +493,7 @@ fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> 
 /// built frontend assets (`index.html`, `_astro/*`, `assets/*`, etc.) public.
 fn captured_source_paths(sources_dir: &Path) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
-    for file in [
-        "app.spacepress.json",
-        "vendor.spacepress.json",
-        compiler::bundle::APP_FILE,
-        compiler::bundle::VENDOR_FILE,
-    ] {
+    for file in [compiler::bundle::APP_FILE, compiler::bundle::VENDOR_FILE] {
         let Ok(bytes) = fs::read(sources_dir.join(file)) else {
             continue;
         };
@@ -595,10 +619,11 @@ pub(crate) fn compile(
     let work = SourceWork::new(stage);
     let compile_result = compiler_sources(kind, &work, &stage.join("files"), inline_app_source)
         .and_then(|sources_dir| {
+            let assets = work.compiler_assets(kind, &stage.join("files"))?;
             let build = compiler::host::compile_to_store(
                 &sources_dir,
                 &store,
-                &stage.join("files"),
+                &assets,
                 previous_build.as_deref(),
             )
             .map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
@@ -678,6 +703,35 @@ impl SourceWork {
         }
     }
 
+    // A captured CLI upload serves public files from the version root. Present its built
+    // styles at the project-relative paths the compiler expects, without editing the catalog.
+    fn compiler_assets(&self, kind: AppKind, files: &Path) -> Result<PathBuf> {
+        if kind != AppKind::Captured || !STYLE_DIRS.iter().any(|dir| files.join(dir).is_dir()) {
+            return Ok(files.to_owned());
+        }
+        let public = self.compat_project.join("public");
+        if files.join("public").is_dir() {
+            copy_tree(&files.join("public"), &public).map_err(io_failure)?;
+        }
+        for dir in STYLE_DIRS {
+            let source = files.join(dir);
+            if !source.is_dir() {
+                continue;
+            }
+            let target = public.join(dir);
+            fs::create_dir_all(&target).map_err(io_failure)?;
+            for entry in fs::read_dir(source).map_err(io_failure)? {
+                let entry = entry.map_err(io_failure)?;
+                if entry.file_type().map_err(io_failure)?.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "css")
+                {
+                    fs::copy(entry.path(), target.join(entry.file_name())).map_err(io_failure)?;
+                }
+            }
+        }
+        Ok(self.compat_project.clone())
+    }
+
     fn remove(&self) {
         for dir in [&self.capture, &self.compat_project, &self.compat_sources] {
             if dir.exists() {
@@ -696,19 +750,19 @@ fn compiler_sources(
     inline_app_source: Option<String>,
 ) -> Result<PathBuf> {
     let failure = |e: std::io::Error| invalid_error("spacepress_build_io", e.to_string());
+    if !matches!(kind, AppKind::Captured) && files_root.join("tp").is_dir() {
+        return invalid(
+            "spacepress_source_layout",
+            "Upgrade the project's tp/ directory to sp/ before publishing raw source.",
+        );
+    }
     match kind {
         AppKind::Captured => prepare_captured_spacepress_sources(
             &files_root.join(SPACEPRESS_SOURCE_DIR),
             &work.compat_sources,
         ),
         AppKind::Raw => {
-            if needs_pre_rename_shim() {
-                stage_compat_project(files_root, &work.compat_project, None).map_err(failure)?;
-                compiler::host::sources(&work.compat_project, &work.capture)
-                    .map_err(map_capture_error)?;
-            } else {
-                compiler::host::sources(files_root, &work.capture).map_err(map_capture_error)?;
-            }
+            compiler::host::sources(files_root, &work.capture).map_err(map_capture_error)?;
             Ok(work.capture.clone())
         }
         AppKind::InlineConfig => {
@@ -718,10 +772,10 @@ fn compiler_sources(
                     "spacefast.config.ts declares no SpacePress app.",
                 )
             })?;
-            stage_compat_project(
-                files_root,
-                &work.compat_project,
-                Some((CONFIG_TYPESCRIPT_FILE, synthesized)),
+            copy_tree(files_root, &work.compat_project).map_err(failure)?;
+            fs::write(
+                work.compat_project.join(SPACEPRESS_CONFIG_FILE),
+                synthesized,
             )
             .map_err(failure)?;
             compiler::host::sources(&work.compat_project, &work.capture)
@@ -911,7 +965,7 @@ pub fn recompile(
         // Compile inputs only: private sources, and the public/ tree the compile reads assets from.
         let blobs = blob_root(private, space_id);
         for (path, entry) in &catalog.paths {
-            if entry.public && !path.starts_with("public/") {
+            if entry.public && !path.starts_with("public/") && !published_stylesheet(path) {
                 continue;
             }
             validate_relative_path(path)?;
@@ -935,13 +989,16 @@ pub fn recompile(
         } else {
             return not_spacepress();
         };
-        let sources = compiler_sources(kind, &SourceWork::new(&stage), &files, inline_app_source)?;
+        let work = SourceWork::new(&stage);
+        let sources = compiler_sources(kind, &work, &files, inline_app_source)?;
+        let assets = work.compiler_assets(kind, &files)?;
         let store = compiled.join("store");
         let previous = baseline
             .map(|previous| seed_baseline(private, space_id, previous, &store))
             .transpose()?;
-        let build = compiler::host::compile_to_store(&sources, &store, &files, previous.as_deref())
-            .map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
+        let build =
+            compiler::host::compile_to_store(&sources, &store, &assets, previous.as_deref())
+                .map_err(|e| invalid_error("spacepress_compile_failed", e.message))?;
         let client =
             tree(&store.join("app").join(&build.app_hash).join("client")).map_err(io_failure)?;
         let manifest = hosted_manifest(&store, build)?;

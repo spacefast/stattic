@@ -1,0 +1,1 @@
+<?php return array('name' => 'settings-experiments', 'dependencies' => array('react', 'wp-components', 'wp-i18n'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit'), 'version' => '0f66a483d0f3b559fcf3');

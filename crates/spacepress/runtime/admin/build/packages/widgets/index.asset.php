@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/widgets', 'dependencies' => array('react', 'wp-api-fetch', 'wp-components', 'wp-data', 'wp-element', 'wp-primitives'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/boot', '@spacepress-admin/dashboard', '@spacepress-admin/schema'), 'version' => 'abab1f99d5dfb0656e84');

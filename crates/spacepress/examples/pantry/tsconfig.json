@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "types": [],
+    "paths": {
+      "spacepress": ["../../types/spacepress/index.d.ts"]
+    }
+  },
+  "include": ["spacepress.config.ts", "sp/_generated/db.d.ts", "sp/lib/**/*.ts"]
+}

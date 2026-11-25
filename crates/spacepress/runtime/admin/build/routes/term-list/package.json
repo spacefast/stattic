@@ -1,0 +1,35 @@
+{
+	"name": "@spacepress-admin/term-list",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/types/$type/taxonomies/$taxonomy",
+		"beforeLoad": true,
+		"staticData": {
+			"telemetry": {
+				"surfaceArea": "term_list",
+				"customPageView": true
+			}
+		}
+	},
+	"dependencies": {
+		"@spacepress-admin/admin-toolkit": "workspace:*",
+		"@spacepress-admin/core-data-next": "workspace:*",
+		"@spacepress-admin/design-system": "workspace:*",
+		"@spacepress-admin/fields-next": "workspace:*",
+		"@spacepress-admin/views": "workspace:*",
+		"@spacepress-admin/telemetry": "workspace:*",
+		"@spacepress-admin/dataviews": "workspace:*",
+		"@wordpress/components": "catalog:",
+		"@wordpress/core-data": "catalog:",
+		"@wordpress/data": "catalog:",
+		"@wordpress/element": "catalog:",
+		"@wordpress/html-entities": "catalog:",
+		"@wordpress/i18n": "catalog:",
+		"@wordpress/icons": "catalog:",
+		"@wordpress/notices": "catalog:",
+		"@wordpress/route": "catalog:",
+		"@wordpress/ui": "catalog:",
+		"dequal": "^2.0.3"
+	}
+}

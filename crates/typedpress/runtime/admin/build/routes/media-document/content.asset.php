@@ -1,1 +1,0 @@
-<?php return array('name' => 'media-document', 'dependencies' => array(), 'moduleDependencies' => array('@typedpress-admin/schema'), 'version' => '643e5dce676fb36427ff');

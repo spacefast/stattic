@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/ai-agent', 'dependencies' => array('react', 'wp-api-fetch', 'wp-core-data', 'wp-data', 'wp-element', 'wp-i18n', 'wp-theme'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/private-apis', '@wordpress/route'), 'version' => '10596b1b955ecfc52ab7');

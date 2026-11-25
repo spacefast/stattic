@@ -107,7 +107,7 @@ add_action('sf_preview_test_job', static function () {
     );
 
     const project = path.join(work, "app");
-    mkdirSync(path.join(project, "tp/app"), { recursive: true });
+    mkdirSync(path.join(project, "sp/app"), { recursive: true });
     mkdirSync(path.join(project, "content/notes"), { recursive: true });
     // `column` adds one column to a table, so versions differ in their migrations.
     const config = (column = "") =>
@@ -123,7 +123,7 @@ add_action('sf_preview_test_job', static function () {
         ].join("\n"),
       );
     writeFileSync(
-      path.join(project, "tp/app/page.tsx"),
+      path.join(project, "sp/app/page.tsx"),
       "export default function Home(){return <main><h1>SpacePress preview page</h1></main>;}",
     );
     const publish = async (versionId: string, note: string, column = "") => {

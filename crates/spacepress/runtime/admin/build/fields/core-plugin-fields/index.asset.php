@@ -1,0 +1,1 @@
+<?php return array('name' => 'core-plugin-fields', 'dependencies' => array('react', 'react-dom', 'wp-compose', 'wp-element', 'wp-i18n', 'wp-primitives', 'wp-private-apis', 'wp-theme', 'wp-warning'), 'moduleDependencies' => array('@wordpress/a11y'), 'version' => '49396542b21504199edd');

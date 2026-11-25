@@ -1,0 +1,13 @@
+{
+	"name": "@spacepress-admin/route-globals",
+	"version": "1.0.0",
+	"private": true,
+	"route": {
+		"path": "/globals"
+	},
+	"license": "GPL-2.0-or-later",
+	"dependencies": {
+		"@spacepress-admin/schema": "workspace:*",
+		"@wordpress/route": "catalog:"
+	}
+}

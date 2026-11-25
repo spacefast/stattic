@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/user-data', 'dependencies' => array('wp-api-fetch', 'wp-core-data', 'wp-data', 'wp-i18n'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit'), 'version' => '500233ba88fbe332c558');

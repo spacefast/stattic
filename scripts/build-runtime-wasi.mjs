@@ -11,7 +11,7 @@ import { ensureRustTarget } from "./lib/rust-toolchain.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 // Public runtime source releases already contain the expanded compiler.
-if (existsSync(path.join(repoRoot, "packages/cli/compiler/typedpress-source.zip"))) {
+if (existsSync(path.join(repoRoot, "packages/cli/compiler/spacepress-source.zip"))) {
   const { prepareTypedPress } = await import("./prepare-typedpress.ts");
   await prepareTypedPress();
 }

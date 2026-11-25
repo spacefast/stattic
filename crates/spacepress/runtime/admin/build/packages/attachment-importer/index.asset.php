@@ -1,0 +1,1 @@
+<?php return array('name' => '@spacepress-admin/attachment-importer', 'dependencies' => array('wp-api-fetch', 'wp-core-data', 'wp-notices'), 'moduleDependencies' => array(), 'version' => '56f4f20e1380930eb4ac');

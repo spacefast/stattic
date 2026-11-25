@@ -1,0 +1,1 @@
+<?php return array('name' => 'classic-admin', 'dependencies' => array('react'), 'moduleDependencies' => array('@spacepress-admin/admin-toolkit', '@spacepress-admin/boot', '@wordpress/route'), 'version' => '8fb3a9570645409cccc7');

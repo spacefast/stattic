@@ -10,7 +10,10 @@ import { operations } from "../../apps/control-plane/src/db/schema/core.js";
 import { startRuntime } from "./harness.ts";
 
 const API = "https://api.sf.localhost";
-const credentialsSchema = z.object({ access_token: z.string(), session_id: z.string() });
+const credentialsSchema = z.object({
+  access_token: z.string(),
+  token_type: z.enum(["DPoP", "Bearer"]),
+});
 
 test("a personal agent publishes through DPoP, reads the runtime, and receives tracked artifact refusals", async () => {
   await using cleanup = new AsyncDisposableStack();
@@ -112,17 +115,14 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       .returning({ slug: authTeams.slug });
     if (!team) throw new Error("Created team is missing");
     const referralUrl = `https://spacefast.com/?sf_ref=${team.slug}`;
-    const started = credentialsSchema.parse(
-      await (
-        await agent.token({
-          grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-          assertion: await agent.assertion(`${API}/v1/auth/oauth2/token`, "publish-user"),
-        })
-      ).json(),
+    const sid = `sid_${randomUUID().replaceAll("-", "")}`;
+    const sub = "publish-user";
+    const { response: signedInResponse } = await agent.signIn(
+      await sessionCookie(user.sessionToken),
+      { tokenResource: `${API}/v1` },
     );
-    const signedIn = credentialsSchema.parse(
-      await (await agent.signIn(await sessionCookie(user.sessionToken), started.session_id)).json(),
-    );
+    expect(signedInResponse.status, await signedInResponse.clone().text()).toBe(200);
+    const signedIn = credentialsSchema.parse(await signedInResponse.json());
     const createUrl = `${API}/v1/spaces`;
     const createBody = JSON.stringify({
       teamId,
@@ -130,11 +130,19 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
       slug: `poppy-${randomUUID().slice(0, 8)}`,
       access: "public",
     });
+    const createIdempotencyKey = randomUUID();
     const createHeaders = {
+      ...(await agent.sessionHeaders({
+        url: createUrl,
+        method: "POST",
+        sid,
+        sub,
+        accessToken: signedIn.access_token,
+      })),
       authorization: `DPoP ${signedIn.access_token}`,
       dpop: await agent.proof(createUrl, "POST", signedIn.access_token),
       "content-type": "application/json",
-      "idempotency-key": randomUUID(),
+      "idempotency-key": createIdempotencyKey,
     };
     const created = await app.request(createUrl, {
       method: "POST",
@@ -145,17 +153,44 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
     spaceId = z
       .object({ data: z.object({ space: z.object({ id: z.string() }) }) })
       .parse(await created.json()).data.space.id;
-    const replay = await app.request(createUrl, {
+    // Replaying the same Session JWT jti is rejected with Poppy's 400 invalid_session.
+    const sessionReplay = await app.request(createUrl, {
       method: "POST",
       headers: createHeaders,
       body: createBody,
     });
-    expect(replay.status).toBe(401);
-    expect(replay.headers.get("www-authenticate")).toBe('DPoP error="invalid_dpop_proof"');
+    expect(sessionReplay.status).toBe(400);
+    expect(z.object({ error: z.string() }).parse(await sessionReplay.json()).error).toBe(
+      "invalid_session",
+    );
+    // Replaying the same DPoP proof with a fresh Session JWT is rejected with 401 invalid_dpop_proof.
+    const dpopReplay = await app.request(createUrl, {
+      method: "POST",
+      headers: {
+        ...createHeaders,
+        ...(await agent.sessionHeaders({
+          url: createUrl,
+          method: "POST",
+          sid,
+          sub,
+          accessToken: signedIn.access_token,
+        })),
+      },
+      body: createBody,
+    });
+    expect(dpopReplay.status).toBe(401);
+    expect(dpopReplay.headers.get("www-authenticate")).toBe('DPoP error="invalid_dpop_proof"');
     const receiptRead = await app.request(createUrl, {
       method: "POST",
       headers: {
         ...createHeaders,
+        ...(await agent.sessionHeaders({
+          url: createUrl,
+          method: "POST",
+          sid,
+          sub,
+          accessToken: signedIn.access_token,
+        })),
         dpop: await agent.proof(createUrl, "POST", signedIn.access_token),
       },
       body: createBody,
@@ -246,6 +281,13 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
     const published = await app.request(publishUrl, {
       method: "POST",
       headers: {
+        ...(await agent.sessionHeaders({
+          url: publishUrl,
+          method: "POST",
+          sid,
+          sub,
+          accessToken: signedIn.access_token,
+        })),
         authorization: `DPoP ${signedIn.access_token}`,
         dpop: await agent.proof(publishUrl, "POST", signedIn.access_token),
       },
@@ -331,6 +373,13 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
     const refused = await app.request(publishUrl, {
       method: "POST",
       headers: {
+        ...(await agent.sessionHeaders({
+          url: publishUrl,
+          method: "POST",
+          sid,
+          sub,
+          accessToken: signedIn.access_token,
+        })),
         authorization: `DPoP ${signedIn.access_token}`,
         dpop: await agent.proof(publishUrl, "POST", signedIn.access_token),
       },

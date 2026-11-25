@@ -1,7 +1,7 @@
 {
-  "revision": "c3632c55718ad2ca7ed1a8bf83199159b02d0238",
+  "revision": "2fb5de3e1ce9407dd6083eda75cc2650e87f1d38",
   "sourceHash": "725677a6ae4e728898a76457175c74f54aff28ecdfd1af7aaf939317725ab018",
-  "manifestSha256": "415bb1fee3c0a2953a49ef2f703dcadb8c8a7becb22cf8e571e906dff6ba530d",
+  "manifestSha256": "3defae2784bdea7c48f06f9b23abb1d7c0790cc7238fa67b3c24509e222994f1",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "e807de3853147865c6925fbd8db3a19625870580a0a5f549387f760b037c1e79"
+      "sha256": "8b20f066f7b2be88dce0b8b7f689e3ee057fd0e1c19049851141b2789814c3f4"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "f83e57f15935d374278a787bd208df887f7437ea8f154bb77e0a8fded599b8e9"
+      "sha256": "ff8cd7052aeff63b16fa7211f341d04eb2228b1862381d61b3046668fc20523c"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -30833,7 +30833,7 @@
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "a2936faceb7a61e0a5b5e678518c92e986f40a585d52e0b4fd70f9a37e630cbc"
+      "sha256": "d3f25751efeae2c7a99d823b2e5e86594859fed0074565f812720cc323c55bd0"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",

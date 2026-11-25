@@ -79,6 +79,7 @@ $storageRoot = _stattic_runtime_install_root($engineRoot) . '/storage';
 if (!is_dir($storageRoot)) {
     _stattic_problem_response(503, 'runtime_dispatch_undeployed', 'Runtime storage is not provisioned on this site.');
 }
+_stattic_access_private_root($storageRoot);
 
 // Stage the request exactly where the HTTP handlers read it; the management JWT
 // is still required and verified identically.

@@ -115,6 +115,7 @@ fn compile_zero_program(
                     message: format!("{} bytecode compilation failed: {error}", lane.label),
                     path: Some(diagnostic_path.to_string()),
                     details: None,
+                    fix: None,
                 });
                 return None;
             }
@@ -164,6 +165,7 @@ pub(crate) fn compile_zero_endpoints(
             message: "Zero endpoints support up to 128 entries.".to_string(),
             path: None,
             details: None,
+            fix: None,
         });
         return compiled;
     }
@@ -174,6 +176,7 @@ pub(crate) fn compile_zero_endpoints(
             message: "Zero run handlers support up to 128 entries.".to_string(),
             path: None,
             details: None,
+            fix: None,
         });
         return compiled;
     }
@@ -203,6 +206,7 @@ pub(crate) fn compile_zero_endpoints(
                 message: format!("Zero endpoint {path} conflicts with a generated control route."),
                 path: Some(endpoint.path.clone()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -218,6 +222,7 @@ pub(crate) fn compile_zero_endpoints(
                 message: "Zero endpoint entry is invalid.".to_string(),
                 path: Some(endpoint.path.clone()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -232,6 +237,7 @@ pub(crate) fn compile_zero_endpoints(
                     .to_string(),
                 path: Some(path.clone()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -246,6 +252,7 @@ pub(crate) fn compile_zero_endpoints(
                 message: "Zero endpoint ids must be unique.".to_string(),
                 path: Some(path.clone()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -334,6 +341,7 @@ pub(crate) fn compile_zero_endpoints(
                 message: "Zero run handler entry is invalid.".to_string(),
                 path: Some(run.run_id.clone()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -344,6 +352,7 @@ pub(crate) fn compile_zero_endpoints(
                 message: "Zero run handler ids must be unique.".to_string(),
                 path: Some(run_id.to_string()),
                 details: None,
+                fix: None,
             });
             continue;
         }
@@ -410,6 +419,7 @@ pub(crate) fn compile_zero_endpoints(
                 ("statementCount".to_string(), json!(count)),
                 ("statementLimit".to_string(), json!(ZERO_MIGRATION_STATEMENTS_MAX)),
             ])),
+            fix: None,
         });
     } else if !migration_statements.is_empty() {
         let metadata = artifact_metadata_fields(artifact_metadata);

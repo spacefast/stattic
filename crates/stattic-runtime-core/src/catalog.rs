@@ -127,6 +127,24 @@ pub struct FileCatalog {
     /// which fails closed to a full scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookie_scan_policy_digest: Option<String>,
+    /// Digest over the secret scanner revision, ruleset, and allowlist that
+    /// validated every object in this catalog cleanly without warnings or
+    /// budget truncation. Absent on older catalogs or inconclusive/warning
+    /// runs, which fails closed to rescanning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_scan_policy_digest: Option<String>,
+    /// Digest over the hygiene/abuse/PII/web scanner revision and public path
+    /// set that validated every object in this catalog cleanly without warnings
+    /// or budget truncation. Absent when warnings were emitted or budgets were
+    /// hit, failing closed to rescanning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene_scan_policy_digest: Option<String>,
+    /// Policy marker proving every precompressed `.gz`/`.br` blob in this
+    /// catalog passed full-stream decompression-bomb validation. Absent on
+    /// older catalogs or when any compressed stream failed to decode, failing
+    /// closed to full-stream re-verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decompression_scan_policy_digest: Option<String>,
 }
 
 /// The two scalars the control plane keeps on the version row instead of a file
@@ -153,6 +171,26 @@ struct ServedDigestInput<'a> {
 }
 
 impl FileCatalog {
+    /// Iterates every `(path, object)` referenced by this catalog: each path's
+    /// source object, its served object (if present), and all channel variants.
+    pub fn iter_objects(&self) -> impl Iterator<Item = (&str, &ObjectIdentity)> {
+        self.paths
+            .iter()
+            .flat_map(|(path, entry)| {
+                std::iter::once((path.as_str(), &entry.source)).chain(
+                    entry
+                        .served
+                        .iter()
+                        .map(move |object| (path.as_str(), object)),
+                )
+            })
+            .chain(
+                self.variants
+                    .values()
+                    .flat_map(|paths| paths.iter().map(|(path, object)| (path.as_str(), object))),
+            )
+    }
+
     pub fn digests(&self) -> CatalogDigests {
         CatalogDigests {
             source: stable_json_sha256(
@@ -433,6 +471,9 @@ pub fn build_catalog(input: &CatalogInput<'_>) -> FileCatalog {
         generated_at: input.generated_at.into(),
         pipeline_context_digest: input.pipeline_context_digest.clone(),
         cookie_scan_policy_digest: None,
+        secret_scan_policy_digest: None,
+        hygiene_scan_policy_digest: None,
+        decompression_scan_policy_digest: None,
     }
 }
 

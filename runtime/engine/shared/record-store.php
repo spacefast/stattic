@@ -36,18 +36,34 @@ function _stattic_record_store_path(array $store, string $id): string
     return $path;
 }
 
-/** @return list<string> ids in ascending id order. */
-function _stattic_record_store_ids(array $store): array
+/**
+ * Fail-closed record-store enumeration. Returns `[]` when the store directory
+ * does not exist yet, a sorted list of ids when enumerated cleanly, or `null`
+ * if an existing directory could not be read.
+ *
+ * @return list<string>|null
+ */
+function _stattic_record_store_ids_strict(array $store): ?array
 {
+    $entries = _stattic_runtime_directory_entries($store['root']);
+    if (!is_array($entries)) {
+        return null;
+    }
     $ids = [];
-    foreach (glob($store['root'] . '/*.json') ?: [] as $path) {
-        if (!is_string($path)) {
+    foreach ($entries as $path) {
+        if (!is_string($path) || !str_ends_with($path, '.json')) {
             continue;
         }
         $ids[] = basename($path, '.json');
     }
     sort($ids, SORT_STRING);
     return $ids;
+}
+
+/** @return list<string> ids in ascending id order. */
+function _stattic_record_store_ids(array $store): array
+{
+    return _stattic_record_store_ids_strict($store) ?? [];
 }
 
 /**

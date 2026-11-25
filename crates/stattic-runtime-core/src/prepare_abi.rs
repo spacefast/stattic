@@ -9,6 +9,7 @@ use crate::config::strict::{compile as compile_strict_config, Input as StrictCon
 use crate::prepare::{
     analyze, prepare, resolve_dependency_digest, AnalyzeInput, PrepareInput, VariableScope,
 };
+use crate::secret_scan::{scan_secrets_batch, ScanSecretsInput, SCAN_SECRETS_INPUT_FORMAT};
 use crate::transforms::{
     build_runtime_payload, compile_page, resolve_effective_config, validate_theme_json,
     PageCompileInput, ResolveEffectiveInput, RuntimePayloadInput, ValidateThemeJsonInput,
@@ -50,6 +51,7 @@ enum Operation {
     ValidateThemeJson(ValidateThemeJsonInput),
     BuildRuntimePayload(RuntimePayloadInput),
     CompilePage(PageCompileInput),
+    ScanSecrets(ScanSecretsInput),
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +95,16 @@ pub fn dispatch_json(input: &[u8]) -> Vec<u8> {
                     serde_json::to_value(build_runtime_payload(input))
                 }
                 Operation::CompilePage(input) => serde_json::to_value(compile_page(input)),
+                Operation::ScanSecrets(input) => {
+                    if input.format != SCAN_SECRETS_INPUT_FORMAT {
+                        return serde_json::to_vec(&error_response(
+                            "finalizer_prepare_request_format_invalid",
+                            format!("Unsupported scan_secrets format {:?}.", input.format),
+                        ))
+                        .expect("static prepare error response serializes");
+                    }
+                    serde_json::to_value(scan_secrets_batch(input))
+                }
             };
             match output {
                 Ok(output) => Response {

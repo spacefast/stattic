@@ -344,7 +344,7 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
 /// ceiling (`STATTIC_RUNTIME_VERSION_CATALOG_MAX_BYTES`), which would let a
 /// version commit and then 500 on every read. Artifacts a human opens —
 /// `debug.json`, the zero documents — keep their indentation.
-pub fn write_json_compact(path: &Path, value: &Value) -> Result<()> {
+pub fn write_json_compact<T: serde::Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec(value).map_err(|source| FinalizeError::Json {
         path: path.into(),
         source,

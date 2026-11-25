@@ -63,6 +63,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "redirects",
     "rewrites",
     "runtime",
+    "security",
     "sell",
     "space",
     "superpowers",
@@ -392,6 +393,7 @@ fn validate_config_shape(
     validate_superpowers_config(object, diagnostics);
     validate_space_theme(object, diagnostics);
     validate_public_identity(object, diagnostics);
+    validate_security_config(object, diagnostics);
     if let Some(inject) = object.get_mut("inject").and_then(Value::as_object_mut) {
         inject
             .retain(|key, _| matches!(key.as_str(), "head" | "bodyStart" | "bodyEnd" | "noscript"));
@@ -400,6 +402,108 @@ fn validate_config_shape(
 
 pub(crate) const CONNECTOR_ROLES_MAX: usize = 32;
 const CONNECTOR_ROLE_TOOLS_MAX: usize = 200;
+
+fn validate_security_config(object: &Map<String, Value>, diagnostics: &mut Vec<PrepareDiagnostic>) {
+    let Some(security) = object.get("security") else {
+        return;
+    };
+    let Some(security_obj) = security.as_object() else {
+        config_invalid(diagnostics, "security", "an object");
+        return;
+    };
+    let Some(secrets) = security_obj.get("secrets") else {
+        return;
+    };
+    let Some(secrets_obj) = secrets.as_object() else {
+        config_invalid(diagnostics, "security.secrets", "an object");
+        return;
+    };
+    let Some(allowlist) = secrets_obj.get("allowlist") else {
+        return;
+    };
+    let Some(allowlist_obj) = allowlist.as_object() else {
+        config_invalid(diagnostics, "security.secrets.allowlist", "an object");
+        return;
+    };
+    let limit = crate::secret_scan::CONFIG_SECRET_ALLOWLIST_LIMIT;
+    for key in ["fingerprints", "paths", "rules"] {
+        let Some(value) = allowlist_obj.get(key) else {
+            continue;
+        };
+        let Some(items) = value.as_array() else {
+            config_invalid(
+                diagnostics,
+                &format!("security.secrets.allowlist.{key}"),
+                "an array of non-empty strings",
+            );
+            continue;
+        };
+        if items.len() > limit {
+            diagnostics.push(diagnostic(
+                DiagnosticSeverity::Error,
+                "config_invalid",
+                format!("security.secrets.allowlist.{key} supports up to {limit} entries."),
+                Some(format!("security.secrets.allowlist.{key}")),
+            ));
+            continue;
+        }
+        if !items
+            .iter()
+            .all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+        {
+            config_invalid(
+                diagnostics,
+                &format!("security.secrets.allowlist.{key}"),
+                "an array of non-empty strings",
+            );
+        }
+    }
+    if let Some(entries) = allowlist_obj.get("entries") {
+        let Some(list) = entries.as_array() else {
+            config_invalid(
+                diagnostics,
+                "security.secrets.allowlist.entries",
+                "an array of allowlist entry objects",
+            );
+            return;
+        };
+        if list.len() > limit {
+            diagnostics.push(diagnostic(
+                DiagnosticSeverity::Error,
+                "config_invalid",
+                format!("security.secrets.allowlist.entries supports up to {limit} entries."),
+                Some("security.secrets.allowlist.entries".into()),
+            ));
+            return;
+        }
+        for (idx, entry) in list.iter().enumerate() {
+            let Some(obj) = entry.as_object() else {
+                config_invalid(
+                    diagnostics,
+                    &format!("security.secrets.allowlist.entries.{idx}"),
+                    "an object with path, ruleId, or fingerprint",
+                );
+                continue;
+            };
+            let has_field = ["path", "ruleId", "fingerprint"].iter().any(|field| {
+                obj.get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            });
+            let valid_fields = obj.iter().all(|(field, value)| {
+                matches!(field.as_str(), "path" | "ruleId" | "fingerprint")
+                    && value.as_str().is_some_and(|s| !s.trim().is_empty())
+            });
+            if !has_field || !valid_fields {
+                config_invalid(
+                    diagnostics,
+                    &format!("security.secrets.allowlist.entries.{idx}"),
+                    "an object with at least one non-empty string among path, ruleId, fingerprint",
+                );
+            }
+        }
+    }
+}
 
 /// Connector roles, keyed by role name. Mirrors `connectorRoleEntrySchema` in
 /// packages/common/src/contracts/connector-roles.ts. Blocking: a role that

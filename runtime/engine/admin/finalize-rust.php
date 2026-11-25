@@ -190,6 +190,16 @@ function _stattic_runtime_finalize_with_rust(
     $incomingRoot = $canonicalPrivateRoot . '/runtime/finalizer-inputs';
     $inputPath = $incomingRoot . '/' . ($uploadId !== '' ? $uploadId : 'refinalize') . '-' . bin2hex(random_bytes(6)) . '.json';
     $outputPath = $inputPath . '.output.json';
+    // Guarantee secret-bearing finalizer input files and output envelopes are
+    // removed even on fatal errors, timeouts, or early exits.
+    register_shutdown_function(static function () use ($inputPath, $outputPath): void {
+        if (is_file($inputPath)) {
+            unlink($inputPath);
+        }
+        if (is_file($outputPath)) {
+            unlink($outputPath);
+        }
+    });
     _stattic_runtime_write_json_atomic($inputPath, $input);
 
     // Move an existing immutable version aside BEFORE the binary starts, so any
@@ -201,7 +211,9 @@ function _stattic_runtime_finalize_with_rust(
             _stattic_runtime_rm_recursive($backup);
         }
         if (!rename($versionRoot, $backup)) {
-            unlink($inputPath);
+            if (is_file($inputPath)) {
+                unlink($inputPath);
+            }
             _stattic_problem_response(
                 500,
                 'runtime_finalizer_storage_invalid',
@@ -214,17 +226,25 @@ function _stattic_runtime_finalize_with_rust(
     $result = _stattic_runtime_run_subprocess($command, null, null, $canonicalPrivateRoot, 310000, 8 * 1024 * 1024, 64 * 1024);
     if (!$result['spawned']) {
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        unlink($inputPath);
-        unlink($outputPath);
+        if (is_file($inputPath)) {
+            unlink($inputPath);
+        }
+        if (is_file($outputPath)) {
+            unlink($outputPath);
+        }
         _stattic_problem_response(503, 'finalize_unavailable', 'The native runtime finalizer could not be started.');
     }
     $exitCode = $result['exitCode'];
     $stderr = $result['stderr'];
     $timedOut = $result['timedOut'];
-    unlink($inputPath);
+    if (is_file($inputPath)) {
+        unlink($inputPath);
+    }
     if ($timedOut) {
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        unlink($outputPath);
+        if (is_file($outputPath)) {
+            unlink($outputPath);
+        }
         _stattic_problem_response(
             503,
             'runtime_finalizer_timeout',
@@ -237,7 +257,9 @@ function _stattic_runtime_finalize_with_rust(
         $structuredError = _stattic_runtime_read_finalizer_output($outputPath)
             ?? _stattic_runtime_finalizer_stderr_envelope(is_string($stderr) ? $stderr : '');
         _stattic_runtime_restore_interrupted_version($versionRoot);
-        unlink($outputPath);
+        if (is_file($outputPath)) {
+            unlink($outputPath);
+        }
         $safeReason = is_string($stderr)
             ? preg_replace('/[^A-Za-z0-9_.:\/ -]+/', '', substr(trim($stderr), 0, 500))
             : '';
@@ -259,6 +281,20 @@ function _stattic_runtime_finalize_with_rust(
             'runtime_file_catalog_invalid',
         ];
         $status = in_array($rustCode, $conflictCodes, true) ? 409 : 422;
+        $releaseOnRejectCodes = [
+            'secret_detected',
+            'sensitive_file_not_supported',
+            'malicious_script_reference',
+            'credential_exfiltration_detected',
+        ];
+        if (
+            $uploadId !== ''
+            && in_array($rustCode, $releaseOnRejectCodes, true)
+            && function_exists('_stattic_runtime_publish_session_release')
+        ) {
+            // Release the rejected session to drop its CAS pin; control-plane GC owns blob deletion.
+            _stattic_runtime_publish_session_release($canonicalPrivateRoot, $spaceId, $uploadId);
+        }
         error_log('spacefast finalizer failed code=' . $rustCode . ' exit=' . $exitCode . ' reason=' . $safeReason);
         $errorDetails = $structuredValid ? $structuredError['details'] : ['exit_code' => $exitCode];
         _stattic_problem_response(

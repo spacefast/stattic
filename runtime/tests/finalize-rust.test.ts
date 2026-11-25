@@ -2,6 +2,7 @@
 // the stattic-runtime-compiler binary, fail-closed 503 when the binary is
 // missing, process timeout reaping, and replacement move-aside/restore.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -12,6 +13,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+
+import { z } from "zod";
 
 import { runtimeVersionFinalizeResponseSchema } from "../../packages/common/src/contracts/runtime-api.ts";
 import {
@@ -373,4 +376,67 @@ test("a finalize failure moves an existing version aside and restores it", async
   const siblings = readdirSync(path.dirname(root));
   expect(siblings.some((name) => name.includes(".rust-previous"))).toBe(false);
   expect(siblings.some((name) => name.includes(".rust-failed"))).toBe(false);
+});
+
+test("secret_detected refuses publish with redacted details, releases the session pin, and never deletes CAS blobs", async () => {
+  const spaceId = "spc_native_secret_reject";
+  const safeHtml = "<!doctype html><p>safe v1</p>\n";
+  const safeSha = createHash("sha256").update(safeHtml).digest("hex");
+
+  // Commit v1 so safeSha is referenced by an existing version.
+  await deploy(rt, {
+    spaceId,
+    versionId: "ver_secret_v1",
+    metadata: { mode: "website" },
+    files: { "index.html": safeHtml },
+  });
+
+  // Upload v2 carrying a Tier-1 GitHub PAT alongside the existing safe blob.
+  const secretToken = ["ghp_", "9kX7mQ2vR8pL4nW6tY1zB5cJ3hF0dS8uE2qA"].join("");
+  const leakedJs = `const gh = "${secretToken}";\n`;
+  const leakedSha = createHash("sha256").update(leakedJs).digest("hex");
+
+  const session = await createDeclaredSession(rt, spaceId, "ver_secret_v2", {
+    "index.html": safeHtml,
+    "app.js": leakedJs,
+  });
+  await uploadSessionBlobs(rt, session, {
+    "index.html": safeHtml,
+    "app.js": leakedJs,
+  });
+
+  const spaceDir = path.dirname(path.dirname(versionRoot(rt, spaceId, "ver_secret_v2")));
+  const pinPath = path.join(spaceDir, "pins", `publish-${session.uploadId}.json`);
+  const safeBlobPath = path.join(spaceDir, "blobs", safeSha.slice(0, 2), safeSha);
+  const leakedBlobPath = path.join(spaceDir, "blobs", leakedSha.slice(0, 2), leakedSha);
+  expect(existsSync(pinPath)).toBe(true);
+  expect(existsSync(safeBlobPath)).toBe(true);
+  expect(existsSync(leakedBlobPath)).toBe(true);
+
+  const response = await finalize(rt, spaceId, "ver_secret_v2", { upload_id: session.uploadId });
+  expect(response.status).toBe(422);
+  const body = await response.text();
+  expect(body).not.toContain(secretToken);
+  const parsed = z
+    .object({
+      code: z.string(),
+      details: z.object({
+        ruleId: z.string(),
+        path: z.string(),
+        line: z.number().int().positive(),
+        fingerprint: z.string().min(1),
+      }),
+    })
+    .parse(JSON.parse(body));
+  expect(parsed.code).toBe("secret_detected");
+  expect(parsed.details.ruleId).toBe("github-pat");
+  expect(parsed.details.path).toBe("app.js");
+  expect(parsed.details.line).toBe(1);
+  expect(parsed.details.fingerprint.length).toBeGreaterThan(0);
+
+  // Version is not committed, session pin is dropped, and runtime never deletes CAS blobs directly.
+  expect(existsSync(versionRoot(rt, spaceId, "ver_secret_v2"))).toBe(false);
+  expect(existsSync(pinPath)).toBe(false);
+  expect(existsSync(safeBlobPath)).toBe(true);
+  expect(existsSync(leakedBlobPath)).toBe(true);
 });

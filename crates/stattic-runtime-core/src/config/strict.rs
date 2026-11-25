@@ -471,6 +471,7 @@ fn validate_keys(
         "firewall",
         "cache",
         "system",
+        "security",
         "sell",
         "analytics",
         "app",

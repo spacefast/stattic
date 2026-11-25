@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/gitleaks/gitleaks",
+  "license": "MIT",
+  "tag": "v8.30.1",
+  "commit": "5f6ec56cfa6f8c67648d863582c7ae2f206d5c1c",
+  "configPath": "config/gitleaks.toml",
+  "sha256": "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf",
+  "ruleCount": 222
+}

@@ -2,8 +2,14 @@
 // Zero runner (QuickJS/rlimit) is compiled out of the wasm32-wasip1 build.
 // The wasm surface is the pure prepare/transform dispatch in `prepare_abi`.
 #[cfg(not(target_family = "wasm"))]
+mod catalog_scan;
+#[cfg(not(target_family = "wasm"))]
 mod cookie_writes;
+#[cfg(not(target_family = "wasm"))]
+mod decompression;
 mod hash;
+#[cfg(not(target_family = "wasm"))]
+pub mod hygiene;
 #[cfg(not(target_family = "wasm"))]
 mod io;
 pub mod legacy_zero;
@@ -31,6 +37,7 @@ pub mod protocol;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod responses;
 pub mod routing;
+pub mod secret_scan;
 mod serving_paths;
 #[cfg(not(target_family = "wasm"))]
 pub mod storage;

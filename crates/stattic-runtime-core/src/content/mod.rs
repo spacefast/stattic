@@ -9,7 +9,20 @@ mod markdown;
 mod support;
 mod theme_css;
 
-use lol_html::{doc_comments, element, end_tag, rewrite_str, text, RewriteStrSettings};
+use lol_html::{
+    doc_comments, element, end_tag, rewrite_str, text, HtmlRewriter, RewriteStrSettings,
+};
+
+/// Streams HTML through `lol_html` into a no-op sink for analysis-only passes,
+/// avoiding allocating and copying the entire document into a discarded `String`.
+fn scan_html(
+    html: &str,
+    settings: RewriteStrSettings<'_, '_>,
+) -> std::result::Result<(), lol_html::errors::RewritingError> {
+    let mut rewriter = HtmlRewriter::new(settings.into(), |_: &[u8]| {});
+    rewriter.write(html.as_bytes())?;
+    rewriter.end()
+}
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::cell::{Cell, RefCell};
@@ -603,7 +616,7 @@ fn advertised_image_files(
             Ok(())
         }));
     // A document lol_html cannot finish still yields the tags it reached.
-    let _ = rewrite_str(html, settings);
+    let _ = scan_html(html, settings);
     let references = found.take();
     let base_href = base_href.take();
     references
@@ -633,7 +646,7 @@ fn html_base_href(html: &str) -> Option<String> {
     }
     let base_href = Rc::new(RefCell::new(None));
     let sink = Rc::clone(&base_href);
-    let _ = rewrite_str(
+    let _ = scan_html(
         html,
         RewriteStrSettings::new().append_element_content_handler(element!(
             "head base[href]",
@@ -1077,7 +1090,7 @@ fn generated_favicon(title: &str) -> String {
 fn html_has_body(source: &str) -> bool {
     let found = Rc::new(Cell::new(false));
     let sink = Rc::clone(&found);
-    let _ = rewrite_str(
+    let _ = scan_html(
         source,
         RewriteStrSettings::new().append_element_content_handler(element!("body", move |_| {
             sink.set(true);
@@ -1170,7 +1183,7 @@ fn decorate_html(
     let head_end = Rc::new(Cell::new(None::<usize>));
     let body_start_offset = Rc::new(Cell::new(None::<usize>));
     let body_end_offset = Rc::new(Cell::new(None::<usize>));
-    let analysis = rewrite_str(
+    let analysis = scan_html(
         &html,
         RewriteStrSettings::new()
             // Without an explicit `<head>`, the head ends at the first element
@@ -1577,7 +1590,7 @@ fn strip_generated_html_blocks(source: &str) -> String {
     let ranges = Rc::new(RefCell::new(Vec::<std::ops::Range<usize>>::new()));
     let open_for_handler = Rc::clone(&open);
     let ranges_for_handler = Rc::clone(&ranges);
-    let _ = rewrite_str(
+    let _ = scan_html(
         source,
         RewriteStrSettings::new().append_document_content_handler(doc_comments!(move |comment| {
             let marker = comment.text().trim().to_string();

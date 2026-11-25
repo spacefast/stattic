@@ -228,11 +228,26 @@ function _stattic_runtime_static_zip_preflight(ZipArchive $archive, array $caps)
         $firstSegments[$parts[0]] = true;
         $allWrapped = $allWrapped && count($parts) === 2;
     }
-    $wrapper = count($firstSegments) === 1 && $allWrapped ? (array_key_first($firstSegments) ?: null) : null;
+    $firstKey = array_key_first($firstSegments);
+    $wrapper = count($firstSegments) === 1 && $allWrapped && $firstKey !== null ? (string) $firstKey : null;
     $normalized = [];
+    $normalizedPaths = [];
     foreach ($visible as $entry) {
         $path = $wrapper === null ? $entry['path'] : substr($entry['path'], strlen($wrapper) + 1);
         if (_stattic_runtime_static_zip_visible_path($path)) {
+            if ($wrapper !== null) {
+                // Re-enforce root-level upload-policy restrictions after stripping the
+                // top-level wrapper folder (e.g. `site/installer.php`, `site/.spacefast/storage/...`).
+                _stattic_runtime_assert_static_upload_path($path);
+                if (isset($normalizedPaths[$path])) {
+                    _stattic_runtime_static_zip_problem(
+                        'manifest_duplicate_path',
+                        'Publish archive contains the same canonical path twice.',
+                        ['path' => $path],
+                    );
+                }
+                $normalizedPaths[$path] = true;
+            }
             $normalized[] = ['index' => $entry['index'], 'path' => $path, 'size' => $entry['size']];
         }
     }

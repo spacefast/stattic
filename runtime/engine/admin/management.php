@@ -187,7 +187,11 @@ function _stattic_runtime_upload_session_for_version(string $privateRoot, string
     }
     $found = null;
     $complete = true;
-    $ids = _stattic_record_store_ids($sessions);
+    $ids = _stattic_record_store_ids_strict($sessions);
+    if (!is_array($ids)) {
+        // Fail closed: never stamp `.indexed` when the sessions directory could not be enumerated.
+        return null;
+    }
     foreach ($ids as $candidateId) {
         // Absence must be proven: a record this walk could not read is not one
         // the marker may declare gone. A record it read but could not decode is
@@ -630,7 +634,7 @@ function _stattic_runtime_finalize_ready_response(string $privateRoot, string $s
             'The runtime-authored readiness target is unavailable.',
         );
     }
-    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId);
+    $catalog = _stattic_runtime_version_catalog($privateRoot, $spaceId, $versionId, is_array($metadata) ? $metadata : null);
     if ($catalog === null) {
         _stattic_problem_response(
             500,
@@ -2662,72 +2666,74 @@ function _stattic_runtime_list_version_files_route(string $privateRoot, string $
         );
     }
 
-    $rows = [];
-    foreach ($catalog['paths'] as $path => $entry) {
-        // JSON object keys that are decimal filenames decode as integer keys.
-        if ($readOnly) {
-            $path = (string) $path;
-        }
+    $rowsByKey = [];
+    $addRow = static function (string $path, mixed $entryOrObject, bool $public, ?string $variantRoute) use (
+        $readOnly,
+        $includeInternal,
+        $publicOnly,
+        $exactPath,
+        $prefix,
+        $query,
+        $after,
+        &$rowsByKey
+    ): void {
         if (
-            !is_string($path)
-            || $path === ''
+            $path === ''
             || (!$includeInternal && _stattic_path_is_internal_artifact($path))
-            || !is_array($entry)
+            || ($publicOnly && !$public)
+            || !_stattic_runtime_version_files_matches($path, $exactPath, $prefix, $query)
         ) {
-            continue;
-        }
-        $public = ($entry['public'] ?? false) === true;
-        if ($publicOnly && !$public) {
-            continue;
+            return;
         }
         $object = $readOnly
-            ? _stattic_runtime_evidence_catalog_object($entry[$view] ?? null)
-            : _stattic_runtime_catalog_object($entry[$view] ?? null);
+            ? _stattic_runtime_evidence_catalog_object($entryOrObject)
+            : _stattic_runtime_catalog_object($entryOrObject);
         if ($object === null) {
-            continue;
+            return;
         }
-        $rows[] = _stattic_runtime_version_files_row($path, $object, $public, null);
-    }
-    if ($channel !== null) {
-        $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
-        foreach ($variant as $path => $object) {
-            if ($readOnly) {
-                $path = (string) $path;
+        $row = _stattic_runtime_version_files_row($path, $object, $public, $variantRoute);
+        $sortKey = _stattic_runtime_version_files_sort_key($row);
+        if ($after !== null && strcmp($sortKey, $after) <= 0) {
+            return;
+        }
+        $rowsByKey[$sortKey] = $row;
+    };
+
+    if ($exactPath !== null) {
+        if (array_key_exists($exactPath, $catalog['paths']) && is_array($catalog['paths'][$exactPath])) {
+            $entry = $catalog['paths'][$exactPath];
+            $addRow($exactPath, $entry[$view] ?? null, ($entry['public'] ?? false) === true, null);
+        }
+        if ($channel !== null) {
+            $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
+            if (array_key_exists($exactPath, $variant)) {
+                $base = is_array($catalog['paths'][$exactPath] ?? null) ? $catalog['paths'][$exactPath] : [];
+                $addRow($exactPath, $variant[$exactPath], ($base['public'] ?? false) === true, $channel);
             }
-            if (!is_string($path) || $path === '' || (!$includeInternal && _stattic_path_is_internal_artifact($path))) {
+        }
+    } else {
+        foreach ($catalog['paths'] as $rawPath => $entry) {
+            // JSON object keys that are decimal filenames decode as integer keys.
+            $path = (string) $rawPath;
+            if (!is_array($entry)) {
                 continue;
             }
-            // A variant substitutes bytes for a path the base already carries,
-            // so the base entry owns the visibility bit.
-            $base = is_array($catalog['paths'][$path] ?? null) ? $catalog['paths'][$path] : [];
-            $public = ($base['public'] ?? false) === true;
-            if ($publicOnly && !$public) {
-                continue;
+            $addRow($path, $entry[$view] ?? null, ($entry['public'] ?? false) === true, null);
+        }
+        if ($channel !== null) {
+            $variant = is_array($catalog['variants'][$channel] ?? null) ? $catalog['variants'][$channel] : [];
+            foreach ($variant as $rawPath => $object) {
+                $path = (string) $rawPath;
+                // A variant substitutes bytes for a path the base already carries,
+                // so the base entry owns the visibility bit.
+                $base = is_array($catalog['paths'][$path] ?? null) ? $catalog['paths'][$path] : [];
+                $addRow($path, $object, ($base['public'] ?? false) === true, $channel);
             }
-            $normalized = $readOnly
-                ? _stattic_runtime_evidence_catalog_object($object)
-                : _stattic_runtime_catalog_object($object);
-            if ($normalized === null) {
-                continue;
-            }
-            $rows[] = _stattic_runtime_version_files_row($path, $normalized, $public, $channel);
         }
     }
 
-    $rows = array_values(array_filter(
-        $rows,
-        static fn (array $row): bool => _stattic_runtime_version_files_matches($row['path'], $exactPath, $prefix, $query)
-    ));
-    usort($rows, static fn (array $left, array $right): int => strcmp(
-        _stattic_runtime_version_files_sort_key($left),
-        _stattic_runtime_version_files_sort_key($right)
-    ));
-    if ($after !== null) {
-        $rows = array_values(array_filter(
-            $rows,
-            static fn (array $row): bool => strcmp(_stattic_runtime_version_files_sort_key($row), $after) > 0
-        ));
-    }
+    ksort($rowsByKey, SORT_STRING);
+    $rows = array_values($rowsByKey);
     $page = array_slice($rows, 0, $limit);
     $nextCursor = count($rows) > $limit && $page !== []
         ? _stattic_runtime_version_files_cursor_encode(

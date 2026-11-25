@@ -105,6 +105,9 @@ function _stattic_runtime_publish_session_create(string $privateRoot, string $sp
         if ($existing === null) {
             _stattic_problem_response(500, 'upload_session_create_failed', 'Could not create the publish session.');
         }
+        if (_stattic_runtime_publish_session_expired($existing)) {
+            _stattic_problem_response(404, 'upload_not_found', 'Publish session has expired or was released.');
+        }
         return $existing;
     }
     _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $record);
@@ -176,7 +179,7 @@ function _stattic_runtime_publish_session_release(string $privateRoot, string $s
             _stattic_runtime_publish_session_index_drop($privateRoot, $spaceId, $uploadId, $session);
             if ($session !== null) {
                 $session['expires_at'] = gmdate('c', time() - 1);
-                _stattic_record_store_put($sessions, $uploadId, $session);
+                _stattic_runtime_publish_session_store_record($sessions, $uploadId, $session);
             }
             _stattic_record_store_delete(
                 _stattic_runtime_publish_pins_store($privateRoot, $spaceId),
@@ -185,7 +188,7 @@ function _stattic_runtime_publish_session_release(string $privateRoot, string $s
             return true;
         }) === true;
     };
-    if ($release() || $release()) {
+    if ($release()) {
         return;
     }
     _stattic_runtime_append_journal($privateRoot, [
@@ -207,20 +210,27 @@ function _stattic_runtime_publish_session_store_record(array $store, string $upl
     return $session;
 }
 
-function _stattic_runtime_publish_session_replace(string $privateRoot, string $spaceId, string $uploadId, callable $change): array
-{
+function _stattic_runtime_publish_session_replace(
+    string $privateRoot,
+    string $spaceId,
+    string $uploadId,
+    callable $change,
+    bool $updatePin = true
+): array {
     $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
-    $updated = _stattic_record_store_mutate($store, $uploadId, static function (?array $session) use ($privateRoot, $spaceId, $uploadId, $store, $change): array {
-        if ($session === null) {
+    $updated = _stattic_record_store_mutate($store, $uploadId, static function (?array $session) use ($privateRoot, $spaceId, $uploadId, $store, $change, $updatePin): array {
+        if ($session === null || _stattic_runtime_publish_session_expired($session)) {
             _stattic_problem_response(404, 'upload_not_found', 'Publish session not found.');
         }
         $next = $change($session);
         if (!is_array($next)) {
             _stattic_problem_response(500, 'upload_session_update_failed', 'Publish session update returned an invalid record.');
         }
-        // Pin first: a digest established by a path upload or URL fetch must be
-        // protected before it becomes an accepted CAS object.
-        _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $next);
+        if ($updatePin) {
+            // Pin first: a digest established by a path upload or URL fetch must be
+            // protected before it becomes an accepted CAS object.
+            _stattic_runtime_publish_session_write_pin($privateRoot, $spaceId, $uploadId, $next);
+        }
         return _stattic_runtime_publish_session_store_record($store, $uploadId, $next);
     });
     if (!is_array($updated)) {
@@ -316,7 +326,7 @@ function _stattic_runtime_publish_session_claim_url_fetch(string $privateRoot, s
 {
     $store = _stattic_runtime_publish_sessions_store($privateRoot, $spaceId);
     $decision = _stattic_record_store_mutate($store, $uploadId, static function (?array $session) use ($store, $uploadId, $privateRoot, $spaceId, $filePath): array {
-        if ($session === null) {
+        if ($session === null || _stattic_runtime_publish_session_expired($session)) {
             _stattic_problem_response(404, 'upload_not_found', 'Publish session not found.');
         }
         $entry = _stattic_runtime_declared_upload_file($session, $filePath);
@@ -365,7 +375,7 @@ function _stattic_runtime_publish_session_accept_many(string $privateRoot, strin
         ksort($accepted, SORT_STRING);
         $session['accepted'] = _stattic_runtime_json_object($accepted);
         return $session;
-    });
+    }, false);
 }
 
 /** @return list<string> */

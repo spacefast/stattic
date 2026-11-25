@@ -959,7 +959,7 @@ const STATTIC_RUNTIME_VERSION_BLOB_BASE_LANE = "\0base";
  *
  * @return array{paths: array<string,mixed>, variants: array<string,mixed>}|null
  */
-function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, string $versionId): ?array
+function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, string $versionId, ?array $metadata = null): ?array
 {
     static $memo = [];
     $memoKey = $spaceId . "\0" . $versionId;
@@ -972,7 +972,9 @@ function _stattic_runtime_version_catalog(string $privateRoot, string $spaceId, 
     if (is_array($cached) && is_array($cached['paths'] ?? null) && is_array($cached['variants'] ?? null)) {
         return $memo[$memoKey] = ['paths' => $cached['paths'], 'variants' => $cached['variants']];
     }
-    $catalog = _stattic_runtime_version_catalog_metadata($privateRoot, $spaceId, $versionId);
+    $catalog = is_array($metadata)
+        ? _stattic_runtime_version_catalog_from_metadata($metadata, $spaceId, $versionId, false)
+        : _stattic_runtime_version_catalog_metadata($privateRoot, $spaceId, $versionId);
     if ($catalog === null) {
         return $memo[$memoKey] = null;
     }
@@ -1043,6 +1045,25 @@ function _stattic_runtime_evidence_catalog_object(mixed $object): ?array
     return ['sha' => strtolower($object['sha256']), 'size' => $object['size'], 'mime' => $object['contentType']];
 }
 
+function _stattic_runtime_version_catalog_from_metadata(mixed $metadata, string $spaceId, string $versionId, bool $strict = false): ?array
+{
+    $decoded = is_array($metadata) ? ($metadata[STATTIC_RUNTIME_VERSION_CATALOG_KEY] ?? null) : null;
+    if (
+        !is_array($decoded)
+        || ($decoded['format'] ?? null) !== STATTIC_RUNTIME_VERSION_CATALOG_FORMAT
+        || ($decoded['spaceId'] ?? null) !== $spaceId
+        || ($decoded['versionId'] ?? null) !== $versionId
+        || !is_array($decoded['paths'] ?? null)
+        || ($strict && array_key_exists('variants', $decoded) && !is_array($decoded['variants']))
+    ) {
+        return null;
+    }
+    return [
+        'paths' => $decoded['paths'],
+        'variants' => is_array($decoded['variants'] ?? null) ? $decoded['variants'] : [],
+    ];
+}
+
 /** Bounded JSON decode shared with ordinary catalog reads, without evidence coercion rules. */
 function _stattic_runtime_version_catalog_metadata(string $privateRoot, string $spaceId, string $versionId, bool $strict = false): ?array
 {
@@ -1061,21 +1082,7 @@ function _stattic_runtime_version_catalog_metadata(string $privateRoot, string $
         return null;
     }
     $metadata = json_decode($json, true);
-    $decoded = is_array($metadata) ? ($metadata[STATTIC_RUNTIME_VERSION_CATALOG_KEY] ?? null) : null;
-    if (
-        !is_array($decoded)
-        || ($decoded['format'] ?? null) !== STATTIC_RUNTIME_VERSION_CATALOG_FORMAT
-        || ($decoded['spaceId'] ?? null) !== $spaceId
-        || ($decoded['versionId'] ?? null) !== $versionId
-        || !is_array($decoded['paths'] ?? null)
-        || ($strict && array_key_exists('variants', $decoded) && !is_array($decoded['variants']))
-    ) {
-        return null;
-    }
-    return [
-        'paths' => $decoded['paths'],
-        'variants' => is_array($decoded['variants'] ?? null) ? $decoded['variants'] : [],
-    ];
+    return _stattic_runtime_version_catalog_from_metadata($metadata, $spaceId, $versionId, $strict);
 }
 
 /**

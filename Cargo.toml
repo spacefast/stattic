@@ -2,6 +2,7 @@
 members = [
   "crates/zero",
   "crates/typedpress",
+  "crates/spacefast-secret-scan",
   "crates/stattic-runtime-egress",
   "crates/stattic-runtime-compiler",
   "crates/stattic-runtime-core",

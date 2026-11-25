@@ -27,6 +27,14 @@ function _stattic_share_oauth_issuer(array $serving): ?string
     return is_string($issuer) && $issuer !== '' ? $issuer : null;
 }
 
+// The token endpoint this box calls: the one the control plane named, else the
+// issuer's own.
+function _stattic_share_oauth_token_url(array $serving, string $issuer): string
+{
+    $url = _stattic_access_page_descriptor($serving)['tokenUrl'] ?? null;
+    return is_string($url) && $url !== '' ? $url : $issuer . '/oauth2/token';
+}
+
 function _stattic_share_oauth_cookie_name(array $serving): string
 {
     return '__Host-spacefast_oauth_' . _stattic_serving_space_id($serving);
@@ -245,7 +253,7 @@ function _stattic_share_oauth_callback(array $serving, string $requestHost): nev
         ..._stattic_access_exchange_headers($exchange, _stattic_access_context($serving, $host, '/'), 'application/json'),
         'Content-Type: application/x-www-form-urlencoded',
     ];
-    $result = _stattic_access_exchange_post($issuer . '/oauth2/token', $fields, $headers);
+    $result = _stattic_access_exchange_post(_stattic_share_oauth_token_url($serving, $issuer), $fields, $headers);
     // An older control plane refuses any Authorization on a Space client's
     // exchange (`invalid_client`) before it spends the code. Send it once more
     // with the older credential alone; the code is still unspent.
@@ -254,7 +262,7 @@ function _stattic_share_oauth_callback(array $serving, string $requestHost): nev
         if (count($withoutToken) !== count($headers)) {
             require_once __DIR__ . '/../shared/space-identity.php';
             _stattic_space_identity_refused(_stattic_access_private_root(), _stattic_serving_space_id($serving), 401);
-            $result = _stattic_access_exchange_post($issuer . '/oauth2/token', $fields, $withoutToken);
+            $result = _stattic_access_exchange_post(_stattic_share_oauth_token_url($serving, $issuer), $fields, $withoutToken);
         }
     }
     $token = $result['body']['spacefast_handoff']['token'] ?? null;

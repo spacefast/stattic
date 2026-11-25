@@ -12,6 +12,14 @@ use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TMP_BLOB_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn unique_temp_blob_path(blob_root: &Path, hash: &str) -> PathBuf {
+    let seq = TMP_BLOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    blob_root.join(format!(".tmp-blob-{hash}-{}-{seq}", std::process::id()))
+}
 
 use crate::catalog::read_version_catalog;
 use crate::finalize::{
@@ -59,9 +67,10 @@ pub fn commit_session_files(
     let retained = retained_files(session, space_id, private_root, reusable)?;
     let mut planned = plan_retained_files(&blobs, &retained, reusable)?;
 
-    let manifest = match session.get("manifest") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(manifest)) => manifest.clone(),
+    let empty_manifest = Vec::new();
+    let manifest: &[Value] = match session.get("manifest") {
+        None | Some(Value::Null) => &empty_manifest,
+        Some(Value::Array(manifest)) => manifest.as_slice(),
         Some(_) => {
             return invalid(
                 "version_session_invalid",
@@ -69,9 +78,10 @@ pub fn commit_session_files(
             );
         }
     };
+    let empty_accepted = serde_json::Map::new();
     let accepted = match session.get("accepted") {
-        None | Some(Value::Null) => serde_json::Map::new(),
-        Some(Value::Object(accepted)) => accepted.clone(),
+        None | Some(Value::Null) => &empty_accepted,
+        Some(Value::Object(accepted)) => accepted,
         Some(_) => {
             return invalid(
                 "version_session_invalid",
@@ -79,7 +89,7 @@ pub fn commit_session_files(
             );
         }
     };
-    planned.extend(plan_accepted_files(&blobs, &manifest, &accepted)?);
+    planned.extend(plan_accepted_files(&blobs, manifest, accepted)?);
 
     let planned = dedupe_planned(planned);
     assert_version_total_bytes(&blobs, private_root, space_id, &planned, reusable)?;
@@ -505,6 +515,8 @@ fn link_or_copy(blob: &Path, target: &Path, hash: &str) -> Result<()> {
             source,
         })?;
     }
+    // PHP-ingested CAS blobs arrive with wall-clock mtime; stamping through the
+    // hardlink updates the shared CAS inode so nginx derives content-addressed ETags.
     stamp_content_mtime(target, hash)
 }
 
@@ -551,11 +563,17 @@ pub fn put_blob(blob_root: &Path, bytes: &[u8]) -> Result<String> {
         return Ok(hash);
     }
     create_dir_all(blob.parent().unwrap_or(blob_root))?;
-    let temporary = blob_root.join(format!(".tmp-blob-{hash}"));
+    let temporary = unique_temp_blob_path(blob_root, &hash);
     fs::write(&temporary, bytes).map_err(|source| FinalizeError::Io {
         path: temporary.clone(),
         source,
     })?;
+    // Stamp the content-derived mtime on the temp inode before atomic rename so
+    // nginx ETag derivation never observes a wall-clock mtime on a live CAS blob.
+    if let Err(err) = stamp_content_mtime(&temporary, &hash) {
+        let _ = fs::remove_file(&temporary);
+        return Err(err);
+    }
     match fs::rename(&temporary, &blob) {
         Ok(()) => {}
         Err(_) if blob.is_file() => {
@@ -566,10 +584,6 @@ pub fn put_blob(blob_root: &Path, bytes: &[u8]) -> Result<String> {
             return Err(FinalizeError::Io { path: blob, source });
         }
     }
-    // The garbage collector never deletes a blob newer than the grace time and
-    // reads that from the file time, so a publish has to set it. The
-    // content-derived stamp is also the ETag nginx will hand out.
-    stamp_content_mtime(&blob, &hash)?;
     Ok(hash)
 }
 
@@ -591,13 +605,36 @@ pub fn install_blob_from(blob_root: &Path, staged: &Path, sha: &str) -> Result<(
         return Ok(());
     }
     create_dir_all(blob.parent().unwrap_or(blob_root))?;
-    if fs::hard_link(staged, &blob).is_err() {
-        fs::copy(staged, &blob).map_err(|source| FinalizeError::Io {
-            path: blob.clone(),
-            source,
-        })?;
+    match fs::hard_link(staged, &blob) {
+        Ok(()) => return stamp_content_mtime(&blob, sha),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(_) => {}
     }
-    stamp_content_mtime(&blob, sha)
+    // Atomic copy fallback via unique temp file + rename so concurrent writers
+    // never overwrite a live CAS inode in place.
+    let temporary = unique_temp_blob_path(blob_root, sha);
+    if let Err(source) = fs::copy(staged, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(FinalizeError::Io {
+            path: temporary,
+            source,
+        });
+    }
+    if let Err(err) = stamp_content_mtime(&temporary, sha) {
+        let _ = fs::remove_file(&temporary);
+        return Err(err);
+    }
+    match fs::rename(&temporary, &blob) {
+        Ok(()) => Ok(()),
+        Err(_) if blob.is_file() => {
+            let _ = fs::remove_file(&temporary);
+            Ok(())
+        }
+        Err(source) => {
+            let _ = fs::remove_file(&temporary);
+            Err(FinalizeError::Io { path: blob, source })
+        }
+    }
 }
 
 /// Overwrites committed files with caller-supplied template contents,
@@ -1041,6 +1078,9 @@ mod tests {
             generated_at: "2026-08-13T00:00:00Z".into(),
             pipeline_context_digest: None,
             cookie_scan_policy_digest: None,
+            secret_scan_policy_digest: None,
+            hygiene_scan_policy_digest: None,
+            decompression_scan_policy_digest: None,
         };
         let previous_root = private.join("spaces/s/versions/prev");
         fs::create_dir_all(&previous_root).unwrap();
@@ -1296,6 +1336,9 @@ mod tests {
             generated_at: "2026-09-13T00:00:00Z".into(),
             pipeline_context_digest: None,
             cookie_scan_policy_digest: None,
+            secret_scan_policy_digest: None,
+            hygiene_scan_policy_digest: None,
+            decompression_scan_policy_digest: None,
         };
         let previous_root = private.join("spaces/s/versions/prev");
         fs::create_dir_all(&previous_root).unwrap();

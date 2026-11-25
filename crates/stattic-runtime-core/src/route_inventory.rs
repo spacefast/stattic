@@ -570,7 +570,10 @@ impl<'a> CompiledRedirectRule<'a> {
     }
 }
 
-fn expand_redirect_destination(destination: &str, captures: &BTreeMap<String, String>) -> String {
+pub(crate) fn expand_redirect_destination(
+    destination: &str,
+    captures: &BTreeMap<String, String>,
+) -> String {
     static PLACEHOLDER: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r":([A-Za-z][A-Za-z0-9_]*)").unwrap());
     PLACEHOLDER

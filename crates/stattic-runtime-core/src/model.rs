@@ -99,6 +99,8 @@ pub struct FinalizeTelemetry {
     pub catalog_delta_ms: u64,
     #[serde(default)]
     pub cookie_scan_ms: u64,
+    #[serde(default)]
+    pub secret_scan_ms: u64,
     /// Writing and validating the version artifacts: metadata, catalog, debug
     /// and Zero artifacts, plus the staging-workspace teardown.
     #[serde(default)]
@@ -135,6 +137,9 @@ pub struct RuntimeDiagnostic {
     /// turns a pointed publish failure into "something went wrong".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Map<String, Value>>,
+    /// Concrete, agent-actionable remediation hint, when one can be derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

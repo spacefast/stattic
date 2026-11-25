@@ -3442,6 +3442,11 @@ function _stattic_access_page_descriptor(array $serving): ?array
     $issuer = is_string($raw['issuer'] ?? null) && _stattic_platform_destination_allowed($raw['issuer'])
         ? rtrim($raw['issuer'], '/')
         : null;
+    // Where this box trades a code. The issuer is the browser's; a box cannot
+    // always reach it (a dev relay in front of a local auth host).
+    $tokenUrl = is_string($raw['tokenUrl'] ?? null) && _stattic_platform_destination_allowed($raw['tokenUrl'])
+        ? $raw['tokenUrl']
+        : null;
     $exchange = null;
     $rawExchange = $raw['exchange'] ?? null;
     if (is_array($rawExchange)) {
@@ -3497,6 +3502,7 @@ function _stattic_access_page_descriptor(array $serving): ?array
         'previewTerms' => $previewTerms,
         'accountUrl' => $accountUrl,
         'issuer' => $issuer,
+        'tokenUrl' => $tokenUrl,
         'exchange' => $exchange,
     ];
 }

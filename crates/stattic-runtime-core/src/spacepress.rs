@@ -77,8 +77,12 @@ pub(crate) fn is_spacepress_declared(stage: &Path, files: &BTreeMap<String, File
         && files.contains_key(CONFIG_TYPESCRIPT_FILE)
     {
         let config_path = stage.join("files").join(CONFIG_TYPESCRIPT_FILE);
-        if let Ok(source) = fs::read_to_string(config_path) {
-            return extract_inline_app_config(&source).is_some();
+        if let Ok(bytes) =
+            crate::finalize::read_bounded(&config_path, crate::protocol::CONFIG_FILE_MAX_BYTES)
+        {
+            if let Ok(source) = String::from_utf8(bytes) {
+                return extract_inline_app_config(&source).is_some();
+            }
         }
     }
     false
@@ -235,20 +239,41 @@ fn find_inline_app_expr<'a>(
     expr: &'a Expression<'a>,
     bindings: &BTreeMap<&str, &'a Expression<'a>>,
 ) -> Option<&'a Expression<'a>> {
+    let mut visited = std::collections::HashSet::new();
+    find_inline_app_expr_inner(expr, bindings, &mut visited, 0)
+}
+
+fn find_inline_app_expr_inner<'a>(
+    expr: &'a Expression<'a>,
+    bindings: &BTreeMap<&str, &'a Expression<'a>>,
+    visited: &mut std::collections::HashSet<&'a str>,
+    depth: usize,
+) -> Option<&'a Expression<'a>> {
+    if depth > 64 {
+        return None;
+    }
     match unwrap_expr(expr) {
         Expression::ObjectExpression(obj) => find_app_property(obj),
         Expression::CallExpression(call) => {
             let first = call.arguments.first()?;
             match first {
                 Argument::SpreadElement(_) => None,
-                arg => arg
-                    .as_expression()
-                    .and_then(|inner| find_inline_app_expr(inner, bindings)),
+                arg => arg.as_expression().and_then(|inner| {
+                    find_inline_app_expr_inner(inner, bindings, visited, depth + 1)
+                }),
             }
         }
-        Expression::Identifier(ident) => bindings
-            .get(ident.name.as_str())
-            .and_then(|bound| find_inline_app_expr(bound, bindings)),
+        Expression::Identifier(ident) => {
+            let name = ident.name.as_str();
+            if !visited.insert(name) {
+                return None;
+            }
+            let result = bindings
+                .get(name)
+                .and_then(|bound| find_inline_app_expr_inner(bound, bindings, visited, depth + 1));
+            visited.remove(name);
+            result
+        }
         _ => None,
     }
 }
@@ -496,9 +521,13 @@ pub(crate) fn compile(
         && !has_legacy_zero
         && files.contains_key(CONFIG_TYPESCRIPT_FILE)
     {
-        fs::read_to_string(stage.join("files").join(CONFIG_TYPESCRIPT_FILE))
-            .ok()
-            .and_then(|source| extract_inline_app_config(&source))
+        crate::finalize::read_bounded(
+            &stage.join("files").join(CONFIG_TYPESCRIPT_FILE),
+            crate::protocol::CONFIG_FILE_MAX_BYTES,
+        )
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|source| extract_inline_app_config(&source))
     } else {
         None
     };

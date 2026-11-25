@@ -17,10 +17,12 @@ sha2 = "0.10"
 unicode-normalization.workspace = true
 url.workspace = true
 walkdir.workspace = true
+spacefast-secret-scan = { path = "../spacefast-secret-scan" }
 stattic-runtime-egress = { path = "../stattic-runtime-egress" }
 stattic-runtime-policy = { path = "../stattic-runtime-policy" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+aho-corasick = "1"
 html5ever = "0.40.1"
 html5gum = "0.9.1"
 oxc_allocator = "=0.152.0"

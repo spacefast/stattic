@@ -276,29 +276,37 @@ fn script_type(name: &QualName, attrs: &[Attribute]) -> Option<SourceType> {
     if kind.is_empty() {
         return Some(SourceType::script());
     }
-    match kind
-        .trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}'))
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "text/javascript"
-        | "application/javascript"
-        | "text/ecmascript"
-        | "application/ecmascript"
-        | "application/x-ecmascript"
-        | "application/x-javascript"
-        | "text/javascript1.0"
-        | "text/javascript1.1"
-        | "text/javascript1.2"
-        | "text/javascript1.3"
-        | "text/javascript1.4"
-        | "text/javascript1.5"
-        | "text/jscript"
-        | "text/livescript"
-        | "text/x-ecmascript"
-        | "text/x-javascript" => Some(SourceType::script()),
-        _ => None,
+    if is_javascript_mime_type(&kind) {
+        Some(SourceType::script())
+    } else {
+        None
     }
+}
+
+/// WHATWG HTML JavaScript MIME type essence check shared across script guards.
+/// Parameters (such as `; charset=utf-8`) intentionally do not match per HTML spec.
+pub(crate) fn is_javascript_mime_type(kind: &str) -> bool {
+    let essence = kind.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}'));
+    [
+        "text/javascript",
+        "application/javascript",
+        "text/ecmascript",
+        "application/ecmascript",
+        "application/x-ecmascript",
+        "application/x-javascript",
+        "text/javascript1.0",
+        "text/javascript1.1",
+        "text/javascript1.2",
+        "text/javascript1.3",
+        "text/javascript1.4",
+        "text/javascript1.5",
+        "text/jscript",
+        "text/livescript",
+        "text/x-ecmascript",
+        "text/x-javascript",
+    ]
+    .iter()
+    .any(|known| essence.eq_ignore_ascii_case(known))
 }
 
 // https://html.spec.whatwg.org/multipage/custom-elements.html#valid-custom-element-name

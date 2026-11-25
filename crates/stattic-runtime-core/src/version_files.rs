@@ -4,11 +4,10 @@
 
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
-use crate::finalize::{invalid, invalid_error, remove_any, write_bytes, FinalizeError, Result};
-use crate::protocol::{PAGE_MAX_BYTES, VERSION_ROOT_POINTER_FILE};
+use crate::finalize::{invalid, invalid_error, read_bounded, remove_any, write_bytes, Result};
+use crate::protocol::{CONFIG_FILE_MAX_BYTES, PAGE_MAX_BYTES, VERSION_ROOT_POINTER_FILE};
 use crate::transforms::html::{
     validate_installed_page, AccessSlot, InstalledPageError, InstalledPageKind,
 };
@@ -198,15 +197,14 @@ pub fn convention_files(stage_root: &Path) -> Result<Map<String, Value>> {
     let mut result = Map::new();
     let routes = stage_root.join("files/.stattic/routes.json");
     if routes.is_file() {
-        result.insert(
-            "routes".into(),
-            Value::String(
-                fs::read_to_string(&routes).map_err(|source| FinalizeError::Io {
-                    path: routes,
-                    source,
-                })?,
-            ),
-        );
+        let bytes = read_bounded(&routes, CONFIG_FILE_MAX_BYTES)?;
+        let content = String::from_utf8(bytes).map_err(|_| {
+            invalid_error(
+                "invalid_routes_config",
+                ".stattic/routes.json must be valid UTF-8.",
+            )
+        })?;
+        result.insert("routes".into(), Value::String(content));
     }
     Ok(result)
 }
@@ -240,7 +238,9 @@ pub fn resolved_viewer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::finalize::FinalizeError;
     use serde_json::json;
+    use std::fs;
     use tempfile::tempdir;
 
     // Adapted from the donor's finalize-level

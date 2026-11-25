@@ -39,6 +39,10 @@ let tokenHandoff: (() => Promise<string>) | null = null;
 // behind the dev relay or a split auth host.
 const OAUTH_AUTHORIZE_URL = "https://api.spacefast.test/v1/auth/oauth2/authorize";
 const OAUTH_ISSUER = "https://auth.spacefast.test/v1/auth";
+// Where the box trades codes, on the API it syncs from: behind the dev relay
+// that is not the issuer's host, which the box cannot reach.
+const OAUTH_TOKEN_URL = "https://relay.spacefast.test/v1/auth/oauth2/token";
+const tokenHosts: string[] = [];
 const OAUTH_HOST = "oauth-chain.test";
 const INVITE_TOKEN = "Bhf_1nv1t3_0ne_use_t0ken_x";
 const OAUTH_SPACE = "spc_oauth_chain";
@@ -146,7 +150,8 @@ beforeAll(async () => {
           code_verifier: z.string(),
         })
         .parse(Object.fromEntries(new URLSearchParams(await request.text())));
-      expect(request.headers.get("host")).toBe(new URL(OAUTH_ISSUER).host);
+      // The named token URL's host, or the issuer's when a control plane names none.
+      tokenHosts.push(request.headers.get("host") ?? "");
       expect(new URL(request.url).pathname).toBe("/v1/auth/oauth2/token");
       expect(request.headers.get("spacefast-runtime-exchange")).toBe(EXCHANGE_CREDENTIAL);
       expect(fields.client_id).toBe(`spacefast-share:${OAUTH_SPACE}`);
@@ -370,6 +375,7 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
             ...config.authorization.accessPage,
             accountUrl: OAUTH_AUTHORIZE_URL,
             issuer: OAUTH_ISSUER,
+            tokenUrl: OAUTH_TOKEN_URL,
           },
         },
       },
@@ -566,6 +572,7 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
       .some((value) => value.startsWith("__Host-spacefast_session=")),
   ).toBe(false);
   expect(exchangeCount).toBe(1);
+  expect(tokenHosts).toEqual([new URL(OAUTH_TOKEN_URL).host]);
   const restart = await get(
     runtime,
     OAUTH_HOST,
@@ -757,6 +764,7 @@ test("OAuth callback binds the browser, keeps PKCE server-side and creates one r
           ...config.authorization.accessPage,
           accountUrl: OAUTH_AUTHORIZE_URL,
           issuer: OAUTH_ISSUER,
+          tokenUrl: OAUTH_TOKEN_URL,
           exchange: {
             ...config.authorization.accessPage.exchange,
             credential: `${EXCHANGE_CREDENTIAL}-rotated`,

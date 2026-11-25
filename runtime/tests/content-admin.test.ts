@@ -209,6 +209,9 @@ echo json_encode([
   'paths' => [
     _stattic_content_admin_request_path('/wp-admin'),
     _stattic_content_admin_request_path('/wp-admin/edit.php'),
+    _stattic_content_admin_request_path('/wp-admin/new'),
+    _stattic_content_admin_request_path('/wp-admin/new/screens/todo-admin-screen'),
+    _stattic_content_admin_request_path('/wp-admin/new/', ['rest_route' => '/wp/v2/posts']),
     _stattic_content_admin_request_path('/wp-json'),
     _stattic_content_admin_request_path('/wp-json/wp/v2/posts'),
     _stattic_content_admin_request_path('/', ['rest_route' => '/wp/v2/types']),
@@ -330,7 +333,7 @@ echo json_encode([
       expires_at: 1050,
       wordpress_role: null,
     },
-    paths: [true, true, true, true, true, false, false, true, false],
+    paths: [true, true, false, false, true, true, true, true, false, false, true, false],
   });
 });
 
@@ -439,4 +442,32 @@ echo json_encode(array_map(
     ["/zero-admin", true],
     ["/zero-admin/users", true],
   ]);
+});
+
+test("access-rules.php loads _stattic_wordpress_role_for_capabilities without content-admin.php", async () => {
+  const accessRulesPath = path.join(repoRoot, "runtime/engine/runtime/access-rules.php");
+  const script = String.raw`
+require_once $argv[1];
+echo json_encode([
+  'defined' => function_exists('_stattic_wordpress_role_for_capabilities'),
+  'content_admin_loaded' => function_exists('_stattic_content_admin_request_path'),
+  'role' => _stattic_wordpress_role_for_capabilities(['page.view', 'access.manage']),
+]);
+`;
+  const proc = Bun.spawn(["php", "-r", script, accessRulesPath], {
+    cwd: repoRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  expect(exitCode, stderr).toBe(0);
+  expect(JSON.parse(stdout)).toEqual({
+    defined: true,
+    content_admin_loaded: false,
+    role: "administrator",
+  });
 });

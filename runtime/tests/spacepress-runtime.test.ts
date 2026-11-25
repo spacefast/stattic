@@ -11,7 +11,7 @@
 // 6. Hard-deleted PHP Functions returning inline `410 php_functions_retired`.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,12 +24,15 @@ import {
   PHP_BINARY,
   publicAccessConfig,
   putRoute,
+  redeemHandoff,
   type Runtime,
   RUNTIME_DIR,
   RUNTIME_INSTANCE_ID,
   selfSignedCertificate,
+  signEd25519Jwt,
   signToken,
   startRuntime,
+  visitorIssuer,
 } from "./harness.ts";
 
 const STATIC_HOST = "static-clean.test";
@@ -104,6 +107,21 @@ const spPageBodySchema = z.object({
   apiPrefix: z.string().nullable(),
   authPrefix: z.string().nullable(),
   assetsUrl: z.string().nullable(),
+  principal: z
+    .object({
+      kind: z.string(),
+      issuer: z.string(),
+      subject: z.string(),
+      wordpress_role: z.string(),
+    })
+    .nullable(),
+  spaceRole: z
+    .object({
+      role: z.string(),
+      issuer: z.string(),
+      subject: z.string(),
+    })
+    .nullable(),
 });
 
 const connectorAnswerSchema = z.object({
@@ -359,6 +377,8 @@ echo json_encode([
     'apiPrefix' => defined('SP_API_PREFIX') ? SP_API_PREFIX : null,
     'authPrefix' => defined('SP_AUTH_PREFIX') ? SP_AUTH_PREFIX : null,
     'assetsUrl' => defined('SP_ASSETS_URL') ? SP_ASSETS_URL : null,
+    'principal' => $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null,
+    'spaceRole' => $GLOBALS['SPACEFAST_SPACE_ROLE'] ?? null,
 ], JSON_UNESCAPED_SLASHES);
 `,
   );
@@ -953,4 +973,166 @@ echo json_encode(_stattic_zero_worker_target(${JSON.stringify(rt.storageRoot)}, 
     legacy_prefix: true,
     legacy_typedpress: false,
   });
+});
+
+test("signed-in requests to SpacePress /wp-admin/new and sub-screens resolve the visitor principal and Space role", async () => {
+  const keys = generateKeyPairSync("ed25519");
+  const issuer = visitorIssuer(keys.publicKey);
+  const authIssuer = `http://127.0.0.1:${connectorServer.port}/v1/auth`;
+  const authority = `external:${createHash("sha256").update("spacefast-share\0sp_admin").digest("hex")}`;
+  await putRoute(rt, PRIVATE_SPACE, "production", {
+    version_id: PRIVATE_VERSION,
+    hostnames: [PRIVATE_HOST],
+    production_hostnames: [PRIVATE_HOST],
+    config: {
+      mode: "website",
+      site_title: "Private SpacePress",
+      zero_generation: "spacepress",
+      projection_generation: 1,
+      visitor_issuer: "spacefast-api",
+      visitor_jwks: {
+        keys: [
+          {
+            ...keys.publicKey.export({ format: "jwk" }),
+            kid: issuer.kid,
+            alg: "EdDSA",
+            use: "sig",
+          },
+        ],
+      },
+      authorization: {
+        generation: 1,
+        sessionVersion: 0,
+        sessionKey: "e".repeat(64),
+        fence: "none",
+        acquireUrl: "https://access.spacefast.test/acquire/sp-private",
+        spaceClaimed: true,
+        accessPage: {
+          displayName: "Private SpacePress",
+          accountUrl: `${authIssuer}/oauth2/authorize`,
+          issuer: authIssuer,
+          connections: [],
+          exchange: {
+            passwordUrl: "https://access.spacefast.test/acquire/sp-private/password",
+            tokenUrl: "https://access.spacefast.test/acquire/sp-private/token",
+            requestUrl: "https://access.spacefast.test/acquire/sp-private/request",
+            credential: "spacepress-private-exchange-credential-0123456789",
+          },
+        },
+        grants: [
+          {
+            id: "grt_sp_admin",
+            generation: 1,
+            audience: { kind: "external", issuer: "spacefast-share", subject: "sp_admin" },
+            resources: { include: ["/**"], exclude: [] },
+            capabilities: [
+              "page.view",
+              "comments.read",
+              "comments.write",
+              "content.publish",
+              "access.manage",
+            ],
+            constraints: {},
+            target: { kind: "live" },
+            source: { kind: "system", reference: "share-consent:sp_admin:grt_sp_admin" },
+          },
+        ],
+      },
+    },
+  });
+
+  // Anonymous requests to private SpacePress admin screens remain denied.
+  const anonymous = await get(rt, PRIVATE_HOST, "/wp-admin/new/screens/todo-admin-screen");
+  expect(anonymous.status).toBe(403);
+
+  const now = Math.floor(Date.now() / 1000);
+  const handoff = signEd25519Jwt(keys.privateKey, issuer.kid, {
+    sub: authority,
+    purpose: "handoff",
+    authorities: [authority],
+    principal: "account:sp_admin",
+    identity: { issuer: authIssuer, subject: "sp_admin" },
+    iss: "spacefast-api",
+    aud: PRIVATE_SPACE,
+    host: PRIVATE_HOST,
+    spaceId: PRIVATE_SPACE,
+    generation: 1,
+    sessionVersion: 0,
+    sid: createHash("sha256").update(randomUUID()).digest("hex"),
+    iat: now,
+    nbf: now,
+    exp: now + 300,
+    jti: randomUUID(),
+  });
+  const signIn = await redeemHandoff(rt, PRIVATE_HOST, handoff, "/wp-admin/new");
+  expect(signIn.status, await signIn.clone().text()).toBe(303);
+  const cookie = (signIn.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  expect(cookie).toStartWith("spacefast_session_dev=sfv2_");
+
+  // Both `/wp-admin/new` and nested screens stay in the SpacePress lane while
+  // resolving `_stattic_wordpress_role_for_capabilities()` through the real loader.
+  for (const adminPath of ["/wp-admin/new", "/wp-admin/new/screens/todo-admin-screen"]) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential requests verify each admin route
+    const res = await get(rt, PRIVATE_HOST, adminPath, {
+      headers: { cookie, ...probeHeaders },
+    });
+    expect(res.status, `${adminPath}: ${await res.clone().text()}\n${rt.diagnostics()}`).toBe(200);
+    expect(res.headers.get("x-spacefast-test-deprecated-includes")).toBe("none");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(res.headers.get("a8c-edge-cache")).toBe("no-cache");
+    if (adminPath.startsWith("/wp-admin/new/")) {
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+      expect(res.headers.get("x-frame-options")).toBeNull();
+    }
+    const body = spPageBodySchema.parse(await res.json());
+    expect(body.surface).toBe("spacepress-page");
+    expect(body.uri).toBe(adminPath);
+    expect(body.principal).toEqual({
+      kind: "user",
+      issuer: authIssuer,
+      subject: "sp_admin",
+      wordpress_role: "subscriber",
+    });
+    expect(body.spaceRole).toEqual({
+      role: "manager",
+      issuer: authIssuer,
+      subject: "sp_admin",
+    });
+  }
+
+  // `rest_route` on `/wp-admin/new*` must still pass through the WordPress REST
+  // door rather than bypassing origin and `_method` checks into SpacePress.
+  for (const restAttackPath of [
+    "/wp-admin/new/?rest_route=/wp/v2/posts/1&_method=DELETE",
+    "/wp-admin/new?rest_route=/wp/v2/posts/1&_method=DELETE",
+  ]) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential requests verify each selector spelling
+    const restRes = await get(rt, PRIVATE_HOST, restAttackPath, {
+      headers: {
+        cookie,
+        "sec-fetch-site": "cross-site",
+      },
+    });
+    expect(restRes.status, `${restAttackPath}: ${await restRes.clone().text()}`).toBe(403);
+    expect(await restRes.json()).toMatchObject({ code: "rest_origin_denied" });
+  }
+
+  // A cross-origin unsafe request to `/wp-admin/new/*` must never run with the
+  // visitor's lent principal or Space role.
+  const crossOriginPost = await get(rt, PRIVATE_HOST, "/wp-admin/new/screens/todo-admin-screen", {
+    method: "POST",
+    headers: {
+      cookie,
+      origin: "https://attacker.example",
+      "sec-fetch-site": "cross-site",
+    },
+  });
+  expect(crossOriginPost.status).not.toBe(500);
+  if (crossOriginPost.status === 200) {
+    const postBody = spPageBodySchema.parse(await crossOriginPost.json());
+    expect(postBody.principal).toBeNull();
+    expect(postBody.spaceRole).toBeNull();
+  } else {
+    expect(crossOriginPost.status).toBe(403);
+  }
 });

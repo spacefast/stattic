@@ -247,29 +247,6 @@ function _stattic_content_wordpress_role(mixed $value): ?string
         : null;
 }
 
-/**
- * The runtime half of THE grant→WordPress-role mapping. The other half is
- * wordpressRoleForGrantCapabilities in
- * packages/common/src/contracts/principal-assertion.ts. Both read the one role
- * table (shared/space-roles.generated.php is generated from it), and
- * runtime/tests/content-admin.test.ts runs them side by side.
- *
- * Two callers exist because the two lanes learn the capabilities at different
- * moments. The control plane knows them when it composes a principal assertion
- * for the content API and the editor launch. The WP API door has no control
- * plane in the request at all: the capabilities come from the Grant decision
- * the runtime just made for THIS path, so the runtime has to map them itself.
- */
-function _stattic_wordpress_role_for_capabilities(array $capabilities): ?string
-{
-    $role = _stattic_space_role_for_capabilities($capabilities);
-    $reads = in_array('page.view', $capabilities, true) || in_array('comments.read', $capabilities, true);
-    if (_stattic_space_role_rank($role) <= _stattic_space_role_rank('commenter') && !$reads) {
-        return null;
-    }
-    return SPACEFAST_SPACE_ROLE_WORDPRESS_ROLES[$role];
-}
-
 function _stattic_content_admin_mint_ticket(
     string $privateRoot,
     string $host,
@@ -675,11 +652,11 @@ function _stattic_content_admin_verify_session(
  */
 function _stattic_content_admin_request_path(string $path, array $query = []): bool
 {
+    $isSpacepressAdmin = $path === '/wp-admin/new' || str_starts_with($path, '/wp-admin/new/');
     return $path === '/zero-admin'
         || str_starts_with($path, '/zero-admin/')
         || $path === '/wp-login.php'
-        || $path === '/wp-admin'
-        || str_starts_with($path, '/wp-admin/')
+        || (!$isSpacepressAdmin && ($path === '/wp-admin' || str_starts_with($path, '/wp-admin/')))
         || _stattic_content_rest_request_path($path, $query);
 }
 

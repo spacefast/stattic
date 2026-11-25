@@ -16,6 +16,7 @@ require_once __DIR__ . '/../shared/egress.php';
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/record-store.php';
 require_once __DIR__ . '/../shared/admission.php';
+require_once __DIR__ . '/../shared/space-roles.php';
 
 // Country and IP come ONLY from values a client cannot set (contracts §16, live
 // probe 2026-08-07). Every header the edge was assumed to own reaches PHP

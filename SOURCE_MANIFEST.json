@@ -1,7 +1,7 @@
 {
-  "revision": "7755b94772d8044db28cb04e5620751692eb1c3b",
-  "sourceHash": "17f40ad593b72ed5a7e63f64a30276543c2c8bda90b40837e2f08b59352d5482",
-  "manifestSha256": "12951a82d50aa4206b1d1781346551da782b89f2761485ad7c6c126565bf7ec0",
+  "revision": "334421c60396186349d54053749b423d0b2ed4e3",
+  "sourceHash": "481e6dc19f3156464a45a272d93f19fed6fc310074f9cf329a20e194404cb42f",
+  "manifestSha256": "7adc66c611bb4b02512f90a624a0159e15f4c4c3c3e041d281b0f18cad4b8aee",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "7e63ddf85ccb39c37cb6903fd970cbb6b4dd73adc63b2b7de05322a77792b93d"
+      "sha256": "4da9d5f1a90992a7a8a84f27b8a54f9279da308e3e32f7cc902e3e19f9cdf849"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "8e5fb2f68c64a482b4f9e24d855bc6f3da4aaef16bd61625fdaea2ef6926516d"
+      "sha256": "f72d24708296761428cc5c54ee0560034cbbce1fc17f40e027a11896914c8390"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -29993,7 +29993,7 @@
     },
     {
       "path": "runtime/engine/loader/request.php",
-      "sha256": "c0e9f768725078cae1ad36eb195593116fc81c2c44911f42cf44c29d077b9d95"
+      "sha256": "5888c5e8a6b274857ec86ff1854b8dfe9240af724a69df51f39daf2660fcba37"
     },
     {
       "path": "runtime/engine/loader/wordpress.php",
@@ -30013,7 +30013,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "349cc669af42634967431c226470c1c7675d50e941ed55ee359155e90d3fb5ad"
+      "sha256": "614a165457bc6b7d0049a9ef26134038cc9d31bc96e4beb03e4dc9d1ee6ee441"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -30177,7 +30177,7 @@
     },
     {
       "path": "runtime/engine/shared/content-admin.php",
-      "sha256": "5fa16dd58df6a1dc2387239bd3626496e7cf760601350679f7ea5dd4677a1e7c"
+      "sha256": "5f9b6a428eb72611079fe8616d51e09113b7e902930ca90268d3fbb2068e5422"
     },
     {
       "path": "runtime/engine/shared/content-principal.php",
@@ -30333,7 +30333,7 @@
     },
     {
       "path": "runtime/engine/shared/space-roles.php",
-      "sha256": "df37ebeb289855ae7c272ee246b8e6bec440c48f818dd595b41c52da35571e4d"
+      "sha256": "7e7541f7be7dc97e822a5ae194b33b0d8847e04c27518ffaf45fb485c49fa17a"
     },
     {
       "path": "runtime/engine/shared/space-users-site.php",
@@ -30545,7 +30545,7 @@
     },
     {
       "path": "runtime/tests/content-admin.test.ts",
-      "sha256": "14a9891e8280fe7064adaa85c468b594b1735f0ff95b612940c5d5fcdca2c6b2"
+      "sha256": "9bf1f56477f2bed3d52e3f6c7fc468dca622c72a44e34829b0e22b1a8ace73dd"
     },
     {
       "path": "runtime/tests/content-html-sync.test.ts",
@@ -30973,7 +30973,7 @@
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
-      "sha256": "e948a51f40e1cca4d3b4719c111d186cbdd2c15d96d4c0a41577b593356853b2"
+      "sha256": "d947917bb8d79a5d80506e1542010e56d661c1f87bccc57d09d082b5c1091084"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",
@@ -31001,7 +31001,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "6e869e7587269b2a6298120113a8e217767c1da038a9bfb4a64cc7dca751c6af"
+      "sha256": "ebcf8f173cbae2e25cfd30ecc17b4e20a61670cd771a2e046f6a82ba4e4aace5"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

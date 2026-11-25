@@ -4858,13 +4858,14 @@ rmdir($spacepressRoot);
 
 require_once __DIR__ . '/../engine/shared/space-roles.php';
 foreach ([
-    [[], 'viewer'],
-    [['page.view'], 'viewer'],
-    [['page.view', 'comments.read', 'comments.write'], 'commenter'],
-    [['page.view', 'content.publish'], 'editor'],
-    [['comments.write', 'access.manage'], 'manager'],
-] as [$capabilities, $expected]) {
+    [[], 'viewer', null],
+    [['page.view'], 'viewer', 'subscriber'],
+    [['page.view', 'comments.read', 'comments.write'], 'commenter', 'subscriber'],
+    [['page.view', 'content.publish'], 'editor', 'editor'],
+    [['comments.write', 'access.manage'], 'manager', 'administrator'],
+] as [$capabilities, $expected, $expectedWpRole]) {
     check(_stattic_space_role_for_capabilities($capabilities) === $expected, 'space role: ' . json_encode($capabilities) . ' is ' . $expected);
+    check(_stattic_wordpress_role_for_capabilities($capabilities) === $expectedWpRole, 'wp role: ' . json_encode($capabilities) . ' is ' . var_export($expectedWpRole, true));
 }
 $wholeSpaceGrant = static fn (string $id, string $subject, array $capabilities, array $extra = []): array => [
     'id' => $id,

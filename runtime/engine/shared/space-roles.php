@@ -30,3 +30,27 @@ function _stattic_space_role_for_capabilities(array $capabilities): string
     }
     return $role;
 }
+
+/**
+ * The runtime half of THE grant→WordPress-role mapping. The other half is
+ * wordpressRoleForGrantCapabilities in
+ * packages/common/src/contracts/principal-assertion.ts. Both read the one role
+ * table (shared/space-roles.generated.php is generated from it), and
+ * runtime/tests/content-admin.test.ts runs them side by side.
+ *
+ * Two callers exist because the two lanes learn the capabilities at different
+ * moments. The control plane knows them when it composes a principal assertion
+ * for the content API and the editor launch. The WP API door and SpacePress
+ * visitor lane have no control plane in the request at all: the capabilities
+ * come from the Grant decision the runtime just made for THIS path, so the
+ * runtime has to map them itself.
+ */
+function _stattic_wordpress_role_for_capabilities(array $capabilities): ?string
+{
+    $role = _stattic_space_role_for_capabilities($capabilities);
+    $reads = in_array('page.view', $capabilities, true) || in_array('comments.read', $capabilities, true);
+    if (_stattic_space_role_rank($role) <= _stattic_space_role_rank('commenter') && !$reads) {
+        return null;
+    }
+    return SPACEFAST_SPACE_ROLE_WORDPRESS_ROLES[$role];
+}

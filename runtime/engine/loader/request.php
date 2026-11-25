@@ -263,8 +263,6 @@ return static function (array $loader): void {
         if (
             !isset($entrypointPaths[$path])
             && !$isFpmReadinessProbe
-            && $path !== '/wp-admin/new'
-            && !str_starts_with($path, '/wp-admin/new/')
             && is_file($releaseRoot . '/engine/shared/content-admin.php')
         ) {
             require_once $releaseRoot . '/engine/shared/content-admin.php';

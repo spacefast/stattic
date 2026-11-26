@@ -1,7 +1,7 @@
 {
-  "revision": "f03f0be5f5bfc3d9ac6092d62fed1029b6f472bc",
+  "revision": "a5726d9e9f8752d157cde4c9d97227615777aeff",
   "sourceHash": "2916d5394ef7ef2a825ddbcd761f8d3ddea9c00a708960e54ffdfed27e27bd37",
-  "manifestSha256": "a79d267e36b2dd14e5911bd36122a369bbe9bab494647638fed74735a9a183e3",
+  "manifestSha256": "aa27f3c082e7d2a8c3f0653bf69a9f6a0b45954d72d755e2972fed9b3119f952",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "48ffa015e85942d6eeedf7c10b9375f7b7c2d6814c9dd4d1e9c1b1255711204b"
+      "sha256": "48e7f205d1045bdc1b419077ed092bfebafa310ec01ccb19b96e2f00faa75644"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "a4b6b82446b3d9bf39d10d6383d08663cb1540f2ed9918a9da303cc4106f5e0c"
+      "sha256": "37327422c25b4fcff74fba93dac867d0aee72dcb8fb80a5b536d53f5cfb12865"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -30737,7 +30737,7 @@
     },
     {
       "path": "runtime/tests/fixtures/spacepress-preview-parity.php",
-      "sha256": "d13bcf0fad060a5bd81da32e24871b658a2916cea854134b5531d73b36c2ea79"
+      "sha256": "c86c1fb4d6e93b56ddd58e16733eaccb66877e803d98f87b60f45b387eaa3f05"
     },
     {
       "path": "runtime/tests/fixtures/without-intl-prepend.php",
@@ -30961,7 +30961,7 @@
     },
     {
       "path": "runtime/tests/spacepress-preview-parity.test.ts",
-      "sha256": "d6e677e83cc4ec24c3e4f5d1132129df9b84f1e712d085122e0fca0d81912060"
+      "sha256": "4124291da14486ae29929c28e535f1b0fc837d607d73ca710b1dcb96a6684ec3"
     },
     {
       "path": "runtime/tests/spacepress-preview-sign-in.test.ts",

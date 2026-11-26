@@ -555,11 +555,26 @@ describe("transactions with SELECT ... FOR UPDATE", () => {
     "%s: two sessions racing 100 increments each lose no update and raise no error",
     async (engine) => {
       await driver(engine, { action: "case", case: "counter-setup" });
-      const [a, b] = await Promise.all([Worker.start(engine), Worker.start(engine)]);
+      const [a, b, holder] = await Promise.all([
+        Worker.start(engine),
+        Worker.start(engine),
+        Worker.start(engine),
+      ]);
       const rounds = 100;
       try {
+        // Both loops start behind a lock a third session holds. Each reports
+        // its first timed attempt before the release, and no commit can land
+        // until the release, so the race is real even when a process starts
+        // late. MySQL and MariaDB also show both sessions waiting on the lock.
+        holder.send("lock");
+        await holder.next("locking");
+        expect(await holder.next("locked")).toMatchObject({ n: 0, error: null });
         a.send(`loop ${rounds}`);
         b.send(`loop ${rounds}`);
+        await Promise.all([a.next("attempting"), b.next("attempting")]);
+        if (engine !== "sqlite") await waiting(engine, 2);
+        holder.send("release");
+        expect(await holder.next("released")).toMatchObject({ error: null });
         const [ra, rb] = (await Promise.all([a.next("looped"), b.next("looped")])).map((event) =>
           loopSchema.parse(event),
         );
@@ -582,6 +597,7 @@ describe("transactions with SELECT ... FOR UPDATE", () => {
       } finally {
         a.stop();
         b.stop();
+        holder.stop();
       }
     },
     120_000,
@@ -885,8 +901,8 @@ class Worker {
   }
 }
 
-/** Wait for InnoDB to report the second session's lock wait. */
-async function waiting(engine: Live): Promise<"waiting"> {
+/** Wait for InnoDB to report `sessions` lock waits (by default, the second session's). */
+async function waiting(engine: Live, sessions = 1): Promise<"waiting"> {
   const server = servers[engine];
   if (!server) throw new Error(`${engine} server is not running`);
   const deadline = Date.now() + 20_000;
@@ -894,7 +910,7 @@ async function waiting(engine: Live): Promise<"waiting"> {
     const waits = server.exec(
       "SELECT COUNT(*) FROM information_schema.innodb_trx WHERE trx_state = 'LOCK WAIT'",
     );
-    if (Number(waits) > 0) return "waiting";
+    if (Number(waits) >= sessions) return "waiting";
     if (Date.now() > deadline) throw new Error(`${engine} worker never blocked`);
     await Bun.sleep(5);
   }

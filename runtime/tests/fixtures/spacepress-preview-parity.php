@@ -511,9 +511,11 @@ UNIQUE KEY k (k)");
  * Case 3 worker: one session doing read-modify-write of the counter under
  * START TRANSACTION + SELECT ... FOR UPDATE. Commands arrive on stdin:
  * `lock` opens the transaction and reads, `try-lock` probes a SQLite lock
- * without waiting, `commit` writes n+1 and commits,
- * `touch` increments the other row in autocommit, `loop N` runs N whole increments, timing each with the system-wide monotonic
- * clock so the test can check the critical sections never overlapped.
+ * without waiting, `commit` writes n+1 and commits, `release` rolls back
+ * without writing, `touch` increments the other row in autocommit, and
+ * `loop N` runs N whole increments, timing each with the system-wide
+ * monotonic clock so the test can check the critical sections never
+ * overlapped. It announces its first timed attempt before taking the lock.
  */
 function parity_worker(): void
 {
@@ -550,6 +552,9 @@ function parity_worker(): void
             $update = parity_error();
             $wpdb->query('COMMIT');
             $emit(['event' => 'committed', 'error' => $update ?? parity_error()]);
+        } elseif ($command[0] === 'release') {
+            $wpdb->query('ROLLBACK');
+            $emit(['event' => 'released', 'error' => parity_error()]);
         } elseif ($command[0] === 'touch') {
             $emit(['event' => 'touching']);
             $wpdb->query("UPDATE $t SET n = n + 1 WHERE id = 2");
@@ -559,6 +564,9 @@ function parity_worker(): void
             $errors = [];
             for ($i = 0, $n = (int) $command[1]; $i < $n; $i++) {
                 $attempt = hrtime(true);
+                if ($i === 0) {
+                    $emit(['event' => 'attempting']);
+                }
                 $wpdb->query('START TRANSACTION');
                 $error = parity_error();
                 $read = (int) $wpdb->get_var("SELECT n FROM $t WHERE id = 1 FOR UPDATE");

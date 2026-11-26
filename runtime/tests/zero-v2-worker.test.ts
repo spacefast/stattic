@@ -23,6 +23,7 @@ import {
   uploadSessionBlobs,
 } from "./harness.ts";
 import { MYSQL_SETUP_TIMEOUT_MS, startMysqlContainer } from "./mysql-container.ts";
+import { type PhpFpmServer, startPhpFpmServer } from "./php-fpm.ts";
 import { installWordpress } from "./zero-wordpress.ts";
 
 const resultSchema = z.union([
@@ -55,8 +56,8 @@ test(
       },
     });
     enableSpaceMailEndpoint(rt);
-    const { promise: enteredSink, resolve: entered } = Promise.withResolvers<void>();
-    const { promise: releaseSink, resolve: release } = Promise.withResolvers<void>();
+    let enteredSink = Promise.withResolvers<void>();
+    let releaseSink = Promise.withResolvers<void>();
     let hold = true;
     const deliveries: Array<{ scope: string; label: string }> = [];
     const sink = Bun.serve({
@@ -78,13 +79,14 @@ test(
         assert.equal(hook.event, "records.created");
         deliveries.push(hook.data.row);
         if (hold) {
-          entered();
-          await releaseSink;
+          enteredSink.resolve();
+          await releaseSink.promise;
         }
         return new Response("ok");
       },
     });
     const workers: Array<ReturnType<typeof Bun.spawn>> = [];
+    let fpm: PhpFpmServer | undefined;
     try {
       const wp = await installWordpress(rt, work, db, "worker-a.test");
       const coreVersion = readFileSync(
@@ -109,7 +111,7 @@ const records = table({ label: text().notNull(), scope: text().notNull() }, { ac
 export default defineConfig({ name: 'worker-proof', tables: { records }, users: { members: userProjection({ email: email().notNull().unique().max(191), name: text().notNull().default('') }) },
   webhooks: [{ url: env('HOOK_URL'), secret: env('HOOK_SECRET'), events: ['records.created'] }],
   jobs: { crash: job({ input: {}, retries: 3, handler: () => { throw new Error('Expected worker failure'); } }), stamp: job({ input: { label: text().notNull() }, handler: async (input) => { await db.insert(records).values({ label: input.label, scope: (process.env.SCOPE ?? 'missing') }); } }) },
-  actions: { notify: action({ input: { from: text(), to: text().notNull(), cc: text() }, access: 'anyone', handler: async ({ from, to, cc }) => { if (from === null) return (await mail.send({ to, cc, subject: 'Welcome', text: 'Hi' })).id; return (await mail.send({ from, to, cc, subject: 'Welcome', text: 'Hi' })).id; } }), failEnqueue: action({ access: 'anyone', handler: async () => { return await jobs.crash.enqueue({}); } }), enqueue: action({ access: 'anyone', handler: async () => {
+  actions: { later: action({ access: 'anyone', handler: async () => await jobs.stamp.enqueue({ label: 'later' }, { delay: 3600 }) }), notify: action({ input: { from: text(), to: text().notNull(), cc: text() }, access: 'anyone', handler: async ({ from, to, cc }) => { if (from === null) return (await mail.send({ to, cc, subject: 'Welcome', text: 'Hi' })).id; return (await mail.send({ from, to, cc, subject: 'Welcome', text: 'Hi' })).id; } }), failEnqueue: action({ access: 'anyone', handler: async () => { return await jobs.crash.enqueue({}); } }), enqueue: action({ access: 'anyone', handler: async () => {
     await db.insert(records).values({ label: 'immediate', scope: (process.env.SCOPE ?? 'missing') });
     return await jobs.stamp.enqueue({ label: 'scheduled' }, { delay: 3600 });
   } }) }
@@ -155,6 +157,8 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
           body: "{}",
         });
         assert.equal(queued.status, 200, await queued.clone().text());
+        // Without php-fpm's fastcgi_finish_request() the request never arms a post-response drain.
+        assert.equal(queued.headers.get("x-accel-buffering"), null);
       }
       assert.deepEqual(deliveries, []);
       // Recreate the committed-but-not-dispatched ticket: Zero's own maintenance action recovers it.
@@ -239,7 +243,7 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       const first = worker(a);
       // Signal from the real delivery, with a bounded timeout so a failed boot is diagnosed promptly.
       await Promise.race([
-        enteredSink,
+        enteredSink.promise,
         first.result().then((result) => {
           throw new Error(`Worker exited before delivery: ${JSON.stringify(result)}`);
         }),
@@ -254,7 +258,7 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       assert.equal(db.exec(`SELECT * FROM ${prefix(b)}zero__jobs ORDER BY id`), bBefore);
       assert.deepEqual(deliveries, [{ label: "immediate", scope: "a" }]);
       hold = false;
-      release();
+      releaseSink.resolve();
       const [firstResult] = await first.result();
       assert.equal(firstResult?.status, "ran");
       assert.ok(firstResult && "failures" in firstResult);
@@ -504,6 +508,110 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
         readFileSync(path.join(rt.root, "__wp__/wp-includes/version.php"), "utf8"),
         coreVersion,
       );
+      // Under php-fpm, a request that queues due work runs it after its response. One FPM child,
+      // so the next request it answers proves the previous request's post-response work ended.
+      fpm = await startPhpFpmServer({
+        root: rt.root,
+        env: {
+          PATH: `${path.join(work, "bin")}:${process.env.PATH ?? ""}`,
+          SPACEFAST_ZERO_DATABASE_URL: db.url,
+        },
+        maxChildren: 1,
+      });
+      const fpmAction = (name: string) =>
+        fetch(`${fpm?.baseUrl}/wp-json/zero/v1/actions/${name}`, {
+          method: "POST",
+          headers: { host: "worker-a.test", "content-type": "application/json" },
+          body: "{}",
+        });
+      const fpmSettled = async () => {
+        // A drain that blocks its only FPM child fails here, not at the suite timeout.
+        let health: Response;
+        try {
+          health = await fetch(`${fpm?.baseUrl}/__spacefast/health.php`, {
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (error) {
+          throw new Error(`FPM did not settle: ${String(error)}\n${fpm?.diagnostics()}`, {
+            cause: error,
+          });
+        }
+        assert.equal(health.ok, true);
+      };
+      // A delayed job alone arms nothing and stays queued.
+      const later = await fpmAction("later");
+      assert.equal(later.status, 200, (await later.clone().text()) + fpm.diagnostics());
+      assert.equal(later.headers.get("x-accel-buffering"), null);
+      await fpmSettled();
+      assert.equal(
+        db.exec(
+          `SELECT state FROM ${prefix(a)}zero__jobs WHERE job='stamp' AND input LIKE '%"later"%'`,
+        ),
+        "pending",
+      );
+      // The webhook runs after the response: the client holds the whole answer while the job
+      // is still blocked in the sink.
+      const deliveredBefore = deliveries.length;
+      hold = true;
+      enteredSink = Promise.withResolvers<void>();
+      releaseSink = Promise.withResolvers<void>();
+      const posted = await fpmAction("enqueue");
+      assert.equal(posted.status, 200, (await posted.clone().text()) + fpm.diagnostics());
+      assert.equal(posted.headers.get("x-accel-buffering"), "no");
+      await posted.json();
+      await Promise.race([
+        enteredSink.promise,
+        new Promise<never>((_, reject) => {
+          AbortSignal.timeout(10_000).addEventListener(
+            "abort",
+            () => reject(new Error(`Post-response delivery deadline\n${fpm?.diagnostics()}`)),
+            { once: true },
+          );
+        }),
+      ]);
+      hold = false;
+      releaseSink.resolve();
+      await fpmSettled();
+      assert.deepEqual(deliveries.slice(deliveredBefore), [{ label: "immediate", scope: "a" }]);
+      assert.equal(
+        db.exec(
+          `SELECT COUNT(*) FROM ${prefix(a)}zero__jobs WHERE job='zero.webhook' AND state<>'done'`,
+        ),
+        "0",
+      );
+      // The drain left nothing due, so the next tick boots no WordPress.
+      const [afterDrain] = await worker(a).result();
+      assert.equal(afterDrain?.status, "idle");
+      assert.ok(afterDrain && "wordpress_booted" in afterDrain);
+      assert.equal(afterDrain.wordpress_booted, false);
+      assert.equal(
+        db.exec(`SELECT COUNT(*) FROM ${prefix(a)}zero_records WHERE label='scheduled'`),
+        "1",
+      );
+      // While a worker holds the Space's lock, the request answers and leaves the job to it.
+      const holder = Bun.spawn({
+        cmd: [
+          "php",
+          "-r",
+          '$h = fopen($argv[1], "c+"); flock($h, LOCK_EX); echo "locked\\n"; fgets(STDIN);',
+          path.join(rt.storageRoot, "spaces", a, "zero-v2-worker.lock"),
+        ],
+        stdin: "pipe",
+        stdout: "pipe",
+      });
+      workers.push(holder);
+      const reader = holder.stdout.getReader();
+      assert.equal(new TextDecoder().decode((await reader.read()).value), "locked\n");
+      const contended = await fpmAction("enqueue");
+      assert.equal(contended.status, 200, await contended.clone().text());
+      assert.equal(contended.headers.get("x-accel-buffering"), "no");
+      await fpmSettled();
+      assert.equal(deliveries.length, deliveredBefore + 1);
+      holder.stdin.end();
+      await holder.exited;
+      const [fallback] = await worker(a).result();
+      assert.equal(fallback?.status, "ran");
+      assert.equal(deliveries.length, deliveredBefore + 2);
       // Generation authority closes the worker before any legacy WordPress boot, even with due work.
       await putRoute(rt, b, "production", {
         version_id: "ver_worker_live",
@@ -519,7 +627,8 @@ export default defineConfig({ name: 'worker-proof', tables: { records }, users: 
       assert.equal(db.exec(`SELECT * FROM ${prefix(b)}zero__jobs ORDER BY id`), legacyBefore);
     } finally {
       hold = false;
-      release();
+      releaseSink.resolve();
+      fpm?.stop();
       for (const worker of workers) {
         worker.kill();
         await worker.exited;

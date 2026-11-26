@@ -1266,6 +1266,15 @@ function _stattic_flush_response_before_deferred(?bool $set = null): bool
     return $flush;
 }
 
+function _stattic_response_finished_before_deferred(?bool $set = null): bool
+{
+    static $finished = false;
+    if ($set !== null) {
+        $finished = $set;
+    }
+    return $finished;
+}
+
 // A PHP handler pins open_basedir for the rest of the request. Finish queued
 // platform file work before that handoff, without releasing its admission lock.
 function _stattic_run_deferred_work(bool $beforeTenant = false): void
@@ -1314,9 +1323,11 @@ function _stattic_defer(callable $work, bool $beforeTenant = false): void
         if (function_exists('_stattic_lock_release_all')) {
             _stattic_lock_release_all();
         }
+        $finished = false;
         if (_stattic_flush_response_before_deferred() && function_exists('fastcgi_finish_request')) {
-            fastcgi_finish_request();
+            $finished = fastcgi_finish_request() === true;
         }
+        _stattic_response_finished_before_deferred($finished);
         _stattic_run_deferred_work();
     });
 }

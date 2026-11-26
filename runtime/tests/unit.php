@@ -5278,6 +5278,157 @@ if ($savedReentry !== null) {
 @unlink($cpRoot . '/wp-load.php');
 @rmdir($cpRoot);
 
+// --- Zero v2 post-response Action Scheduler drain -----------------------------------
+// A child process, so its WordPress and Action Scheduler stand-ins stay out of this file.
+$zeroDrainScript = <<<'PHP'
+<?php
+declare(strict_types=1);
+
+require_once $argv[1] . '/shared/context.php';
+require_once $argv[1] . '/shared/storage.php';
+require_once $argv[1] . '/shared/artifacts.php';
+require_once $argv[1] . '/shared/http.php';
+require_once $argv[1] . '/deprecated/zero-v2/zero-v2.php';
+
+$GLOBALS['test_filters'] = [];
+$GLOBALS['test_user'] = 0;
+function add_filter(string $tag, callable|string $fn, int $priority = 10, int $args = 1): bool {
+    $GLOBALS['test_filters'][$tag][] = $fn;
+    return true;
+}
+function remove_filter(string $tag, callable|string $fn, int $priority = 10): bool {
+    foreach ($GLOBALS['test_filters'][$tag] ?? [] as $id => $candidate) {
+        if ($candidate === $fn) unset($GLOBALS['test_filters'][$tag][$id]);
+    }
+    return true;
+}
+function apply_filters(string $tag, mixed $value, mixed ...$args): mixed {
+    foreach ($GLOBALS['test_filters'][$tag] ?? [] as $fn) $value = $fn($value, ...$args);
+    return $value;
+}
+function get_current_user_id(): int { return $GLOBALS['test_user']; }
+function wp_set_current_user(int $id): void { $GLOBALS['test_user'] = $id; }
+final class ActionScheduler {
+    public static int $runs = 0;
+    public static ?Closure $job = null;
+    public static function store(): object { return new class { public function has_pending_actions_due(): bool { return true; } }; }
+    public static function runner(): object { return new class { public function run(string $context): void { ActionScheduler::$runs++; (ActionScheduler::$job)(); } }; }
+}
+
+$tmp = realpath(sys_get_temp_dir()) . '/sf-zero-drain-' . bin2hex(random_bytes(5));
+$privateRoot = $tmp . '/.stattic/storage';
+$spaceId = 'spc_zero_drain';
+$spaceRoot = $privateRoot . '/spaces/' . $spaceId;
+foreach (['ver_a', 'ver_b'] as $version) {
+    mkdir($spaceRoot . '/versions/' . $version . '/.zero-compiled', 0775, true);
+    file_put_contents($spaceRoot . '/versions/' . $version . '/.zero-compiled/ready.json', '{}');
+}
+$live = static function (string $version) use ($spaceRoot): void {
+    $overlay = 'overlay-' . bin2hex(random_bytes(3)) . '.php';
+    file_put_contents($spaceRoot . '/' . $overlay, '<?php return ' . var_export([
+        'schema' => STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX,
+        'open' => true,
+        'zero_generation' => 'v2',
+        'versions' => ['production' => $version],
+    ], true) . ";\n");
+    file_put_contents($spaceRoot . '/space.json', json_encode(['schema' => STATTIC_RUNTIME_ARTIFACT_SCHEMA_MAX, 'overlay' => $overlay]));
+};
+$results = [];
+$drain = static function (float $seconds = 5.0) use ($privateRoot, $spaceId): int {
+    $before = ActionScheduler::$runs;
+    _stattic_zero_v2_drain($privateRoot, $spaceId, 'ver_a', $seconds);
+    return ActionScheduler::$runs - $before;
+};
+$lockFree = static function () use ($spaceRoot): bool {
+    $handle = fopen($spaceRoot . '/zero-v2-worker.lock', 'c+');
+    $free = flock($handle, LOCK_EX | LOCK_NB);
+    fclose($handle);
+    return $free;
+};
+ActionScheduler::$job = static function (): void {};
+$live('ver_a');
+
+// FPM did not confirm the response as sent: the jobs wait for the worker.
+_stattic_response_finished_before_deferred(false);
+$results['unconfirmed response skips'] = $drain() === 0;
+_stattic_response_finished_before_deferred(true);
+
+// Production moved to another version after this request bound ver_a.
+$live('ver_b');
+$results['version skew skips'] = $drain() === 0 && $lockFree();
+$live('ver_a');
+
+// The worker holds the lock: skip at once rather than wait.
+$held = fopen($spaceRoot . '/zero-v2-worker.lock', 'c+');
+flock($held, LOCK_EX);
+$started = microtime(true);
+$results['held worker lock skips without waiting'] = $drain() === 0 && microtime(true) - $started < 1;
+flock($held, LOCK_UN);
+fclose($held);
+
+// Jobs see no visitor; the request's identity returns afterwards.
+wp_set_current_user(77);
+$_COOKIE = ['__Host-spacefast_session' => 'secret'];
+$_SERVER['HTTP_COOKIE'] = '__Host-spacefast_session=secret';
+$_SERVER['HTTP_AUTHORIZATION'] = 'Bearer secret';
+$GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] = ['subject' => 'usr_visitor'];
+$GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] = ['userId' => 'usr_visitor'];
+$seen = [];
+ActionScheduler::$job = static function () use (&$seen): void {
+    $seen = [
+        'user' => get_current_user_id(),
+        'determined' => apply_filters('determine_current_user', 77),
+        'cookies' => $_COOKIE,
+        'headers' => [$_SERVER['HTTP_COOKIE'] ?? null, $_SERVER['HTTP_AUTHORIZATION'] ?? null],
+        'principal' => $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] ?? null,
+        // Pinned to null, so Space Users never re-reads the cleared cookies.
+        'space_users' => array_key_exists('SPACEFAST_SPACE_USERS_AUTH', $GLOBALS) ? $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] : 'unset',
+    ];
+};
+$results['live binding runs'] = $drain() === 1 && $lockFree();
+$results['jobs run without the visitor'] = $seen === [
+    'user' => 0,
+    'determined' => 0,
+    'cookies' => [],
+    'headers' => [null, null],
+    'principal' => null,
+    'space_users' => null,
+];
+$results['visitor restored after the drain'] = get_current_user_id() === 77
+    && $_COOKIE === ['__Host-spacefast_session' => 'secret']
+    && $_SERVER['HTTP_COOKIE'] === '__Host-spacefast_session=secret'
+    && $_SERVER['HTTP_AUTHORIZATION'] === 'Bearer secret'
+    && $GLOBALS['SPACEFAST_CONTENT_PRINCIPAL'] === ['subject' => 'usr_visitor']
+    && $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] === ['userId' => 'usr_visitor'];
+
+// The limit stops new actions only: a started action keeps its calls' normal timeouts.
+$timed = [];
+ActionScheduler::$job = static function () use (&$timed): void {
+    $timed['args'] = apply_filters('http_request_args', ['timeout' => 30], 'https://example.test/hook')['timeout'];
+    $timed['before'] = apply_filters('action_scheduler_maximum_execution_time_likely_to_be_exceeded', false, null, 1);
+    usleep(150000);
+    $timed['after'] = apply_filters('action_scheduler_maximum_execution_time_likely_to_be_exceeded', false, null, 1);
+};
+$drain(0.1);
+$results['started action keeps its HTTP timeout'] = $timed['args'] === 30;
+$results['next action may start before the limit'] = $timed['before'] === false;
+$results['no new action after the limit'] = $timed['after'] === true;
+$results['limit cleared after the drain'] = apply_filters('action_scheduler_maximum_execution_time_likely_to_be_exceeded', false, null, 1) === false;
+
+$failed = array_keys(array_filter($results, static fn (bool $ok): bool => !$ok));
+echo $failed === [] ? 'ok' : 'FAIL: ' . implode(', ', $failed);
+exec('rm -rf ' . escapeshellarg($tmp));
+PHP;
+$zeroDrainFile = tempnam(sys_get_temp_dir(), 'sf-zero-drain-');
+file_put_contents($zeroDrainFile, $zeroDrainScript);
+$zeroDrainOut = [];
+exec(
+    escapeshellarg(PHP_BINARY) . ' -d auto_prepend_file= ' . escapeshellarg($zeroDrainFile) . ' ' . escapeshellarg(realpath(__DIR__ . '/../engine')) . ' 2>&1',
+    $zeroDrainOut
+);
+@unlink($zeroDrainFile);
+check(end($zeroDrainOut) === 'ok', 'Zero v2 post-response drain: ' . implode("\n", $zeroDrainOut));
+
 // --- Per-Space brand override & white-label Space Bar config ------------------------
 require_once __DIR__ . '/../engine/shared/brand.php';
 require_once __DIR__ . '/../engine/runtime/space-bar.php';

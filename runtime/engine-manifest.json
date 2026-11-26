@@ -153,6 +153,7 @@
     "engine/deprecated/zero-v2/zero-v2.php",
     "engine/deprecated/zero-v2/zero-v2-scope.php",
     "engine/deprecated/zero-v2/zero-v2-worker.php",
+    "engine/deprecated/zero-v2/zero-v2-immediate-drain.php",
     "engine/deprecated/zero-v2/zero-v2-realtime.php",
     "engine/deprecated/zero-v2/zero-v2-realtime-publisher.php",
     "engine/deprecated/zero-v2/zero-realtime.js",

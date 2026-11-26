@@ -92,6 +92,7 @@ function _stattic_zero_v2_bind_wordpress(): void
         add_filter('pre_site_option_' . $name, static fn (): string => $value);
     }
     $GLOBALS['SPACEFAST_ZERO_V2_DATABASE_PREFIX'] = $scope;
+    _stattic_zero_v2_drain_install();
 }
 
 /**

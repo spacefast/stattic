@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__ . '/../../shared/spacepress.php';
+require_once __DIR__ . '/zero-v2-immediate-drain.php';
 
 /** Only the authenticated control plane supplies generation authority. */
 function _stattic_zero_generation(array $authority): string
@@ -80,9 +81,11 @@ function _stattic_zero_v2_select(string $privateRoot, string $spaceId, string $v
         throw new RuntimeException('Only one Zero version may load in a request.');
     }
     $GLOBALS['SPACEFAST_ZERO_V2_ROOT'] = $root;
+    $GLOBALS['SPACEFAST_ZERO_V2_VERSION_ID'] = $versionId;
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     $GLOBALS['SPACEFAST_ZERO_V2_INITIALIZING'] = $initializing;
+    $GLOBALS['SPACEFAST_ZERO_V2_SERVING'] = $authority;
     // Space Users is part of the binding: while the Space still has accounts on
     // the site tables it stays off, so no second store of them starts here.
     // A failed lookup pauses Space Users too; it never touches an app's own users.

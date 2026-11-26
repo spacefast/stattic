@@ -2,7 +2,7 @@
 
 This repository mirrors the source corresponding to Spacefast's published
 Stattic runtime engine. The current snapshot comes from monorepo revision
-`23f1a7598827543c9c26d6486565a9267e8b3b02`.
+`f03f0be5f5bfc3d9ac6092d62fed1029b6f472bc`.
 
 Release tags use `runtime-<monorepo revision>` and point at the public source
 commit used for that release. The attached `runtime-engine.zip` is the

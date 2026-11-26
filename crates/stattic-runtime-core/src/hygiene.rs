@@ -516,13 +516,13 @@ pub(crate) fn validate_sensitive_paths(files: &BTreeMap<String, FileMeta>) -> Re
             return invalid_with_details(
                 "sensitive_file_not_supported",
                 format!(
-                    "{path} is a sensitive credential, agent config, or repository metadata file and cannot be published. Remove it or store secrets with `sf env set`."
+                    "{path} is a sensitive credential, agent config, or repository metadata file and cannot be published. Remove it and store runtime secrets with Spacefast Secrets (`sf env set NAME --value-from-stdin`, Space Variables in the dashboard, or `.env.server` for runtime Spaces)."
                 ),
                 json!({
                     "path": path,
                     "category": DiagnosticCategory::Security.as_str(),
                     "pointer": "/files",
-                    "fix": "Remove this file from your publish directory (or publish only your build output directory) and store secrets with `sf env set`.",
+                    "fix": "Remove this file from your publish directory (or publish only your build output directory) and store runtime secrets with Spacefast Secrets (`sf env set NAME --value-from-stdin`, Space Variables in the dashboard, or `.env.server` for runtime Spaces; use `--no-secret` for non-secret variables).",
                 }),
             );
         }
@@ -1026,7 +1026,7 @@ impl<'a> HygieneSession<'a> {
                     format!(
                         "{path}:{line} embeds username/password credentials in a URL ({redacted})."
                     ),
-                    "Remove embedded credentials from public URLs and authenticate from a server-side endpoint using `sf env set`.",
+                    "Remove embedded credentials from public URLs and authenticate from a server-side endpoint using Spacefast Secrets (`sf env set NAME --value-from-stdin`, Space Variables in the dashboard, or `.env.server` for runtime Spaces).",
                     details,
                 );
             }

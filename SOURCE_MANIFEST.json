@@ -1,7 +1,7 @@
 {
-  "revision": "7b2911cb618b947389f7b19770c2b6007785e79d",
-  "sourceHash": "b3de9aceec60417ec8d93668ab782146170bce826190d8284e991e2559247ae9",
-  "manifestSha256": "ff96cfb597503f99efebb9c3a883dd5d184619114c72139141e56aa700c9cae1",
+  "revision": "9df7bce2256929f3ed0cc79e79c6242cb0c4b08f",
+  "sourceHash": "d9605395a8b27e7b91e8c5e1ebfe84cc5317e85457da1c1c45b28a7ee439dd30",
+  "manifestSha256": "808d78963b5402c3aefe5cd6b6ef5863fdd41ae420449c832ce171cccacec8df",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "9f732e2f76be391f86ae12cb20a3e37da2ae040cd6483d803e712432d55918df"
+      "sha256": "ffc04e142a7a0aae6556421b1fdb0c287f470592086057f2985cb5a459e1f2b9"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "9ed0119acae6d97e5a9ea50b74fd6b8e8b5062bfb51ed6a45afb0ce37f0b35cd"
+      "sha256": "219c033c7c1b8f4ef7daf0321cb673404f6c2f3d1f1f700d3334ff3518e3133c"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16273,7 +16273,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/hygiene.rs",
-      "sha256": "dcc11f07c7be97b7aacdc8ecd1d956cf60c5ceb10a1fff6d48ea73f658957137"
+      "sha256": "9caeb2d91f92ed9188e6abbc3f91a354cd45015afa9c5f3941fc67fccf0dd539"
     },
     {
       "path": "crates/stattic-runtime-core/src/io.rs",
@@ -16361,7 +16361,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/secret_scan.rs",
-      "sha256": "89aeeb56d0709386342f08bd152f1395fb94006ecc14586797e30be4037ec824"
+      "sha256": "db09d27ef7695692e775a59b86f33ec8b38ba655549af3f30ae0cd02b5de2209"
     },
     {
       "path": "crates/stattic-runtime-core/src/serving_paths.rs",

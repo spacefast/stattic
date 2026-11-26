@@ -207,7 +207,7 @@ pub fn policy_digest(allowlist: &AllowlistOverride) -> String {
 #[must_use]
 pub fn block_message(finding: &Finding) -> String {
     format!(
-        "{}:{} contains a potential secret ({}, {}, fingerprint {}). Move secrets to .env.server or `sf env set`, or suppress a false positive with `gitleaks:allow` on that line or `security.secrets.allowlist.fingerprints` in sf.jsonc.",
+        "{}:{} contains a potential secret ({}, {}, fingerprint {}). Remove real secrets from published files, rotate them if exposed, and store runtime secrets with Spacefast Secrets (`sf env set NAME --value-from-stdin`, Space Variables in the dashboard, or `.env.server` for runtime Spaces; use `--no-secret` for non-secret variables). Never suppress a real secret — only suppress confirmed false positives with `gitleaks:allow` on that line or scoped `security.secrets.allowlist.entries` in `spacefast.config.ts` (or `sf.jsonc`).",
         finding.path,
         finding.line,
         finding.rule_id,
@@ -480,10 +480,26 @@ impl<'a> SecretScanSession<'a> {
             finding.path = path.to_string();
             match finding.severity {
                 Severity::Block => {
+                    let mut details = finding_details(&finding, Some(sha256));
+                    if let Some(map) = details.as_object_mut() {
+                        map.insert(
+                            "findings".into(),
+                            json!([{
+                                "path": finding.path,
+                                "line": finding.line,
+                                "column": finding.column,
+                                "ruleId": finding.rule_id,
+                                "description": finding.description,
+                                "severity": finding.severity,
+                                "redactedPreview": finding.redacted_preview,
+                                "fingerprint": finding.fingerprint,
+                            }]),
+                        );
+                    }
                     return invalid_with_details(
                         "secret_detected",
                         block_message(&finding),
-                        finding_details(&finding, Some(sha256)),
+                        details,
                     );
                 }
                 Severity::Warn => {
@@ -498,7 +514,7 @@ impl<'a> SecretScanSession<'a> {
                     if self.warnings_emitted < FINALIZE_MAX_WARNINGS {
                         self.warnings_emitted += 1;
                         let fix = format!(
-                            "Verify this value is intended to be public. Move secrets to .env.server or `sf env set`, or suppress a false positive with `gitleaks:allow` on line {} or fingerprint \"{}\" in `sf.jsonc` under `security.secrets.allowlist.fingerprints`.",
+                            "Verify this value is intended to be public. If it is a real secret, remove it from published files, rotate it if exposed, and store it as a Spacefast Secret (`sf env set NAME --value-from-stdin`, Space Variables in the dashboard, or `.env.server` for runtime Spaces). Only suppress confirmed false positives with `gitleaks:allow` on line {} or scoped `security.secrets.allowlist.entries` (fingerprint \"{}\") in `spacefast.config.ts` (or `sf.jsonc`).",
                             finding.line, finding.fingerprint
                         );
                         let mut details = finding_details(&finding, Some(sha256));
@@ -515,7 +531,7 @@ impl<'a> SecretScanSession<'a> {
                             "severity": "warning",
                             "code": "secret_detected_warning",
                             "message": format!(
-                                "{}:{} matches secret pattern {} ({}, fingerprint {}). Verify this value is intended to be public, or suppress with `gitleaks:allow`.",
+                                "{}:{} matches secret pattern {} ({}, fingerprint {}). Verify this value is intended to be public; never allowlist a real secret.",
                                 finding.path,
                                 finding.line,
                                 finding.rule_id,

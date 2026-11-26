@@ -1711,6 +1711,116 @@ test("finalize purges released tombstones once and leaves unchanged replays cach
   }
 });
 
+test("update_tombstones purges only hostnames whose tombstone state is affected", async () => {
+  const purgeRt = await startRuntime({ captureEdgePurges: true });
+  try {
+    const spaceId = "spc_tomb_purge_scope";
+    const liveHost = "live.tomb-scope.test";
+    const v1Host = "v1.tomb-scope.test";
+    const existingTombHost = "existing.tomb-scope.test";
+    const addedTombHost = "added.tomb-scope.test";
+    const replacedTombHost = "replaced.tomb-scope.test";
+
+    await deploy(purgeRt, {
+      spaceId,
+      versionId: "ver_tomb_scope_1",
+      files: { "index.html": "<h1>live</h1>\n" },
+      activate: {
+        route_name: "production",
+        config: publicAccessConfig({ mode: "website" }, "live_and_all_versions"),
+        production_hostnames: [liveHost],
+        version_hostnames: [{ hostname: v1Host, version_id: "ver_tomb_scope_1" }],
+      },
+    });
+    await apiJson(
+      purgeRt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [existingTombHost], mode: "replace", reason: "version_deleted" },
+    );
+
+    // mode: "add" purges ONLY the requested hostname, never prior tombstones or intent routes.
+    const beforeAdd = edgePurgeCalls(purgeRt).length;
+    const addResult = await apiJson(
+      purgeRt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [addedTombHost], mode: "add", reason: "version_deleted" },
+    );
+    expect(addResult.tombstone_count).toBe(2);
+    expect(
+      edgePurgeCalls(purgeRt)
+        .slice(beforeAdd)
+        .map((call) => call.hostname),
+    ).toEqual([addedTombHost]);
+    expect((await get(purgeRt, existingTombHost, "/")).status).toBe(404);
+    expect((await get(purgeRt, addedTombHost, "/")).status).toBe(404);
+    expect((await get(purgeRt, liveHost, "/")).status).toBe(200);
+    expect((await get(purgeRt, v1Host, "/")).status).toBe(200);
+
+    // mode: "remove" purges ONLY the removed hostname.
+    const beforeRemove = edgePurgeCalls(purgeRt).length;
+    const removeResult = await apiJson(
+      purgeRt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [addedTombHost], mode: "remove" },
+    );
+    expect(removeResult.tombstone_count).toBe(1);
+    expect(
+      edgePurgeCalls(purgeRt)
+        .slice(beforeRemove)
+        .map((call) => call.hostname),
+    ).toEqual([addedTombHost]);
+    expect((await get(purgeRt, existingTombHost, "/")).status).toBe(404);
+
+    // mode: "replace" purges BOTH newly added and newly removed tombstones, not intent routes.
+    const beforeReplace = edgePurgeCalls(purgeRt).length;
+    const replaceResult = await apiJson(
+      purgeRt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [replacedTombHost], mode: "replace", reason: "version_deleted" },
+    );
+    expect(replaceResult.tombstone_count).toBe(1);
+    expect(
+      edgePurgeCalls(purgeRt)
+        .slice(beforeReplace)
+        .map((call) => call.hostname)
+        .toSorted(),
+    ).toEqual([existingTombHost, replacedTombHost].toSorted());
+    expect((await get(purgeRt, replacedTombHost, "/")).status).toBe(404);
+    expect((await get(purgeRt, liveHost, "/")).status).toBe(200);
+
+    // mode: "replace" with [] purges the cleared prior tombstone.
+    const beforeClear = edgePurgeCalls(purgeRt).length;
+    const clearResult = await apiJson(
+      purgeRt,
+      "PUT",
+      `${RUNTIME_HTTP_API_BASE}/spaces/${spaceId}/tombstones`,
+      "update_tombstones",
+      { space_id: spaceId },
+      { hostnames: [], mode: "replace" },
+    );
+    expect(clearResult.tombstone_count).toBe(0);
+    expect(
+      edgePurgeCalls(purgeRt)
+        .slice(beforeClear)
+        .map((call) => call.hostname),
+    ).toEqual([replacedTombHost]);
+  } finally {
+    purgeRt.stop();
+  }
+});
+
 test("finalize rejects proxy rules targeting internal or non-public upstreams", async () => {
   const upstreams = [
     "https://127.0.0.1/api",

@@ -769,12 +769,13 @@ function _stattic_runtime_finalize_idempotent_ready_response(string $privateRoot
 // The whole-domain purge every space mutation owes the edge. `$hostnames` is
 // supplied when the caller already narrowed the set (a tombstone push, an
 // intent diff); otherwise it is the space's full event hostname set.
-function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, ?array $hostnames = null): array
+function _stattic_runtime_purge_space_now(string $privateRoot, string $spaceId, string $reason, ?array $hostnames = null, bool $prepared = false): array
 {
     return _stattic_runtime_purge_now($privateRoot, [
         'hostnames' => $hostnames
             ?? _stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId)),
         'reason' => $reason,
+        'prepared' => $prepared,
     ]);
 }
 
@@ -1279,7 +1280,7 @@ function _stattic_runtime_delete_route(string $privateRoot, string $spaceId, str
         'space_id' => $spaceId,
         'route_name' => $routeName,
         'status' => 'deleted',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'route_deleted', $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'route_deleted', $hostnames, true),
     ]);
 }
 
@@ -1337,7 +1338,7 @@ function _stattic_runtime_put_space_config(string $privateRoot, string $spaceId,
     ]);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_config_updated', $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_config_updated', $hostnames, true),
     ]);
 }
 
@@ -1385,7 +1386,7 @@ function _stattic_runtime_put_hostname_intent(string $privateRoot, string $space
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'route_count' => count($routes),
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'hostname_intent_updated', $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'hostname_intent_updated', $hostnames, true),
     ]);
 }
 
@@ -1726,6 +1727,7 @@ function _stattic_runtime_write_route_pointer(string $privateRoot, string $space
     $purge = _stattic_runtime_purge_now($privateRoot, [
         'hostnames' => $purgeHosts,
         'reason' => $needsSweep ? 'space_access_privatized' : 'route_updated',
+        'prepared' => true,
     ]);
     return [
         'changed_paths' => $changedPaths,
@@ -1880,7 +1882,16 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     // preserves the generic tombstone.
     $reason = isset($body['reason']) && is_string($body['reason']) ? $body['reason'] : null;
     $category = isset($body['category']) && is_string($body['category']) ? $body['category'] : null;
-    $purgeHostnames = array_values(array_unique([...$hostnames, ..._stattic_runtime_space_sweep_hostnames(_stattic_space_root($privateRoot, $spaceId))]));
+    $purgeHostnames = $hostnames;
+    if ($mode === 'replace') {
+        $existingTombstones = _stattic_runtime_space_routing_doc(_stattic_space_root($privateRoot, $spaceId), 'tombstones');
+        if (is_array($existingTombstones['hostnames'] ?? null)) {
+            $purgeHostnames = array_values(array_unique([
+                ...$hostnames,
+                ..._stattic_runtime_purge_hostname_list($existingTombstones['hostnames']),
+            ]));
+        }
+    }
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $purgeHostnames, 'space_tombstones_updated');
     $tombstoneCount = _stattic_runtime_store_space_tombstones($privateRoot, $spaceId, $hostnames, $mode, $reason, $category);
     _stattic_runtime_update_route_index($privateRoot, $spaceId);
@@ -1893,7 +1904,7 @@ function _stattic_runtime_put_tombstones(string $privateRoot, string $spaceId, a
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'tombstone_count' => $tombstoneCount,
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', $purgeHostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_tombstones_updated', $purgeHostnames, true),
     ]);
 }
 
@@ -1926,7 +1937,7 @@ function _stattic_runtime_delete_space(string $privateRoot, string $spaceId, arr
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'status' => 'deleted',
-        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', $hostnames),
+        'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_deleted', $hostnames, true),
     ]);
 }
 
@@ -1963,7 +1974,7 @@ function _stattic_runtime_repair_space(string $privateRoot, string $spaceId, arr
     _stattic_json_response(200, [
         'space_id' => $spaceId,
         'status' => 'repaired',
-        'purge' => _stattic_runtime_purge_now($privateRoot, ['hostnames' => $hostnames, 'reason' => 'space_repaired']),
+        'purge' => _stattic_runtime_purge_now($privateRoot, ['hostnames' => $hostnames, 'reason' => 'space_repaired', 'prepared' => true]),
     ]);
 }
 

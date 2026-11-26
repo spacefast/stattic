@@ -1,7 +1,7 @@
 {
-  "revision": "c6873736c066ebd65b7344beb18866e8c9f7c047",
-  "sourceHash": "1ea91aa10f13c3c90c199691954d432175eecc6e143935b179d750edfdfa1ba6",
-  "manifestSha256": "78ee6069d01e634aa0b946414c4d10c445df7b41a16bb9cedb763b301b09aa95",
+  "revision": "7b2911cb618b947389f7b19770c2b6007785e79d",
+  "sourceHash": "b3de9aceec60417ec8d93668ab782146170bce826190d8284e991e2559247ae9",
+  "manifestSha256": "ff96cfb597503f99efebb9c3a883dd5d184619114c72139141e56aa700c9cae1",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "cf3a79aa8786c99d0276a1ddeb6aac5bf55338455b3b2412ec22699f3a75835c"
+      "sha256": "9f732e2f76be391f86ae12cb20a3e37da2ae040cd6483d803e712432d55918df"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "69e8b07dee46b2af3796759276c9abcfba5947a2a3f91d9566453a8ad74c4b2e"
+      "sha256": "9ed0119acae6d97e5a9ea50b74fd6b8e8b5062bfb51ed6a45afb0ce37f0b35cd"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -29741,7 +29741,7 @@
     },
     {
       "path": "runtime/engine/admin/generate.php",
-      "sha256": "2c5e065033595aefb3bb66527d5e32e6edcedce4d3070bb6d3df58a07dcc4089"
+      "sha256": "2f17977dcf568095833b1e763348680b9dbc49cde60df963821fcfdeb26119ae"
     },
     {
       "path": "runtime/engine/admin/generated-blob.php",
@@ -29757,7 +29757,7 @@
     },
     {
       "path": "runtime/engine/admin/management.php",
-      "sha256": "2cbcbc963c76e25bd84f91c0bc5c8dee29abd872e21c377500e0c0ecf4ec8f04"
+      "sha256": "0b6bef859cb67bca42aa2767c02a4c364849fcc4112314bbe64ee020ebc5008a"
     },
     {
       "path": "runtime/engine/admin/retention.php",
@@ -30293,7 +30293,7 @@
     },
     {
       "path": "runtime/engine/shared/purge.php",
-      "sha256": "3f5a7407ac267912a6b4cee2d757c26ccb7ba058c420de9deee4383f0c683618"
+      "sha256": "c9e247ea2045a1adb4fb6cdced35c2752680151b5dfe0c2bde87038fb27fb285"
     },
     {
       "path": "runtime/engine/shared/record-store.php",
@@ -30645,7 +30645,7 @@
     },
     {
       "path": "runtime/tests/edge-purge.test.ts",
-      "sha256": "432096677e1ee11a78f434df3764c56d4c535f01e4ac326b56e364d234ef800e"
+      "sha256": "365c002edb271c6ed7c396cd67858819fab3bd0061fa5fed6e8419959d34df3a"
     },
     {
       "path": "runtime/tests/engine-manifest-drift.test.ts",
@@ -30893,7 +30893,7 @@
     },
     {
       "path": "runtime/tests/routing.test.ts",
-      "sha256": "4a11bd0ecc34518d1e93fca4c768d099559372e99f94ace78d500d31c9d65114"
+      "sha256": "8214f9180b1db339e47d627c770e95c8c22217bd60bc57a1e13022ff5681d2bd"
     },
     {
       "path": "runtime/tests/run-ci.sh",
@@ -31009,7 +31009,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "c1bded08d9fc47d1219fd680e1fc928ebcfa35b32ea646bcf3bd1777008c810f"
+      "sha256": "55dcead92c32cfba886ea567c9c5288998cfdde495394bceb55778b7a809b4c9"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

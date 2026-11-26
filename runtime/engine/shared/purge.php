@@ -510,7 +510,9 @@ function _stattic_runtime_purge_now(string $privateRoot, array $input): array
         // saying exactly how much provider work was needed.
         return ['status' => 'ok', 'mode' => 'urls', 'urls' => 0];
     }
-    _stattic_runtime_purge_enqueue($privateRoot, $hostnames, $reason);
+    if (empty($input['prepared'])) {
+        _stattic_runtime_purge_enqueue($privateRoot, $hostnames, $reason);
+    }
     $run = static fn (): bool => _stattic_runtime_purge_drain($privateRoot, microtime(true) + 20, null, $hostnames);
     if (function_exists('fastcgi_finish_request')) {
         _stattic_flush_response_before_deferred(true);

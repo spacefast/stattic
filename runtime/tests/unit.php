@@ -3934,6 +3934,28 @@ check(
         === ['site.view.fast', 'retired.example'],
     'the disk-reading sweep spelling reads the current intent and tombstones in sweep order'
 );
+
+// Legacy tombstones.json without hostname_metadata preserves top-level reason/category
+// on both add and replace via the O(1) lookup set.
+file_put_contents(
+    _stattic_space_root($scopeRoot, 'spc_scope') . '/tombstones.json',
+    json_encode([
+        'space_id' => 'spc_scope',
+        'hostnames' => ['legacy-a.example', 'legacy-b.example'],
+        'reason' => 'abuse',
+        'category' => 'csam',
+    ])
+);
+check(
+    _stattic_runtime_store_space_tombstones($scopeRoot, 'spc_scope', ['legacy-a.example', 'new-c.example'], 'replace', null, null) === 2,
+    'tombstone replace writes the requested hostname count'
+);
+$storedTombstones = json_decode((string) file_get_contents(_stattic_space_root($scopeRoot, 'spc_scope') . '/tombstones.json'), true);
+check(
+    ($storedTombstones['hostname_metadata']['legacy-a.example'] ?? null) === ['reason' => 'abuse', 'category' => 'csam']
+        && ($storedTombstones['hostname_metadata']['new-c.example'] ?? null) === ['reason' => null, 'category' => null],
+    'tombstone replace preserves legacy top-level metadata for retained hostnames only'
+);
 _stattic_job_runner_unit_rm_recursive(dirname(dirname($scopeRoot)));
 
 // --- Version catalog + gate sidecars ------------------------------------------------

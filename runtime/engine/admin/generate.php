@@ -309,12 +309,14 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
     $tombstones = [];
     $existing = _stattic_runtime_read_json_strict($tombstonePath);
     $metadata = [];
-    if ($mode !== 'replace') {
-        if (is_array($existing) && is_array($existing['hostnames'] ?? null)) {
-            foreach ($existing['hostnames'] as $hostname) {
-                if (!is_string($hostname)) {
-                    continue;
-                }
+    $existingHostnames = [];
+    if (is_array($existing) && is_array($existing['hostnames'] ?? null)) {
+        foreach ($existing['hostnames'] as $hostname) {
+            if (!is_string($hostname)) {
+                continue;
+            }
+            $existingHostnames[$hostname] = true;
+            if ($mode !== 'replace') {
                 $normalized = _stattic_runtime_normalize_route_hostname($hostname);
                 if ($normalized !== '') {
                     $tombstones[$normalized] = true;
@@ -339,7 +341,7 @@ function _stattic_runtime_store_space_tombstones(string $privateRoot, string $sp
         } else {
             $tombstones[$normalized] = true;
             $prior = $metadata[$normalized] ?? $existing['hostname_metadata'][$normalized] ?? [];
-            if ($prior === [] && in_array($normalized, $existing['hostnames'] ?? [], true)) {
+            if ($prior === [] && isset($existingHostnames[$normalized])) {
                 $prior = ['reason' => $existing['reason'] ?? null, 'category' => $existing['category'] ?? null];
             }
             $metadata[$normalized] = [

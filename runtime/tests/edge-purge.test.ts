@@ -324,3 +324,53 @@ test("engine revisions invalidate unversioned platform responses once per instal
   expect((await update("second")).exitCode).toBe(0);
   expect(f.delivered).toHaveLength(2);
 });
+
+test("prepared purges drain without re-enqueueing the already-persisted record", async () => {
+  await using f = await fixture();
+  f.enableGateway();
+  const deferred = await f.run(`
+    function fastcgi_finish_request(): void {}
+    _stattic_space_write_lock_with($root, 'spc_prep', STATTIC_LOCK_WAIT, null, static function () use ($root): void {
+      _stattic_runtime_prepare_purge($root, 'spc_prep', ['prep.test'], 'space_tombstones_updated');
+      $before = _stattic_runtime_purge_read(_stattic_runtime_purge_store($root), 'prep.test');
+      $receipt = _stattic_runtime_purge_now($root, [
+        'hostnames' => ['prep.test'],
+        'reason' => 'space_tombstones_updated',
+        'prepared' => true,
+      ]);
+      $after = _stattic_runtime_purge_read(_stattic_runtime_purge_store($root), 'prep.test');
+      echo json_encode([
+        'receipt' => $receipt,
+        'same_generation' => is_array($before) && is_array($after) && $before['generation'] === $after['generation'],
+      ]);
+    });
+  `);
+  expect(deferred.exitCode, deferred.stderr).toBe(0);
+  expect(JSON.parse(deferred.stdout)).toEqual({
+    receipt: { status: "queued", mode: "domain", hosts: 1 },
+    same_generation: true,
+  });
+  expect(f.delivered).toEqual(["/api/v1.0/edge-cache/123/purge/prep.test"]);
+
+  const sync = await f.run(`
+    _stattic_space_write_lock_with($root, 'spc_prep', STATTIC_LOCK_WAIT, null, static function () use ($root): void {
+      _stattic_runtime_prepare_purge($root, 'spc_prep', ['prep-sync.test'], 'space_tombstones_updated');
+      $receipt = _stattic_runtime_purge_now($root, [
+        'hostnames' => ['prep-sync.test'],
+        'reason' => 'space_tombstones_updated',
+        'prepared' => true,
+      ]);
+      $pending = _stattic_runtime_purge_read(_stattic_runtime_purge_store($root), 'prep-sync.test');
+      echo json_encode(['receipt' => $receipt, 'pending' => $pending]);
+    });
+  `);
+  expect(sync.exitCode, sync.stderr).toBe(0);
+  expect(JSON.parse(sync.stdout)).toEqual({
+    receipt: { status: "ok", mode: "domain", hosts: 1 },
+    pending: null,
+  });
+  expect(f.delivered).toEqual([
+    "/api/v1.0/edge-cache/123/purge/prep.test",
+    "/api/v1.0/edge-cache/123/purge/prep-sync.test",
+  ]);
+});

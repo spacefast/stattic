@@ -1,7 +1,7 @@
 {
-  "revision": "d33601218e4730858b094fa0ae55bce590bcadea",
+  "revision": "23f1a7598827543c9c26d6486565a9267e8b3b02",
   "sourceHash": "2916d5394ef7ef2a825ddbcd761f8d3ddea9c00a708960e54ffdfed27e27bd37",
-  "manifestSha256": "e55e9c609537a228bcb0ae87ccf05876f0c0ce8de77e9d4c092c0e5e54bd2324",
+  "manifestSha256": "719dd521dc6afb8d49293d0640b8001b2caf1414041aa4a8b0be36893e7ff809",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "a3c907240ee68cb9edc80ae1f4ce4a842538c294ce78f9892046dfff6a62e6bd"
+      "sha256": "3d0f826486509df429c7e3ee6b85e0eacbc5555e3e74b496cbc9bffae1fc480b"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "207a2727cf0ba7f56620161befd4f2a75a87dba5b36b71c4a25c8de0062f3924"
+      "sha256": "c2afa516a0a75b5ee3261024d2d2612605390d1f822763536cdc086dc29c8078"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",

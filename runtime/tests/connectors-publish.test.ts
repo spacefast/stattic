@@ -300,7 +300,7 @@ test("a published config role reads once for every viewer and writes only for a 
     .parse(await published.json()).data;
   const versionId = accepted.version.id;
   if (accepted.operation) {
-    const { runOperationNow } = await import("../../apps/control-plane/src/operations/claimant.js");
+    const { runOperationNow } = await import("../../apps/control-plane/src/operations/runner.js");
     expect(await runOperationNow({ operationId: accepted.operation.id })).toBe("succeeded");
   }
   const versionRead = await app.request(`${API}/v1/spaces/${seed.spaceId}/versions/${versionId}`, {

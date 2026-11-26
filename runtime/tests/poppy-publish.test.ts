@@ -78,7 +78,7 @@ test("a personal agent publishes through DPoP, reads the runtime, and receives t
   const { setFeatureFlagEnv } = await import("../../apps/control-plane/src/test/feature-flags.js");
   const { tagGraphFromTemplateSelection } =
     await import("../../packages/common/src/contracts/tags.js");
-  const { runOperationNow } = await import("../../apps/control-plane/src/operations/claimant.js");
+  const { runOperationNow } = await import("../../apps/control-plane/src/operations/runner.js");
   const { platformWpCloudContext } =
     await import("../../apps/control-plane/src/wp-cloud/tenant-client.js");
   const { simulatedWpCloudContext } =

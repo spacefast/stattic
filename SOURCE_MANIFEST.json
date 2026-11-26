@@ -1,7 +1,7 @@
 {
-  "revision": "e56af9a54dbb75a4eddb549d5ca0c49e5f2efc7b",
+  "revision": "cbbd4abaaefff5d1edd91350d32b1c4d1819d1f6",
   "sourceHash": "a32b5f2fb20dc0934967f734f92aea06b8c12e03b3ba8f5406bbe772be1890c1",
-  "manifestSha256": "641a00e8e46cd1a584394a686b5e4c14c1c70b0548667de44281cc6a481eb704",
+  "manifestSha256": "76cf3e5c03b69dc569c2e673004c5014208b309dadb83d66a1468fd6a4d7ecf0",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "3210db016ae99144f9a9379057ba32db77310221f6b49d8303f56d6225eadbe7"
+      "sha256": "eed527789ac48de281fa23eedec0c99bd77edc807d007f603788bb5af0419cf3"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "acab0cc16eb63603a737994b3a5cd2448596c512207d6c800a94606561a7c57c"
+      "sha256": "1cfe623f23d74742c3be22a7b0219875ce7c13c5c9e0f5db57c3be47f5e39019"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -29773,7 +29773,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture-main.ts",
-      "sha256": "134cab043abae7e0997b0148d0ec99979ab34e58675496910005b10b5553caea"
+      "sha256": "36cc6659dc541fc42c11bc19c0cceea75642e585378c1dd970aece9a4d0d6a3c"
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture.ts",
@@ -30633,7 +30633,7 @@
     },
     {
       "path": "runtime/tests/connectors-publish.test.ts",
-      "sha256": "9f17218484c1b1409ae1bb10007d868328f4aee9bbbeed333224845a095e137e"
+      "sha256": "96b664f9e05e8155b96b312a4614d5d12290e1e6e631fd6ab19c85e1e4298101"
     },
     {
       "path": "runtime/tests/connectors.test.ts",
@@ -30961,7 +30961,7 @@
     },
     {
       "path": "runtime/tests/poppy-publish.test.ts",
-      "sha256": "d3f25751efeae2c7a99d823b2e5e86594859fed0074565f812720cc323c55bd0"
+      "sha256": "132561a31b546b542ee2da17aded6bfd65b5193b86c69c4a0897b52b1c21368c"
     },
     {
       "path": "runtime/tests/prepare-ci.sh",
@@ -31117,7 +31117,7 @@
     },
     {
       "path": "runtime/tests/version-delete-tombstones.test.ts",
-      "sha256": "7c2052c9a57d182612875bbb234defbd7c5245557d165a3dd66cc5ddb3399e2a"
+      "sha256": "9f44df90d0e7de983a31f4259619df94bb2d9b1e9d5b6ff0ae7ad5b6beae1a33"
     },
     {
       "path": "runtime/tests/version-files.test.ts",

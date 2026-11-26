@@ -110,7 +110,7 @@ export async function main(): Promise<void> {
     seed,
     { mutateOverrides },
     { setFeatureOverride, teamFeatureScope },
-    { startOperationClaimant, stopOperationClaimant, waitForOperation },
+    { startOperationRunner, stopOperationRunner, waitForOperation },
     { spaceSubjectUserId },
     { setRuntimeConnectAddressDependenciesForTests },
     { verifyCollaborationBearer },
@@ -136,7 +136,7 @@ export async function main(): Promise<void> {
     import("../../apps/control-plane/src/test/seed.ts"),
     import("../../apps/control-plane/src/superadmin/features.ts"),
     import("../../apps/control-plane/src/features/overrides.ts"),
-    import("../../apps/control-plane/src/operations/claimant.ts"),
+    import("../../apps/control-plane/src/operations/runner.ts"),
     import("../../apps/control-plane/src/access/space-subject.ts"),
     import("../../apps/control-plane/src/runtime/runtime-connect-address.ts"),
     import("../../apps/control-plane/src/comments/mint.ts"),
@@ -200,9 +200,9 @@ export async function main(): Promise<void> {
   async function teardown() {
     const actions: [string, () => Promise<void> | void][] = [
       [
-        "operation claimant",
+        "operation runner",
         async () => {
-          await stopOperationClaimant({ drainDeadlineMs: 2_000 });
+          await stopOperationRunner({ drainDeadlineMs: 2_000 });
         },
       ],
       ["engine proxy", () => stopProxy?.()],
@@ -300,7 +300,7 @@ export async function main(): Promise<void> {
     setRuntimeConnectAddressDependenciesForTests({
       loadProviderTarget: async () => null,
     });
-    await startOperationClaimant({ maintenance: false, idlePollMs: 200 });
+    await startOperationRunner({ maintenance: false, idlePollMs: 200 });
 
     // Each Space's hostname, served by its runtime. The browser reaches them
     // through the listener below; the control plane's own public probes (a route

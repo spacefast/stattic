@@ -77,7 +77,7 @@ test("deleted versions stay tombstoned across later deletes and a takedown resto
     await import("../../apps/control-plane/src/auth/reverification.js");
   const { claimOperationById } = await import("../../apps/control-plane/src/operations/claim.js");
   const { executeLeasedOperation } =
-    await import("../../apps/control-plane/src/operations/claimant.js");
+    await import("../../apps/control-plane/src/operations/runner.js");
   const { operations } = await import("../../apps/control-plane/src/db/schema/core.js");
 
   const seed = await seedSpaceWithKey("version-delete-tombstones", {

@@ -4873,6 +4873,24 @@ check(!_stattic_spacepress_path_claimed('/identity/account', $spManifest), 'Spac
 check(!_stattic_spacepress_path_claimed('/typedpress-admin', $spManifest), 'SpacePress never claims /typedpress-admin');
 check(!_stattic_spacepress_path_claimed('/__tp/assets/client.js', $spManifest), 'SpacePress never claims /__tp/*');
 check(!_stattic_spacepress_path_claimed('/unclaimed-page', $spManifest), 'SpacePress leaves unclaimed paths for CF Workers / SPA / 404');
+check(_stattic_spacepress_html_insert_path_allowed('/', $spManifest), 'SpacePress allows HTML injection on root page');
+check(_stattic_spacepress_html_insert_path_allowed('/posts/hello-world', $spManifest), 'SpacePress allows HTML injection on declared page routes');
+check(_stattic_spacepress_html_insert_path_allowed('/identity/account', $spManifest), 'native SpacePress allows HTML injection on app-declared /identity pages');
+foreach (['/wp-json', '/wp-json/spacepress/v1/actions/ping', '/wp-admin', '/wp-admin/new', '/wp-admin/new/posts', '/WP-ADMIN/new/posts', '/__spacefast/auth', '/__spacefast/auth/login', '/about.md', '/posts/hello.MD'] as $excludedPath) {
+    check(!_stattic_spacepress_html_insert_path_allowed($excludedPath, $spManifest), 'SpacePress excludes ' . $excludedPath . ' from HTML injection');
+}
+foreach (['/typedpress-admin', '/typedpress-admin/posts', '/identity', '/identity/login', '/__tp/assets/client.js'] as $legacyExcludedPath) {
+    check(!_stattic_spacepress_html_insert_path_allowed($legacyExcludedPath, $tpManifest), 'legacy TypedPress excludes ' . $legacyExcludedPath . ' from HTML injection');
+}
+check(!_stattic_spacepress_is_prerendering(), 'prerendering is false when no Prebuilt class is loaded');
+if (!class_exists('\TypedPress\Render\Prebuilt', false)) {
+    eval('namespace TypedPress\Render; final class Prebuilt { public static bool $active = false; public static function prerendering(): bool { return self::$active; } }');
+}
+\TypedPress\Render\Prebuilt::$active = false;
+check(!_stattic_spacepress_is_prerendering(), 'legacy TypedPress Prebuilt::prerendering() false keeps injection enabled');
+\TypedPress\Render\Prebuilt::$active = true;
+check(_stattic_spacepress_is_prerendering(), 'legacy TypedPress Prebuilt::prerendering() true suppresses injection on prerender loopbacks');
+\TypedPress\Render\Prebuilt::$active = false;
 unlink($spacepressRoot . '/manifest.json');
 rmdir($spacepressRoot);
 

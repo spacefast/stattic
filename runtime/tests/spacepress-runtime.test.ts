@@ -18,6 +18,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import type { RouteInjectionPlan } from "../../packages/common/src/contracts/injection.ts";
 import {
   deploy,
   get,
@@ -185,7 +186,7 @@ function writeSpacePressStub(
       appHash: APP_HASH,
       wordpress: "6.0",
       pagePaths: ["/app/dashboard", "/posts/:slug"],
-      routes: [{ path: "/sp-route/*rest" }],
+      routes: [{ path: "/sp-route/*rest" }, { path: "/prebuilt/*rest" }],
     }),
   );
   writeFileSync(path.join(compiled, "ready.json"), JSON.stringify({ version_id: versionId }));
@@ -201,11 +202,56 @@ function writeSpacePressStub(
     path.join(runtimeDir, "spacepress-loader.php"),
     `<?php
 declare(strict_types=1);
+namespace SpacePress\\Render;
+final class Prebuilt {
+    public static function prerendering(): bool {
+        return ($_SERVER['HTTP_X_SPACEPRESS_PRERENDER'] ?? '') === 'valid-hmac-token';
+    }
+    public static function serve(): void {
+        if (self::prerendering()) {
+            return;
+        }
+        $path = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
+        if ($path === '/prebuilt/about') {
+            $etag = '"prebuilt-html-etag"';
+            header('X-SpacePress-Prebuilt: 1', true);
+            header('Content-Type: text/html; charset=utf-8', true);
+            header('ETag: ' . $etag, true);
+            if (trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
+                http_response_code(304);
+                exit;
+            }
+            $doc = '<!doctype html><html><head><title>Prebuilt HTML</title></head><body><main>Prebuilt Body</main></body></html>';
+            header('Content-Length: ' . strlen($doc), true);
+            if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'HEAD') {
+                echo $doc;
+            }
+            exit;
+        }
+        if ($path === '/prebuilt/about.md') {
+            $etag = '"prebuilt-md-etag"';
+            header('X-SpacePress-Prebuilt: 1', true);
+            header('Content-Type: text/markdown; charset=utf-8', true);
+            header('ETag: ' . $etag, true);
+            if (trim((string) ($_SERVER['HTTP_IF_NONE_MATCH'] ?? '')) === $etag) {
+                http_response_code(304);
+                exit;
+            }
+            $md = "# Prebuilt Markdown\n";
+            header('Content-Length: ' . strlen($md), true);
+            echo $md;
+            exit;
+        }
+    }
+}
 namespace SpacePress\\Loader;
 final class Loader {
     public static array $loaded = [];
     public static function load(string $store, string $build, array $options = []): void {
         self::$loaded = ['store' => $store, 'build' => $build, 'options' => $options];
+        if (function_exists('add_action')) {
+            add_action('plugins_loaded', [\\SpacePress\\Render\\Prebuilt::class, 'serve'], PHP_INT_MAX);
+        }
     }
     public static function initialize(string $store, string $build): array {
         return ['migrations' => [], 'seed' => null];
@@ -236,24 +282,76 @@ if (!function_exists('__return_false')) {
     function __return_true(): bool { return true; }
 }
 if (!function_exists('add_filter')) {
-    function add_filter(string $tag, callable|string $fn, int $priority = 10, int $args = 1): bool {
-        $GLOBALS['sf_test_filters'][$tag][] = [$fn, $args];
+    function add_filter(string $tag, callable|string|array $fn, int $priority = 10, int $args = 1): bool {
+        $GLOBALS['sf_test_filters'][$tag][$priority][] = [$fn, $args];
         return true;
     }
-    function add_action(string $tag, callable|string $fn, int $priority = 10, int $args = 1): bool {
+    function add_action(string $tag, callable|string|array $fn, int $priority = 10, int $args = 1): bool {
         return add_filter($tag, $fn, $priority, $args);
     }
     function remove_filter(string $tag, mixed $fn = null, int $priority = 10): bool { return true; }
     function apply_filters(string $tag, mixed $value, mixed ...$args): mixed {
-        foreach ($GLOBALS['sf_test_filters'][$tag] ?? [] as [$fn, $accepted]) {
-            if (!is_callable($fn)) continue;
-            $callArgs = array_slice(array_merge([$value], $args), 0, max(1, $accepted));
-            $value = $fn(...$callArgs);
+        $byPriority = $GLOBALS['sf_test_filters'][$tag] ?? [];
+        ksort($byPriority, SORT_NUMERIC);
+        foreach ($byPriority as $callbacks) {
+            foreach ($callbacks as [$fn, $accepted]) {
+                if (!is_callable($fn)) continue;
+                $callArgs = array_slice(array_merge([$value], $args), 0, max(1, $accepted));
+                $value = $fn(...$callArgs);
+            }
         }
         return $value;
     }
+    function do_action(string $tag, mixed ...$args): void {
+        $byPriority = $GLOBALS['sf_test_filters'][$tag] ?? [];
+        ksort($byPriority, SORT_NUMERIC);
+        foreach ($byPriority as $callbacks) {
+            foreach ($callbacks as [$fn, $accepted]) {
+                if (!is_callable($fn)) continue;
+                $callArgs = array_slice($args, 0, max(0, $accepted));
+                $fn(...$callArgs);
+            }
+        }
+    }
     function did_action(string $tag): int { return 0; }
-    function wp(): void {}
+    function wp(): void {
+        $path = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
+        if ($path === '/sp-route/early-html') {
+            http_response_code(200);
+            header('Content-Type: text/html; charset=utf-8', true);
+            header('ETag: "sp-early-etag"', true);
+            echo '<!doctype html><html><head><title>Early Route</title></head><body><main>Early HTML</main></body></html>';
+            exit;
+        }
+        if ($path === '/sp-route/early-json') {
+            http_response_code(200);
+            header('Content-Type: application/json; charset=utf-8', true);
+            echo json_encode(['route' => 'early-json'], JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+        if ($path === '/sp-route/clean-buffers') {
+            while (ob_get_level() > 0) {
+                ob_end_clean();
+            }
+            header_register_callback(static function (): void {});
+        }
+        if ($path === '/sp-route/clean-and-replace') {
+            http_response_code(200);
+            header('Content-Type: text/html; charset=utf-8', true);
+            echo '<!doctype html><html lang="discarded">';
+            ob_clean();
+            echo '<!doctype html><html><head><title>Replacement</title></head><body><main>Fresh</main></body></html>';
+            exit;
+        }
+        if ($path === '/sp-route/clean-after-head') {
+            http_response_code(200);
+            header('Content-Type: text/html; charset=utf-8', true);
+            echo '<!doctype html><html><head><title>First</title></head><body>first';
+            ob_clean();
+            echo '<!doctype html><html><head><title>Second</title></head><body><main>Second</main></body></html>';
+            exit;
+        }
+    }
     function wp_get_current_user(): object {
         return (object) ['ID' => 42, 'user_email' => 'viewer@example.test'];
     }
@@ -337,6 +435,9 @@ $muPlugin = __DIR__ . '/wp-content/mu-plugins/spacefast-content.php';
 if (is_file($muPlugin)) {
     require_once $muPlugin;
 }
+// Simulate WordPress wp_magic_quotes() slashing $_GET before plugins_loaded / wp_loaded.
+$_GET = array_map(static fn ($v) => is_string($v) ? addslashes($v) : $v, $_GET);
+do_action('plugins_loaded');
 `;
   writeFileSync(path.join(docRoot, "wp-load.php"), wpLoadPhp);
   writeFileSync(
@@ -361,6 +462,35 @@ echo json_encode($server->response_to_data($res, false), JSON_UNESCAPED_SLASHES)
     path.join(docRoot, "wp-includes", "template-loader.php"),
     `<?php
 declare(strict_types=1);
+$path = explode('?', (string) ($_SERVER['REQUEST_URI'] ?? '/'), 2)[0];
+if ($path === '/sp-route/redirect') {
+    http_response_code(302);
+    header('Location: /posts/hello-html', true);
+    header('Content-Type: text/html; charset=utf-8', true);
+    exit;
+}
+if (
+    $path === '/posts/hello-html'
+    || $path === '/posts/stream-return-html'
+    || $path === '/wp-admin/new/html-screen'
+    || $path === '/__spacefast/auth/html-login'
+) {
+    $doc = '<!doctype html><html><head><title>SpacePress HTML</title></head><body><main>Hello SpacePress</main></body></html>';
+    http_response_code(200);
+    header('Content-Type: text/html; charset=utf-8', true);
+    header('ETag: "sp-upstream-etag"', true);
+    header('Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT', true);
+    header('Content-Length: ' . strlen($doc), true);
+    if (str_starts_with($path, '/wp-admin/new/')) {
+        header('X-Frame-Options: SAMEORIGIN');
+        header("Content-Security-Policy: frame-ancestors 'self' https://my.spacefast.test");
+    }
+    echo $doc;
+    if ($path !== '/posts/stream-return-html') {
+        exit;
+    }
+    return;
+}
 http_response_code(200);
 header('Content-Type: application/json; charset=utf-8', true);
 // The admin frames itself by CSP while core still adds its own frame header
@@ -1135,4 +1265,334 @@ test("signed-in requests to SpacePress /wp-admin/new and sub-screens resolve the
   } else {
     expect(crossOriginPost.status).toBe(403);
   }
+});
+
+test("SpacePress HTML pages inject Spacefast SDK and snippets, honor injection plans, and exclude admin/auth/REST/non-HTML", async () => {
+  const host = "spacepress-html-inject.test";
+  const spaceId = "spc_sp_html_inject";
+  const versionOn = "ver_sp_html_inject_on";
+  const versionFileOff = "ver_sp_html_inject_file_off";
+  const bakedSdk = '<script async src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+  const engineSdk = '<script defer src="/__spacefast/sdk.js" data-spacefast-sdk="v1"></script>';
+  const staticGa =
+    '<!--spacefast-static:ga:head:start--><script async src="https://www.googletagmanager.com/gtag/js?id=G-SP"></script><!--spacefast-static:ga:head:end-->';
+  const authorHead = '<meta name="author-head" content="sp-kept">';
+  const authorNoscript = '<noscript><img src="/author-sp-ns.gif"></noscript>';
+  const authorBodyStart = '<div id="author-sp-start"></div>';
+  const authorBodyEnd = "<script>window.authorSpEnd=1;</script>";
+  type SpacePressSdkSection = {
+    revision: string;
+    body?: string;
+    injection?: boolean;
+    plan?: RouteInjectionPlan;
+    config: {
+      tracker?: { src: string; endpoint: string; key: string };
+      comments?: { live: boolean; preview: boolean; ui: string; features: Record<string, never> };
+    };
+  };
+  const sdkOn: SpacePressSdkSection = {
+    revision: "sdk-sp-1",
+    body: "window.__spTagGraph=1;",
+    config: {
+      tracker: {
+        src: "/__spacefast/t.js",
+        endpoint: "https://beacon.example.test",
+        key: "pk_sp_html",
+      },
+      comments: { live: true, preview: true, ui: "default", features: {} },
+    },
+  };
+  const routeFor = (versionId: string, sdk: SpacePressSdkSection) => ({
+    version_id: versionId,
+    config: {
+      ...publicAccessConfig(
+        { mode: "website", site_title: "SP Inject", zero_generation: "spacepress" },
+        "live_and_all_versions",
+      ),
+      sdk,
+    },
+    production_hostnames: [host],
+    noindex_production_hostnames: [],
+    version_hostnames: [],
+  });
+
+  await deploy(rt, {
+    spaceId,
+    versionId: versionOn,
+    files: { "index.html": "<h1>Static Home</h1>\n" },
+    serving: {
+      config: {
+        inject: {
+          head: [authorHead, staticGa],
+          noscript: [authorNoscript],
+          bodyStart: [authorBodyStart],
+          bodyEnd: [authorBodyEnd, bakedSdk],
+        },
+      },
+    },
+    activate: { route_name: "production", ...routeFor(versionOn, sdkOn) },
+  });
+  writeSpacePressStub(rt.storageRoot, rt.root, spaceId, versionOn);
+
+  // 1. Both template-loader HTML pages (exit and normal return) and early
+  //    do_parse_request HTML routes receive the one SDK tag and all snippets.
+  for (const htmlPath of [
+    "/posts/hello-html",
+    "/posts/stream-return-html",
+    "/sp-route/early-html",
+  ]) {
+    // oxlint-disable-next-line no-await-in-loop -- verify each SpacePress HTML response shape sequentially
+    const res = await get(rt, host, htmlPath, { headers: probeHeaders });
+    const html = await res.text();
+    expect(res.status, `${htmlPath}: ${html}`).toBe(200);
+    expect(res.headers.get("x-spacefast-test-deprecated-includes")).toBe("none");
+    expect(res.headers.get("origin-agent-cluster")).toBe("?1");
+    expect(res.headers.get("permissions-policy")).toBe("document-domain=()");
+    expect(res.headers.get("etag")).toBeNull();
+    expect(res.headers.get("last-modified")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(html).toContain(`<head>${engineSdk}${authorHead}${staticGa}`);
+    expect(html.split("data-spacefast-sdk").length - 1).toBe(1);
+    expect(html).toContain(`<body>${authorNoscript}${authorBodyStart}`);
+    expect(html).toContain(`${authorBodyEnd}</body>`);
+  }
+
+  // 2. Tag preview query parameter propagates raw (unslashed despite wp_magic_quotes)
+  //    to the injected SDK script URL and opts out of shared/edge caching.
+  const previewRes = await get(
+    rt,
+    host,
+    "/posts/hello-html?spacefast_tag_preview=tok_sp%27preview",
+    { headers: probeHeaders },
+  );
+  expect(previewRes.status).toBe(200);
+  expect(previewRes.headers.get("cache-control")).toBe("private, no-store");
+  expect(previewRes.headers.get("a8c-edge-cache")).toBe("no-cache");
+  const previewHtml = await previewRes.text();
+  expect(previewHtml).toContain(
+    '<script defer src="/__spacefast/sdk.js?preview=tok_sp%27preview" data-spacefast-sdk="v1"></script>',
+  );
+  expect(previewHtml.split("data-spacefast-sdk").length - 1).toBe(1);
+
+  // 2b. Prebuilt HTML pages served on plugins_loaded receive live SDK/snippet
+  //     injection and withhold stale 304 validators, while prebuilt Markdown
+  //     twins stay untouched and retain 304 validation.
+  const prebuiltHtmlRes = await get(rt, host, "/prebuilt/about", {
+    headers: {
+      ...probeHeaders,
+      accept: "text/html",
+      "if-none-match": '"prebuilt-html-etag"',
+    },
+  });
+  expect(prebuiltHtmlRes.status).toBe(200);
+  expect(prebuiltHtmlRes.headers.get("x-spacepress-prebuilt")).toBe("1");
+  expect(prebuiltHtmlRes.headers.get("etag")).toBeNull();
+  expect(prebuiltHtmlRes.headers.get("content-length")).toBeNull();
+  expect(prebuiltHtmlRes.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(prebuiltHtmlRes.headers.get("permissions-policy")).toBe("document-domain=()");
+  const prebuiltHtml = await prebuiltHtmlRes.text();
+  expect(prebuiltHtml).toContain(`<head>${engineSdk}${authorHead}${staticGa}`);
+  expect(prebuiltHtml).toContain(`<body>${authorNoscript}${authorBodyStart}`);
+  expect(prebuiltHtml).toContain(`${authorBodyEnd}</body>`);
+
+  const prebuiltMd = await get(rt, host, "/prebuilt/about.md", {
+    headers: { ...probeHeaders, accept: "text/markdown" },
+  });
+  expect(prebuiltMd.status).toBe(200);
+  expect(await prebuiltMd.text()).toBe("# Prebuilt Markdown\n");
+  const prebuiltMd304 = await get(rt, host, "/prebuilt/about.md", {
+    headers: {
+      ...probeHeaders,
+      accept: "text/markdown",
+      "if-none-match": '"prebuilt-md-etag"',
+    },
+  });
+  expect(prebuiltMd304.status).toBe(304);
+  // Browser-style navigation to a Markdown twin (Sec-Fetch-Dest: document + Accept: text/html)
+  // must also retain its 304 validator.
+  const prebuiltMdBrowser304 = await get(rt, host, "/prebuilt/about.md", {
+    headers: {
+      ...probeHeaders,
+      accept: "text/markdown, text/html;q=0.9",
+      "sec-fetch-dest": "document",
+      "if-none-match": '"prebuilt-md-etag"',
+    },
+  });
+  expect(prebuiltMdBrowser304.status).toBe(304);
+
+  // HEAD on prebuilt HTML agrees with injected GET: withholds stale 304 validators
+  // and drops un-injected ETag / Last-Modified / Content-Length headers.
+  const prebuiltHead = await get(rt, host, "/prebuilt/about", {
+    method: "HEAD",
+    headers: {
+      ...probeHeaders,
+      accept: "text/html",
+      "if-none-match": '"prebuilt-html-etag"',
+    },
+  });
+  expect(prebuiltHead.status).toBe(200);
+  expect(prebuiltHead.headers.get("etag")).toBeNull();
+  expect(prebuiltHead.headers.get("last-modified")).toBeNull();
+  expect(prebuiltHead.headers.get("content-length")).toBeNull();
+  expect(await prebuiltHead.text()).toBe("");
+
+  // 2c. Verified SpacePress prerender loopbacks stay un-injected (so prebuilt
+  //     files written to disk never bake in runtime SDK/snippets), whereas a
+  //     forged prerender header still gets injection.
+  const prerenderHtml = await (
+    await get(rt, host, "/posts/hello-html", {
+      headers: { ...probeHeaders, "x-spacepress-prerender": "valid-hmac-token" },
+    })
+  ).text();
+  expect(prerenderHtml).toContain("<title>SpacePress HTML</title>");
+  expect(prerenderHtml).not.toContain("data-spacefast-sdk");
+  expect(prerenderHtml).not.toContain("spacefast-static:");
+  expect(prerenderHtml).not.toContain("author-head");
+
+  const forgedPrerenderHtml = await (
+    await get(rt, host, "/posts/hello-html", {
+      headers: { ...probeHeaders, "x-spacepress-prerender": "forged-token" },
+    })
+  ).text();
+  expect(forgedPrerenderHtml).toContain(`<head>${engineSdk}${authorHead}${staticGa}`);
+
+  // 2d. Code that clears output buffers and replaces the header callback inside
+  //     wp() still gets document isolation headers after wp() returns, and a
+  //     non-final ob_clean() resets the HTML insertion filter before head emission.
+  const cleanBuffersRes = await get(rt, host, "/sp-route/clean-buffers", {
+    headers: probeHeaders,
+  });
+  expect(cleanBuffersRes.status).toBe(200);
+  expect(cleanBuffersRes.headers.get("origin-agent-cluster")).toBe("?1");
+  expect(cleanBuffersRes.headers.get("permissions-policy")).toBe("document-domain=()");
+  expect(spPageBodySchema.parse(await cleanBuffersRes.json()).surface).toBe("spacepress-page");
+
+  const cleanReplaceRes = await get(rt, host, "/sp-route/clean-and-replace", {
+    headers: probeHeaders,
+  });
+  expect(cleanReplaceRes.status).toBe(200);
+  const cleanReplaceHtml = await cleanReplaceRes.text();
+  expect(cleanReplaceHtml).not.toContain('lang="discarded"');
+  expect(cleanReplaceHtml).toContain(
+    `<head>${engineSdk}${authorHead}${staticGa}<title>Replacement</title>`,
+  );
+  expect(cleanReplaceHtml.split("data-spacefast-sdk").length - 1).toBe(1);
+  expect(cleanReplaceHtml).toContain(`<body>${authorNoscript}${authorBodyStart}`);
+  expect(cleanReplaceHtml).toContain(`${authorBodyEnd}</body>`);
+
+  // Once the head has already been emitted (chunk_size 1), a later ob_clean()
+  // cannot take those bytes back and must not inject the SDK or snippets twice.
+  const cleanAfterHeadRes = await get(rt, host, "/sp-route/clean-after-head", {
+    headers: probeHeaders,
+  });
+  expect(cleanAfterHeadRes.status).toBe(200);
+  const cleanAfterHeadHtml = await cleanAfterHeadRes.text();
+  expect(cleanAfterHeadHtml.split("data-spacefast-sdk").length - 1).toBe(1);
+  expect(cleanAfterHeadHtml.split(authorHead).length - 1).toBe(1);
+  expect(cleanAfterHeadHtml.split(authorBodyStart).length - 1).toBe(1);
+  expect(cleanAfterHeadHtml.split(authorBodyEnd).length - 1).toBe(1);
+  expect(cleanAfterHeadHtml).toContain(`${authorBodyEnd}</body>`);
+
+  // 3. Admin, reserved auth, REST, non-HTML, HEAD, and empty redirects are excluded.
+  for (const excludedPath of ["/wp-admin/new/html-screen", "/__spacefast/auth/html-login"]) {
+    // oxlint-disable-next-line no-await-in-loop -- check each excluded HTML surface
+    const res = await get(rt, host, excludedPath, { headers: probeHeaders });
+    const html = await res.text();
+    expect(res.status, excludedPath).toBe(200);
+    expect(html).toContain("<title>SpacePress HTML</title>");
+    expect(html).not.toContain("data-spacefast-sdk");
+    expect(html).not.toContain("spacefast-static:");
+    expect(html).not.toContain("author-head");
+    if (excludedPath.startsWith("/wp-admin/new/")) {
+      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'self'");
+      expect(res.headers.get("x-frame-options")).toBeNull();
+    }
+  }
+  const earlyJson = await get(rt, host, "/sp-route/early-json", { headers: probeHeaders });
+  expect(earlyJson.status).toBe(200);
+  expect(await earlyJson.json()).toEqual({ route: "early-json" });
+
+  const restRes = await get(rt, host, "/wp-json/spacepress/v1/actions/ping", {
+    headers: probeHeaders,
+  });
+  expect(restRes.status).toBe(200);
+  expect(spRestBodySchema.parse(await restRes.json()).route).toBe("/spacepress/v1/actions/ping");
+
+  const headRes = await get(rt, host, "/posts/hello-html", {
+    method: "HEAD",
+    headers: probeHeaders,
+  });
+  expect(headRes.status).toBe(200);
+  expect(await headRes.text()).toBe("");
+
+  const journalPath = path.join(rt.storageRoot, "runtime", "journal.jsonl");
+  const journalBefore = existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "";
+  const redirectRes = await get(rt, host, "/sp-route/redirect", { redirect: "manual" });
+  expect(redirectRes.status).toBe(302);
+  expect(redirectRes.headers.get("location")).toBe("/posts/hello-html");
+  expect(await redirectRes.text()).toBe("");
+  const journalAfter = existsSync(journalPath) ? readFileSync(journalPath, "utf8") : "";
+  expect(journalAfter.slice(journalBefore.length)).not.toContain("html_insert_anchor_missing");
+
+  // 4. Injection opt-outs (Space off, plan default off, plan version off, sf.jsonc off)
+  //    suppress SDK + baked static tags while retaining author snippets.
+  const switches: SpacePressSdkSection[] = [
+    { ...sdkOn, injection: false },
+    { ...sdkOn, plan: { v: 1, default: { mode: "off", items: {} }, versions: {} } },
+    {
+      ...sdkOn,
+      plan: {
+        v: 1,
+        default: { mode: "on", items: { "sdk-tag": true, "tags-baked": true, tracker: true } },
+        versions: { [versionOn]: { mode: "off", items: {} } },
+      },
+    },
+  ];
+  for (const sdkOverride of switches) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential route updates verify each switch
+    await putRoute(rt, spaceId, "production", routeFor(versionOn, sdkOverride));
+    // oxlint-disable-next-line no-await-in-loop -- sequential request after route update
+    const html = await (await get(rt, host, "/posts/hello-html")).text();
+    expect(html).not.toContain("data-spacefast-sdk");
+    expect(html).not.toContain("spacefast-static:");
+    expect(html).toContain(authorHead);
+    expect(html).toContain(authorNoscript);
+    expect(html).toContain(authorBodyStart);
+    expect(html).toContain(authorBodyEnd);
+  }
+
+  // With no SDK features active (no tag body, tracker, comments, bar, or users),
+  // 0 bytes of Spacefast SDK script are injected.
+  await putRoute(
+    rt,
+    spaceId,
+    "production",
+    routeFor(versionOn, { revision: "sdk-empty", config: {} }),
+  );
+  const idleHtml = await (await get(rt, host, "/posts/hello-html")).text();
+  expect(idleHtml).not.toContain("data-spacefast-sdk");
+  expect(idleHtml).toContain(authorHead);
+
+  // Version-level sf.jsonc opt-out (`platform_injection: false`).
+  await deploy(rt, {
+    spaceId,
+    versionId: versionFileOff,
+    files: { "index.html": "<h1>Static Home</h1>\n" },
+    serving: {
+      config: {
+        platform_injection: false,
+        inject: {
+          head: [authorHead, staticGa],
+          bodyEnd: [authorBodyEnd, bakedSdk],
+        },
+      },
+    },
+    activate: { route_name: "production", ...routeFor(versionFileOff, sdkOn) },
+  });
+  writeSpacePressStub(rt.storageRoot, rt.root, spaceId, versionFileOff);
+  const fileOffHtml = await (await get(rt, host, "/posts/hello-html")).text();
+  expect(fileOffHtml).not.toContain("data-spacefast-sdk");
+  expect(fileOffHtml).not.toContain("spacefast-static:");
+  expect(fileOffHtml).toContain(authorHead);
+  expect(fileOffHtml).toContain(authorBodyEnd);
 });

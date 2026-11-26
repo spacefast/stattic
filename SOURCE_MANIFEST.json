@@ -1,7 +1,7 @@
 {
-  "revision": "9df7bce2256929f3ed0cc79e79c6242cb0c4b08f",
-  "sourceHash": "d9605395a8b27e7b91e8c5e1ebfe84cc5317e85457da1c1c45b28a7ee439dd30",
-  "manifestSha256": "808d78963b5402c3aefe5cd6b6ef5863fdd41ae420449c832ce171cccacec8df",
+  "revision": "19fd9da9045340c2ec849e5f8d8f4522e596a26c",
+  "sourceHash": "6aadfdfeb1c8bb6410d3670a5de55b25e7f23c61a4a42f04e9c91027db644dd4",
+  "manifestSha256": "12b7f826eb983fc9b1bd220314fd52b9f6d7601c86754683216fe8b195813914",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "ffc04e142a7a0aae6556421b1fdb0c287f470592086057f2985cb5a459e1f2b9"
+      "sha256": "b42528f33f75715ff54110efe5836640d27348c4352a172e0dcff7c504a1f81c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "219c033c7c1b8f4ef7daf0321cb673404f6c2f3d1f1f700d3334ff3518e3133c"
+      "sha256": "b24656b7bda8dfcdb925806dd84920681b194e66fb1c51439ccf6c74e697c6c7"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -30241,7 +30241,7 @@
     },
     {
       "path": "runtime/engine/shared/html-insert.php",
-      "sha256": "da3a5a3364be9bea742a1eb58004887ed3e7a4f4bad39da317ec5d9352b1a8dc"
+      "sha256": "6996d0c7d6f91c91d11d8d4b2c76a27a19d9dda6cd66edd3dd8c2055c36edb2c"
     },
     {
       "path": "runtime/engine/shared/http.php",
@@ -30305,7 +30305,7 @@
     },
     {
       "path": "runtime/engine/shared/response.php",
-      "sha256": "d68048221194d4f40b8a3e1fff43f8d12868496a382ab1306ab4e4067eef9f2b"
+      "sha256": "a27ea8b6fbd059654ed3921bbe64b05b3b428099c72e7f724b22add16c8506eb"
     },
     {
       "path": "runtime/engine/shared/runtime-log.php",
@@ -30349,7 +30349,7 @@
     },
     {
       "path": "runtime/engine/shared/spacepress.php",
-      "sha256": "4cebee1e4d22018f68f89acc77ba960edda7e40277e24623269f41689e1defe4"
+      "sha256": "fa857ae6a6deaf2dffe0296ff398f87cc52249e87d8d09f2bf3eeb7a75a563ea"
     },
     {
       "path": "runtime/engine/shared/storage-policy.generated.php",
@@ -30981,7 +30981,7 @@
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
-      "sha256": "d947917bb8d79a5d80506e1542010e56d661c1f87bccc57d09d082b5c1091084"
+      "sha256": "63f9dc7031afb666641d4079f336177474f415a3c74367e1e5b0e49e4899b529"
     },
     {
       "path": "runtime/tests/static-zip.test.ts",
@@ -31009,7 +31009,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "55dcead92c32cfba886ea567c9c5288998cfdde495394bceb55778b7a809b4c9"
+      "sha256": "3477308a373c33dffc9eefb749fb7c7780e5fddac59e2e8a38a6677514816131"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

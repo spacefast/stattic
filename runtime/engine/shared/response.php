@@ -40,7 +40,11 @@ function _stattic_document_isolation_stream_begin(): void
     if (PHP_SAPI !== 'cli' && !headers_sent()) {
         header_register_callback('_stattic_send_document_isolation_headers');
     }
+    $GLOBALS['SPACEFAST_DOCUMENT_ISOLATION_STREAM_ACTIVE'] = true;
     ob_start(static function (string $bytes, int $phase): string {
+        if (($phase & PHP_OUTPUT_HANDLER_FINAL) !== 0) {
+            $GLOBALS['SPACEFAST_DOCUMENT_ISOLATION_STREAM_ACTIVE'] = false;
+        }
         if (($phase & PHP_OUTPUT_HANDLER_CLEAN) === 0) {
             _stattic_enforce_document_isolation();
         }
@@ -107,6 +111,15 @@ function _stattic_send_document_isolation_headers(): void
         header_remove('Surrogate-Control');
         header('Cache-Control: private, no-store', true);
         header('a8c-edge-cache: no-cache', true);
+    }
+    if (
+        !empty($GLOBALS['SPACEFAST_HTML_INSERT_STRIP_HEAD_VALIDATORS'])
+        && function_exists('_stattic_html_insert_eligible')
+        && _stattic_html_insert_eligible()
+    ) {
+        header_remove('Content-Length');
+        header_remove('ETag');
+        header_remove('Last-Modified');
     }
     // An authored header map's copy goes; the one the engine's emitter
     // recorded is sent.

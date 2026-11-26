@@ -186,6 +186,9 @@ function _stattic_spacepress_select(
         $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] = _stattic_spacepress_preview_bind($privateRoot, $spaceId, $versionId);
         _stattic_spacepress_preview_hook_database();
     }
+    $previousContext = is_array($GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] ?? null)
+        ? $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']
+        : [];
     $GLOBALS['SPACEFAST_SPACEPRESS_ROOT'] = $root;
     $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] = [
         'private_root' => $privateRoot,
@@ -195,7 +198,9 @@ function _stattic_spacepress_select(
         'compiled_root' => $root,
         'serving' => $authority,
         'initializing' => $initializing,
-    ];
+    ] + (array_key_exists('html_insert_payload', $previousContext)
+        ? ['html_insert_payload' => $previousContext['html_insert_payload']]
+        : []);
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
     return true;
@@ -307,6 +312,14 @@ function _stattic_spacepress_bind_wordpress(): void
     // A legacy-prefix Space has no core cron: its jobs run from the box worker.
     if (!$initializing && !$legacyPrefix && function_exists('add_filter')) {
         _stattic_spacepress_cron_install();
+    }
+    // Start the SpacePress document isolation and HTML injection streams at
+    // `plugins_loaded` (priority PHP_INT_MAX - 1), immediately before
+    // `SpacePress\Render\Prebuilt::serve()` runs at `PHP_INT_MAX`. That covers
+    // prebuilt HTML files on both direct and document-root-reentry boots while
+    // keeping verified prerender loopbacks un-injected.
+    if (!$initializing && function_exists('add_action') && array_key_exists('html_insert_payload', $context)) {
+        add_action('plugins_loaded', '_stattic_spacepress_stream_begin', PHP_INT_MAX - 1);
     }
 }
 
@@ -1079,6 +1092,109 @@ function _stattic_spacepress_try_serve_asset(array $context, string $root, array
 }
 
 /**
+ * Whether a SpacePress request path may receive Spacefast HTML injection
+ * (SDK tag, baked static tags, and author snippets). Excludes WordPress and
+ * SpacePress REST APIs, admin screens, and reserved platform auth/control paths.
+ */
+function _stattic_spacepress_html_insert_path_allowed(string $path, array $manifest): bool
+{
+    $lower = strtolower($path);
+    if (
+        $lower === '/wp-json'
+        || str_starts_with($lower, '/wp-json/')
+        || $lower === '/wp-admin'
+        || str_starts_with($lower, '/wp-admin/')
+        || $lower === SPACEFAST_SPACEPRESS_AUTH_PREFIX
+        || str_starts_with($lower, SPACEFAST_SPACEPRESS_AUTH_PREFIX . '/')
+        // Markdown twins (`*.md`) serve `text/markdown`, never HTML; skipping
+        // them here keeps browser-style requests from withholding their 304 validators.
+        || str_ends_with($lower, '.md')
+    ) {
+        return false;
+    }
+    if (
+        _stattic_spacepress_is_legacy_typedpress($manifest)
+        && (
+            $lower === '/typedpress-admin'
+            || str_starts_with($lower, '/typedpress-admin/')
+            || $lower === '/identity'
+            || str_starts_with($lower, '/identity/')
+            || $lower === '/__tp'
+            || str_starts_with($lower, '/__tp/')
+        )
+    ) {
+        return false;
+    }
+    return true;
+}
+
+/** Whether the current request is a verified SpacePress or legacy TypedPress prerender loopback. */
+function _stattic_spacepress_is_prerendering(): bool
+{
+    foreach (['\SpacePress\Render\Prebuilt', '\TypedPress\Render\Prebuilt'] as $class) {
+        if (class_exists($class, false) && method_exists($class, 'prerendering') && $class::prerendering()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Start the SpacePress document isolation and HTML injection output streams
+ * once per request. Idempotent: may be invoked on `plugins_loaded` (before
+ * `SpacePress\Render\Prebuilt::serve()`) and again before `wp()`.
+ */
+function _stattic_spacepress_stream_begin(): void
+{
+    if (!empty($GLOBALS['SPACEFAST_SPACEPRESS_STREAM_STARTED'])) {
+        return;
+    }
+    $GLOBALS['SPACEFAST_SPACEPRESS_STREAM_STARTED'] = true;
+    if (function_exists('_stattic_document_isolation_stream_begin')) {
+        _stattic_document_isolation_stream_begin();
+    }
+    $payload = $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']['html_insert_payload'] ?? null;
+    if (!is_array($payload) || implode('', $payload) === '') {
+        return;
+    }
+    // Verified SpacePress/TypedPress prerender loopbacks must capture pure app
+    // HTML so runtime SDK/snippets are never baked into prebuilt files on disk
+    // or injected twice on serve.
+    if (_stattic_spacepress_is_prerendering()) {
+        return;
+    }
+    require_once __DIR__ . '/html-insert.php';
+    // Withhold conditional validators on HTML document requests so prebuilt
+    // responses never answer a stale 304 against an un-injected file's ETag.
+    if (_stattic_html_insert_withholds_validators($payload)) {
+        unset($_SERVER['HTTP_IF_NONE_MATCH'], $_SERVER['HTTP_IF_MODIFIED_SINCE']);
+    }
+    // HEAD has no body to transform, but eligible HTML responses must still
+    // drop un-injected ETag/Last-Modified/Content-Length headers so HEAD agrees
+    // with the injected GET representation.
+    if (_stattic_runtime_request_method() === 'HEAD') {
+        $GLOBALS['SPACEFAST_HTML_INSERT_STRIP_HEAD_VALIDATORS'] = true;
+        return;
+    }
+    _stattic_html_insert_stream_begin($payload);
+}
+
+/** Flush whichever SpacePress output streams remain open at exit. */
+function _stattic_spacepress_stream_end(): void
+{
+    if (function_exists('_stattic_html_insert_stream_end')) {
+        _stattic_html_insert_stream_end();
+    }
+    if (function_exists('_stattic_enforce_document_isolation')) {
+        _stattic_enforce_document_isolation();
+    }
+    if (!empty($GLOBALS['SPACEFAST_DOCUMENT_ISOLATION_STREAM_ACTIVE'])) {
+        $GLOBALS['SPACEFAST_DOCUMENT_ISOLATION_STREAM_ACTIVE'] = false;
+        ob_end_flush();
+    }
+}
+
+/**
  * Route SpacePress claimed paths, declared pages, and API routes.
  *
  * Returns true ONLY when the request is deferred to the document root's front
@@ -1145,17 +1261,15 @@ function _stattic_spacepress_try_serve(array $context, string $path, string $met
         $path,
         $method
     );
-    // A page whose admission needed a Grant, or that runs as a platform
-    // principal, is never a shared-cache copy, whatever the app's render cache
-    // sets (shared/response.php applies it when the headers leave PHP).
-    if ((!empty($context['private_cache']) || isset($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL']))
+    // A page whose admission needed a Grant, that runs as a platform principal,
+    // or that carries a draft tag-preview token is never a shared-cache copy,
+    // whatever the app's render cache sets (shared/response.php applies it when
+    // the headers leave PHP).
+    $hasTagPreview = is_string($context['tag_preview'] ?? null) && $context['tag_preview'] !== '';
+    if ((!empty($context['private_cache']) || isset($GLOBALS['SPACEFAST_CONTENT_PRINCIPAL']) || $hasTagPreview)
         && function_exists('_stattic_authenticated_response')) {
         _stattic_authenticated_response(true);
     }
-    if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
-        return true;
-    }
-
     $isRest = $path === SPACEFAST_SPACEPRESS_API_PREFIX
         || str_starts_with($path, SPACEFAST_SPACEPRESS_API_PREFIX . '/')
         || $path === SPACEFAST_SPACEPRESS_IDENTITY_API_PREFIX
@@ -1169,13 +1283,37 @@ function _stattic_spacepress_try_serve(array $context, string $path, string $met
                 || str_starts_with($path, '/wp-json/typedpress/v1/')
             )
         );
+    // Resolve the HTML injection payload once before WordPress boots (so Pass 1
+    // captures raw $_GET before wp_magic_quotes() and Pass 2 can start the
+    // filter on plugins_loaded before Prebuilt::serve() exits).
+    if (!array_key_exists('html_insert_payload', $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'])) {
+        $insertPayload = null;
+        if (!$isRest && _stattic_spacepress_html_insert_path_allowed($path, $manifest)) {
+            require_once __DIR__ . '/html-insert.php';
+            $insertPayload = _stattic_html_insert_payload(
+                is_array($context['serving'] ?? null) ? $context['serving'] : []
+            );
+        }
+        $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT']['html_insert_payload'] = $insertPayload;
+    }
+    if (!empty($GLOBALS['SPACEFAST_RUNTIME_DOCUMENT_ROOT_REENTRY'])) {
+        return true;
+    }
+
     if (!defined('WP_USE_THEMES')) {
         define('WP_USE_THEMES', !$isRest);
     }
     require_once dirname((string) $context['private_root'], 2) . '/wp-load.php';
     _stattic_wordpress_lane_refuse_page_cache();
+    _stattic_spacepress_stream_begin();
     wp();
-    _stattic_document_isolation_stream_begin();
+    // If code during wp() cleared all output buffers and returned instead of
+    // exiting, re-establish the document isolation stream before rendering so
+    // template output still reclaims PHP's header callback (isolation + cache ceiling).
+    if (empty($GLOBALS['SPACEFAST_DOCUMENT_ISOLATION_STREAM_ACTIVE'])
+        && function_exists('_stattic_document_isolation_stream_begin')) {
+        _stattic_document_isolation_stream_begin();
+    }
     if ($isRest) {
         $restRoute = substr($path, strlen('/wp-json'));
         $restRequest = new WP_REST_Request($method === 'HEAD' ? 'GET' : $method, $restRoute);
@@ -1193,12 +1331,11 @@ function _stattic_spacepress_try_serve(array $context, string $path, string $met
         if ($method !== 'HEAD') {
             echo json_encode($server->response_to_data($response, false), JSON_UNESCAPED_SLASHES);
         }
-        ob_end_flush();
+        _stattic_spacepress_stream_end();
         exit;
     }
     require ABSPATH . WPINC . '/template-loader.php';
-    _stattic_enforce_document_isolation();
-    ob_end_flush();
+    _stattic_spacepress_stream_end();
     exit;
 }
 

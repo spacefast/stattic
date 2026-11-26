@@ -493,6 +493,22 @@ function _stattic_html_insert_stream_begin(array $payload): void
     // whole response, which is what makes this a streaming filter.
     ob_start(
         static function (string $chunk, int $phase) use (&$state, &$payload): string {
+            if (($phase & PHP_OUTPUT_HANDLER_FINAL) !== 0) {
+                $GLOBALS['SPACEFAST_HTML_INSERT_ACTIVE'] = false;
+            }
+            if (($phase & PHP_OUTPUT_HANDLER_CLEAN) !== 0) {
+                // Only reset before any bytes have left this buffer (probe/head);
+                // once body/tail/off has emitted the head, ob_clean() cannot
+                // retract it, so re-probing would inject the SDK and snippets twice.
+                if (
+                    ($phase & PHP_OUTPUT_HANDLER_FINAL) === 0
+                    && ($state['mode'] === 'probe' || $state['mode'] === 'head')
+                ) {
+                    $journaled = $state['journaled'];
+                    $state = ['mode' => 'probe', 'held' => '', 'lex' => [], 'scan' => [], 'journaled' => $journaled];
+                }
+                return '';
+            }
             return _stattic_html_insert_filter($state, $payload, $chunk, $phase);
         },
         1
@@ -522,7 +538,7 @@ function _stattic_html_insert_filter(array &$state, array &$payload, string $chu
         return $final ? $chunk . $payload['sdk'] : $chunk;
     }
     if ($state['mode'] === 'probe') {
-        if (!_stattic_html_insert_eligible()) {
+        if (($chunk === '' && $final) || !_stattic_html_insert_eligible()) {
             $state['mode'] = 'off';
             return $chunk;
         }

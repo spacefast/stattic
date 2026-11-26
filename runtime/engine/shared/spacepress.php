@@ -304,6 +304,10 @@ function _stattic_spacepress_bind_wordpress(): void
     if (is_array($preview)) {
         _stattic_spacepress_preview_bind_wordpress($preview);
     }
+    // A legacy-prefix Space has no core cron: its jobs run from the box worker.
+    if (!$initializing && !$legacyPrefix && function_exists('add_filter')) {
+        _stattic_spacepress_cron_install();
+    }
 }
 
 /** Resolve the SpacePress loader class loaded from the runtime store. */
@@ -1345,4 +1349,182 @@ function _stattic_spacepress_scrub_platform_credentials(): void
             unset($_COOKIE[$name]);
         }
     }
+}
+
+// SpacePress jobs run from the Space's own traffic. Core's shutdown check sends
+// its cron request to /__spacefast/preview-cron.php on the request's host, and
+// a request that queued due work calls the same entrypoint for the queue. The stock /wp-cron.php stays in the visitor lane, where
+// a private Space refuses a request with no visitor session. The request carries
+// a token that names the Space, the version and whether it is live or a preview,
+// and lasts two minutes. The key never leaves the box's private root. The path,
+// header and key keep the names boxes already serve.
+
+const STATTIC_SPACEPRESS_CRON_TTL_SECONDS = 120;
+const STATTIC_SPACEPRESS_CRON_HEADER = 'Spacefast-Preview-Cron';
+// A call with this query runs only the Action Scheduler queue.
+const STATTIC_SPACEPRESS_CRON_QUEUE_QUERY = 'sp_queue';
+
+function _stattic_spacepress_cron_token(string $privateRoot, string $spaceId, string $versionId, bool $preview): string
+{
+    require_once __DIR__ . '/storage.php';
+    $key = _stattic_lazy_minted_secret($privateRoot, 'preview-cron-key', 32);
+    if (!is_string($key)) throw new RuntimeException('The cron key is unavailable.');
+    $encoded = _stattic_base64url_encode((string) json_encode([
+        'space_id' => $spaceId,
+        'version_id' => $versionId,
+        'preview' => $preview,
+        'exp' => time() + STATTIC_SPACEPRESS_CRON_TTL_SECONDS,
+    ]));
+    return $encoded . '.' . hash_hmac('sha256', $encoded, $key);
+}
+
+/** @return array{space_id:string,version_id:string,preview:bool,exp:int}|null */
+function _stattic_spacepress_cron_verify(string $privateRoot, string $token): ?array
+{
+    require_once __DIR__ . '/storage.php';
+    $parts = explode('.', $token);
+    if (count($parts) !== 2) return null;
+    $key = _stattic_lazy_minted_secret($privateRoot, 'preview-cron-key', 32);
+    if (!is_string($key) || !hash_equals(hash_hmac('sha256', $parts[0], $key), $parts[1])) return null;
+    $claims = json_decode(_stattic_base64url_decode($parts[0]), true);
+    if (!is_array($claims)
+        || !is_string($claims['space_id'] ?? null) || !_stattic_id_valid($claims['space_id'])
+        || !is_string($claims['version_id'] ?? null) || !_stattic_id_valid($claims['version_id'])
+        || !is_bool($claims['preview'] ?? null)
+        || !is_int($claims['exp'] ?? null) || $claims['exp'] < time()) {
+        return null;
+    }
+    return $claims;
+}
+
+/**
+ * The route target, when this host serves exactly this version in this lane
+ * now; null otherwise. The spawn and the entrypoint ask the same question.
+ */
+function _stattic_spacepress_cron_target(string $privateRoot, string $host, string $spaceId, string $versionId, bool $preview): ?array
+{
+    require_once __DIR__ . '/artifacts.php';
+    require_once __DIR__ . '/content-access.php';
+    require_once __DIR__ . '/spacepress-preview.php';
+    $target = _stattic_content_access_target($privateRoot, $host);
+    if (($target['kind'] ?? null) !== 'present'
+        || $target['space_id'] !== $spaceId
+        || $target['version_id'] !== $versionId
+        || _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $target['serving']) !== $preview) {
+        return null;
+    }
+    if (!$preview && _stattic_spacepress_production_version($privateRoot, $spaceId) !== $versionId) {
+        return null;
+    }
+    // Cron never seeds: only a preview that is ready has jobs to run.
+    if ($preview && !is_file(_stattic_spacepress_preview_dir($privateRoot, $spaceId, $versionId) . '/ready.json')) {
+        return null;
+    }
+    return $target;
+}
+
+/**
+ * The origin this request's cron calls go to, or null when it cannot sign one:
+ * its host must be the canonical name of a host that serves exactly this
+ * version in this lane now. Some requests bind a version on a host that is not
+ * its own, such as an ability call on the box hostname, and the entrypoint
+ * would refuse those.
+ */
+function _stattic_spacepress_cron_origin(): ?string
+{
+    static $origin = false;
+    if ($origin !== false) return $origin;
+    $context = $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'];
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? '');
+    $url = rtrim((string) spacefast_content_request_url('/'), '/');
+    $canonical = $host !== '' && $host === _stattic_normalize_hostname($host) && parse_url($url, PHP_URL_HOST) === $host;
+    $preview = is_array($GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] ?? null);
+    return $origin = $canonical
+        && _stattic_spacepress_cron_target($context['private_root'], $host, $context['space_id'], $context['version_id'], $preview) !== null
+        ? $url
+        : null;
+}
+
+/** The signed headers of a cron call from this request. */
+function _stattic_spacepress_cron_headers(): array
+{
+    $context = $GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'];
+    return [STATTIC_SPACEPRESS_CRON_HEADER => _stattic_spacepress_cron_token(
+        $context['private_root'],
+        $context['space_id'],
+        $context['version_id'],
+        is_array($GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] ?? null)
+    )];
+}
+
+/**
+ * Core's `cron_request` filter: send the spawn to the engine's cron entrypoint
+ * on this request's host. Core turns certificate checks off for its own site;
+ * this request verifies them.
+ */
+function _stattic_spacepress_cron_request(array $request): array
+{
+    $origin = _stattic_spacepress_cron_origin();
+    try {
+        if ($origin === null) throw new RuntimeException('The request host does not serve this version.');
+        $headers = _stattic_spacepress_cron_headers();
+    } catch (Throwable $error) {
+        // This request skips the spawn, never the page, and never falls back to
+        // the stock /wp-cron.php. Core took its cron lock for this spawn: give it
+        // back, so the worker or a later request can run now.
+        error_log('SpacePress cron spawn skipped: ' . $error->getMessage());
+        if (get_transient('doing_cron') === ($request['key'] ?? null)) delete_transient('doing_cron');
+        $request['url'] = '';
+        return $request;
+    }
+    $query = parse_url((string) ($request['url'] ?? ''), PHP_URL_QUERY);
+    $request['url'] = $origin . STATTIC_RUNTIME_PREVIEW_CRON_PATH . (is_string($query) && $query !== '' ? '?' . $query : '');
+    $args = is_array($request['args'] ?? null) ? $request['args'] : [];
+    $args['sslverify'] = true;
+    $args['headers'] = (is_array($args['headers'] ?? null) ? $args['headers'] : []) + $headers;
+    $request['args'] = $args;
+    return $request;
+}
+
+/**
+ * Turn core's cron back on for this request (engine/loader/wordpress.php turns
+ * it off for every request), send it through the entrypoint, and start the
+ * Action Scheduler queue from a request that queued due work.
+ */
+function _stattic_spacepress_cron_install(): void
+{
+    add_action('init', 'wp_cron');
+    add_filter('cron_request', '_stattic_spacepress_cron_request');
+    // Before core's shutdown check (priority 10) takes its cron lock: a request
+    // that could not sign the call takes no lock at all.
+    add_action('shutdown', static function (): void {
+        if (_stattic_spacepress_cron_origin() === null) remove_action('shutdown', '_wp_cron');
+    }, 9);
+    // Action Scheduler's queue event fires once a minute, and a page view can use
+    // that minute up. A request that queued due work starts the queue itself,
+    // after everything else it does, with a call of its own that writes no
+    // schedule and takes no lock.
+    add_action('action_scheduler_stored_action', static function (): void {
+        if (PHP_SAPI === 'cli' || wp_doing_cron() || has_action('shutdown', '_stattic_spacepress_cron_queue_due') !== false) return;
+        add_action('shutdown', '_stattic_spacepress_cron_queue_due', PHP_INT_MAX);
+    });
+}
+
+function _stattic_spacepress_cron_queue_due(): void
+{
+    if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) return;
+    $origin = _stattic_spacepress_cron_origin();
+    if ($origin === null || !ActionScheduler::is_initialized() || !ActionScheduler::store()->has_pending_actions_due()) return;
+    try {
+        $headers = _stattic_spacepress_cron_headers();
+    } catch (Throwable $error) {
+        error_log('SpacePress queue run skipped: ' . $error->getMessage());
+        return;
+    }
+    wp_remote_post($origin . STATTIC_RUNTIME_PREVIEW_CRON_PATH . '?' . STATTIC_SPACEPRESS_CRON_QUEUE_QUERY . '=1', [
+        'timeout' => 0.01,
+        'blocking' => false,
+        'sslverify' => true,
+        'headers' => $headers,
+    ]);
 }

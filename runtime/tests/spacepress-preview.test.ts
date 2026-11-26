@@ -4,7 +4,15 @@ import { Database } from "bun:sqlite";
 import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -96,6 +104,9 @@ add_action('http_api_curl', static function ($handle, $args, $url) {
 add_action('init', static function () {
     if (($_SERVER['HTTP_X_SCHEDULE_TEST_JOB'] ?? '') === '1') wp_schedule_single_event(time() - 1, 'sf_preview_test_job');
 });
+add_action('wp_loaded', static function () {
+    if (($_SERVER['HTTP_X_QUEUE_TEST_ACTION'] ?? '') === '1') as_enqueue_async_action('sf_preview_test_job');
+});
 add_action('sf_preview_test_job', static function () {
     file_put_contents(${JSON.stringify(jobs)}, json_encode([
         'version' => $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW']['version_id'] ?? null,
@@ -162,7 +173,17 @@ add_action('sf_preview_test_job', static function () {
         await step.cleanup?.();
       }
     };
-    const route = (production: string, versions: string[]) =>
+    const open = publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions");
+    // The same Space with no public Grant.
+    const closed = {
+      ...open,
+      public_exposure: {
+        ...z.record(z.string(), z.unknown()).parse(open.public_exposure),
+        public: false,
+      },
+      authorization: { ...z.record(z.string(), z.unknown()).parse(open.authorization), grants: [] },
+    };
+    const route = (production: string, versions: string[], access = open) =>
       putRoute(rt!, SPACE, "production", {
         version_id: production,
         hostnames: [LIVE],
@@ -171,7 +192,7 @@ add_action('sf_preview_test_job', static function () {
           hostname: versionHost(version_id),
           version_id,
         })),
-        config: publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions"),
+        config: access,
       });
     const titles = async (host: string) => {
       const response = await get(rt!, host, "/wp-json/spacepress/v1/actions/titles", {
@@ -475,10 +496,13 @@ add_action('sf_preview_test_job', static function () {
           readFileSync(path.join(rt.storageRoot, "runtime/preview-cron-key.json"), "utf8"),
         ),
       );
-    const token = (version_id: string, exp = Math.floor(Date.now() / 1000) + 120) => {
-      const encoded = Buffer.from(JSON.stringify({ space_id: SPACE, version_id, exp })).toString(
-        "base64url",
-      );
+    const token = (
+      version_id: string,
+      { preview = true, exp = Math.floor(Date.now() / 1000) + 120 } = {},
+    ) => {
+      const encoded = Buffer.from(
+        JSON.stringify({ space_id: SPACE, version_id, preview, exp }),
+      ).toString("base64url");
       return `${encoded}.${createHmac("sha256", key).update(encoded).digest("hex")}`;
     };
     const runCron = async (host: string, value?: string) => {
@@ -493,17 +517,16 @@ add_action('sf_preview_test_job', static function () {
     const cronRefused = { status: 403, code: "spacepress_preview_cron_refused" };
     assert.deepEqual(await runCron(versionHost("ver_next")), cronRefused);
     assert.deepEqual(
-      await runCron(versionHost("ver_next"), token("ver_next", Math.floor(Date.now() / 1000) - 1)),
+      await runCron(
+        versionHost("ver_next"),
+        token("ver_next", { exp: Math.floor(Date.now() / 1000) - 1 }),
+      ),
       cronRefused,
     );
     assert.deepEqual(await runCron(versionHost("ver_next"), `${token("ver_next")}0`), cronRefused);
     assert.deepEqual(await runCron(versionHost("ver_next"), token("ver_other")), cronRefused);
-    // A key that can't be read skips that request's spawn; it never fails
-    // the page that triggered it, and never falls back to /wp-cron.php.
-    const keyFile = path.join(rt.storageRoot, "runtime/preview-cron-key.json");
-    const goodKey = readFileSync(keyFile, "utf8");
-    writeFileSync(keyFile, "{not json");
-    try {
+    // Core's spawn filter, as a request bound to ver_next on this host runs it.
+    const spawnFor = (host: string, key = "own-lock") => {
       const spawn = Bun.spawnSync({
         cmd: [
           "php",
@@ -511,34 +534,124 @@ add_action('sf_preview_test_job', static function () {
           "auto_prepend_file=",
           "-r",
           [
-            `require ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};`,
-            `require ${JSON.stringify(path.join(rt.engineRoot, "shared/spacepress-preview.php"))};`,
-            "function spacefast_content_request_url($u) { return 'https://preview.test' . $u; }",
-            `$GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = ${JSON.stringify(rt.storageRoot)};`,
-            `$GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] = ['space_id' => ${JSON.stringify(SPACE)}, 'version_id' => 'ver_next'];`,
-            "echo json_encode(_stattic_spacepress_preview_cron_request(['url' => 'https://preview.test/wp-cron.php?doing_wp_cron=1', 'args' => []]));",
+            `require ${JSON.stringify(path.join(rt!.engineRoot, "shared/context.php"))};`,
+            `require ${JSON.stringify(path.join(rt!.engineRoot, "shared/spacepress.php"))};`,
+            `function spacefast_content_request_url($u) { return ${JSON.stringify(`https://${host}`)} . $u; }`,
+            "function get_transient($name) { return 'own-lock'; }",
+            "function delete_transient($name) { fwrite(STDERR, 'released ' . $name . PHP_EOL); }",
+            `$GLOBALS['SPACEFAST_SPACEPRESS_CONTEXT'] = ['private_root' => ${JSON.stringify(rt!.storageRoot)}, 'space_id' => ${JSON.stringify(SPACE)}, 'version_id' => 'ver_next'];`,
+            `$_SERVER['HTTP_HOST'] = ${JSON.stringify(host)};`,
+            `$GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'] = [];`,
+            `echo json_encode(_stattic_spacepress_cron_request(['url' => 'https://stock.test/wp-cron.php?doing_wp_cron=1', 'key' => ${JSON.stringify(key)}, 'args' => []]));`,
           ].join(""),
         ],
         stdout: "pipe",
         stderr: "pipe",
       });
-      assert.equal(spawn.exitCode, 0, spawn.stderr.toString());
-      assert.equal(
-        z.object({ url: z.string() }).parse(JSON.parse(spawn.stdout.toString())).url,
-        "",
-      );
-      assert.match(spawn.stderr.toString(), /preview cron spawn skipped/);
+      const stderr = spawn.stderr.toString();
+      assert.equal(spawn.exitCode, 0, stderr);
+      const { url } = z.object({ url: z.string() }).parse(JSON.parse(spawn.stdout.toString()));
+      return { url, stderr };
+    };
+    assert.equal(
+      spawnFor(versionHost("ver_next")).url,
+      `https://${versionHost("ver_next")}/__spacefast/preview-cron.php?doing_wp_cron=1`,
+    );
+    // A host that serves another version, or no Space, would be refused: the
+    // request does not spawn and gives core's cron lock back.
+    for (const host of [
+      LIVE,
+      `${versionHost("ver_next")}:8443`,
+      `${versionHost("ver_next")}.`,
+      "box.sp-preview.invalid",
+    ]) {
+      const skipped = spawnFor(host);
+      assert.equal(skipped.url, "");
+      assert.match(skipped.stderr, /released doing_cron/);
+    }
+    // A preview that has not finished its setup makes no cron call.
+    const readyMarker = path.join(previewDir("ver_next"), "ready.json");
+    renameSync(readyMarker, `${readyMarker}.hidden`);
+    try {
+      assert.equal(spawnFor(versionHost("ver_next")).url, "");
+    } finally {
+      renameSync(`${readyMarker}.hidden`, readyMarker);
+    }
+    // Another runner's lock is not this request's to give back.
+    assert.doesNotMatch(spawnFor(LIVE, "stale-lock").stderr, /released/);
+    // A site that turns request cron off gets no queue call either.
+    const disabled = Bun.spawnSync({
+      cmd: [
+        "php",
+        "-d",
+        "auto_prepend_file=",
+        "-r",
+        [
+          "define('DISABLE_WP_CRON', true);",
+          `require ${JSON.stringify(path.join(rt.engineRoot, "shared/context.php"))};`,
+          `require ${JSON.stringify(path.join(rt.engineRoot, "shared/spacepress.php"))};`,
+          "function wp_remote_post($url, $args) { echo 'posted ', $url; }",
+          "_stattic_spacepress_cron_queue_due();",
+        ].join(""),
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    assert.equal(disabled.exitCode, 0, disabled.stderr.toString());
+    assert.equal(disabled.stdout.toString(), "");
+    // A key that can't be read skips that request's spawn; it never fails
+    // the page that triggered it, and never falls back to /wp-cron.php.
+    const keyFile = path.join(rt.storageRoot, "runtime/preview-cron-key.json");
+    const goodKey = readFileSync(keyFile, "utf8");
+    writeFileSync(keyFile, "{not json");
+    try {
+      const unsigned = spawnFor(versionHost("ver_next"));
+      assert.equal(unsigned.url, "");
+      assert.match(unsigned.stderr, /cron spawn skipped/);
+      assert.match(unsigned.stderr, /released doing_cron/);
     } finally {
       writeFileSync(keyFile, goodKey);
     }
-    // The live version, on its own link or the live host, is never a preview.
+    // A token runs only its own lane: a preview's never binds live, nor live's a preview.
     assert.deepEqual(await runCron(versionHost("ver_live"), token("ver_live")), cronRefused);
     assert.deepEqual(await runCron(LIVE, token("ver_live")), cronRefused);
-    assert.ok(!existsSync(previewDir("ver_live")), "cron never binds the live version");
-    assert.deepEqual(await runCron(versionHost("ver_next"), token("ver_next")), {
-      status: 200,
-      code: null,
+    assert.deepEqual(await runCron(LIVE, token("ver_next", { preview: false })), cronRefused);
+    assert.deepEqual(
+      await runCron(versionHost("ver_next"), token("ver_next", { preview: false })),
+      cronRefused,
+    );
+    assert.ok(!existsSync(previewDir("ver_live")), "cron never binds live as a preview");
+    const cronRan = { status: 200, code: null };
+    assert.deepEqual(await runCron(versionHost("ver_next"), token("ver_next")), cronRan);
+
+    // A live job runs from the request that queues it, through the same
+    // entrypoint, although this minute's queue event is already used up. No
+    // other request follows it.
+    rmSync(jobs);
+    assert.deepEqual(await runCron(LIVE, token("ver_live", { preview: false })), cronRan);
+    const queued = await get(rt, LIVE, "/", { headers: { "X-Queue-Test-Action": "1" } });
+    assert.equal(queued.status, 200, (await queued.text()) + rt.diagnostics());
+    const ranAt = Date.now() + 15_000;
+    while (!existsSync(jobs) && Date.now() < ranAt) await Bun.sleep(100);
+    assert.ok(existsSync(jobs), `the live job never ran${rt.diagnostics()}`);
+    assert.deepEqual(JSON.parse(readFileSync(jobs, "utf8")), {
+      version: null,
+      cron: true,
+      path: "/__spacefast/preview-cron.php",
     });
+
+    // A private Space refuses the stock path and a bad token, and runs its jobs
+    // for a live one, which carries no visitor session.
+    await route("ver_live", ["ver_live", "ver_next", "ver_other"], closed);
+    rmSync(jobs);
+    wp("eval", "wp_schedule_single_event(time() - 1, 'sf_preview_test_job');");
+    const stock = await get(rt, LIVE, "/wp-cron.php", { method: "POST" });
+    assert.equal(stock.status, 403, await stock.text());
+    assert.deepEqual(await runCron(LIVE), cronRefused);
+    assert.ok(!existsSync(jobs), "a refused cron request runs nothing");
+    assert.deepEqual(await runCron(LIVE, token("ver_live", { preview: false })), cronRan);
+    assert.ok(existsSync(jobs), `the private live job never ran${rt.diagnostics()}`);
+    await route("ver_live", ["ver_live", "ver_next", "ver_other"]);
 
     // Promote runs the version's production initialize, though its preview seeded:
     // first on its own, under finalize's timeout and on the production values

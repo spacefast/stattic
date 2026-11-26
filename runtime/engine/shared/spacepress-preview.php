@@ -370,10 +370,6 @@ function _stattic_spacepress_preview_bind_wordpress(array $preview): void
     // Action Scheduler's async runner posts to admin-ajax.php, in the visitor
     // lane and its access rules. Its queue runs from core's cron instead.
     add_filter('action_scheduler_allow_async_request_runner', '__return_false');
-    // A preview's jobs run from its own traffic: core's shutdown check sends
-    // the cron request to the engine's preview cron entrypoint on this host,
-    // with a token that names this preview, never the stock /wp-cron.php.
-    add_filter('cron_request', '_stattic_spacepress_preview_cron_request');
     // The seed clears core's update checks, and core schedules them again on
     // every init. A preview never calls wordpress.org.
     remove_action('init', 'wp_schedule_update_checks');
@@ -409,75 +405,4 @@ function _stattic_spacepress_preview_bind_wordpress(array $preview): void
     if (!$installed) {
         throw new RuntimeException('The SpacePress preview database has not been seeded.');
     }
-}
-
-// A preview's jobs run from its own traffic, through WordPress's cron. Core's
-// shutdown check sends the cron request to /__spacefast/preview-cron.php on the
-// preview's own host, carrying this token. It names the Space and version, and
-// lasts two minutes. The key never leaves the box's private root.
-const STATTIC_SPACEPRESS_PREVIEW_CRON_TTL_SECONDS = 120;
-const STATTIC_SPACEPRESS_PREVIEW_CRON_HEADER = 'Spacefast-Preview-Cron';
-
-function _stattic_spacepress_preview_cron_token(string $privateRoot, string $spaceId, string $versionId): string
-{
-    $key = _stattic_lazy_minted_secret($privateRoot, 'preview-cron-key', 32);
-    if (!is_string($key)) throw new RuntimeException('The preview cron key is unavailable.');
-    $encoded = _stattic_base64url_encode((string) json_encode([
-        'space_id' => $spaceId,
-        'version_id' => $versionId,
-        'exp' => time() + STATTIC_SPACEPRESS_PREVIEW_CRON_TTL_SECONDS,
-    ]));
-    return $encoded . '.' . hash_hmac('sha256', $encoded, $key);
-}
-
-/** @return array{space_id:string,version_id:string,exp:int}|null */
-function _stattic_spacepress_preview_cron_verify(string $privateRoot, string $token): ?array
-{
-    $parts = explode('.', $token);
-    if (count($parts) !== 2) return null;
-    $key = _stattic_lazy_minted_secret($privateRoot, 'preview-cron-key', 32);
-    if (!is_string($key) || !hash_equals(hash_hmac('sha256', $parts[0], $key), $parts[1])) return null;
-    $claims = json_decode(_stattic_base64url_decode($parts[0]), true);
-    if (!is_array($claims)
-        || !is_string($claims['space_id'] ?? null) || !_stattic_id_valid($claims['space_id'])
-        || !is_string($claims['version_id'] ?? null) || !_stattic_id_valid($claims['version_id'])
-        || !is_int($claims['exp'] ?? null) || $claims['exp'] < time()) {
-        return null;
-    }
-    return $claims;
-}
-
-/**
- * Core's `cron_request` filter for a preview binding: send the spawn to the
- * engine's preview cron entrypoint on this request's host, never the stock
- * /wp-cron.php, which lands in the visitor lane and its access rules. Core
- * turns certificate checks off for its own site; this request verifies them.
- */
-function _stattic_spacepress_preview_cron_request(array $request): array
-{
-    $binding = $GLOBALS['SPACEFAST_SPACEPRESS_PREVIEW'];
-    try {
-        $token = _stattic_spacepress_preview_cron_token(
-            (string) $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'],
-            $binding['space_id'],
-            $binding['version_id']
-        );
-    } catch (Throwable $error) {
-        // Core spawns cron while the page is still rendering. Without a token
-        // this request skips the spawn, never the page, and never falls back
-        // to the stock /wp-cron.php. A later request tries again.
-        error_log('SpacePress preview cron spawn skipped: ' . $error->getMessage());
-        $request['url'] = '';
-        return $request;
-    }
-    $origin = rtrim((string) spacefast_content_request_url('/'), '/');
-    $query = parse_url((string) ($request['url'] ?? ''), PHP_URL_QUERY);
-    $request['url'] = $origin . STATTIC_RUNTIME_PREVIEW_CRON_PATH . (is_string($query) && $query !== '' ? '?' . $query : '');
-    $args = is_array($request['args'] ?? null) ? $request['args'] : [];
-    $args['sslverify'] = true;
-    $args['headers'] = (is_array($args['headers'] ?? null) ? $args['headers'] : []) + [
-        STATTIC_SPACEPRESS_PREVIEW_CRON_HEADER => $token,
-    ];
-    $request['args'] = $args;
-    return $request;
 }

@@ -21,6 +21,13 @@ return static function (array $loader): void {
         $GLOBALS['SPACEFAST_RUNTIME_ACTIVE_RELEASE_ROOT'] = $releaseReal;
     }
 
+    // Core's own cron call can only reach the stock /wp-cron.php, which no box
+    // serves, and it takes the site's cron lock first. A SpacePress binding that
+    // can sign the call turns it back on (shared/spacepress.php).
+    if (function_exists('remove_action')) {
+        remove_action('init', 'wp_cron');
+    }
+
     $wordpressRest = $releaseReal . '/engine/shared/wordpress-rest.php';
     if (is_file($wordpressRest)) {
         require_once $wordpressRest;

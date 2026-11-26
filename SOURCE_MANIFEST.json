@@ -1,7 +1,7 @@
 {
-  "revision": "dd1b74ab81376d8bb6dbf032bde5d6ce529d3eec",
-  "sourceHash": "8cc76b6110a277e3c24f417664b3d3db294b3fc92cfd80f6b431e94b12d3cb28",
-  "manifestSha256": "650bb1c561add2d290179a62851c96e99ea51bf2d545ebed62cb27cdbab8f99b",
+  "revision": "e98a83cd4611241aad4fe96f44c5a025bb2a3c2f",
+  "sourceHash": "44551fb27c51c3d1e2f76bc4ab8b56b34aa6d9a69e287c129a84c87524cf4334",
+  "manifestSha256": "0964a5787c4efafd01ef0aeb8ccad52388e676271131ffdee55b2c6d6117ada5",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "75208c206449396ab6697c87970035f88fdb096cd3be0b4bd70fd27383367efa"
+      "sha256": "b6ceeb5aebbe937b243983fe71359aabd4a9380373b1699c6a07e641ceeb45d4"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "daba7dca95571d4fdb74092dd6b2fb8ec5d1a832010f9d539e1e3c61291162e1"
+      "sha256": "d7f8580a405342a42dc551d3d95f7232b91f60dc3fb05cab6fdcca7d297281f9"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16369,7 +16369,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "1b316a290dd3570daf3fa21038de3693ad9cc24a9ab945a1780ec8af6811ef91"
+      "sha256": "fe00121287005672aba2897c74777575f0983444b52a39251254dffe36902b1c"
     },
     {
       "path": "crates/stattic-runtime-core/src/spacepress.rs",
@@ -29957,7 +29957,7 @@
     },
     {
       "path": "runtime/engine/entrypoints/health.php",
-      "sha256": "084e9a5c6a26214d11919d8adeb91d71e6ad46484627929137b36afc68d5add1"
+      "sha256": "1474203727c11a2171b0f1c87f94a4801a5de0e32dae43c10c7bac816e327200"
     },
     {
       "path": "runtime/engine/entrypoints/invoke.php",
@@ -29993,7 +29993,7 @@
     },
     {
       "path": "runtime/engine/loader/request.php",
-      "sha256": "5888c5e8a6b274857ec86ff1854b8dfe9240af724a69df51f39daf2660fcba37"
+      "sha256": "156d380706d4e4bf8bba20329a136c611faa672045445a63818043de56ba984f"
     },
     {
       "path": "runtime/engine/loader/wordpress.php",
@@ -30089,7 +30089,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "f571a48102fd51742bc57e2090682d82db049054d6ddcdf2db91431424e6d989"
+      "sha256": "c394aada76adafcc6f6e9770362b1054ee070ebf287b958bb41baa87e4886ac3"
     },
     {
       "path": "runtime/engine/runtime/share-oauth.php",
@@ -30345,7 +30345,7 @@
     },
     {
       "path": "runtime/engine/shared/spacepress.php",
-      "sha256": "9179580c8483fab397be56e53f3616a6a4e5837edf2174385900609552f252f0"
+      "sha256": "4cebee1e4d22018f68f89acc77ba960edda7e40277e24623269f41689e1defe4"
     },
     {
       "path": "runtime/engine/shared/storage-policy.generated.php",
@@ -30393,7 +30393,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "a79667a06cbc0faf6cc6b77067d0e33029b277184958590336f275a4cb88d3a9"
+      "sha256": "de6a45e02e6bc32c85701c29e60903647135dc7896c2cc07ff914b1c2eaa177d"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -30965,11 +30965,11 @@
     },
     {
       "path": "runtime/tests/spacepress-preview-sign-in.test.ts",
-      "sha256": "23bfa191d33744fe37dcd93c91550d68bf7d921a3ac76ac6fac74dd01dcedbbb"
+      "sha256": "f4db9da72dbaca17726b4b9d4ac2fcbc2e3af94672fdd74717bd19df1b48eded"
     },
     {
       "path": "runtime/tests/spacepress-preview.test.ts",
-      "sha256": "b9938cf537581e6e965e5a815df96d653d2502774f3d15b2d7388fa0e994c55e"
+      "sha256": "449205823db5c1e539bf68bcd263b6242a86293043e130a90c44f743f9deeef1"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",

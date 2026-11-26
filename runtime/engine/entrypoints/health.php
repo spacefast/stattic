@@ -135,10 +135,11 @@ function _stattic_health_serving(string $privateRoot, string $requestHost): arra
             // A SpacePress preview serves once finalized with its own variable
             // set: it seeds a database of its own on its first visit.
             require_once dirname(__DIR__) . '/shared/spacepress-preview.php';
-            $servable = _stattic_spacepress_is_preview($privateRoot, $resolved['space_id'], $versionId, $serving)
+            $isPreview = _stattic_spacepress_is_preview($privateRoot, $resolved['space_id'], $versionId, $serving);
+            $servable = $isPreview
                 ? _stattic_spacepress_finalized($spRoot) && is_file($spRoot . '/variables-preview.json')
                 : is_file($spRoot . '/ready.json');
-            if (in_array($generation, ['legacy_0_8', 'v2'], true) || !$servable) {
+            if ((!$isPreview && in_array($generation, ['legacy_0_8', 'v2'], true)) || !$servable) {
                 return $none('pending');
             }
         }

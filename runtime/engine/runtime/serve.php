@@ -341,10 +341,15 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $hasSpacepressCompiled = is_file($versionDir . '/.spacepress-compiled/manifest.json');
     $hasZeroCompiled = is_file($versionDir . '/.zero-compiled/manifest.json');
     $isSpacepressVersion = false;
+    $isSpacepressPreview = false;
     if ($hasSpacepressCompiled || $hasZeroCompiled) {
         require_once __DIR__ . '/../shared/spacepress.php';
         $isSpacepressVersion = _stattic_spacepress_version_manifest($versionDir) !== null;
-        if ($isSpacepressVersion && in_array($generation, ['legacy_0_8', 'v2'], true)) {
+        if ($isSpacepressVersion) {
+            require_once __DIR__ . '/../shared/spacepress-preview.php';
+            $isSpacepressPreview = _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $serving);
+        }
+        if ($isSpacepressVersion && !$isSpacepressPreview && in_array($generation, ['legacy_0_8', 'v2'], true)) {
             _stattic_problem_response(409, 'zero_generation_locked', 'This version belongs to a different runtime.');
         }
     }
@@ -357,7 +362,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         || is_file($versionDir . '/zero/endpoints-index.json')
         || is_file($versionDir . '/zero/runs-index.json')
     );
-    if ($hasLegacyZeroArtifacts || in_array($generation, ['legacy_0_8', 'v2'], true)) {
+    if ($hasLegacyZeroArtifacts || (!$isSpacepressPreview && in_array($generation, ['legacy_0_8', 'v2'], true))) {
         require_once __DIR__ . '/../deprecated/legacy-serve.php';
         _stattic_legacy_serve_cordon($versionDir, $serving);
     }
@@ -837,12 +842,16 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
 
     // Lazy fallback for deployed legacy Zero 0.8 and `content.managed` Spaces.
     // Normal static, CF-Worker, and SpacePress requests never require anything under `deprecated/`.
-    $needsLegacyFallback = $page !== null
+    // SpacePress previews (including branch previews where `immutable` is false) must never
+    // fall through to legacy WordPress routes, which would boot against the production database.
+    $needsLegacyFallback = !$isSpacepressPreview && (
+        $page !== null
         || is_file($versionDir . '/zero/routes.php')
         || (empty($serving['immutable']) && !_stattic_path_is_reserved($requestPath) && (
             is_file($privateRoot . '/spaces/' . $spaceId . '/content-redirects.json')
             || is_file($privateRoot . '/spaces/' . $spaceId . '/wordpress-routes.json')
-        ));
+        ))
+    );
     if ($needsLegacyFallback) {
         require_once __DIR__ . '/../deprecated/legacy-serve.php';
         if (_stattic_legacy_serve_fallback($sendContext, $requestPath, $requestMethod, $requestUri, $page, $hasPages)) {

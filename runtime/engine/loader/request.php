@@ -504,7 +504,14 @@ return static function (array $loader): void {
                     if (is_file($spacepressHost)) {
                         require_once $spacepressHost;
                         if (_stattic_spacepress_version_manifest($targetVersionRoot) !== null) {
-                            if (in_array($targetGeneration, ['legacy_0_8', 'v2'], true)) {
+                            require_once $releaseRoot . '/engine/shared/spacepress-preview.php';
+                            $isSpacepressPreview = _stattic_spacepress_is_preview(
+                                $privateRoot,
+                                $accessTarget['space_id'],
+                                $accessTarget['version_id'],
+                                $accessTarget['serving']
+                            );
+                            if (!$isSpacepressPreview && in_array($targetGeneration, ['legacy_0_8', 'v2'], true)) {
                                 _stattic_problem_response(409, 'zero_generation_locked', 'This version belongs to a different runtime.');
                             }
                             if (_stattic_spacepress_select($privateRoot, $accessTarget['space_id'], $accessTarget['version_id'], $accessTarget['serving'])) {

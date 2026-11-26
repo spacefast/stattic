@@ -168,17 +168,17 @@ function _stattic_spacepress_select(
     if ($root === null) {
         return false;
     }
+    // A version on a version or branch hostname is a preview with a database
+    // of its own, unless it is the version in production.
+    require_once __DIR__ . '/spacepress-preview.php';
+    $preview = !$initializing && _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $authority);
     $generation = is_string($authority['zero_generation'] ?? null) ? $authority['zero_generation'] : 'none';
-    if (!$initializing && in_array($generation, ['legacy_0_8', 'v2'], true)) {
+    if (!$initializing && !$preview && in_array($generation, ['legacy_0_8', 'v2'], true)) {
         throw new RuntimeException('This Space belongs to a legacy Zero runtime generation.');
     }
     if (isset($GLOBALS['SPACEFAST_SPACEPRESS_ROOT']) && $GLOBALS['SPACEFAST_SPACEPRESS_ROOT'] !== $root) {
         throw new RuntimeException('Only one SpacePress version may load in a request.');
     }
-    // A version on a version or branch hostname is a preview with a database
-    // of its own, unless it is the version in production.
-    require_once __DIR__ . '/spacepress-preview.php';
-    $preview = !$initializing && _stattic_spacepress_is_preview($privateRoot, $spaceId, $versionId, $authority);
     if (!$initializing && !$preview && !is_file($root . '/ready.json')) {
         throw new RuntimeException('SpacePress initialization is incomplete.');
     }
@@ -818,18 +818,25 @@ function _stattic_spacepress_write_variables(string $privateRoot, string $spaceI
 function _stattic_spacepress_initialize(string $privateRoot, string $spaceId, string $versionId, array $authority = []): void
 {
     if (!isset($authority['legacy_prefix'])) {
-        require_once __DIR__ . '/storage.php';
-        require_once __DIR__ . '/artifacts.php';
-        $pointer = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/space.json');
-        $overlay = is_array($pointer) ? _stattic_v4_overlay($privateRoot, $spaceId, $pointer) : null;
         if (
-            is_array($overlay)
-            && (
-                ($overlay['legacy_prefix'] ?? false) === true
-                || in_array($overlay['zero_generation'] ?? null, ['v2', 'tp_v1'], true)
-            )
+            ($authority['activate']['config']['legacy_prefix'] ?? false) === true
+            || in_array($authority['zero_generation'] ?? null, ['v2', 'tp_v1'], true)
         ) {
             $authority['legacy_prefix'] = true;
+        } else {
+            require_once __DIR__ . '/storage.php';
+            require_once __DIR__ . '/artifacts.php';
+            $pointer = _stattic_runtime_read_json($privateRoot . '/spaces/' . $spaceId . '/space.json');
+            $overlay = is_array($pointer) ? _stattic_v4_overlay($privateRoot, $spaceId, $pointer) : null;
+            if (
+                is_array($overlay)
+                && (
+                    ($overlay['legacy_prefix'] ?? false) === true
+                    || in_array($overlay['zero_generation'] ?? null, ['v2', 'tp_v1'], true)
+                )
+            ) {
+                $authority['legacy_prefix'] = true;
+            }
         }
     }
     if (!_stattic_spacepress_select($privateRoot, $spaceId, $versionId, $authority, true)) {

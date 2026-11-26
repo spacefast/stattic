@@ -802,6 +802,151 @@ add_action('sf_preview_test_job', static function () {
     assert.ok(existsSync(previewDir("ver_other")));
     await route("ver_next", ["ver_live", "ver_next"]);
     assert.ok(!existsSync(previewDir("ver_other")));
+
+    // A legacy Zero 0.8 Space can finalize and preview SpacePress before cutting
+    // over live, while still refusing SpacePress on the production route until
+    // generation latches to spacepress.
+    const upgradeSpace = "spc_legacy_zero_upgrade";
+    await deploy(rt, {
+      spaceId: upgradeSpace,
+      versionId: "ver_legacy_live",
+      files: { "index.html": "legacy zero live" },
+      zero: {},
+    });
+    const upgradeProject = path.join(work, "upgrade-app");
+    mkdirSync(path.join(upgradeProject, "sp/app"), { recursive: true });
+    writeFileSync(
+      path.join(upgradeProject, "spacepress.config.ts"),
+      [
+        'import {defineConfig, mutation} from "spacepress";',
+        'export const flavor = mutation({access: "anyone"}, async () => { return process.env.FLAVOR; });',
+        'export default defineConfig({name: "upgraded", admin: false});',
+      ].join("\n"),
+    );
+    writeFileSync(
+      path.join(upgradeProject, "sp/app/page.tsx"),
+      "export default function Home(){return <main><h1>SpacePress upgraded page</h1></main>;}",
+    );
+    const upgradeStep = await prepareZeroV2SourcePublish(upgradeProject);
+    assert.ok(upgradeStep);
+    try {
+      await deploy(rt, {
+        spaceId: upgradeSpace,
+        versionId: "ver_sp_upgrade",
+        files: Object.fromEntries(
+          (upgradeStep.additionalFiles ?? []).map((file) => [
+            path.relative(file.root, file.absolutePath),
+            readFileSync(file.absolutePath),
+          ]),
+        ),
+        finalize: {
+          zero_generation: "legacy_0_8",
+          zero_v2: {
+            variableValues: { FLAVOR: "upgrade prod" },
+            previewVariableValues: { FLAVOR: "upgrade preview" },
+          },
+        },
+      });
+    } finally {
+      await upgradeStep.cleanup?.();
+    }
+    const upgradeConfig = publicAccessConfig(
+      { zero_generation: "legacy_0_8" },
+      "live_and_all_versions",
+    );
+    const upgradeAuth = z
+      .object({ grants: z.array(z.record(z.string(), z.unknown())) })
+      .passthrough()
+      .parse(upgradeConfig.authorization);
+    upgradeAuth.grants.push({
+      id: "grt_runtime_public_branch_preview",
+      generation: 1,
+      name: "Public branch preview",
+      audience: { kind: "public" },
+      resources: { include: ["/**"], exclude: [] },
+      capabilities: ["page.view"],
+      constraints: {},
+      target: { kind: "branch", branch: "branch-preview" },
+      source: { kind: "managed", reference: "test:runtime-public" },
+    });
+    await putRoute(rt, upgradeSpace, "production", {
+      version_id: "ver_legacy_live",
+      hostnames: ["legacy-upgrade.test"],
+      production_hostnames: ["legacy-upgrade.test"],
+      version_hostnames: [{ hostname: "legacy-upgrade--sp.test", version_id: "ver_sp_upgrade" }],
+      config: { ...upgradeConfig, authorization: upgradeAuth },
+    });
+    const legacyLive = await get(rt, "legacy-upgrade.test", "/");
+    assert.equal(legacyLive.status, 200);
+    assert.match(await legacyLive.text(), /legacy zero live/);
+    const upgradePreviewPage = await get(rt, "legacy-upgrade--sp.test", "/");
+    assert.equal(upgradePreviewPage.status, 200);
+    assert.match(await upgradePreviewPage.text(), /SpacePress upgraded page/);
+    assert.equal(await flavor("legacy-upgrade--sp.test"), "upgrade preview");
+
+    // A branch-host SpacePress preview (immutable = false) must never fall
+    // through to legacy Space-scoped WordPress routes against production MySQL.
+    writeFileSync(
+      path.join(rt.storageRoot, "spaces", upgradeSpace, "wordpress-routes.json"),
+      JSON.stringify({ "/wp-legacy-fallback": { postId: 1, postType: "post" } }),
+    );
+    await putRoute(rt, upgradeSpace, "branch-preview", {
+      version_id: "ver_sp_upgrade",
+      production_hostnames: ["legacy-upgrade--branch.test"],
+      noindex_production_hostnames: ["legacy-upgrade--branch.test"],
+      version_hostnames: [],
+    });
+    const branchPreviewPage = await get(rt, "legacy-upgrade--branch.test", "/");
+    assert.equal(branchPreviewPage.status, 200);
+    assert.match(await branchPreviewPage.text(), /SpacePress upgraded page/);
+    const branchUnclaimedFallback = await get(
+      rt,
+      "legacy-upgrade--branch.test",
+      "/wp-legacy-fallback",
+    );
+    assert.equal(branchUnclaimedFallback.status, 404);
+
+    // Even after initialization, production must refuse SpacePress while
+    // zero_generation is still legacy_0_8.
+    await initializeSpacePress(rt, upgradeSpace, "ver_sp_upgrade", "ver_legacy_live");
+    await putRoute(rt, upgradeSpace, "production", {
+      version_id: "ver_sp_upgrade",
+      hostnames: ["legacy-upgrade.test"],
+      production_hostnames: ["legacy-upgrade.test"],
+      config: publicAccessConfig({ zero_generation: "legacy_0_8" }),
+    });
+    const refusedUpgradeLive = await get(rt, "legacy-upgrade.test", "/", {
+      headers: { accept: "application/json" },
+    });
+    assert.equal(refusedUpgradeLive.status, 409);
+    assert.equal(
+      z.object({ code: z.string() }).parse(await refusedUpgradeLive.json()).code,
+      "zero_generation_locked",
+    );
+
+    // Once latched to spacepress, live serves SpacePress and the old Zero 0.8
+    // immutable version retires.
+    await putRoute(rt, upgradeSpace, "production", {
+      version_id: "ver_sp_upgrade",
+      hostnames: ["legacy-upgrade.test"],
+      production_hostnames: ["legacy-upgrade.test"],
+      version_hostnames: [
+        { hostname: "legacy-upgrade--legacy.test", version_id: "ver_legacy_live" },
+      ],
+      config: publicAccessConfig({ zero_generation: "spacepress" }, "live_and_all_versions"),
+    });
+    const upgradedLivePage = await get(rt, "legacy-upgrade.test", "/");
+    assert.equal(upgradedLivePage.status, 200);
+    assert.match(await upgradedLivePage.text(), /SpacePress upgraded page/);
+    assert.equal(await flavor("legacy-upgrade.test"), "upgrade prod");
+    const retiredLegacyVersion = await get(rt, "legacy-upgrade--legacy.test", "/", {
+      headers: { accept: "application/json" },
+    });
+    assert.equal(retiredLegacyVersion.status, 410);
+    assert.equal(
+      z.object({ code: z.string() }).parse(await retiredLegacyVersion.json()).code,
+      "zero_legacy_retired",
+    );
   } finally {
     for (const holder of holders) holder.kill();
     rt?.stop();

@@ -376,38 +376,43 @@ add_action('rest_api_init', static function () {
       // previous runtime. The preview is SpacePress all the same: the app API
       // and core's ability run route lend the team member the preview's admin
       // role and keep the answer out of the edge cache.
-      await putRoute(runtime, SPACE, "production", {
-        ...route,
-        config: { ...route.config, zero_generation: "none" },
-      });
-      for (const restPath of [
-        "/wp-json/spacepress/v1/actions/whoami",
-        "/wp-json/wp-abilities/v1/abilities/signin/whoami/run",
-      ]) {
-        // oxlint-disable-next-line no-await-in-loop -- one request at a time
-        const response = await get(runtime, preview, restPath, {
-          method: "POST",
-          headers: {
-            cookie: cookies.member,
-            "content-type": "application/json",
-            origin: `http://${preview}`,
-            "sec-fetch-site": "same-origin",
-          },
-          body: restPath.endsWith("/run") ? JSON.stringify({ input: {} }) : "{}",
+      for (const previousGeneration of ["none", "legacy_0_8"]) {
+        await putRoute(runtime, SPACE, "production", {
+          ...route,
+          config: { ...route.config, zero_generation: previousGeneration },
         });
-        const text = await response.text();
-        assert.equal(response.status, 200, `${restPath}: ${text}`);
-        assert.equal(response.headers.get("a8c-edge-cache"), "no-cache", restPath);
-        const body: unknown = JSON.parse(text);
-        const role = z
-          .union([
-            z
-              .object({ data: z.object({ role: z.string().nullable() }) })
-              .transform((v) => v.data.role),
-            z.object({ role: z.string().nullable() }).transform((v) => v.role),
-          ])
-          .parse(body);
-        assert.equal(role, "admin", restPath);
+        for (const restPath of [
+          "/wp-json/spacepress/v1/actions/whoami",
+          "/wp-json/wp-abilities/v1/abilities/signin/whoami/run",
+        ]) {
+          const response = await get(runtime, preview, restPath, {
+            method: "POST",
+            headers: {
+              cookie: cookies.member,
+              "content-type": "application/json",
+              origin: `http://${preview}`,
+              "sec-fetch-site": "same-origin",
+            },
+            body: restPath.endsWith("/run") ? JSON.stringify({ input: {} }) : "{}",
+          });
+          const text = await response.text();
+          assert.equal(response.status, 200, `${previousGeneration} ${restPath}: ${text}`);
+          assert.equal(
+            response.headers.get("a8c-edge-cache"),
+            "no-cache",
+            `${previousGeneration} ${restPath}`,
+          );
+          const body: unknown = JSON.parse(text);
+          const role = z
+            .union([
+              z
+                .object({ data: z.object({ role: z.string().nullable() }) })
+                .transform((v) => v.data.role),
+              z.object({ role: z.string().nullable() }).transform((v) => v.role),
+            ])
+            .parse(body);
+          assert.equal(role, "admin", `${previousGeneration} ${restPath}`);
+        }
       }
       await putRoute(runtime, SPACE, "production", route);
 

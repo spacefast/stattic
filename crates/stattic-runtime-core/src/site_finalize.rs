@@ -565,10 +565,10 @@ fn validate_zero_generation(
                 "SpacePress source requires server-owned Space generation.",
             );
         }
-        if generation == Some("legacy_0_8") {
+        if legacy_zero && generation == Some("legacy_0_8") {
             return invalid(
                 "zero_migration_required",
-                "This Space can't publish a SpacePress app yet. Moving existing Zero 0.8 Spaces is coming.",
+                "This Space runs a Zero 0.8 app, so it can't take a zero.config.ts app.",
             );
         }
     }
@@ -2611,6 +2611,18 @@ mod tests {
                 other => panic!("expected generation refusal, got {other:?}"),
             }
         }
+        // SpacePress upgrades forward from legacy Zero 0.8 on finalize.
+        let spacepress_config = r#"import { defineConfig } from "spacepress";
+export default defineConfig({ name: "upgraded", admin: false });"#;
+        let (_temp, _private, upgraded) = finalize_fixture(
+            &[
+                ("spacepress.config.ts", spacepress_config.as_bytes()),
+                ("public/index.html", b"upgraded"),
+            ],
+            json!({"mode":"website"}),
+            json!({ "zero_generation": "legacy_0_8" }),
+        );
+        assert!(upgraded.is_ok(), "legacy_0_8 -> spacepress: {upgraded:?}");
         // A tenant's own zero/ folder is static content on any Space.
         for generation in ["none", "v2", "spacepress"] {
             let (_temp, _private, result) = finalize_fixture(

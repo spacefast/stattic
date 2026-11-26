@@ -2,7 +2,7 @@
   "format": "spacefast.wordpress-components",
   "version": 1,
   "platformRelease": "source-tree",
-  "digest": "sha256:1c756a358df74c5f3391bd00a60799be48baf5983dbe1a8e73eb528ab193f895",
+  "digest": "sha256:2a9c28d5d8e858b57abd9d3abfc4f43a2f52088b12f88be76273492e7130adb5",
   "components": [
     {
       "id": "spacefast-identity",
@@ -74,7 +74,8 @@
         "runtime.zero.connectors.v1",
         "runtime.zero.source.v1",
         "runtime.spacepress.v1",
-        "runtime.spacepress.previews.v1"
+        "runtime.spacepress.previews.v1",
+        "runtime.spacepress.legacy-upgrade.v1"
       ],
       "activation": "always"
     },

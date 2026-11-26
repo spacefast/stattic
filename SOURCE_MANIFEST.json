@@ -1,7 +1,7 @@
 {
-  "revision": "4c42afec544a8e0b83db8e2c1665504476db625f",
+  "revision": "e56af9a54dbb75a4eddb549d5ca0c49e5f2efc7b",
   "sourceHash": "a32b5f2fb20dc0934967f734f92aea06b8c12e03b3ba8f5406bbe772be1890c1",
-  "manifestSha256": "42327055b0cd59e5c03b862ed07f376e1e6e1033b61b138ac95c94837ef865af",
+  "manifestSha256": "641a00e8e46cd1a584394a686b5e4c14c1c70b0548667de44281cc6a481eb704",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "81507fba254ef66368cf4d9ac7a9425667218c5397c0fb74f58d41081de0062d"
+      "sha256": "3210db016ae99144f9a9379057ba32db77310221f6b49d8303f56d6225eadbe7"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "712cf9551cf385c674a14dbafbaa912c5960fd159a19ce06843d01c53bb7a996"
+      "sha256": "acab0cc16eb63603a737994b3a5cd2448596c512207d6c800a94606561a7c57c"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -29781,7 +29781,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow.test.ts",
-      "sha256": "5c9cb985a281a0c9d4096406a733460f8af3039fa5b4859bb9b1c2cfcc92ae7e"
+      "sha256": "7c3d2b9db4cb3c784dca31d05b3c7c768bd98a52579949a8832e9fdfee4e4cdf"
     },
     {
       "path": "runtime/browser/sell-checkout-element.js",

@@ -21,6 +21,7 @@ import {
   type BrowserContext,
   type Frame,
   type Page,
+  type Response as PlaywrightResponse,
 } from "@playwright/test";
 import { z } from "zod";
 
@@ -428,16 +429,59 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     const current = await signedInAs(page, fixture.docs.spaceId, fixture.robin);
     // Comments load only when asked for: nothing before the click.
     expect(await page.locator("spacefast-collab").count()).toBe(0);
-    const ticketResponse = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/__spacefast/comments/ticket" &&
-        response.request().method() === "POST",
-    );
-    await comments.click();
-    await expectUi(comments).toHaveAttribute("aria-pressed", "true");
-    const ticket = z
-      .object({ data: z.object({ token: z.string() }) })
-      .parse(await (await ticketResponse).json()).data.token;
+    // The Space bar's own live-notice watcher may also ask the same ticket
+    // endpoint on load; collect every ticket response and match the one
+    // Comments joins the page's Cast room with.
+    const tickets = new Set<string>();
+    const onTicket = (response: PlaywrightResponse) => {
+      if (
+        new URL(response.url()).pathname !== "/__spacefast/comments/ticket" ||
+        response.request().method() !== "POST" ||
+        !response.ok()
+      ) {
+        return;
+      }
+      void response
+        .json()
+        .then((body) => {
+          const parsed = z.object({ data: z.object({ token: z.string() }) }).safeParse(body);
+          if (parsed.success) tickets.add(parsed.data.data.token);
+        })
+        .catch(() => {});
+    };
+    page.on("response", onTicket);
+    const expectedResource = `resource_${fixture.docs.spaceId}`;
+    const expectedRoom = `space:${fixture.docs.spaceId}:path:${encodeURIComponent("/docs")}`;
+    const matchingJoin = () =>
+      castJoins.find(
+        (join) =>
+          tickets.has(join.token) &&
+          join.verified &&
+          join.resource === expectedResource &&
+          join.room === expectedRoom,
+      );
+    let ticket: string;
+    try {
+      await comments.click();
+      await expectUi(comments).toHaveAttribute("aria-pressed", "true");
+      // Comments joined Cast with a ticket minted from `/__spacefast/comments/ticket`,
+      // which the platform verifies (signature, issuer, audience) for the room it joined.
+      //   The join names the docs Space's own Cast resource and exactly the
+      //   room of the page it was opened on: `/docs/`, whose room key carries
+      //   the page path without its trailing slash.
+      await expectUi
+        .poll(() => matchingJoin() !== undefined)
+        .toBe(true)
+        .catch((error: Error) => {
+          error.message += ` (joins seen: ${JSON.stringify(castJoins.map(({ resource, room, verified }) => ({ resource, room, verified })))})`;
+          throw error;
+        });
+      const joined = matchingJoin();
+      if (!joined) throw new Error("expected a verified Cast join for the comments room");
+      ticket = joined.token;
+    } finally {
+      page.off("response", onTicket);
+    }
     const claims = z
       .object({ sub: z.string(), actorKind: z.enum(["user", "guest"]) })
       .parse(JSON.parse(Buffer.from(ticket.split(".")[1] ?? "", "base64url").toString()));
@@ -449,26 +493,6 @@ test("one person signs in, uses the bar, switches and signs out, and the switch 
     expect(await accountOf(fixture.docs.spaceId, claims.sub)).toBe(
       await accountOf(fixture.docs.spaceId, current),
     );
-    // And Comments joined Cast with exactly that ticket, which the platform
-    // verifies (signature, issuer, audience) for the room it joined.
-    //   The join names the docs Space's own Cast resource and exactly the
-    //   room of the page it was opened on: `/docs/`, whose room key carries
-    //   the page path without its trailing slash.
-    await expectUi
-      .poll(() =>
-        castJoins.some(
-          (join) =>
-            join.token === ticket &&
-            join.verified &&
-            join.resource === `resource_${fixture.docs.spaceId}` &&
-            join.room === `space:${fixture.docs.spaceId}:path:${encodeURIComponent("/docs")}`,
-        ),
-      )
-      .toBe(true)
-      .catch((error: Error) => {
-        error.message += ` (joins seen: ${JSON.stringify(castJoins.map(({ resource, room, verified }) => ({ resource, room, verified })))})`;
-        throw error;
-      });
     // Today's Comments overlay, with the bar as its only way in: no orb. The
     // button opens the comments list, as the rail's Sidebar button would.
     // That a comment can then be started is bar-comments.test.ts's.

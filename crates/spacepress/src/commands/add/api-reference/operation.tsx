@@ -1,16 +1,17 @@
 // Written by `spacepress add api-reference`; yours to change. One operation: who may call it, what it
 // takes and answers, and a request to copy.
-import { Html, Link, notFound, type PageProps } from "spacepress/app";
+import { Html, Link, notFound } from "spacepress/app";
 import { apiReference } from "spacepress/content";
+import type { PageProps } from "./$types";
 import { ApiFields } from "../../../../components/ApiFields";
 
-export const metadata = ({ params }: PageProps<"api/[tag]/[operation]">) => {
+export const metadata = ({ params }: PageProps) => {
   const tag = apiReference().tags.find((t) => t.slug === params.tag);
   const op = tag ? tag.operations.find((o) => o.slug === params.operation) : undefined;
   return { title: op ? op.summary : "API reference", description: op ? `${op.method} ${op.path}` : undefined };
 };
 
-export default function ApiOperation({ params }: PageProps<"api/[tag]/[operation]">) {
+export default function ApiOperation({ params }: PageProps) {
   const tag = apiReference().tags.find((t) => t.slug === params.tag);
   if (!tag) notFound();
   const op = tag.operations.find((o) => o.slug === params.operation);

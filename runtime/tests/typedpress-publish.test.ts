@@ -54,7 +54,7 @@ test("sf capture publishes a TypedPress page and action on an isolated compatibl
     );
     writeFileSync(
       path.join(project, "sp/components/Counter.tsx"),
-      '"use client"; import {useState} from "spacepress/client"; export function Counter(){const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{count}</button>;}',
+      '"use client"; import {useState} from "react"; export function Counter(){const [count,setCount]=useState(0);return <button onClick={()=>setCount(count+1)}>{count}</button>;}',
     );
     const step = await prepareZeroV2SourcePublish(project);
     assert.ok(step);

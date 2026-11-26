@@ -1,8 +1,5 @@
-import {
-  text, integer, boolean, date, timestamp, json,
-  defineConfig, job, db, HttpError,
-  table, select, ref, query, mutation,
-} from "spacepress";
+import { text, integer, boolean, date, timestamp, json, defineConfig, job, table, select, ref, query, mutation } from "spacepress";
+import { db, HttpError } from "spacepress/server";
 import { UNITS, LOW_STOCK, timestamps, slugify } from "./sp/lib/fields";
 
 // Composition is plain TypeScript: shared field sets, factories, spreads.

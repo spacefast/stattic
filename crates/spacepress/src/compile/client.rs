@@ -16,6 +16,9 @@ use crate::client_component::{Analysis, Binding, refuse};
 /// seeded `{ data, error, loading }` ([`Compiler::client_live_seed`]).
 pub(super) const LIVE_SEED: &str = "__sp_live_";
 
+/// The name a `useMutation` field's initial server state is read through: `{ pending: false, error: undefined }`.
+pub(super) const MUTATION_SEED: &str = "__sp_mutation_";
+
 /// The client component being compiled: its analysis, and whether the root element is still to come.
 pub(super) struct ClientCtx {
     pub analysis: Analysis,
@@ -71,6 +74,23 @@ impl Compiler<'_, '_> {
                         span: *span,
                     });
                 }
+                // `useMutation`: initial reactive `{ pending: false, error: undefined }` state on the server.
+                Stmt::Decl {
+                    pat: Pat::Id(name, nspan),
+                    span,
+                    ..
+                } if analysis.mutations.iter().any(|(f, _)| f == name) => {
+                    out.push(Stmt::Decl {
+                        kind: DeclKind::Const,
+                        pat: Pat::Id(name.clone(), *nspan),
+                        ann: None,
+                        init: Some(Expr {
+                            kind: ExprKind::Ident(format!("{MUTATION_SEED}{name}")),
+                            span: *span,
+                        }),
+                        span: *span,
+                    });
+                }
                 Stmt::Decl {
                     pat: Pat::Id(name, _), ..
                 } if matches!(analysis.bindings.get(name), Some(Binding::Action | Binding::Ref)) => {}
@@ -97,6 +117,9 @@ impl Compiler<'_, '_> {
                 fields.push(name.clone());
             }
             for (name, ..) in &ctx.analysis.live {
+                fields.push(name.clone());
+            }
+            for (name, _) in &ctx.analysis.mutations {
                 fields.push(name.clone());
             }
             for name in &ctx.analysis.props {
@@ -700,6 +723,20 @@ impl Compiler<'_, '_> {
         state.insert("loading".to_string(), (Ty::Bool, false));
         Ok(Out::atom(
             format!("\\SpacePress\\Islands::live({}, {}, {on})", php_str(&kind), q.php),
+            Ty::Obj(state),
+        ))
+    }
+
+    /// A `useMutation` field's initial state on first server render: `{ pending: false, error: undefined }`.
+    pub(super) fn client_mutation_seed(&mut self) -> Result<Out> {
+        let mut error = IndexMap::new();
+        error.insert("code".to_string(), (Ty::Str, false));
+        error.insert("message".to_string(), (Ty::Str, false));
+        let mut state = IndexMap::new();
+        state.insert("pending".to_string(), (Ty::Bool, false));
+        state.insert("error".to_string(), (Ty::union([Ty::Obj(error), Ty::Undefined]), false));
+        Ok(Out::atom(
+            "(new \\SpacePress\\JsObject(['pending' => false, 'error' => \\SpacePress\\JsUndefined::Value]))",
             Ty::Obj(state),
         ))
     }

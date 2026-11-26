@@ -204,10 +204,10 @@ pub fn capture(fs: Rc<dyn Fs>, project: &Path, packages: bool) -> Result<Capture
     }
     let mut app = SourceBundle::default();
     let mut vendor = SourceBundle::default();
-    if fs.exists(&project.join(crate::pipeline::OLD_LEDGER)) {
-        return Err(crate::pipeline::moved_ledger());
+    if fs.exists(&project.join(program.layout.old_ledger())) {
+        return Err(crate::pipeline::moved_ledger_for(&program.layout));
     }
-    let migration_dir = project.join(crate::pipeline::LEDGER);
+    let migration_dir = project.join(program.layout.migrations());
     if fs.is_dir(&migration_dir) {
         for path in fs.read_dir(&migration_dir).map_err(io)? {
             let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -1008,19 +1008,27 @@ pub(crate) fn compile_tree(
         source,
         [(APP_FILE, &manifest.app_sha256), (VENDOR_FILE, &manifest.vendor_sha256)],
     )?;
+    let layout = sources
+        .files
+        .get(crate::layout::CONFIG)
+        .map(|src| crate::layout::Layout::from_config_source(Path::new(crate::layout::CONFIG), src))
+        .transpose()?
+        .unwrap_or_default();
+    let old_ledger = layout.old_ledger();
     if sources.files.keys().any(|path| {
-        path.strip_prefix(crate::pipeline::OLD_LEDGER)
+        path.strip_prefix(&old_ledger)
             .is_some_and(|suffix| suffix.starts_with('/'))
     }) {
-        return Err(crate::pipeline::moved_ledger());
+        return Err(crate::pipeline::moved_ledger_for(&layout));
     }
     // A capture from before `sp/app/` may hold TSX pages for the old renderer (`pages/`, with
     // their `sp/pages.json` artifact). There is no renderer for them any more, and compiling the
     // rest would publish the site without its pages.
-    if let Some(path) = sources
-        .files
-        .keys()
-        .find(|p| *p == "sp/pages.json" || p.starts_with("pages/"))
+    if layout.is_default()
+        && let Some(path) = sources
+            .files
+            .keys()
+            .find(|p| *p == "sp/pages.json" || p.starts_with("pages/"))
     {
         return Err(failure(format!(
             "this bundle has TSX pages from the old pages renderer ({path}), which SpacePress no longer has"
@@ -1031,11 +1039,12 @@ pub(crate) fn compile_tree(
     }
     let name = manifest.name;
     let root = source.join("modules");
+    let ledger_prefix = layout.migrations();
     let source_migrations = sources
         .files
         .iter()
         .filter_map(|(path, text)| {
-            path.strip_prefix(crate::pipeline::LEDGER)?
+            path.strip_prefix(&ledger_prefix)?
                 .strip_prefix('/')
                 .map(|name| (name, text))
         })

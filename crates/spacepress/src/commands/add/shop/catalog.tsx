@@ -1,7 +1,7 @@
 import { integer } from "spacepress";
-import { products } from "spacepress:db";
+import { products } from "spacepress/server/db";
 import { Pagination } from "spacepress/app";
-import { get_option } from "php/wordpress";
+import { get_option } from "spacepress/server/wp";
 export const metadata = { title: "Shop", description: "Simple, useful things for everyday living." };
 export const search = { catalogPage: integer().min(1).default(1) };
 export default async function Shop({ search }) {

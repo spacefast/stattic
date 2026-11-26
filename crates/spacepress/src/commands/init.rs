@@ -80,30 +80,33 @@ fn field_list(fields: &Value) -> String {
 fn section(project: &Value) -> String {
     let api = describe::API;
     let name = project["name"].as_str().unwrap_or_default();
+    let dir = project["dir"].as_str().unwrap_or(crate::layout::ROOT);
     let mut s = format!(
         "{BEGIN}\n## SpacePress\n\n\
          Written by `spacepress init` from this project's config; edit outside this section, and run `spacepress init` again \
          after the config changes.\n\n\
-         This project is the SpacePress app `{name}`. SpacePress compiles `spacepress.config.ts` and the `sp/` folder into WordPress \
+         This project is the SpacePress app `{name}`. SpacePress compiles `spacepress.config.ts` and the `{dir}/` folder into WordPress \
          plugins. Server code is TypeScript compiled to PHP: a documented subset, not Node.js.\n\n\
          ### Rules\n\n\
-         - Server TypeScript compiles to PHP — never import Node.js built-ins (`fs`, `path`, `crypto`, `process`) or arbitrary npm packages in `spacepress.config.ts`, `sp/app/`, actions, hooks, or jobs.\n\
-         - Keep import boundaries exact: schema & server builders (`collection`, `table`, `global`, `wp`, `query`, `mutation`, `job`, `cron`, `db`, `HttpError`, `defineConfig`) come from `\"spacepress\"`; visitor-scoped kind queries come from `\"spacepress:db\"`; server page helpers (`Link`, `Content`, `useFormState`) come from `\"spacepress/app\"`; interactive hooks (`useState`, `useLive`) come from `\"spacepress/client\"` inside `\"use client\"` components only.\n\
-         - Headful WordPress is the default: pages in `sp/app/` compile to server-rendered PHP and `\"use client\"` components compile to WordPress Interactivity API islands. Only reach for `sp/_generated/client/` or `@spacepress/astro` when building a separate external frontend.\n\
+         - Server TypeScript compiles to PHP — never import Node.js built-ins (`fs`, `path`, `crypto`, `process`) or arbitrary npm packages in `spacepress.config.ts`, `{dir}/app/`, actions, hooks, or jobs.\n\
+         - Keep import boundaries exact (the path says where code runs): schema & DSL builders (`collection`, `table`, `global`, `wp`, `query`, `mutation`, `job`, `cron`, `env`, `defineConfig`) come from `\"spacepress\"`; server runtime APIs (`db`, `HttpError`, `once`, `mail`, `connectors`) come from `\"spacepress/server\"`; visitor-scoped kind queries come from `\"spacepress/server/db\"`; server page helpers (`Link`, `Content`, `useFormState`, `notFound`, `redirect`) come from `\"spacepress/app\"`; navigation/OpenAPI helpers come from `\"spacepress/content\"`; WordPress core functions & abilities come from `\"spacepress/server/wp\"`; standard React hooks (`useState`, `useEffect`, `useRef`) come from `\"react\"`, SpacePress client hooks (`useLive`, `useMutation`, `useMount`, `useEvent`, `sharedState`, `uploadFile`) come from `\"spacepress/react\"`, and typed client refs (`api`) come from `{dir}/_generated/api` inside `\"use client\"` components only.\n\
+         - Never import `spacepress/server` or `spacepress/server/*` inside a `\"use client\"` component — use `api` from `{dir}/_generated/api` with `useLive(api.<kind>.list(...))` / `useMutation(api.actions.<name>)` from `\"spacepress/react\"` (or `spacepress/client` in external frontends).\n\
+         - Pages and layouts under `{dir}/app/` can `import type {{ PageProps, LayoutProps, StaticParams }} from \"./$types\"` (generated under `{dir}/_generated/types/` via `tsconfig.json` `rootDirs`) instead of repeating route strings.\n\
+         - Headful WordPress is the default: pages in `{dir}/app/` compile to server-rendered PHP and `\"use client\"` components compile to WordPress Interactivity API islands. Only reach for `{dir}/_generated/client/` or `@spacepress/astro` when building a separate external frontend.\n\
          - Pick `collection()` for editorial content (Gutenberg, drafts, revisions, comments, `sync: \"content/**/*.md\"`) and `table()` for relational app data in SQL tables.\n\
          - Use `.column(\"old_name\")` when renaming a field and `storageName: \"old_table\"` when renaming a table export to keep its physical SQL name.\n\
-         - Set explicit `access` rules on kinds and server functions and a `guard` on routes. Use `spacepress:db` for user-facing reads and `destructive: true` on mutations that perform destructive work.\n\
-         - Run `spacepress check` after every edit to `spacepress.config.ts` or `sp/` (`spacepress check --fix` applies lint fixes such as `capital_P_dangit`).\n\
-         - Never edit `sp/_generated/` or `sp/dist/`: `spacepress build` writes them. Commit `sp/_generated/`.\n\
+         - Set explicit `access` rules on kinds and server functions and a `guard` on routes. Use `spacepress/server/db` for user-facing reads and `destructive: true` on mutations that perform destructive work.\n\
+         - Run `spacepress check` after every edit to `spacepress.config.ts` or `{dir}/` (`spacepress check --fix` applies lint fixes such as `capital_P_dangit`).\n\
+         - Never edit `{dir}/_generated/` or `{dir}/dist/`: `spacepress build` writes them. Commit `{dir}/_generated/`.\n\
          - Look an API up before using it: the `docs_search` and `docs_read` tools of the `spacepress` MCP server \
          (`.mcp.json`) answer from the documentation this compiler was built with.\n\
          - `spacepress dev` runs the project on a local WordPress site; site commands such as `spacepress find <storage name>` read it (the `API` column below gives each kind's).\n\n\
          ### Layout\n\n\
-         - `spacepress.config.ts`: `export default defineConfig({{ ... }})`, the app's name and options. It may export kinds, actions and jobs too.\n\
-         - `sp/`: kinds, actions and jobs, in any file. Each registers under its export name (`export const posts = collection({{ ... }})`); `defineConfig` doesn't list them, and a kind's hooks are `.on({{ ... }})` on its declaration.\n\
-         - `sp/app/`: pages (`page.tsx`, `layout.tsx`) and HTTP routes (`route.ts`), by folder.\n\
-         - `sp/_generated/`: migrations, types and the typed client. Written by `spacepress build`.\n\
-         - `sp/dist/` and `.sp/`: build output and the local dev site. Not committed.\n\n"
+         - `spacepress.config.ts`: `export default defineConfig({{ ... }})`, the app's name and options (including optional `dir`, currently `\"{dir}\"`). It may export kinds, actions and jobs too.\n\
+         - `{dir}/`: kinds, actions and jobs, in any file. Each registers under its export name (`export const posts = collection({{ ... }})`); `defineConfig` doesn't list them, and a kind's hooks are `.on({{ ... }})` on its declaration.\n\
+         - `{dir}/app/`: pages (`page.tsx`, `layout.tsx`) and HTTP routes (`route.ts`), by folder.\n\
+         - `{dir}/_generated/`: migrations, types and the typed client. Written by `spacepress build`.\n\
+         - `{dir}/dist/` and `.sp/`: build output and the local dev site. Not committed.\n\n"
     );
     let kinds = project["kinds"].as_object().filter(|kinds| !kinds.is_empty());
     s.push_str("### Kinds\n\n");
@@ -505,7 +508,8 @@ pub(super) fn stale_hint(project: &Path, schema: &crate::schema::Schema) -> Opti
     if !installed(project) && !super::init_github::written(project) {
         return None;
     }
-    let pending = pending(project, &describe::project(schema), false).ok()?;
+    let layout = crate::layout::Layout::from_project(project).unwrap_or_default();
+    let pending = pending(project, &describe::project_with_layout(schema, &layout), false).ok()?;
     let workflow = |(path, _): &(PathBuf, String)| path.ends_with(".github/workflows/spacepress-sync.yml");
     let agents = installed(project);
     let mut stale = Vec::new();
@@ -564,7 +568,11 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let pending = match pending(&project, &describe::project(&built.schema), github) {
+    let pending = match pending(
+        &project,
+        &describe::project_with_layout(&built.schema, &built.layout),
+        github,
+    ) {
         Ok(pending) => pending,
         Err(error) => {
             eprintln!("error: {error}");

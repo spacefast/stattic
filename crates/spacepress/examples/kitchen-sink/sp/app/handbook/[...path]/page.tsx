@@ -1,8 +1,9 @@
-import { Content, Link, notFound, type PageProps } from "spacepress/app";
+import { Content, Link, notFound } from "spacepress/app";
+import type { PageProps } from "./$types";
 import { headings, nav, pager } from "spacepress/content";
 import { handbook } from "../../../schema";
 
-export default async function Handbook({ item }: PageProps<"handbook/[...path]">) {
+export default async function Handbook({ item }: PageProps) {
   if (!item) notFound();
   const chapters = await nav(handbook, item);
   const nearby = await pager(handbook, item);

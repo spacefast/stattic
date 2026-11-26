@@ -25,9 +25,10 @@ use crate::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, BindingPattern, ExportDefaultDeclarationKind, Expression, ObjectPropertyKind,
-    PropertyKey, Statement,
+    Argument, BindingPattern, CallExpression, ExportDefaultDeclarationKind, Expression,
+    ImportDeclarationSpecifier, ImportOrExportKind, ObjectPropertyKind, PropertyKey, Statement,
 };
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use serde_json::Value;
@@ -335,28 +336,290 @@ fn current_relative_import(path: &str, name: &str) -> String {
     components.join("/")
 }
 
+const LEGACY_SERVER_EXPORTS: &[&str] = &["db", "HttpError", "once", "mail", "connectors"];
+const LEGACY_REACT_CORE_HOOKS: &[&str] = &["useState", "useEffect", "useRef"];
+const LEGACY_SPACEPRESS_REACT_HOOKS: &[&str] = &[
+    "useMount",
+    "useEvent",
+    "sharedState",
+    "uploadFile",
+    "useLive",
+    "useMutation",
+];
+
+fn is_legacy_root_spacepress_module(name: &str) -> bool {
+    matches!(
+        name,
+        "spacepress" | "typedpress" | "@spacefast/spacepress" | "spacefast/app"
+    )
+}
+
+fn is_legacy_client_spacepress_module(name: &str) -> bool {
+    matches!(
+        name,
+        "spacepress/client" | "typedpress/client" | "@spacefast/spacepress/client"
+    )
+}
+
+fn remap_legacy_module_specifier(path: &str, name: &str) -> Option<String> {
+    if matches!(
+        name,
+        "typedpress:db" | "spacepress:db" | "@spacefast/spacepress:db"
+    ) {
+        Some("spacepress/server/db".into())
+    } else if name == "php/wordpress" {
+        Some("spacepress/server/wp".into())
+    } else if name == "@spacefast/spacepress/client" {
+        Some("spacepress/client".into())
+    } else if name == "typedpress" || name.starts_with("typedpress/") {
+        Some(name.replacen("typedpress", "spacepress", 1))
+    } else if name.starts_with("./") || name.starts_with("../") {
+        let mapped = current_relative_import(path, name);
+        (mapped != name).then_some(mapped)
+    } else {
+        None
+    }
+}
+
+fn is_valid_js_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+fn relative_generated_api_import(path: &str) -> String {
+    let canonical = current_source_path(path);
+    let inside = canonical
+        .strip_prefix("sp/")
+        .or_else(|| canonical.split_once('/').map(|(_, rest)| rest))
+        .unwrap_or(&canonical);
+    let depth = inside.matches('/').count();
+    if depth == 0 {
+        "./_generated/api".into()
+    } else {
+        format!("{}_generated/api", "../".repeat(depth))
+    }
+}
+
+struct LegacyUseLiveFinder<'a> {
+    source: &'a str,
+    use_live_locals: &'a BTreeSet<String>,
+    edits: Vec<(usize, usize, String)>,
+}
+
+impl<'a> Visit<'a> for LegacyUseLiveFinder<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Expression::Identifier(ident) = &call.callee {
+            if self.use_live_locals.contains(ident.name.as_str()) {
+                if let Some(Argument::StringLiteral(kind_lit)) = call.arguments.first() {
+                    let kind = kind_lit.value.as_str();
+                    if is_valid_js_ident(kind)
+                        && (1..=3).contains(&call.arguments.len())
+                        && call
+                            .arguments
+                            .iter()
+                            .all(|arg| !matches!(arg, Argument::SpreadElement(_)))
+                    {
+                        let local = ident.name.as_str();
+                        let replacement = match call.arguments.as_slice() {
+                            [_] => format!("{local}(__sp_legacy_api.{kind}.list())"),
+                            [_, query] => {
+                                let q = self
+                                    .source
+                                    .get(query.span().start as usize..query.span().end as usize)
+                                    .unwrap_or("{}");
+                                format!("{local}(__sp_legacy_api.{kind}.list({q}))")
+                            }
+                            [_, query, opts] => {
+                                let q = self
+                                    .source
+                                    .get(query.span().start as usize..query.span().end as usize)
+                                    .unwrap_or("{}");
+                                let o = self
+                                    .source
+                                    .get(opts.span().start as usize..opts.span().end as usize)
+                                    .unwrap_or("{}");
+                                format!("{local}(__sp_legacy_api.{kind}.list({q}), {o})")
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.edits.push((
+                            call.span.start as usize,
+                            call.span.end as usize,
+                            replacement,
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
 fn current_source_text(path: &str, mut text: String) -> String {
     let Ok(kind) = SourceType::from_path(path) else {
         return text;
     };
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &text, kind).parse();
-    let mut edits = Vec::new();
-    for (specifier, requests) in &parsed.module_record.requested_modules {
-        let name = specifier.as_str();
-        let replacement =
-            if name == "typedpress" || name.starts_with("typedpress/") || name == "typedpress:db" {
-                name.replacen("typedpress", "spacepress", 1)
-            } else if name.starts_with("./") || name.starts_with("../") {
-                let mapped = current_relative_import(path, name);
-                if mapped == name {
-                    continue;
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let mut handled_specifier_spans: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut use_live_locals: BTreeSet<String> = BTreeSet::new();
+
+    // Previously released CLIs and existing apps may import server runtime symbols
+    // (`db`, `HttpError`, `once`, `mail`, `connectors`) from the root `spacepress`
+    // module, or React/Interactivity hooks from `spacepress/client`. Rewrite those
+    // imports (and legacy string-first-arg `useLive("kind", ...)` calls) so existing
+    // apps keep compiling without forcing an immediate rewrite.
+    for stmt in &parsed.program.body {
+        let Statement::ImportDeclaration(import) = stmt else {
+            continue;
+        };
+        let spec = import.source.value.as_str();
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        if import.import_kind != ImportOrExportKind::Type
+            && (is_legacy_client_spacepress_module(spec)
+                || matches!(spec, "spacepress/react" | "@spacefast/client/react"))
+        {
+            for item in specifiers {
+                if let ImportDeclarationSpecifier::ImportSpecifier(named) = item {
+                    if named.import_kind != ImportOrExportKind::Type
+                        && named.imported.name().as_str() == "useLive"
+                    {
+                        use_live_locals.insert(named.local.name.to_string());
+                    }
                 }
-                mapped
-            } else {
+            }
+        }
+        let type_kw = if import.import_kind == ImportOrExportKind::Type {
+            "type "
+        } else {
+            ""
+        };
+        if is_legacy_root_spacepress_module(spec) {
+            let mut root_specs = Vec::new();
+            let mut server_specs = Vec::new();
+            let mut can_split = true;
+            for item in specifiers {
+                match item {
+                    ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                        let slice = text
+                            .get(named.span.start as usize..named.span.end as usize)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if LEGACY_SERVER_EXPORTS.contains(&named.imported.name().as_str()) {
+                            server_specs.push(slice);
+                        } else {
+                            root_specs.push(slice);
+                        }
+                    }
+                    _ => {
+                        can_split = false;
+                        break;
+                    }
+                }
+            }
+            if !can_split || server_specs.is_empty() {
                 continue;
+            }
+            let replacement = if root_specs.is_empty() {
+                format!(
+                    "import {type_kw}{{ {} }} from \"spacepress/server\";",
+                    server_specs.join(", ")
+                )
+            } else {
+                format!(
+                    "import {type_kw}{{ {} }} from \"spacepress\";\nimport {type_kw}{{ {} }} from \"spacepress/server\";",
+                    root_specs.join(", "),
+                    server_specs.join(", ")
+                )
             };
+            handled_specifier_spans.insert((
+                import.source.span.start as usize,
+                import.source.span.end as usize,
+            ));
+            edits.push((
+                import.span.start as usize,
+                import.span.end as usize,
+                replacement,
+            ));
+        } else if is_legacy_client_spacepress_module(spec) {
+            let mut react_specs = Vec::new();
+            let mut sp_react_specs = Vec::new();
+            let mut client_specs = Vec::new();
+            let mut can_split = true;
+            for item in specifiers {
+                match item {
+                    ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                        let slice = text
+                            .get(named.span.start as usize..named.span.end as usize)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let name = named.imported.name().as_str();
+                        if LEGACY_REACT_CORE_HOOKS.contains(&name) {
+                            react_specs.push(slice);
+                        } else if LEGACY_SPACEPRESS_REACT_HOOKS.contains(&name) {
+                            sp_react_specs.push(slice);
+                        } else {
+                            client_specs.push(slice);
+                        }
+                    }
+                    _ => {
+                        can_split = false;
+                        break;
+                    }
+                }
+            }
+            if !can_split || (react_specs.is_empty() && sp_react_specs.is_empty()) {
+                continue;
+            }
+            let mut parts = Vec::new();
+            if !react_specs.is_empty() {
+                parts.push(format!(
+                    "import {type_kw}{{ {} }} from \"react\";",
+                    react_specs.join(", ")
+                ));
+            }
+            if !sp_react_specs.is_empty() {
+                parts.push(format!(
+                    "import {type_kw}{{ {} }} from \"spacepress/react\";",
+                    sp_react_specs.join(", ")
+                ));
+            }
+            if !client_specs.is_empty() {
+                parts.push(format!(
+                    "import {type_kw}{{ {} }} from \"spacepress/client\";",
+                    client_specs.join(", ")
+                ));
+            }
+            handled_specifier_spans.insert((
+                import.source.span.start as usize,
+                import.source.span.end as usize,
+            ));
+            edits.push((
+                import.span.start as usize,
+                import.span.end as usize,
+                parts.join("\n"),
+            ));
+        }
+    }
+
+    for (specifier, requests) in &parsed.module_record.requested_modules {
+        let Some(replacement) = remap_legacy_module_specifier(path, specifier.as_str()) else {
+            continue;
+        };
         for request in requests {
+            if handled_specifier_spans
+                .contains(&(request.span.start as usize, request.span.end as usize))
+            {
+                continue;
+            }
             edits.push((
                 request.span.start as usize + 1,
                 request.span.end as usize - 1,
@@ -364,11 +627,48 @@ fn current_source_text(path: &str, mut text: String) -> String {
             ));
         }
     }
-    edits.sort_by_key(|edit| edit.0);
+
+    let is_use_client = parsed
+        .program
+        .directives
+        .iter()
+        .any(|d| d.expression.value.as_str() == "use client");
+    if is_use_client && !use_live_locals.is_empty() {
+        let mut finder = LegacyUseLiveFinder {
+            source: &text,
+            use_live_locals: &use_live_locals,
+            edits: Vec::new(),
+        };
+        finder.visit_program(&parsed.program);
+        if !finder.edits.is_empty() {
+            let insert_at = parsed
+                .program
+                .directives
+                .last()
+                .map_or(0, |d| d.span.end as usize);
+            let rel_api = relative_generated_api_import(path);
+            edits.push((
+                insert_at,
+                insert_at,
+                format!("\nimport {{ api as __sp_legacy_api }} from \"{rel_api}\";"),
+            ));
+            edits.extend(finder.edits);
+        }
+    }
+
+    edits.sort_by_key(|edit| (edit.0, edit.1));
     for (start, end, replacement) in edits.into_iter().rev() {
         text.replace_range(start..end, &replacement);
     }
     text
+}
+
+fn bundle_needs_adaptation(bundle: &compiler::bundle::SourceBundle) -> bool {
+    bundle.files.iter().any(|(path, text)| {
+        path == "typedpress.config.ts"
+            || path.starts_with("tp/")
+            || current_source_text(path, text.clone()) != *text
+    })
 }
 
 fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> Result<PathBuf> {
@@ -392,12 +692,7 @@ fn prepare_captured_spacepress_sources(source_dir: &Path, compat_dir: &Path) -> 
             .map_err(|e| invalid_error("spacepress_source_layout", e.to_string()))
     };
     let app = parse(&app_raw)?;
-    if manifest["format"] == SPACEPRESS_SOURCE_FORMAT
-        && !app
-            .files
-            .keys()
-            .any(|path| path == "typedpress.config.ts" || path.starts_with("tp/"))
-    {
+    if manifest["format"] == SPACEPRESS_SOURCE_FORMAT && !bundle_needs_adaptation(&app) {
         return Ok(source_dir.to_owned());
     }
     let vendor_raw = fs::read(source_dir.join("vendor.spacepress.json")).map_err(failure)?;
@@ -763,7 +1058,7 @@ fn compiler_sources(
         ),
         AppKind::Raw => {
             compiler::host::sources(files_root, &work.capture).map_err(map_capture_error)?;
-            Ok(work.capture.clone())
+            prepare_captured_spacepress_sources(&work.capture, &work.compat_sources)
         }
         AppKind::InlineConfig => {
             let synthesized = inline_app_source.ok_or_else(|| {
@@ -780,7 +1075,7 @@ fn compiler_sources(
             .map_err(failure)?;
             compiler::host::sources(&work.compat_project, &work.capture)
                 .map_err(map_capture_error)?;
-            Ok(work.capture.clone())
+            prepare_captured_spacepress_sources(&work.capture, &work.compat_sources)
         }
     }
 }
@@ -1074,7 +1369,52 @@ fn promote_public_assets(stage: &Path, files: &mut BTreeMap<String, FileMeta>) -
 
 #[cfg(test)]
 mod tests {
-    use super::extract_inline_app_config;
+    use super::{current_source_text, extract_inline_app_config};
+
+    #[test]
+    fn current_source_text_adapts_legacy_spacepress_imports() {
+        let mixed = r#"import { db, email, HttpError, mail, mutation, table } from "spacepress";"#;
+        assert_eq!(
+            current_source_text("sp/contact.ts", mixed.into()),
+            "import { email, mutation, table } from \"spacepress\";\nimport { db, HttpError, mail } from \"spacepress/server\";"
+        );
+
+        let server_only = r#"import { db } from "spacepress";"#;
+        assert_eq!(
+            current_source_text("sp/app/page.tsx", server_only.into()),
+            "import { db } from \"spacepress/server\";"
+        );
+
+        let wp_and_db = "import { is_user_logged_in } from \"php/wordpress\";\nimport { posts } from \"spacepress:db\";\nimport { notes } from \"typedpress:db\";\n";
+        assert_eq!(
+            current_source_text("sp/app/account/page.tsx", wp_and_db.into()),
+            "import { is_user_logged_in } from \"spacepress/server/wp\";\nimport { posts } from \"spacepress/server/db\";\nimport { notes } from \"spacepress/server/db\";\n"
+        );
+
+        let desktop_client = "\"use client\";\nimport { useEvent, useMount, useState } from \"spacepress/client\";\n";
+        assert_eq!(
+            current_source_text("sp/components/desktop/SignIn.tsx", desktop_client.into()),
+            "\"use client\";\nimport { useState } from \"react\";\nimport { useEvent, useMount } from \"spacepress/react\";\n"
+        );
+
+        let scoped_aliases = "import { posts } from \"@spacefast/spacepress:db\";\nimport { createClient } from \"@spacefast/spacepress/client\";\n";
+        assert_eq!(
+            current_source_text("sp/lib.ts", scoped_aliases.into()),
+            "import { posts } from \"spacepress/server/db\";\nimport { createClient } from \"spacepress/client\";\n"
+        );
+
+        let legacy_use_live = "\"use client\";\nimport { useLive, useState } from \"spacepress/client\";\nexport function Todos() {\n  const [ready] = useState(true);\n  const a = useLive(\"todos\");\n  const b = useLive<{ id: number }>(\"todos\", { limit: 20 });\n  const c = useLive(\"todos\", { limit: 5 }, { enabled: ready });\n  return <div>{a.data}{b.data}{c.data}</div>;\n}\n";
+        assert_eq!(
+            current_source_text("sp/components/desktop/Todos.tsx", legacy_use_live.into()),
+            "\"use client\";\nimport { api as __sp_legacy_api } from \"../../_generated/api\";\nimport { useState } from \"react\";\nimport { useLive } from \"spacepress/react\";\nexport function Todos() {\n  const [ready] = useState(true);\n  const a = useLive(__sp_legacy_api.todos.list());\n  const b = useLive(__sp_legacy_api.todos.list({ limit: 20 }));\n  const c = useLive(__sp_legacy_api.todos.list({ limit: 5 }), { enabled: ready });\n  return <div>{a.data}{b.data}{c.data}</div>;\n}\n"
+        );
+
+        let modern = "import { mutation } from \"spacepress\";\nimport { db } from \"spacepress/server\";\nimport { Link } from \"spacepress/app\";\n";
+        assert_eq!(
+            current_source_text("sp/app/page.tsx", modern.into()),
+            modern
+        );
+    }
 
     #[test]
     fn inline_app_extraction_detects_app_section_and_ignores_plain_configs() {

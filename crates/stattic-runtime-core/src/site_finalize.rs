@@ -3051,6 +3051,72 @@ export default defineConfig({{ name: "hosted", admin: false }});"#
     }
 
     #[test]
+    fn finalize_compiles_spacepress_bundle_with_pre_split_imports() {
+        let app = serde_json::to_vec(&json!({
+            "files": {
+                "spacepress.config.ts": r#"import { collection, defineConfig, text } from "spacepress";
+export const notes = collection({ title: text() }, { title: "title", access: { read: "anyone" } });
+export default defineConfig({ name: "pre-split", admin: false });"#,
+                "sp/actions.ts": r#"import { db, HttpError, mutation, table, text } from "spacepress";
+export const messages = table({ body: text() }, { access: { read: "admin" } });
+export const send = mutation({ access: "anyone" }, async ({ body }: { body: string }) => {
+  if (!body) throw new HttpError(422, "invalid_input", "Required", "/body");
+  const [row] = await db.insert(messages).values({ body }).returning();
+  return { id: row?.id ?? null };
+});"#,
+                "sp/queries.ts": r#"import { query } from "spacepress";
+import { notes } from "spacepress:db";
+import { notes as scopedNotes } from "@spacefast/spacepress:db";
+export const listNotes = query({ access: "anyone" }, async () => await notes.list({ limit: 5 }));
+export const listScopedNotes = query({ access: "anyone" }, async () => await scopedNotes.list({ limit: 5 }));"#,
+                "sp/app/account/page.tsx": r#"import { is_user_logged_in } from "php/wordpress";
+import { redirect } from "spacepress/app";
+import { Account } from "../../components/Account";
+export default function AccountPage() {
+  if (!is_user_logged_in()) redirect("/login");
+  return <main><Account /></main>;
+}"#,
+                "sp/components/Account.tsx": r#""use client";
+import { useEvent, useLive, useMount, useState } from "spacepress/client";
+export function Account() {
+  const [name, setName] = useState("");
+  const liveNotes = useLive<{ id: number; title: string }>("notes", { limit: 5 });
+  useMount(() => { setName("loaded"); });
+  useEvent("focus", () => { setName("focused"); });
+  return <div><span>{name}</span><span>{liveNotes.data ? liveNotes.data.length : 0}</span></div>;
+}"#
+            },
+            "canonical": {
+                "spacepress.config.ts": "spacepress.config.ts",
+                "sp/actions.ts": "sp/actions.ts",
+                "sp/queries.ts": "sp/queries.ts",
+                "sp/app/account/page.tsx": "sp/app/account/page.tsx",
+                "sp/components/Account.tsx": "sp/components/Account.tsx"
+            }
+        }))
+        .unwrap();
+        let vendor = br#"{"files":{},"canonical":{}}"#;
+        let manifest = serde_json::to_vec(&json!({
+            "format": "spacepress.source-bundle.v1",
+            "name": "pre-split",
+            "app_sha256": sha256(&app),
+            "vendor_sha256": sha256(vendor),
+        }))
+        .unwrap();
+        let (_temp, private, result) = finalize_fixture(
+            &[
+                (".spacepress-source/app.spacepress.json", &app),
+                (".spacepress-source/vendor.spacepress.json", vendor),
+                (".spacepress-source/manifest.json", &manifest),
+            ],
+            json!({"mode": "website"}),
+            json!({"zero_generation": "spacepress"}),
+        );
+        result.unwrap();
+        crate::spacepress::recompile(&private, "s", "v", None).unwrap();
+    }
+
+    #[test]
     fn finalize_compiles_inline_app_in_spacefast_config_ts_with_frontend() {
         let (_temp, private, result) = finalize_fixture(
             &[

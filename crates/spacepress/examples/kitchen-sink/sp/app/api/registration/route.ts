@@ -1,5 +1,6 @@
-import { db, env } from "spacepress";
-import { sanitize_title } from "php/wordpress";
+import { env } from "spacepress";
+import { db } from "spacepress/server";
+import { sanitize_title } from "spacepress/server/wp";
 import type { RouteRequest, RouteResponse } from "spacepress/app";
 import { events } from "../../../schema";
 

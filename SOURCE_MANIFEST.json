@@ -1,7 +1,7 @@
 {
-  "revision": "c76fd6a9e35188e6a1cefbb79a2f022121c7209e",
-  "sourceHash": "6440514f555cbe6aeff831e2ccf73dd245a7b0755eb8c3fc054b1c9012fc6627",
-  "manifestSha256": "e7924a72c0f0acd3d3cdf3c2c4735c1be936c45d9b7968a0cbc6664dd9e086b4",
+  "revision": "4c42afec544a8e0b83db8e2c1665504476db625f",
+  "sourceHash": "a32b5f2fb20dc0934967f734f92aea06b8c12e03b3ba8f5406bbe772be1890c1",
+  "manifestSha256": "42327055b0cd59e5c03b862ed07f376e1e6e1033b61b138ac95c94837ef865af",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "d12e52066d05d1a4bc15c6d96162428a4af8db342cb5850ec769297e62ab6656"
+      "sha256": "81507fba254ef66368cf4d9ac7a9425667218c5397c0fb74f58d41081de0062d"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "dd16468e93a93ac53b1d7d3235200183fb4d1f6b030403e1400871f7a2e6b43a"
+      "sha256": "712cf9551cf385c674a14dbafbaa912c5960fd159a19ce06843d01c53bb7a996"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -41,7 +41,7 @@
     },
     {
       "path": "crates/spacefast-secret-scan/src/lib.rs",
-      "sha256": "c8a6013e117a0caad73ada38c735730dffc53758125c29ae970855b6531ce918"
+      "sha256": "2ebee5db2780e48e2cee24846af0a90f8d3747edfcf787ddad48626cd27e6397"
     },
     {
       "path": "crates/spacefast-secret-scan/src/tiers.rs",
@@ -73,7 +73,7 @@
     },
     {
       "path": "crates/spacepress/SOURCE.json",
-      "sha256": "09f692bbf14987fc02dbbd51521e68cf41d3ff3c65280d64e07eb8c9c1ffb59c"
+      "sha256": "d064173bc091d6d82083fddb4ab7c6af0f9d8f041a83d64d2203de7e04ac6029"
     },
     {
       "path": "crates/spacepress/build.rs",
@@ -122,6 +122,14 @@
     {
       "path": "crates/spacepress/examples/blog/public/index.html",
       "sha256": "2d90fe75de9aa87e203f0df8cb5544c743bca9486f8653e69d1739b2a70bfaf7"
+    },
+    {
+      "path": "crates/spacepress/examples/blog/sp/_generated/api.d.ts",
+      "sha256": "1e4bfb50138310cb0e9c7680314670ce85e671d3b09bb5763afdea894edfc17c"
+    },
+    {
+      "path": "crates/spacepress/examples/blog/sp/_generated/api.js",
+      "sha256": "6347c4768b11b4af65d22adcbc0c43aaa29c63ae1cea50df777513204d7734e5"
     },
     {
       "path": "crates/spacepress/examples/blog/sp/_generated/client/LICENSE",
@@ -181,11 +189,11 @@
     },
     {
       "path": "crates/spacepress/examples/blog/spacepress.config.ts",
-      "sha256": "658fd835936f315ab5ed163a7d68964f57ab770187c853331c3deeb7cf12cd84"
+      "sha256": "61e59e0b9e803f97e9b369a75f78882ea9c72544a6d4e8fb4be2d78ab6ca792d"
     },
     {
       "path": "crates/spacepress/examples/blog/tsconfig.json",
-      "sha256": "b8aaea167d194fb7363c92b10d6cbb8da9e5bc69e59af453003e09b80f0a5473"
+      "sha256": "80a689c67f98cd1c428451d36548a7727f9ddedf72f8d0beb5c875e24a71d54c"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/.gitignore",
@@ -222,6 +230,14 @@
     {
       "path": "crates/spacepress/examples/kitchen-sink/emails/reservation.tsx",
       "sha256": "eb665e90cd1a71ef1f71c963ec5c3bbff3aea5e803d9f89a17556488089c1452"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/api.d.ts",
+      "sha256": "ab9d139696d9ca410af76bdcdd0f464c1b0e50f8e7253d5cff5ac95a550d88af"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/api.js",
+      "sha256": "fc6a3283327df3b4dcd4358a22fa533a61240bc1157aad6b04c37ae35ec197d3"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/client/LICENSE",
@@ -269,7 +285,7 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/db.d.ts",
-      "sha256": "dfcfdfa3143fa4c1b467a51dc2fb1c075c78707e13a92fc412e86f7f3495290b"
+      "sha256": "b3c1b34470d9e9fd0a649853a82dec677792413d20708e92bb3be195855e9ac5"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/migrations/20261121201832_y6t2t9_init/migration.sql",
@@ -289,11 +305,87 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/routes.d.ts",
-      "sha256": "9b34650c92bcc6b14c1dc5808e9f20d64d6c7bbcc74bfdcc9969ba9eae21afbd"
+      "sha256": "02a1d1005a45284051d60b54b90fe835122594ae698fdf8b9c64597bb55d0945"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/theme.css",
       "sha256": "20307b4b06fff8ca0742f7e2e25f824869cc3d627faa1e2e88d570aeef4c30a4"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/$types.d.ts",
+      "sha256": "cebf0806a875a2f34856332d27972233e35dc3444209837edfc389f4a205b9f5"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/about/$types.d.ts",
+      "sha256": "5592b0e41bd55a92d68e856de75837b922ece06e8e3530c7d7d04879e4cc2d2a"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/api/registration/$types.d.ts",
+      "sha256": "1bf485328e043991f512e812fe8408e775c747db140fa3be01d90765869ff8d4"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/api/schedule/$types.d.ts",
+      "sha256": "e5dc6594503ca3086ceffb1d1acf0f2a813461c7b228452914ee6dfbe092cdee"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/cart/$types.d.ts",
+      "sha256": "6173623eb7c5b8ef6b9319e63dfb24c80bef8218fcb84ed941c7f4d2583f4ca0"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/checkout/$types.d.ts",
+      "sha256": "c8ac5b1b2c97bce710bd4992e4b2dc606ff916d2102374b737721d32df8bc6c4"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/contact/$types.d.ts",
+      "sha256": "36ed1a7e0d0272b8bb29674454bbf45fa2f914a9966aa317036930a29a682fd3"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/events/[slug]/$types.d.ts",
+      "sha256": "afea6457545a082ac8fd53b75e2de2862b7106c073f93ff1b110576de1250674"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/find/$types.d.ts",
+      "sha256": "2e10770e69ad22535292602ae6f348ebb6fb98039769a2b61ae494dd9d084135"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/handbook/$types.d.ts",
+      "sha256": "076a7ab780a04899d0ba4ddb64a13c154dfeb906435c026ba2e9cca8864c832f"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/handbook/[...path]/$types.d.ts",
+      "sha256": "8d21e7b3c1a56092a01f4b8304e8a6160a93da3dffd7fdfaade0c4d86a451d8e"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/journal/[slug]/$types.d.ts",
+      "sha256": "51ca4f0fbd1c09fe680e9f585de9cdd7aad028f4ccda16b9a8fed1b2514795e5"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/recipes/$types.d.ts",
+      "sha256": "f7ed9f91a84812f6a234dbd79450a35b7e17afbc3dbd840835db55257105f64f"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/recipes/[slug]/$types.d.ts",
+      "sha256": "4b0926af3bfd2a271a565d62af7bf09d5183f9bf48e54a35536bae529a72c9c9"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/shop/$types.d.ts",
+      "sha256": "8b56394dce5269cb01eb8baf73ad12fafd79545a906865dd3e7def27d06241ee"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/staff/$types.d.ts",
+      "sha256": "4347d0c5a159f0573f924a378ee2e95012c4cfdd50028f64dc6c340f4dad6a5c"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/start/$types.d.ts",
+      "sha256": "409b4ad462dc98f63faa2246c8134fa02e24f84b1e6d4b2d56df8c9505ee7cd6"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/supplies/[slug]/$types.d.ts",
+      "sha256": "08412b6c6c4d87322f2389a09cb3f3d40965e4f10040e8286e7440220b4ba2f4"
+    },
+    {
+      "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/types/sp/app/visits/[day]/$types.d.ts",
+      "sha256": "23d05211c73ddf652dbe9d6cfd0f49aaa64d8cf9390fad7be6fa31bec262b7c7"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/_generated/wp-plugins.lock.json",
@@ -305,11 +397,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/api/registration/route.ts",
-      "sha256": "0aaf75153add376438d6176e3f5702c9b77235865109ad20979df156d1b8c174"
+      "sha256": "90eb93348d4a32871fcded15bb54c49a3ae773b909c3d545f564a7da5e0d75df"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/api/schedule/route.ts",
-      "sha256": "151b965f9c082c9bcb1086d304d7fb3114b7f0d73b7431249a8fe51bd833d0dd"
+      "sha256": "7b27789ad9d30ec6c35085e277c52d697774bcc1312d0907f64fcea85500428e"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/cart/page.md",
@@ -329,7 +421,7 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/events/[slug]/page.tsx",
-      "sha256": "cb1c2e6794365a6eba4750e81f317957213474b246470c1ffe8c814fdbc319c7"
+      "sha256": "9ce229acd2aac01d9f4a16654462748336e7bff48b514b86cec9da7720818b56"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/events/[slug]/workshop.module.css",
@@ -337,11 +429,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/find/page.tsx",
-      "sha256": "2bea4dde2a7793b2aacd13a4c7946e10511283f0615db71fb90b1f0050bfc83e"
+      "sha256": "cf494f3fb5e7912c8db3a60b7d41fde7822e305ebd9a70238259ff752324fe2b"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/handbook/[...path]/page.tsx",
-      "sha256": "5a71eac7936bb0732c84b6ba527519c9580e83187775828778e9e3573435e7c3"
+      "sha256": "4728793ba8b5c7f4ece36638a62a0326ef368a0ab62d3bcdb0f348c5d7fc1618"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/handbook/page.tsx",
@@ -349,11 +441,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/journal/[slug]/page.tsx",
-      "sha256": "159d7db592b48f9080e796330d58d30ddbcb453c35f4ba60f376734a7ab401d3"
+      "sha256": "0e40fbeaf84ad7939d5afe01bf78b70be11a5d05a25448e4e4c4742d8a7d0792"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/layout.tsx",
-      "sha256": "71d8f7ee1b98d94961b460f81398e2ac0e1a3de9f83eb959a57323ed8f6eb278"
+      "sha256": "ff691faea8f4ce0d2d10bb2d70fc90f1e2a9bd154b36c37312becd4dee3d587d"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/login.tsx",
@@ -365,19 +457,19 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/page.tsx",
-      "sha256": "7cff0b21751bf135595a69ea2de6ccd0af7b35e1b632ca5cf21ad6eb23971107"
+      "sha256": "bb5d3c4e4e14dc9ce71f6e240ffd898244b1534da266e9d286ba81673188c616"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/recipes/[slug]/page.tsx",
-      "sha256": "13f3cf9b8e14bb079a045ab6c3c60ab9c6e55fbd79160cf6647b08ba46e9b618"
+      "sha256": "4793c834d9e748f326a1e220f128fff4c340e8cae6b63910c6ecd0fc61cdce71"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/recipes/page.tsx",
-      "sha256": "4ba50bacb4430216833407326354f4bdb37fa08c02555c26890fafadf2836d70"
+      "sha256": "cc837e4afd75393d1278c2298915d10b9ed018be86ad24f23b99e1a032db9d2b"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/shop/page.tsx",
-      "sha256": "76949005eeec8a65e0bb87d0df6ae6aaa5a4adf8c41b2a07b84cbf2c88199517"
+      "sha256": "d0e017a90765f99363f33f5efffcaa9182ce172dcbf9494425e7259430bd0e6c"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/site.css",
@@ -389,7 +481,7 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/staff/page.tsx",
-      "sha256": "42d97383609ab9b6d462454fd0930b5c85c003f18e4784a0d3184f090e5c4e35"
+      "sha256": "55edc7c3119f757a3f951546107dd6395ac2e89df40d69d3cddb39c14a09ef80"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/start/page.tsx",
@@ -397,11 +489,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/supplies/[slug]/page.tsx",
-      "sha256": "a87203d958423aab6be118ee77169cded0674da17bd8a11555ee05c05c7fa3dc"
+      "sha256": "b466f12305cee132eab53d5e3c0a73406155162c5ed4714f9e70f6c2b0cc964d"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/visits/[day]/page.tsx",
-      "sha256": "e6082c8b6bfd62fe9174fd0a08363eb38d4fe8dd5276d848547d6314fe59e214"
+      "sha256": "a9b59f296ece103b4e250dcab2b652e2b0b1776c0ba54c11737d4173185b05e9"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/app/whisk.svg",
@@ -413,7 +505,7 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/components/WorkshopBoard.tsx",
-      "sha256": "413999de1ba9c9575a3afbb044600b8c2b488f8837a1cd3fab71dedaa03f2458"
+      "sha256": "b912a9e71a65b6c4ad25396692b4557497b5cf063feab2cfead864b495136d20"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/plugins/kitchen-policy/index.ts",
@@ -425,11 +517,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/schema.ts",
-      "sha256": "65fca53c94e2b63ae1e6f67935605088efd9c3f9367fac480f950086896f5fac"
+      "sha256": "b221373a87860a56a5d52eb48dc9ec8e15782ad760a8b9e8e4ea312416aa0c59"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/server.ts",
-      "sha256": "300985f32416a8e6ec340a818bbd51af0eca2311adbaeb273067f9eb7b1f80e4"
+      "sha256": "23d677b60fea8e83841fe966c41ce7887e3cc415819ba94546cd101180a6f872"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/shop.ts",
@@ -437,11 +529,11 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/wp-hooks/excerpt_more.ts",
-      "sha256": "aef4ff80cb1eee0d4712404e366f6dad134a7e0f83045dde484cc938a218e0c8"
+      "sha256": "e130858a00dd652d5660a91b39160fea0afe20bbb2592a14f6a49aea3c4f18e8"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/sp/wp-hooks/login_message.ts",
-      "sha256": "c324c3adc8f8d79f663c5922dd19799ad95aeb9c9d054ed5868b11e1e31c2663"
+      "sha256": "9a00b9e0f42facb95bfb9eae7036b0fe869084aa3ef0a367b7e4f1aed7f0f23d"
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/spacepress.config.ts",
@@ -449,7 +541,7 @@
     },
     {
       "path": "crates/spacepress/examples/kitchen-sink/tsconfig.json",
-      "sha256": "19ba3128d9407873a510823cfb101fe17958b0860332f902c3d849685032d3de"
+      "sha256": "43949cf3449466070f7393a1b9c88acfe2b5fa3b9ca0d935a1c14325a8580d41"
     },
     {
       "path": "crates/spacepress/examples/pantry/playground-seed.php",
@@ -458,6 +550,14 @@
     {
       "path": "crates/spacepress/examples/pantry/playground.json",
       "sha256": "e0511f4e81a545d9691acc8a26e3e055847bfa919b2b9091c260967fe980f1ee"
+    },
+    {
+      "path": "crates/spacepress/examples/pantry/sp/_generated/api.d.ts",
+      "sha256": "4ab3e84d92666154ba6dd9f8cc5fe92f2b2b5116213371badc6c2dd57d9afb44"
+    },
+    {
+      "path": "crates/spacepress/examples/pantry/sp/_generated/api.js",
+      "sha256": "4d06e872cf9dcd34d03cb1e88a7db1128648ab67c09f90f77e826dbb74dc43c4"
     },
     {
       "path": "crates/spacepress/examples/pantry/sp/_generated/client/LICENSE",
@@ -521,15 +621,15 @@
     },
     {
       "path": "crates/spacepress/examples/pantry/sp/schedule.ts",
-      "sha256": "b876591ba7d6e24d4f9578351e4d60f0d0b109bc92dba9f8fa7cde143fd4a410"
+      "sha256": "ae35531cfed0e3605d6c13d004f8bf39b969b4fdc49656ad4d0e0180b3bdb082"
     },
     {
       "path": "crates/spacepress/examples/pantry/spacepress.config.ts",
-      "sha256": "c759c0967f6ea3c30f0864172dee876bd052223827744e042c55b4e8c9e787f1"
+      "sha256": "d5364bd786ead4851696de11eaaa967b1be9283c9f260b6167eb5a7f8c3260bd"
     },
     {
       "path": "crates/spacepress/examples/pantry/tsconfig.json",
-      "sha256": "1d573cd33c642fa3a3b885fa10cfde33dcc6929222655c6a55473fee75be209a"
+      "sha256": "c968b677ad4198d26216c563781fec535d2726911b559d954aedde047dacf7d4"
     },
     {
       "path": "crates/spacepress/licenses/GPL-2.0-or-later.txt",
@@ -1269,7 +1369,7 @@
     },
     {
       "path": "crates/spacepress/runtime/SpacePress/Wp/BrandUpgrade.php",
-      "sha256": "df918d9c087773bdea2e042e2e43dcf13f166323f1fc9183bc2844256c7ce599"
+      "sha256": "ee190504e4232c5fbcf583cfaa0588ddc3eb0608477679cbed1a0b78583899b8"
     },
     {
       "path": "crates/spacepress/runtime/SpacePress/Wp/Bytes.php",
@@ -15305,7 +15405,7 @@
     },
     {
       "path": "crates/spacepress/scripts/dev/studio.mjs",
-      "sha256": "140881445d4fd4bd1747282b63356f0ea26cc5a3b318bf0e4d04d5c268417b3f"
+      "sha256": "5389f96c43f7f86cfc68e8bdf1d98f6c2708c8e9f7f7d627b7284151a4feed62"
     },
     {
       "path": "crates/spacepress/src/admin_dashboard.rs",
@@ -15317,7 +15417,7 @@
     },
     {
       "path": "crates/spacepress/src/app.rs",
-      "sha256": "293d01613aa5f8d9f5fb149f4fdc13920f0674684661a86ae3dc5eac2a84c171"
+      "sha256": "348156bcdaad7c2cfb72d9edbc049b89dfc1a490bdc358a4b0e59836ce386f9b"
     },
     {
       "path": "crates/spacepress/src/app_plugin.rs",
@@ -15329,7 +15429,7 @@
     },
     {
       "path": "crates/spacepress/src/astro_content.rs",
-      "sha256": "42bc768919337b707cd81f7d78222dae765a06ad262d7ba33045dd1d630b2912"
+      "sha256": "aad6651f7ec344a592854ec4512197bd74010d6e128b7fa78d8d0ea58f0435f4"
     },
     {
       "path": "crates/spacepress/src/builtins.rs",
@@ -15337,7 +15437,7 @@
     },
     {
       "path": "crates/spacepress/src/bundle.rs",
-      "sha256": "ba6caec53c3a8b715799ef581b0c976d05967dba7192cf0f78d57c5975801b7d"
+      "sha256": "8a92f5b16d1e010da3e764a0c848b78ff830b2b9b588515385563389b2336eec"
     },
     {
       "path": "crates/spacepress/src/cli.rs",
@@ -15345,19 +15445,19 @@
     },
     {
       "path": "crates/spacepress/src/client.rs",
-      "sha256": "c7d7cad41ed9a1f92025071ef08b44feafdb44bdfb3c536d4f8123a188fc0b60"
+      "sha256": "116f4087f5232486ce732c5d44bb7629f0ed58758731bce9fc6f21b780df394a"
     },
     {
       "path": "crates/spacepress/src/client_component.rs",
-      "sha256": "c79916e16a62a2b99b308e533533fefaedc43b3daa1d427735c905e6b17dba4b"
+      "sha256": "fc81410bc8899ddeacbf1270ef8fff8735069ad5879db4121a842d5c215e6e51"
     },
     {
       "path": "crates/spacepress/src/commands/abilities.rs",
-      "sha256": "9f2a4dfedea24ddc666138983fa9f81bd3c6a18c0095f1047defd57148e2fe5e"
+      "sha256": "585dc8a8c78ed43dbf514cc47e03c9e3c74dcd23183143fb35c4670c0f0d5495"
     },
     {
       "path": "crates/spacepress/src/commands/add.rs",
-      "sha256": "5926bfdfb0ddfa5e6e5573cc0f93e93cbea1b738b771b05b6b432556f51e3915"
+      "sha256": "e0fab7b099de81d193a4b4346af20894c6d562f57c42479d6cad73948399d53b"
     },
     {
       "path": "crates/spacepress/src/commands/add/api-reference/API.md",
@@ -15369,7 +15469,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/add/api-reference/operation.tsx",
-      "sha256": "ef8ba89015b6e7616787c91227a389995a6a052a42af73ea6c4ce2a97934dd95"
+      "sha256": "a13c5aba71e7a7af380fdead456c22e128072ec6920c11ba1ef7d29e43406c3a"
     },
     {
       "path": "crates/spacepress/src/commands/add/api-reference/page.tsx",
@@ -15377,11 +15477,11 @@
     },
     {
       "path": "crates/spacepress/src/commands/add/api-reference/static-params.tsx",
-      "sha256": "2e2269ad727f35c65d2d302032dc9dfc7183ff40b55017ba8f7499e21d605792"
+      "sha256": "95a13211c1b7085a08530f286cf46a62bf077593e40c665356056c06401e9899"
     },
     {
       "path": "crates/spacepress/src/commands/add/db/DATABASE.md",
-      "sha256": "7060e3633b02b69df2c1adda32a2447fca6587b897421fc45a64a7b9a8be9176"
+      "sha256": "e8c7cce29d046fc7acf48769bc5db30692fe192d752a62058db33e251fa45dca"
     },
     {
       "path": "crates/spacepress/src/commands/add/db/tables.client.ts",
@@ -15401,7 +15501,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/catalog.tsx",
-      "sha256": "b9cf0fa1ab417f73b1c765e3ba965a88dc2b044b7cfa1fc747d9891187ce7b9b"
+      "sha256": "32c33e1d81208fdcb6c184769ff7dfbb4419f21612fe836944414d483663fd5d"
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/category.md",
@@ -15409,7 +15509,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/category.tsx",
-      "sha256": "7594b5ef93507756a36ce14cf550088d07e7d5dd504e0099c724e8ca234ec2bc"
+      "sha256": "a7e11b6a8a7402d6a8d08c2e0ef013c73f0e2a8c60e38b51e38ccf55548d2af9"
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/checkout.md",
@@ -15429,7 +15529,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/product.tsx",
-      "sha256": "639d06c04cdccb959dd0e02d530aba7521d55b491fd12ec42872f3173e405589"
+      "sha256": "68a793775010eff0f6e22a8eba3c8c848797b5bdbab980b46037ab719727e4f0"
     },
     {
       "path": "crates/spacepress/src/commands/add/shop/shop.css",
@@ -15449,11 +15549,11 @@
     },
     {
       "path": "crates/spacepress/src/commands/build.rs",
-      "sha256": "f05e6d8c09aa404ce254b5fec3839a5f7d1e555f040b9ae38bdfd0d13bda75b3"
+      "sha256": "b893f15c4f62e4b51d09d17a4d6712866729d60833c2c16f8a24766f7a01ba38"
     },
     {
       "path": "crates/spacepress/src/commands/danger.rs",
-      "sha256": "b3c81d9ca7a51c60283b98709dda36d012aca8bd51dee3a000e8017c8dd5cdcb"
+      "sha256": "e4bbbabcefb3771360940aa217e6248ad35fe6af573e45cd6631d6119c8a963d"
     },
     {
       "path": "crates/spacepress/src/commands/deploy.rs",
@@ -15461,23 +15561,23 @@
     },
     {
       "path": "crates/spacepress/src/commands/describe.rs",
-      "sha256": "b4686339e833bc38170a615ce102008796a0d86ed238c0c05471bb23e46e5e18"
+      "sha256": "67ffa5f58753da2cd30ea85a9239ad61eaf7abb23ff44d1137a1e935c9d9c541"
     },
     {
       "path": "crates/spacepress/src/commands/dev.rs",
-      "sha256": "1d2ecf55d68ac25b6d0a18ff44cc7a00fb03259b8c9961b0e25a17d14cfe3479"
+      "sha256": "f2df9b1a89e3ffbef7ca3dd1f14c32b5ca95da81d41e11b0265e086e40f5d2c7"
     },
     {
       "path": "crates/spacepress/src/commands/doctor.rs",
-      "sha256": "a320a624779be1ff269a23d3cc983a8749c9f5b95cecb8d6dedad6a37449098a"
+      "sha256": "40a9834399dd43bfb27b2068ea33a309e50b3ae320d38542f169bdc748a77288"
     },
     {
       "path": "crates/spacepress/src/commands/export.rs",
-      "sha256": "e7673816b6c48bb17b3a740a5e5d398fb4d3cfa43934971f1fcd56f5fffaae74"
+      "sha256": "a69d250ad7f7176c66c993b89e68a1d709c1266a6e33024738d6970c8e110021"
     },
     {
       "path": "crates/spacepress/src/commands/init.rs",
-      "sha256": "ae8ae0af70e9d375f59febfa57db1bdaff84c2f7b6c178e029fd4a40775a7873"
+      "sha256": "4b8dedc22cf8edc15d79b2e0213deedf370d07452e8b4c94608ae62a794b57b0"
     },
     {
       "path": "crates/spacepress/src/commands/init_github.rs",
@@ -15505,7 +15605,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/mcp/tools.rs",
-      "sha256": "2559d780087faac9b97d1bca55d98bba6b2a4c894969338f0db957d492df8fb8"
+      "sha256": "96d87fa758e4ecbe3b11a0358025780599d2d2025c10693549dee5d27b80dffe"
     },
     {
       "path": "crates/spacepress/src/commands/mod.rs",
@@ -15517,7 +15617,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/pull.rs",
-      "sha256": "65b9b2d4a83f66d767f4d0ddd2b6b530894153da504b9a5528761ae9854b7407"
+      "sha256": "7be23766a5a64c6da44f2b509898f39c0b2ba16675823ab73fe86a4e6f734879"
     },
     {
       "path": "crates/spacepress/src/commands/push.rs",
@@ -15533,7 +15633,7 @@
     },
     {
       "path": "crates/spacepress/src/commands/styles.rs",
-      "sha256": "72386aa8f238a1ba1bdabc7f99cd316e72c7d9a2d301cf73615918b25e360fc3"
+      "sha256": "deca352f122391b3575c7c4f05449ffbac5570ea4143d55dda8338bb51d88e10"
     },
     {
       "path": "crates/spacepress/src/commands/sync.rs",
@@ -15545,15 +15645,15 @@
     },
     {
       "path": "crates/spacepress/src/compile.rs",
-      "sha256": "76517455de15eeff6a776fc3223b0b1f8aaa301f8edd0e668382eb4717829996"
+      "sha256": "36188f75695f67bfd734f92dc999a5d1620d0a1e87870d82d0dcaebcb4f930e1"
     },
     {
       "path": "crates/spacepress/src/compile/annotations.rs",
-      "sha256": "2060513aaa48fb8fc56c75f64fab572d1eb5b25180c8f2b3f80fa2cc70e9d60e"
+      "sha256": "f6d49147924890cefbf5a0b5be2a144b0e3339419ad74a8117a2e2af29ad8893"
     },
     {
       "path": "crates/spacepress/src/compile/app.rs",
-      "sha256": "62aa4d4053e8eb6d9499161de696f21041d8880bf3adb4c8db0f1983f8a6cca7"
+      "sha256": "f4ebad74a77f6b6714bf0499866127ae114b0f217c9616ce05efb9761f6772d1"
     },
     {
       "path": "crates/spacepress/src/compile/classes.rs",
@@ -15561,11 +15661,11 @@
     },
     {
       "path": "crates/spacepress/src/compile/client.rs",
-      "sha256": "f946c7ce5e10a8a43d206eca889a4475949acb2f043591b82bbcdba23d2086f6"
+      "sha256": "c52dcb53917673a326168be1736fded36ed21e04fd20fc19ef9ce005b41af526"
     },
     {
       "path": "crates/spacepress/src/compile/content.rs",
-      "sha256": "31e29b501fd230fb0e73ce7af1c6e3f88716911dde20cb58c3ee8ac1d8295a9c"
+      "sha256": "2742823df6e1ccfb989d2f0afffedca08ca7bb5ae7f8416f2b100df3b9631e96"
     },
     {
       "path": "crates/spacepress/src/compile/effects.rs",
@@ -15597,7 +15697,7 @@
     },
     {
       "path": "crates/spacepress/src/content_page.rs",
-      "sha256": "5ce28b832634452e4d10b950e12696c3d93f2bc8282ec1417dd503e90e8eb828"
+      "sha256": "d3a1a86b9414eb240a4d92fe2f3b77a03ad3f2063a03fcdb573c34d1138cddd0"
     },
     {
       "path": "crates/spacepress/src/css.rs",
@@ -15613,15 +15713,15 @@
     },
     {
       "path": "crates/spacepress/src/eval.rs",
-      "sha256": "dc562eb9cb85970297cbc8d7989b05bf6b00ce1cf052ceacca276488e0f26e36"
+      "sha256": "c796635d341849166441066949a147846d1c170788a1157d90496472fb9e0262"
     },
     {
       "path": "crates/spacepress/src/extract.rs",
-      "sha256": "d9abf4577111342ca661f142fcfb70cdae1d15e87bef4144bb43aac87eb6bc0f"
+      "sha256": "3c017228e8aa06ba8922cd17531b48cee210a7ab3460b6261a2e80e0c0cf7fce"
     },
     {
       "path": "crates/spacepress/src/frontend.rs",
-      "sha256": "077acca5ac200f725f5084141b478932549df3f65140c3a27ca749b270c14374"
+      "sha256": "87ce685b0357b8828d37bf4e324319bc4363de33d9f354fb716ad945ac013a3b"
     },
     {
       "path": "crates/spacepress/src/host.rs",
@@ -15645,7 +15745,7 @@
     },
     {
       "path": "crates/spacepress/src/layout.rs",
-      "sha256": "24a469a5164d7b6700e1f9dc152b7f3bb9f2a035cd4478653834e6cacf720818"
+      "sha256": "edf25c454d52d0a31b42ecc13e1c0fe6de7705040a9c4404273af767a5711cef"
     },
     {
       "path": "crates/spacepress/src/lib.rs",
@@ -15653,11 +15753,11 @@
     },
     {
       "path": "crates/spacepress/src/lint.rs",
-      "sha256": "ee003812de7bba36fe596b85c8a30037581442d11c1a475ceb051cee8de97b92"
+      "sha256": "340684bfac19413b57c994b2f02d71a1795777622d26a97397708ecb1717d28c"
     },
     {
       "path": "crates/spacepress/src/loader.rs",
-      "sha256": "6aaff48ef01a77389ccb166e9491bbbe239ed568cdabc2256b752b5852f09f7f"
+      "sha256": "64652b71189758316cf4b416f0597d426de41e0847e6f33bd3cf13132e20adf8"
     },
     {
       "path": "crates/spacepress/src/lower.rs",
@@ -15689,7 +15789,7 @@
     },
     {
       "path": "crates/spacepress/src/pipeline.rs",
-      "sha256": "7dd5c425651b5a578e77c9367298568e58c2356fa36f706454835eba534d1c21"
+      "sha256": "c18233a275baa8d025f60c8ae522d6b65bb25e0bfb71f21bcd40abe6cb7cc707"
     },
     {
       "path": "crates/spacepress/src/pipeline/app.rs",
@@ -15697,7 +15797,7 @@
     },
     {
       "path": "crates/spacepress/src/pipeline/exports.rs",
-      "sha256": "997da68b68d6ee796f347af710389200d5177e76562d2c907ede35f6f11bcc8d"
+      "sha256": "f7ed3aea0d3bdc635bb99513c1fcfcd1cafc054de226795f39d19d00df82b83b"
     },
     {
       "path": "crates/spacepress/src/pipeline/route_plan.rs",
@@ -15709,11 +15809,11 @@
     },
     {
       "path": "crates/spacepress/src/plugins.rs",
-      "sha256": "605991e66d2959e6e2ca25436e0ef076947407f01a7fd047047db2cde9be80ae"
+      "sha256": "0f47a9d044b0038f628550bbf8f41508f671970d903140113db78820753a9cce"
     },
     {
       "path": "crates/spacepress/src/runtime_schema.rs",
-      "sha256": "44fc398995b712de3fb9a6c3e5d6fc389a3649c099c3a043d7deff16d3727daf"
+      "sha256": "f2222593390c8d4d809b607efc7d21eb2a9f679c4ac4265d1ed76ecc9e1a2e86"
     },
     {
       "path": "crates/spacepress/src/schema.rs",
@@ -15813,7 +15913,7 @@
     },
     {
       "path": "crates/spacepress/src/wasm.rs",
-      "sha256": "aa3de25b15698969f7665123076e7493b284b41b61e86cad95856de328cc1ea5"
+      "sha256": "2351c1d50ea26be7e4f0c8bf33692b1adbc75ebd8937e8e4f5d5936925d8a5cb"
     },
     {
       "path": "crates/spacepress/src/wasm_host_fs.rs",
@@ -15821,7 +15921,7 @@
     },
     {
       "path": "crates/spacepress/src/wordpress/abilities.rs",
-      "sha256": "a48f496ba4307caa52f0c903c7b5533fe7f1c7f62c4a1a2c1307f4a53beb3f1e"
+      "sha256": "b984c039b1393cfa0c1ac083f999ab962fc918fbafc5acc505bbd50401834396"
     },
     {
       "path": "crates/spacepress/src/wordpress/catalog.json",
@@ -15861,7 +15961,7 @@
     },
     {
       "path": "crates/spacepress/tests/compatibility/registry.json",
-      "sha256": "639a1595f77c67d8a2cf99aa07a614cafa245727eb916f9517cb0142dd2a80e8"
+      "sha256": "2dcdf34a64532181687f5fd92fc9210446b54b390ffad57788f8ede95f08bbcb"
     },
     {
       "path": "crates/spacepress/tests/differential/language/bigint-helpers.mjs",
@@ -16369,11 +16469,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/site_finalize.rs",
-      "sha256": "fe00121287005672aba2897c74777575f0983444b52a39251254dffe36902b1c"
+      "sha256": "3593b25297ef34f6bd1b6a152443df937e4e8298c8923c6598c2db06b96e6f79"
     },
     {
       "path": "crates/stattic-runtime-core/src/spacepress.rs",
-      "sha256": "67594f67bc99f43d304fc8bd4caebfd0389efa7abc9a8735556649d1f071dff1"
+      "sha256": "fe7636c9ea9db2947798f4d608b5e143e78e8c5c586242c14ecaf2cd4cb16cd3"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",
@@ -29673,7 +29773,7 @@
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture-main.ts",
-      "sha256": "a1abddb97058c47e68462efcf1c02b2a9cf141d29563e5b06e128d48f0879244"
+      "sha256": "134cab043abae7e0997b0148d0ec99979ab34e58675496910005b10b5553caea"
     },
     {
       "path": "runtime/browser-specs/sign-in-flow-fixture.ts",
@@ -30977,7 +31077,7 @@
     },
     {
       "path": "runtime/tests/spacepress-preview.test.ts",
-      "sha256": "449205823db5c1e539bf68bcd263b6242a86293043e130a90c44f743f9deeef1"
+      "sha256": "d93784fc598839af72a5903a925600004ff72964645886b620cc21396423896a"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
@@ -31001,7 +31101,7 @@
     },
     {
       "path": "runtime/tests/typedpress-publish.test.ts",
-      "sha256": "3d959d8a46b0b5e1ac07fefdde80aabb6c0a3dae20f48ca7d7e640e22e0e8dfb"
+      "sha256": "51b1d8cd24fef9e1a0dc5fc1ed7fa06fff1e338e62a10e73af81da33b028bfb8"
     },
     {
       "path": "runtime/tests/typedpress-space-role.test.ts",

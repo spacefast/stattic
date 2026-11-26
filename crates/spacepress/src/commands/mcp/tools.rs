@@ -259,7 +259,7 @@ fn dev_site(options: &Options) -> Result<(), String> {
 /// diagnostics. It runs in a process of its own (see [`compile`]).
 pub(super) fn compiled(project: &std::path::Path) -> Value {
     let (envelope, built) = build::check(project, build::frozen(false));
-    json!({ "envelope": envelope, "schema": built.map(|built| describe::project(&built.schema)) })
+    json!({ "envelope": envelope, "schema": built.map(|built| describe::project_with_layout(&built.schema, &built.layout)) })
 }
 
 /// Why a command run for a tool gave no answer, as the tool's result.

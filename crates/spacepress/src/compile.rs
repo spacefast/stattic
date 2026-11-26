@@ -1132,11 +1132,82 @@ impl<'a, 'p> Compiler<'a, 'p> {
                         Some((local, asset))
                     })
                     .collect();
+                // Refuse transitive server-only imports reached through non-action relative helpers.
+                for stmt in &module.body {
+                    let Stmt::Import {
+                        source,
+                        specs,
+                        type_only,
+                        span,
+                    } = stmt
+                    else {
+                        continue;
+                    };
+                    if *type_only || !source.starts_with('.') {
+                        continue;
+                    }
+                    let Some(&target_id) = program.resolved.get(&(module.id, source.clone())) else {
+                        continue;
+                    };
+                    if program.assets.contains_key(&target_id) {
+                        continue;
+                    }
+                    // If every non-type imported binding is a registered server action, the helper
+                    // runs on the server and is called over RPC, never bundled to the browser.
+                    let value_specs: Vec<_> = specs.iter().filter(|s| !s.type_only).collect();
+                    let all_actions = !value_specs.is_empty()
+                        && value_specs.iter().all(|s| match &s.imported {
+                            crate::ir::ImportName::Named(n) => actions.contains(n),
+                            _ => false,
+                        });
+                    if all_actions {
+                        continue;
+                    }
+                    // BFS over the helper's transitive imports for any server-only module.
+                    let mut seen = std::collections::HashSet::new();
+                    let mut queue = std::collections::VecDeque::from([target_id]);
+                    while let Some(mid) = queue.pop_front() {
+                        if !seen.insert(mid) {
+                            continue;
+                        }
+                        let m = &program.modules[mid];
+                        for s in &m.body {
+                            let Stmt::Import {
+                                source: dep,
+                                specs: dep_specs,
+                                type_only: dep_type_only,
+                                span: dep_span,
+                            } = s
+                            else {
+                                continue;
+                            };
+                            if *dep_type_only || (!dep_specs.is_empty() && dep_specs.iter().all(|d| d.type_only)) {
+                                continue;
+                            }
+                            if crate::loader::is_server_only_module(dep) {
+                                let helper_rel = m.path.strip_prefix(&program.root).unwrap_or(&m.path).display();
+                                return err_help(
+                                    *span,
+                                    format!(
+                                        "a \"use client\" component can't import \"{source}\" because {helper_rel} imports server-only module \"{dep}\""
+                                    ),
+                                    format!(
+                                        "move server work into a query() or mutation() action and call it from the client component, or read data via @spacepress/client (server import at line {})",
+                                        dep_span.start
+                                    ),
+                                );
+                            }
+                            if let Some(&next) = program.resolved.get(&(mid, dep.clone())) {
+                                queue.push_back(next);
+                            }
+                        }
+                    }
+                }
                 let analysis = crate::client_component::analyse(
                     namespace,
                     &root.closure.func,
                     module,
-                    crate::loader::CLIENT_MODULE,
+                    program,
                     &actions,
                     &file_buckets,
                     &assets,
@@ -4773,6 +4844,9 @@ impl<'a, 'p> Compiler<'a, 'p> {
         {
             return self.client_live_seed(field, span);
         }
+        if n.starts_with(client::MUTATION_SEED) && self.client.is_some() {
+            return self.client_mutation_seed();
+        }
         match self.resolve(n, span)? {
             Resolved::Local(l) => Ok(Out {
                 php: l.php.clone(),
@@ -4997,7 +5071,7 @@ impl<'a, 'p> Compiler<'a, 'p> {
             ),
             Value::Builtin(Builtin::WpFunction(name)) => err_help(
                 span,
-                format!("`{name}` from \"php/wordpress\" can't be used as a value"),
+                format!("`{name}` from \"spacepress/server/wp\" can't be used as a value"),
                 format!("call it directly: `{name}(...)`"),
             ),
             Value::Builtin(Builtin::Abilities) => err_help(

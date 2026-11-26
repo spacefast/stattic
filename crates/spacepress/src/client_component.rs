@@ -20,7 +20,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
-/// Hooks `"spacepress/client"` exports.
+/// Standard React hooks supported in `"use client"` components (imported from `"react"`).
+pub const REACT_HOOKS: &[&str] = &["useState", "useEffect", "useRef"];
+
+/// SpacePress-specific client hooks (imported from `"spacepress/react"` or `"@spacepress/client/react"`).
+pub const CLIENT_HOOKS: &[&str] = &[
+    "useMount",
+    "useEvent",
+    "sharedState",
+    "useLive",
+    "useMutation",
+    "uploadFile",
+];
+
+/// All hooks supported by the Interactivity API client component compiler.
 pub const HOOKS: &[&str] = &[
     "useState",
     "useEffect",
@@ -29,6 +42,7 @@ pub const HOOKS: &[&str] = &[
     "useRef",
     "sharedState",
     "useLive",
+    "useMutation",
     "uploadFile",
 ];
 
@@ -49,7 +63,11 @@ pub enum Binding {
     Ref,
     /// A server action the file imports (its registered name): called through `fetch`.
     ServerAction(String),
-    /// `uploadFile` imported from `"spacepress/client"`: uploads to a `files()` bucket via `@spacepress/client`.
+    /// Generated `api` object imported from `<dir>/_generated/api`.
+    GeneratedApi,
+    /// A `useMutation(api.actions.<name>)` handle: reactive `{ pending, error }` + `.mutate(...)` / `.reset()`.
+    Mutation(String),
+    /// `uploadFile` imported from `"spacepress/react"`: uploads to a `files()` bucket via `spacepress/client`.
     UploadFile,
     /// `sharedState` exported from this module: the namespace's global `state`.
     Shared,
@@ -78,7 +96,7 @@ pub struct Analysis {
     pub init: Vec<(String, Rc<Func>)>,
     /// `useEvent("resize", fn)` / `useEvent("keydown", fn, "document")`: (target, event, callback name).
     pub events: Vec<(String, String, String)>,
-    /// Server actions called from handlers.
+    /// Server actions called from handlers or `useMutation(...)`.
     pub server_actions: BTreeSet<String>,
     /// Private file buckets uploaded to via `uploadFile(bucket, file, opts?)`.
     pub file_uploads: BTreeSet<String>,
@@ -88,9 +106,12 @@ pub struct Analysis {
     pub shared: Vec<(String, Expr)>,
     /// The props the component destructures, in order.
     pub props: Vec<String>,
-    /// `const todos = useLive("todos", { where, limit })`: (field, kind, args, enabled). The field is
-    /// a context value `{ data, error, loading }` the server seeds and the browser keeps current.
+    /// `const todos = useLive(api.todos.list({ where, limit }))`: (field, kind, args, enabled).
+    /// The field is a context value `{ data, error, loading }` the server seeds and the browser keeps current.
     pub live: Vec<(String, String, Expr, Expr)>,
+    /// `const add = useMutation(api.actions.addNote)`: (field, action name).
+    /// The field is a reactive context object `{ pending, error }`.
+    pub mutations: Vec<(String, String)>,
     /// Each `useRef()` an element's `ref={name}` attached, with that attribute's place in the
     /// source (generator A records them; a conditional's element compiles twice).
     pub refs: BTreeMap<String, (u32, u32)>,
@@ -108,21 +129,42 @@ fn hook<'a>(callee: &Expr, hooks: &'a BTreeMap<String, &'static str>) -> Option<
     }
 }
 
-/// Local names bound to `"spacepress/client"` hooks in `module`, and server actions it imports.
-pub fn imports(module: &Module, client_module: &str) -> (BTreeMap<String, &'static str>, Vec<(String, String)>) {
+pub struct ClientImports {
+    pub hooks: BTreeMap<String, &'static str>,
+    pub api_locals: BTreeSet<String>,
+    pub others: Vec<(String, String)>,
+}
+
+/// Local names bound to `"react"` and `"spacepress/react"` hooks in `module`, generated `api`
+/// bindings from `<dir>/_generated/api`, and server actions it imports.
+pub fn imports(module: &Module, program: &crate::loader::Program) -> ClientImports {
     let mut hooks = BTreeMap::new();
+    let mut api_locals = BTreeSet::new();
     let mut others = Vec::new();
     for stmt in &module.body {
         if let Stmt::Import { source, specs, .. } = stmt {
+            let is_api = crate::loader::is_generated_api_import(&program.root, &program.layout, &module.path, source);
             for spec in specs {
                 if spec.type_only {
                     continue;
                 }
-                if source == client_module {
+                if source == crate::loader::REACT_MODULE {
                     if let ImportName::Named(n) = &spec.imported
-                        && let Some(h) = HOOKS.iter().find(|h| **h == n.as_str())
+                        && let Some(h) = REACT_HOOKS.iter().find(|h| **h == n.as_str())
                     {
                         hooks.insert(spec.local.clone(), *h);
+                    }
+                } else if crate::loader::is_client_react_module(source) {
+                    if let ImportName::Named(n) = &spec.imported
+                        && let Some(h) = CLIENT_HOOKS.iter().find(|h| **h == n.as_str())
+                    {
+                        hooks.insert(spec.local.clone(), *h);
+                    }
+                } else if is_api {
+                    if let ImportName::Named(n) = &spec.imported
+                        && n == "api"
+                    {
+                        api_locals.insert(spec.local.clone());
                     }
                 } else if let ImportName::Named(n) = &spec.imported {
                     others.push((spec.local.clone(), n.clone()));
@@ -130,7 +172,11 @@ pub fn imports(module: &Module, client_module: &str) -> (BTreeMap<String, &'stat
             }
         }
     }
-    (hooks, others)
+    ClientImports {
+        hooks,
+        api_locals,
+        others,
+    }
 }
 
 /// Analyses one client component: `f` is its function, `module` its module, `actions` the
@@ -140,16 +186,23 @@ pub fn analyse(
     namespace: String,
     f: &Func,
     module: &Module,
-    client_module: &str,
+    program: &crate::loader::Program,
     server_actions: &BTreeSet<String>,
     file_buckets: &BTreeSet<String>,
     assets: &[(String, &crate::assets::Asset)],
 ) -> Result<Analysis> {
-    let (hooks, imported) = imports(module, client_module);
+    let ClientImports {
+        hooks,
+        api_locals,
+        others: imported,
+    } = imports(module, program);
     let mut a = Analysis {
         namespace,
         ..Default::default()
     };
+    for api_local in api_locals {
+        a.bindings.insert(api_local, Binding::GeneratedApi);
+    }
     // Default imports of stylesheets and static assets, by local name.
     for (local, asset) in assets {
         match asset.kind {
@@ -359,33 +412,107 @@ pub fn analyse(
                                 return Err(refuse(
                                     *span,
                                     "`useLive` is assigned to a name",
-                                    "write `const todos = useLive(\"todos\", { where: { done: false } })`",
+                                    "write `const todos = useLive(api.todos.list({ where: { done: false } }))`",
                                 ));
                             };
-                            let help = "write `useLive(\"todos\", { where: { done: false }, limit: 20 })`";
-                            let (kind, rest) = match args.as_slice() {
-                                [
-                                    ArrEl::Item(Expr {
-                                        kind: ExprKind::Str(k), ..
-                                    }),
-                                    rest @ ..,
-                                ] if rest.len() <= 2 => (k.clone(), rest),
+                            let help = "import `{ api }` from \"../_generated/api\" and write `useLive(api.todos.list({ where: { done: false }, limit: 20 }))`";
+                            let (first_arg, opt_arg) = match args.as_slice() {
+                                [ArrEl::Item(first)] => (first, None),
+                                [ArrEl::Item(first), opt] => (first, Some(opt)),
                                 _ => {
                                     return Err(refuse(
                                         init.span,
-                                        "`useLive` takes a kind's name, its query and options",
+                                        "`useLive` takes a typed query from `_generated/api` and optional `{ enabled }`",
                                         help,
                                     ));
                                 }
                             };
-                            let query = match rest.first() {
-                                None => Expr {
-                                    kind: ExprKind::Object(Vec::new()),
-                                    span: init.span,
+                            if let ExprKind::Str(k) = &first_arg.kind {
+                                return Err(refuse(
+                                    first_arg.span,
+                                    "`useLive` takes a typed query from `_generated/api`, not a string",
+                                    format!(
+                                        "import `{{ api }}` from \"../_generated/api\" and write `useLive(api.{k}.list({{ limit: 20 }}))`"
+                                    ),
+                                ));
+                            }
+                            let (kind, query) = match &first_arg.kind {
+                                ExprKind::Call {
+                                    callee,
+                                    args: list_args,
+                                    optional: false,
+                                    ..
+                                } => match &callee.kind {
+                                    ExprKind::Member {
+                                        obj,
+                                        prop,
+                                        optional: false,
+                                        ..
+                                    } if prop == "list" => match &obj.kind {
+                                        ExprKind::Member {
+                                            obj: root,
+                                            prop: kind,
+                                            optional: false,
+                                            ..
+                                        } => match &root.kind {
+                                            ExprKind::Ident(api_name)
+                                                if a.bindings.get(api_name) == Some(&Binding::GeneratedApi) =>
+                                            {
+                                                let query = match list_args.as_slice() {
+                                                    [] => Expr {
+                                                        kind: ExprKind::Object(Vec::new()),
+                                                        span: first_arg.span,
+                                                    },
+                                                    [ArrEl::Item(q)] => q.clone(),
+                                                    [ArrEl::Spread(x), ..] => {
+                                                        return Err(refuse(
+                                                            x.span,
+                                                            "`useLive` takes its query as an object",
+                                                            help,
+                                                        ));
+                                                    }
+                                                    _ => {
+                                                        return Err(refuse(
+                                                            first_arg.span,
+                                                            format!(
+                                                                "`api.{kind}.list()` takes an optional query object"
+                                                            ),
+                                                            help,
+                                                        ));
+                                                    }
+                                                };
+                                                (kind.clone(), query)
+                                            }
+                                            _ => {
+                                                return Err(refuse(
+                                                    first_arg.span,
+                                                    "`useLive` takes a typed query from `_generated/api`",
+                                                    help,
+                                                ));
+                                            }
+                                        },
+                                        _ => {
+                                            return Err(refuse(
+                                                first_arg.span,
+                                                "`useLive` takes a typed query from `_generated/api`",
+                                                help,
+                                            ));
+                                        }
+                                    },
+                                    _ => {
+                                        return Err(refuse(
+                                            first_arg.span,
+                                            "`useLive` takes an `api.<kind>.list(...)` query",
+                                            help,
+                                        ));
+                                    }
                                 },
-                                Some(ArrEl::Item(q)) => q.clone(),
-                                Some(ArrEl::Spread(x)) => {
-                                    return Err(refuse(x.span, "`useLive` takes its query as an object", help));
+                                _ => {
+                                    return Err(refuse(
+                                        first_arg.span,
+                                        "`useLive` takes a typed query from `_generated/api`",
+                                        help,
+                                    ));
                                 }
                             };
                             // The browser subscribes to the read the server answered: its arguments
@@ -411,7 +538,7 @@ pub fn analyse(
                                     "pass what the query depends on as a prop; a query that follows state changes isn't supported yet",
                                 ));
                             }
-                            let enabled = match rest.get(1) {
+                            let enabled = match opt_arg {
                                 None => Expr {
                                     kind: ExprKind::Bool(true),
                                     span: init.span,
@@ -448,6 +575,78 @@ pub fn analyse(
                             };
                             a.live.push((name.clone(), kind, query, enabled));
                             a.bindings.insert(name.clone(), Binding::State { setter: None });
+                        }
+                        "useMutation" => {
+                            let Pat::Id(name, _) = pat else {
+                                return Err(refuse(
+                                    *span,
+                                    "`useMutation` is assigned to a name",
+                                    "write `const save = useMutation(api.actions.saveNote)`",
+                                ));
+                            };
+                            let help = "import `{ api }` from \"../_generated/api\" and write `const save = useMutation(api.actions.saveNote)`";
+                            let [ArrEl::Item(arg)] = args.as_slice() else {
+                                return Err(refuse(
+                                    init.span,
+                                    "`useMutation` takes an action reference from `_generated/api`",
+                                    help,
+                                ));
+                            };
+                            let action_name = match &arg.kind {
+                                ExprKind::Member {
+                                    obj,
+                                    prop: action_name,
+                                    optional: false,
+                                    ..
+                                } => match &obj.kind {
+                                    ExprKind::Member {
+                                        obj: root,
+                                        prop: actions_prop,
+                                        optional: false,
+                                        ..
+                                    } if actions_prop == "actions" => match &root.kind {
+                                        ExprKind::Ident(api_name)
+                                            if a.bindings.get(api_name) == Some(&Binding::GeneratedApi) =>
+                                        {
+                                            action_name.clone()
+                                        }
+                                        _ => {
+                                            return Err(refuse(
+                                                arg.span,
+                                                "`useMutation` takes `api.actions.<name>` from `_generated/api`",
+                                                help,
+                                            ));
+                                        }
+                                    },
+                                    _ => {
+                                        return Err(refuse(
+                                            arg.span,
+                                            "`useMutation` takes `api.actions.<name>` from `_generated/api`",
+                                            help,
+                                        ));
+                                    }
+                                },
+                                _ => {
+                                    return Err(refuse(
+                                        arg.span,
+                                        "`useMutation` takes `api.actions.<name>` from `_generated/api`",
+                                        help,
+                                    ));
+                                }
+                            };
+                            if !server_actions.contains(&action_name) {
+                                let mut d = Diag::new(arg.span, format!("unknown action `{action_name}`"));
+                                if let Some(s) =
+                                    crate::diag::suggest(&action_name, server_actions.iter().map(String::as_str))
+                                {
+                                    d = d.help(format!("did you mean `{s}`?"));
+                                } else {
+                                    d = d.help("export a `mutation()` or `query()` action first");
+                                }
+                                return Err(d);
+                            }
+                            a.mutations.push((name.clone(), action_name.clone()));
+                            a.bindings.insert(name.clone(), Binding::Mutation(action_name));
                         }
                         "useRef" => {
                             let Pat::Id(name, _) = pat else {
@@ -668,6 +867,9 @@ pub fn analyse(
     if let Some(err) = upload_err {
         return Err(err);
     }
+    for (_, action) in &a.mutations {
+        called.insert(action.clone());
+    }
     a.server_actions = called;
     a.file_uploads = uploads;
     Ok(a)
@@ -692,7 +894,9 @@ impl Analysis {
     /// The directive reference for an identifier used in markup: `context.count`, `state.label`.
     pub fn reference(&self, name: &str) -> Option<String> {
         match self.bindings.get(name)? {
-            Binding::State { .. } | Binding::Prop | Binding::Item => Some(format!("context.{name}")),
+            Binding::State { .. } | Binding::Mutation(_) | Binding::Prop | Binding::Item => {
+                Some(format!("context.{name}"))
+            }
             Binding::Derived | Binding::Shared => Some(format!("state.{name}")),
             Binding::Action => Some(format!("actions.{name}")),
             _ => None,
@@ -730,9 +934,14 @@ impl Analysis {
         let mut ok = true;
         visit(e, &mut |x| match &x.kind {
             ExprKind::Ident(n) => match self.bindings.get(n) {
-                Some(Binding::State { .. } | Binding::Prop | Binding::Derived | Binding::Shared | Binding::Item) => {
-                    reads = true
-                }
+                Some(
+                    Binding::State { .. }
+                    | Binding::Mutation(_)
+                    | Binding::Prop
+                    | Binding::Derived
+                    | Binding::Shared
+                    | Binding::Item,
+                ) => reads = true,
                 // A class map is the same on both sides: inlined into the store.
                 Some(Binding::Static(_)) | None => {}
                 Some(_) => ok = false,
@@ -770,6 +979,11 @@ impl Analysis {
             out.push_str("let client;\n");
             if !self.server_actions.is_empty() {
                 out.push_str("const call = (name, input) => (client ??= createClient()).actions[name](input);\n");
+            }
+            if !self.mutations.is_empty() {
+                out.push_str(
+                    "const __spMutate = async (state, name, input) => {\n  state.pending = true;\n  state.error = undefined;\n  try {\n    return await call(name, input);\n  } catch (e) {\n    state.error = { code: e?.code ?? \"error\", message: e?.message ?? String(e) };\n    throw e;\n  } finally {\n    state.pending = false;\n  }\n};\n",
+                );
             }
             if !self.file_uploads.is_empty() {
                 out.push_str(
@@ -973,7 +1187,9 @@ impl Analysis {
             }
             ExprKind::Ident(n) if scope.locals.contains(n) => n.clone(),
             ExprKind::Ident(n) => match self.bindings.get(n) {
-                Some(Binding::State { .. } | Binding::Prop | Binding::Item) => format!("context.{n}"),
+                Some(Binding::State { .. } | Binding::Mutation(_) | Binding::Prop | Binding::Item) => {
+                    format!("context.{n}")
+                }
                 Some(Binding::Derived) => format!("state.{n}"),
                 Some(Binding::Shared) => format!("state.{n}"),
                 Some(Binding::Ref) => format!("({{ current: attached({}) }})", js_str(n)),
@@ -982,6 +1198,13 @@ impl Analysis {
                     "(() => {{ throw new Error({}) }})()",
                     js_str("call handlers from markup")
                 ),
+                Some(Binding::GeneratedApi) => {
+                    return Err(refuse(
+                        e.span,
+                        format!("`{n}` from `_generated/api` is passed to `useLive(...)` or `useMutation(...)`"),
+                        "write `useLive(api.<kind>.list(...))` or `useMutation(api.actions.<name>)`",
+                    ));
+                }
                 Some(Binding::Setter { .. } | Binding::ServerAction(_) | Binding::UploadFile) => {
                     return Err(refuse(
                         e.span,
@@ -1184,6 +1407,44 @@ impl Analysis {
                         Some(Binding::Action) => format!("(yield* actions.{n}({}))", argv()?),
                         _ => format!("{}{}({})", js(callee)?, if *optional { "?." } else { "" }, argv()?),
                     },
+                    ExprKind::Member {
+                        obj,
+                        prop,
+                        optional: false,
+                        ..
+                    } if matches!(&obj.kind, ExprKind::Ident(n) if !scope.locals.contains(n) && matches!(self.bindings.get(n), Some(Binding::Mutation(_)))) =>
+                    {
+                        let ExprKind::Ident(n) = &obj.kind else { unreachable!() };
+                        let Some(Binding::Mutation(action)) = self.bindings.get(n) else {
+                            unreachable!()
+                        };
+                        match prop.as_str() {
+                            "mutate" => {
+                                let input = match args.as_slice() {
+                                    [] => "undefined".to_string(),
+                                    [ArrEl::Item(x)] => js(x)?,
+                                    _ => {
+                                        return Err(refuse(
+                                            e.span,
+                                            format!("`{n}.mutate` takes at most one input object"),
+                                            format!("write `{n}.mutate({{ … }})`"),
+                                        ));
+                                    }
+                                };
+                                format!("__spMutate(context.{n}, {}, {input})", js_str(action))
+                            }
+                            "reset" => format!("(context.{n}.error = undefined)"),
+                            _ => {
+                                return Err(refuse(
+                                    e.span,
+                                    format!(
+                                        "`{n}` has `.mutate(...)`, `.reset()`, `.pending`, and `.error`, not `.{prop}()`"
+                                    ),
+                                    format!("write `await {n}.mutate(...)`"),
+                                ));
+                            }
+                        }
+                    }
                     _ => format!("{}{}({})", js(callee)?, if *optional { "?." } else { "" }, argv()?),
                 }
             }

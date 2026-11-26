@@ -235,7 +235,7 @@ type Graph = {
   };
 };
 declare module "spacepress" { interface Register { relations: Relations<Entities, Graph>; globals: Globals } }
-declare module "php/wordpress" {
+declare module "spacepress/server/wp" {
   interface Abilities {
     "kitchen-sink/activity-create": { input: { eventId?: number | null; summary: string; createdAt?: string }; output: { id: number; eventId: number | null; summary: string; createdAt: string; author: number | null; updatedAt: string; deletedAt: string | null; deletedBy: number | null } };
     "kitchen-sink/activity-delete": { input: { id: number; _rev?: string }; output: { id: number; eventId: number | null; summary: string; createdAt: string; author: number | null; updatedAt: string; deletedAt: string | null; deletedBy: number | null } };

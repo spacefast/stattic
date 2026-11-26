@@ -1,4 +1,4 @@
-import type { Handler } from "php/wordpress";
+import type { Handler } from "spacepress/server/wp";
 
 // WordPress ends a trimmed excerpt with this: in the journal's feed (/feed/) and wherever a theme
 // or block prints an excerpt.

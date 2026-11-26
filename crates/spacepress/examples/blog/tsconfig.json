@@ -1,15 +1,50 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
     "types": [],
     "paths": {
-      "spacepress": ["../../types/spacepress/index.d.ts"]
-    }
+      "spacepress": [
+        "../../types/spacepress/index.d.ts"
+      ],
+      "spacepress/server": [
+        "../../types/spacepress/server.d.ts"
+      ],
+      "spacepress/server/db": [
+        "../../types/spacepress/server-db.d.cts"
+      ],
+      "spacepress/app": [
+        "../../types/spacepress/app.d.ts"
+      ],
+      "spacepress/content": [
+        "../../types/spacepress/content.d.ts"
+      ],
+      "spacepress/server/wp": [
+        "../../types/spacepress/server-wp.d.ts"
+      ],
+      "spacepress/danger": [
+        "../../types/spacepress/danger.d.ts"
+      ],
+      "spacepress/client": [
+        "../../packages/client/src/index.d.ts"
+      ],
+      "spacepress/react": [
+        "../../packages/client/src/react.d.ts"
+      ]
+    },
+    "rootDirs": [
+      ".",
+      "./sp/_generated/types"
+    ]
   },
-  "include": ["spacepress.config.ts", "sp/_generated/db.d.ts"]
+  "include": [
+    "spacepress.config.ts",
+    "sp/_generated/db.d.ts"
+  ]
 }

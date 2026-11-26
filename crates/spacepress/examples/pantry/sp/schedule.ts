@@ -1,5 +1,6 @@
-import { cron, mail } from "spacepress";
-import { shoppingList } from "spacepress:db";
+import { cron } from "spacepress";
+import { mail } from "spacepress/server";
+import { shoppingList } from "spacepress/server/db";
 
 // Every Monday at 08:00 UTC: mail the open shopping list.
 export const weeklyList = cron("0 8 * * 1", async () => {

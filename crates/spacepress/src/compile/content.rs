@@ -48,7 +48,7 @@ impl Compiler<'_, '_> {
             return err_help(
                 k.span,
                 format!("`{name}()` needs a kind, not {}", v.ty.describe()),
-                "import the kind from \"spacepress:db\" and pass it: `nav(docs)`",
+                "import the kind from \"spacepress/server/db\" and pass it: `nav(docs)`",
             );
         };
         let c = &self.schema.collections[&table];

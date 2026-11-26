@@ -133,6 +133,7 @@ struct RefField {
 /// actions and jobs register by their exports (ruling 36).
 const CONFIG_KEYS: &[&str] = &[
     "name",
+    "dir",
     "relations",
     "webhooks",
     "media",
@@ -354,6 +355,25 @@ pub fn extract(config: &Value, ev: &mut Evaluator<'_>, config_span: Span, defaul
             .help("it becomes the WordPress plugin slug `spacepress-<name>`"));
         }
     };
+    if let Some(dir_val) = cfg_map.get("dir")
+        && !matches!(dir_val, Value::Undef)
+    {
+        let dir_span = span_of(ev, config, "dir", config_span);
+        match dir_val {
+            Value::Str(s) => {
+                crate::layout::validate_dir(s, dir_span)?;
+            }
+            other => {
+                return Err(Diag::new(
+                    dir_span,
+                    format!(
+                        "`dir` must be a relative directory string like \"sp\" or \"cms\", not {}",
+                        other.describe()
+                    ),
+                ));
+            }
+        }
+    }
     out.schema.seed = bool_option(&cfg_map, "seed", false, span_of(ev, config, "seed", config_span))?;
     out.schema.admin = bool_option(&cfg_map, "admin", true, span_of(ev, config, "admin", config_span))?;
     out.schema.public_authors = bool_option(

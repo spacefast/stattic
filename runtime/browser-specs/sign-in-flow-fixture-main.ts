@@ -115,6 +115,7 @@ export async function main(): Promise<void> {
     { setRuntimeConnectAddressDependenciesForTests },
     { verifyCollaborationBearer },
     { parseCommentRoomKey },
+    { subscribeInternal },
     { buildCdnModules },
     { buildCollabOverlay },
     harness,
@@ -140,6 +141,7 @@ export async function main(): Promise<void> {
     import("../../apps/control-plane/src/runtime/runtime-connect-address.ts"),
     import("../../apps/control-plane/src/comments/mint.ts"),
     import("../../apps/control-plane/src/comments/rooms.ts"),
+    import("../../apps/control-plane/src/billing/subscribe.ts"),
     import("../../packages/space-client/scripts/browser.mjs"),
     import("../../packages/collab-sdk/scripts/overlay.mjs"),
     import("../tests/harness.ts"),
@@ -500,6 +502,10 @@ export async function main(): Promise<void> {
         .insert(channels)
         .values({ id: createId("chn"), spaceId: owner.spaceId, name: "live", versionId });
       // Comments on, so the bar's Comments button has today's Comments to open.
+      await subscribeInternal(
+        { teamId: owner.teamId, planCode: "go", grantedBy: owner.userId },
+        { servingStateSync: "deferred" },
+      );
       await db.insert(spaceCollaboration).values({
         id: createId("collab"),
         tenantId: MAIN_TENANT_ID,

@@ -1,8 +1,9 @@
-import { Comments, Content, notFound, type PageProps } from "spacepress/app";
+import { Comments, Content, notFound } from "spacepress/app";
+import type { PageProps } from "./$types";
 
-export const metadata = ({ item }: PageProps<"recipes/[slug]">) => ({ title: item?.title ?? "Recipe", description: item?.excerpt ?? "" });
+export const metadata = ({ item }: PageProps) => ({ title: item?.title ?? "Recipe", description: item?.excerpt ?? "" });
 
-export default function Recipe({ item }: PageProps<"recipes/[slug]">) {
+export default function Recipe({ item }: PageProps) {
   if (!item) notFound();
   return (
     <article>

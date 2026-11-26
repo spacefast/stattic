@@ -44,7 +44,7 @@ fn build_program(project: &Path, program: &loader::Program, frozen: bool) -> Res
         project,
         program,
         || {
-            let mut previous = read_previous(project)?;
+            let mut previous = read_previous(project, &program.layout)?;
             previous.frozen = frozen;
             Ok(previous)
         },
@@ -63,21 +63,20 @@ fn check_seed(project: &Path, built: &Built) -> Result<(), Diag> {
     Ok(())
 }
 
-fn migrations_dir(project: &Path) -> PathBuf {
-    project.join(pipeline::LEDGER)
+fn migrations_dir(project: &Path, layout: &layout::Layout) -> PathBuf {
+    project.join(layout.migrations())
 }
 
-/// Reads all committed `<id>/ops.json` migration folders in `sp/_generated/migrations/` and folds
+/// Reads all committed `<id>/ops.json` migration folders in `<dir>/_generated/migrations/` and folds
 /// them into the baseline schema state.
-fn read_previous(project: &Path) -> Result<pipeline::Previous, Diag> {
-    if project.join(pipeline::OLD_LEDGER).exists() {
-        return Err(pipeline::moved_ledger());
+fn read_previous(project: &Path, layout: &layout::Layout) -> Result<pipeline::Previous, Diag> {
+    if project.join(layout.old_ledger()).exists() {
+        return Err(pipeline::moved_ledger_for(layout));
     }
-    read_migrations_dir(&migrations_dir(project))
+    read_migrations_dir_with_label(&migrations_dir(project, layout), &layout.migrations())
 }
 
-pub(crate) fn read_migrations_dir(dir: &Path) -> Result<pipeline::Previous, Diag> {
-    let ledger = pipeline::LEDGER;
+pub(crate) fn read_migrations_dir_with_label(dir: &Path, ledger: &str) -> Result<pipeline::Previous, Diag> {
     let entries_iter = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(pipeline::Previous::none()),
@@ -178,7 +177,8 @@ pub(super) fn refresh(project: &Path) -> Result<(), String> {
 /// Writes `sp/_generated/` (committed): immutable `<id>/{ops.json,migration.sql}` folders,
 /// `db.d.ts`, locks, typed client, and `openapi.json`. No global `snapshot.json` is written.
 pub(super) fn emit_project(project: &Path, built: &Built) -> std::io::Result<()> {
-    let migrations = migrations_dir(project);
+    let layout = &built.layout;
+    let migrations = migrations_dir(project, layout);
     for entry in &built.migrations {
         let folder = migrations.join(&entry.id);
         if folder.exists() {
@@ -204,24 +204,31 @@ pub(super) fn emit_project(project: &Path, built: &Built) -> std::io::Result<()>
             return Err(e);
         }
     }
-    write(&project.join(layout::DB_TYPES), &built.gen_ts)?;
+    write(&project.join(layout.db_types()), &built.gen_ts)?;
     match &built.routes_ts {
         Some(routes) => {
-            write(&project.join(layout::ROUTES_TYPES), routes)?;
+            write(&project.join(layout.routes_types()), routes)?;
         }
         None => {
-            let _ = std::fs::remove_file(project.join(layout::ROUTES_TYPES));
+            let _ = std::fs::remove_file(project.join(layout.routes_types()));
         }
     }
+    let route_types_root = project.join(layout.route_types_dir());
+    let _ = std::fs::remove_dir_all(&route_types_root);
+    for (rel, content) in &built.route_type_files {
+        write(&route_types_root.join(rel), content)?;
+    }
+    write(&project.join(layout.api_js()), &built.api_js)?;
+    write(&project.join(layout.api_types()), &built.api_d_ts)?;
     if let Some(lock) = &built.plugin_lock {
         write(
-            &project.join(crate::plugins::LOCK_PATH),
+            &project.join(layout.plugins_lock()),
             serde_json::to_string_pretty(lock)? + "\n",
         )?;
     }
-    write(&project.join(layout::OPENAPI), crate::openapi::render(&built.openapi))?;
-    write(&project.join(crate::theme::TOKENS), &built.theme_css)?;
-    let client_dir = project.join(layout::CLIENT);
+    write(&project.join(layout.openapi()), crate::openapi::render(&built.openapi))?;
+    write(&project.join(layout.theme_tokens()), &built.theme_css)?;
+    let client_dir = project.join(layout.client());
     for (name, content) in &built.client_files {
         write(&client_dir.join(name), content)?;
     }
@@ -278,7 +285,7 @@ pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std
         root.file_name()
             .ok_or_else(|| std::io::Error::other("output needs a directory name"))?,
     );
-    if project.starts_with(&root) || project.join("sp").starts_with(&root) {
+    if project.starts_with(&root) || built.layout.root_path(project).starts_with(&root) {
         return Err(std::io::Error::other(
             "wp-content output cannot contain the project or its dependency lock",
         ));
@@ -298,12 +305,12 @@ pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std
             .map_err(|e| std::io::Error::other(format!("cannot acquire build lock {}: {e}", path.display())))?;
         Ok(Guard(path, file))
     }
-    let lock = project.join(layout::WP_PLUGINS_LOCK);
+    let lock = project.join(built.layout.wp_plugins_lock());
     std::fs::create_dir_all(lock.parent().unwrap())?;
     // Serialize the project lockfile and publication to a shared output root. The guard lives in
     // the SpacePress root, which no output may contain (checked above), so publication never renames it
     // away while a build holds it.
-    let _project_guard = guard(project.join(layout::ROOT).join(".wp-plugins.build.lock"))?;
+    let _project_guard = guard(built.layout.root_path(project).join(".wp-plugins.build.lock"))?;
     let _output_guard = guard(parent.join(format!(
         ".{}.spacepress-build.lock",
         root.file_name().unwrap().to_string_lossy()
@@ -343,7 +350,7 @@ pub(super) fn emit_wp_content(project: &Path, root: &Path, built: &Built) -> std
     if !built.schema.admin {
         remove_plugin(&plugins.join("spacepress-admin"))?;
     }
-    let (schema_php, app) = app_files(project, &migrations_dir(project), built)?;
+    let (schema_php, app) = app_files(project, &migrations_dir(project, &built.layout), built)?;
     let mut versions = serde_json::Map::new();
     for slug in generated {
         let directory = plugins.join(&slug);
@@ -772,7 +779,10 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
         eprintln!("error: {e}");
         return ExitCode::from(1);
     }
-    let root = args.out.clone().unwrap_or_else(|| project.join(layout::WP_CONTENT));
+    let root = args
+        .out
+        .clone()
+        .unwrap_or_else(|| project.join(built.layout.wp_content()));
     let out = match emit_wp_content(&project, &root, &built) {
         Ok(directory) => directory,
         Err(error) => {
@@ -789,11 +799,8 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
         }
     }
     let shown = out.strip_prefix(&project).unwrap_or(&out).display().to_string();
-    let new: Vec<String> = built
-        .migrations
-        .iter()
-        .map(|m| format!("{}/{}", pipeline::LEDGER, m.id))
-        .collect();
+    let ledger = built.layout.migrations();
+    let new: Vec<String> = built.migrations.iter().map(|m| format!("{ledger}/{}", m.id)).collect();
     let suffix = if new.is_empty() {
         String::new()
     } else {
@@ -820,7 +827,7 @@ mod tests {
             .join("20261121180000_7k9m2x_init");
         std::fs::create_dir_all(&folder).unwrap();
         // Missing ops.json inside a migration folder is an error.
-        let error = read_previous(project.path()).unwrap_err();
+        let error = read_previous(project.path(), &crate::layout::Layout::default()).unwrap_err();
         assert!(
             error
                 .message
@@ -839,7 +846,7 @@ mod tests {
         let dir = project.path().join(crate::pipeline::LEDGER);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(dir.join(std::ffi::OsStr::from_bytes(b"20261121180000_\xff_init"))).unwrap();
-        let error = read_previous(project.path()).unwrap_err();
+        let error = read_previous(project.path(), &crate::layout::Layout::default()).unwrap_err();
         assert!(error.message.contains("is not a UTF-8 file name"), "{}", error.message);
     }
 
@@ -860,7 +867,7 @@ mod tests {
     fn a_ledger_still_at_the_old_path_is_refused_not_built_as_a_first_build() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join("sp/migrations")).unwrap();
-        let error = read_previous(project.path()).unwrap_err();
+        let error = read_previous(project.path(), &crate::layout::Layout::default()).unwrap_err();
         assert_eq!(error.message, "sp/migrations/ moved to sp/_generated/migrations/");
     }
 
@@ -887,7 +894,7 @@ mod tests {
     #[test]
     fn a_missing_migrations_dir_is_a_first_build() {
         let project = tempfile::tempdir().unwrap();
-        let previous = read_previous(project.path()).unwrap();
+        let previous = read_previous(project.path(), &crate::layout::Layout::default()).unwrap();
         assert!(previous.ids.is_empty());
         assert_eq!(previous.snapshot["tables"], serde_json::json!({}));
     }

@@ -255,8 +255,14 @@ fn compile_request(request: Request) -> String {
             .filter_map(|(rel, text)| Some((rel.strip_prefix(prefix)?.to_string(), text.clone().into_bytes())))
             .collect()
     };
+    let layout = request
+        .files
+        .get(crate::layout::CONFIG)
+        .and_then(|src| crate::layout::Layout::from_config_source(&project.join(crate::layout::CONFIG), src).ok())
+        .unwrap_or_default();
+    let ledger_rel = layout.migrations();
     let mut public = under("public/");
-    let ledger = under(&format!("{}/", pipeline::LEDGER));
+    let ledger = under(&format!("{ledger_rel}/"));
     let mut prev_entries = Vec::new();
     for (rel, bytes) in &ledger {
         if let Some((id, file)) = rel.split_once('/')
@@ -289,7 +295,7 @@ fn compile_request(request: Request) -> String {
             let ops: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
                 diag::Diag::new(
                     diag::Span::NONE,
-                    format!("{}/{id}/ops.json is not valid JSON: {e}", pipeline::LEDGER),
+                    format!("{ledger_rel}/{id}/ops.json is not valid JSON: {e}"),
                 )
             })?;
             parsed.push((id, ops));
@@ -450,10 +456,10 @@ pub fn operation(operation: &str, request: &str) -> String {
                             &root,
                             &program,
                             || {
-                                if fs.exists(&root.join(pipeline::OLD_LEDGER)) {
-                                    return Err(pipeline::moved_ledger());
+                                if fs.exists(&root.join(program.layout.old_ledger())) {
+                                    return Err(pipeline::moved_ledger_for(&program.layout));
                                 }
-                                let dir = root.join(pipeline::LEDGER);
+                                let dir = root.join(program.layout.migrations());
                                 let mut entries = Vec::new();
                                 if fs.is_dir(&dir) {
                                     for path in fs
@@ -678,7 +684,7 @@ mod tests {
     #[test]
     fn a_locked_ability_in_the_request_types_its_call() {
         let config = r#"import { query, defineConfig } from "spacepress";
-import { abilities } from "php/wordpress";
+import { abilities } from "spacepress/server/wp";
 const __a = query({ access: "anyone" }, () => abilities.call("acme/info", { field: "title" })); export { __a as a }; export default defineConfig({});"#;
         let lock = serde_json::json!({"version": 1, "abilities": [{"name": "acme/info",
             "input_schema": {"type": "object", "properties": {"field": {"enum": ["name"]}}, "required": ["field"]}, "output_schema": {}}]});

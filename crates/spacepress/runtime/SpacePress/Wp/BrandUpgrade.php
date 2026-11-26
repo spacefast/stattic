@@ -1377,6 +1377,20 @@ final class BrandUpgrade
         if (!is_array($cron)) {
             return 0;
         }
+        // An event as compared, strictly: its keys in one order, the schedule a string (custom schedule
+        // names `01` and `001` are two schedules) or false, the interval an int.
+        $normal = static function (mixed $event): array {
+            $event = (array) $event;
+            $schedule = $event['schedule'] ?? false;
+            $out = ['schedule' => $schedule === false ? false : (string) $schedule, 'args' => $event['args'] ?? []];
+            if (array_key_exists('interval', $event)) {
+                $out['interval'] = (int) $event['interval'];
+            }
+            $rest = array_diff_key($event, $out);
+            ksort($rest);
+
+            return $out + $rest;
+        };
         $count = 0;
         foreach ($cron as $time => $events) {
             foreach ((array) $events as $hook => $instances) {
@@ -1388,7 +1402,7 @@ final class BrandUpgrade
                         $event['schedule'] = self::CRON_SCHEDULES[$event['schedule']];
                     }
                     // The same event under its current hook is the one moving; a different one is not this move's to replace.
-                    if (isset($cron[$time][$hooks[$hook]][$key]) && $cron[$time][$hooks[$hook]][$key] != $event) {
+                    if (isset($cron[$time][$hooks[$hook]][$key]) && $normal($cron[$time][$hooks[$hook]][$key]) !== $normal($event)) {
                         if ($taken !== null) {
                             $taken[] = "scheduled event {$hooks[$hook]} at $time";
                             continue;

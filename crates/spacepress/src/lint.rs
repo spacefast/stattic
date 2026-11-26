@@ -40,6 +40,10 @@ pub struct Warning {
 
 /// Runs all compile-time lint rules over every project source file registered in this run.
 pub fn check_project(root: &Path) -> Vec<Warning> {
+    check_project_with_layout(root, &crate::layout::Layout::default())
+}
+
+pub fn check_project_with_layout(root: &Path, layout: &crate::layout::Layout) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let mut seen = HashSet::new();
     for (path, source) in crate::diag::registered_files() {
@@ -49,7 +53,7 @@ pub fn check_project(root: &Path) -> Vec<Warning> {
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        if !should_lint(rel) {
+        if !should_lint(rel, layout) {
             continue;
         }
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -59,7 +63,7 @@ pub fn check_project(root: &Path) -> Vec<Warning> {
     warnings
 }
 
-fn should_lint(rel: &Path) -> bool {
+fn should_lint(rel: &Path, layout: &crate::layout::Layout) -> bool {
     let Some(ext) = rel.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -69,8 +73,7 @@ fn should_lint(rel: &Path) -> bool {
     let normalized = rel.to_string_lossy().replace('\\', "/");
     if normalized.starts_with("node_modules/")
         || normalized.contains("/node_modules/")
-        || normalized.starts_with("sp/_generated/")
-        || normalized.contains("/sp/_generated/")
+        || layout.is_under_generated(&normalized)
     {
         return false;
     }

@@ -10,7 +10,8 @@ fn check(checks: &mut Vec<Value>, name: &str, ok: bool, detail: impl Into<String
 
 pub(super) fn run(args: &Args) -> ExitCode {
     let project = args.project.canonicalize().unwrap_or(args.project.clone());
-    let out = args.out.clone().unwrap_or_else(|| project.join("sp/dist/wp-content"));
+    let layout = crate::layout::Layout::from_project(&project).unwrap_or_default();
+    let out = args.out.clone().unwrap_or_else(|| project.join(layout.wp_content()));
     let mut checks = Vec::new();
     let mut manifest = Value::Null;
     check(

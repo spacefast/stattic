@@ -54,7 +54,11 @@ struct Collection {
 }
 
 /// The SpacePress module for `src/content.config.ts`, or `None` when the project has none.
-pub fn module(fs: &dyn crate::loader::Fs, root: &Path) -> Result<Option<(PathBuf, String)>> {
+pub fn module(
+    fs: &dyn crate::loader::Fs,
+    root: &Path,
+    layout: &crate::layout::Layout,
+) -> Result<Option<(PathBuf, String)>> {
     let path = root.join(CONFIG);
     if !fs.is_file(&path) {
         return Ok(None);
@@ -64,7 +68,7 @@ pub fn module(fs: &dyn crate::loader::Fs, root: &Path) -> Result<Option<(PathBuf
         .map_err(|e| Diag::new(Span::NONE, format!("can't read {CONFIG}: {e}")).code(Code::Import))?;
     let file = diag::register_file(&path, &source);
     let collections = read(&source, file)?;
-    Ok(Some((root.join(MODULE), write(&collections))))
+    Ok(Some((root.join(layout.astro_content_module()), write(&collections))))
 }
 
 fn write(collections: &[Collection]) -> String {

@@ -1,4 +1,4 @@
-import { esc_attr, esc_html, esc_url, get_option, home_url, type Handler } from "php/wordpress";
+import { esc_attr, esc_html, esc_url, get_option, home_url, type Handler } from "spacepress/server/wp";
 
 // The notice above the sign-in form (sp/app/login.tsx shows it). A filter returns markup, so every
 // value placed in it is escaped for where it lands.

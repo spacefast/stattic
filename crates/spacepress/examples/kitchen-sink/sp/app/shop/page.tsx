@@ -1,4 +1,4 @@
-import { db } from "spacepress";
+import { db } from "spacepress/server";
 import { Link } from "spacepress/app";
 
 export const metadata = { title: "Kitchen supplies" };

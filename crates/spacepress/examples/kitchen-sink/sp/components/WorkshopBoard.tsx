@@ -1,6 +1,8 @@
 "use client";
 
-import { sharedState, uploadFile, useEffect, useEvent, useLive, useMount, useRef, useState } from "spacepress/client";
+import { useEffect, useRef, useState } from "react";
+import { sharedState, uploadFile, useEvent, useLive, useMount } from "spacepress/react";
+import { api } from "../_generated/api";
 import styles from "./WorkshopBoard.module.css";
 
 export const display = sharedState({ dismissals: 0 });
@@ -11,9 +13,9 @@ export function WorkshopBoard() {
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const [uploadedName, setUploadedName] = useState("");
-  const openWorkshops = useLive<{ id: number }>("events", {
+  const openWorkshops = useLive(api.events.list({
     where: { registrationOpen: true }, columns: { id: true }, limit: 100,
-  });
+  }));
   const workshops = openWorkshops.data;
   const count = workshops ? workshops.length : 0;
   useMount(() => { setReady(true); });

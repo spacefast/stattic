@@ -732,7 +732,7 @@ pub fn gen_ts(catalog: &Catalog) -> String {
     if catalog.abilities.is_empty() {
         return String::new();
     }
-    let mut out = String::from("declare module \"php/wordpress\" {\n  interface Abilities {\n");
+    let mut out = String::from("declare module \"spacepress/server/wp\" {\n  interface Abilities {\n");
     for (name, (input, output)) in &catalog.abilities {
         out.push_str(&format!(
             "    {}: {{ input: {}; output: {} }};\n",

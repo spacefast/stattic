@@ -104,7 +104,7 @@ const MODULES: &[Module] = &[
                 static_output: Some(StaticOutput {
                     after: "import { ApiFields }",
                     insert: include_str!("add/api-reference/static-params.tsx"),
-                    import: ("type PageProps }", "type PageProps, type StaticParams }"),
+                    import: ("import type { PageProps }", "import type { PageProps, StaticParams }"),
                 }),
                 what: "/api/<tag>/<operation>: parameters, body, responses and a request to copy",
                 when: When::Always,
@@ -266,20 +266,47 @@ fn table(schema: &Schema, key: Option<&str>) -> bool {
         .any(|c| !c.editor && !c.auth && c.taxonomy.is_none() && key.is_none_or(|key| c.key == key))
 }
 
+fn target_path(path: &str, layout: &crate::layout::Layout) -> String {
+    if let Some(rest) = path.strip_prefix("sp/") {
+        layout.rel(rest)
+    } else {
+        path.to_string()
+    }
+}
+
+fn rewrite_dir(content: &str, layout: &crate::layout::Layout) -> String {
+    if layout.is_default() {
+        return content.to_string();
+    }
+    let dir = layout.root();
+    content
+        .replace("./sp/_generated/", &format!("./{dir}/_generated/"))
+        .replace("sp/_generated/", &format!("{dir}/_generated/"))
+        .replace("sp/app/", &format!("{dir}/app/"))
+        .replace("sp/components/", &format!("{dir}/components/"))
+        .replace("sp/tables.ts", &format!("{dir}/tables.ts"))
+        .replace("sp/shop.ts", &format!("{dir}/shop.ts"))
+        .replace("sp/DATABASE.md", &format!("{dir}/DATABASE.md"))
+        .replace("sp/API.md", &format!("{dir}/API.md"))
+        .replace("`sp/`", &format!("`{dir}/`"))
+        .replace("\"sp/**/*.ts\"", &format!("\"{dir}/**/*.ts\""))
+}
+
 /// Why `file` doesn't belong in a project with this schema, or None when it does.
-fn skip(file: &File, schema: &Schema, project: &Path) -> Option<String> {
+fn skip(file: &File, schema: &Schema, project: &Path, layout: &crate::layout::Layout) -> Option<String> {
+    let shop_ts = layout.rel("shop.ts");
     match file.when {
         When::Always => None,
         When::NoStore => schema
             .store
             .is_some()
             .then(|| "the project already has a store".to_string()),
-        When::Shop => (!(project.join("sp/shop.ts").is_file()
+        When::Shop => (!(project.join(&shop_ts).is_file()
             && schema
                 .collections
                 .values()
                 .any(|c| c.commerce.as_deref() == Some("product") && c.key == "products")))
-        .then(|| "the project doesn't use the example sp/shop.ts products kind".to_string()),
+        .then(|| format!("the project doesn't use the example {shop_ts} products kind")),
         When::NoTables => table(schema, None).then(|| "the project already has tables".to_string()),
         When::Tables(names) => names
             .iter()
@@ -302,7 +329,7 @@ fn with_static_output(content: &str, extra: &StaticOutput) -> String {
 /// What a run created, in order, so a failed run can take all of it out again.
 #[derive(Default)]
 struct Created {
-    files: Vec<&'static str>,
+    files: Vec<String>,
     directories: Vec<PathBuf>,
 }
 
@@ -310,8 +337,8 @@ impl Created {
     /// Creates `path` with `content`, and the directories it needs. Fails when something is
     /// already there, so a file that appeared since [`occupied`] looked is never replaced. A file
     /// that could not be written whole is removed.
-    fn file(&mut self, project: &Path, path: &'static str, content: &str) -> std::io::Result<()> {
-        let full = project.join(path);
+    fn file(&mut self, project: &Path, path: String, content: &str) -> std::io::Result<()> {
+        let full = project.join(&path);
         let mut missing: Vec<PathBuf> = full
             .ancestors()
             .skip(1)
@@ -368,6 +395,11 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
         ExitCode::from(1)
     };
 
+    let layout = match crate::layout::Layout::from_project(&project) {
+        Ok(layout) => layout,
+        Err(problem) => return refuse(&problem, "invalid SpacePress config. Nothing was added."),
+    };
+    let shop_ts = layout.rel("shop.ts");
     let mut schema = match super::build::compile(&project) {
         Ok(schema) => schema,
         Err(problem) => return refuse(&problem, "the project has to compile first. Nothing was added."),
@@ -378,11 +410,12 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
     let mut compiled = 0;
     let mut report = Vec::new();
     for file in module.files {
-        if occupied(&project.join(file.path)) {
-            report.push((file, "kept   ", "already there, not changed".to_string()));
+        let out_path = target_path(file.path, &layout);
+        if occupied(&project.join(&out_path)) {
+            report.push((out_path, "kept   ", "already there, not changed".to_string()));
             continue;
         }
-        let shop_files = matches!(file.when, When::Shop) && created.files.contains(&"sp/shop.ts");
+        let shop_files = matches!(file.when, When::Shop) && created.files.iter().any(|f| f == &shop_ts);
         if !shop_files && !matches!(file.when, When::Always) && compiled < created.files.len() {
             schema = match super::build::compile(&project) {
                 Ok(schema) => schema,
@@ -399,21 +432,22 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
         if let Some(why) = if shop_files {
             None
         } else {
-            skip(file, &schema, &project)
+            skip(file, &schema, &project, &layout)
         } {
-            report.push((file, "skipped", why));
+            report.push((out_path, "skipped", why));
             continue;
         }
         let content = match &file.static_output {
             Some(extra) if schema.output == crate::schema::Output::Static => with_static_output(file.content, extra),
             _ => file.content.to_string(),
         };
-        if let Err(error) = created.file(&project, file.path, &content) {
+        let content = rewrite_dir(&content, &layout);
+        if let Err(error) = created.file(&project, out_path.clone(), &content) {
             created.undo(&project);
-            eprintln!("{command}: can't write {}: {error}. Nothing was added.", file.path);
+            eprintln!("{command}: can't write {out_path}: {error}. Nothing was added.");
             return ExitCode::from(1);
         }
-        report.push((file, "created", file.what.to_string()));
+        report.push((out_path, "created", file.what.to_string()));
     }
     if compiled < created.files.len()
         && let Err(problem) = super::build::compile(&project)
@@ -430,14 +464,14 @@ pub(crate) fn cli(args: &[String]) -> ExitCode {
     } else {
         println!("{command}: {}", module.summary);
     }
-    let width = module.files.iter().map(|f| f.path.len()).max().unwrap_or(0);
-    for (file, status, detail) in &report {
-        println!("  {status}  {:width$}  {detail}", file.path);
+    let width = report.iter().map(|(path, ..)| path.len()).max().unwrap_or(0);
+    for (path, status, detail) in &report {
+        println!("  {status}  {path:width$}  {detail}");
     }
     if !created.files.is_empty() {
         println!("\nnext:");
         for line in module.next {
-            println!("  {line}");
+            println!("  {}", rewrite_dir(line, &layout));
         }
     }
     ExitCode::SUCCESS

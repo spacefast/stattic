@@ -113,7 +113,7 @@ fn leading_heading(body: &str) -> Option<(String, String)> {
 /// Reads every `page.md` route into the app's route table: its entry in `content`, and the file
 /// entry the router reads (`component`, `metadata`).
 pub fn register(program: &loader::Program, ext: &mut extract::Extracted) -> Result<(), Diag> {
-    let first = program.root.join(crate::layout::ROOT);
+    let first = program.layout.root_path(&program.root);
     let mut pages = Vec::new();
     // One id space: the page.tsx `route` exports already in the table, then each page.md's `id:`.
     let mut ids: Vec<(String, String, Span)> = ext

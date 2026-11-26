@@ -1,9 +1,5 @@
-import {
-  collection, global, text, integer, boolean, timestamp, richText, media, slug, select,
-  repeater, group, blocks, email, url, file, files, defineConfig, job, env,
-  db, HttpError,
-  table, userProjection, ref, query, mutation,
-} from "spacepress";
+import { collection, global, text, integer, boolean, timestamp, richText, media, slug, select, repeater, group, blocks, email, url, file, files, defineConfig, job, env, table, userProjection, ref, query, mutation } from "spacepress";
+import { db, HttpError } from "spacepress/server";
 
 export const authors = collection({
   name: text().max(80),

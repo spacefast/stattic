@@ -4,7 +4,7 @@
 //! lists what the site shows anyone.
 
 use crate::sync::client::Credential;
-use crate::wordpress::abilities::{self, LOCK};
+use crate::wordpress::abilities;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -44,12 +44,14 @@ fn run(args: &[String]) -> Result<(), String> {
         .collect();
     let mut warnings = Vec::new();
     let lock = lock(&site, &now(), &kept, &mut warnings);
-    let path = project.join(LOCK);
+    let layout = crate::layout::Layout::from_project(&project).map_err(|d| d.message)?;
+    let lock_rel = layout.abilities_lock();
+    let path = project.join(&lock_rel);
     crate::sync::write_atomic(&path, (serde_json::to_string_pretty(&lock).unwrap() + "\n").as_bytes())?;
     for w in &warnings {
         eprintln!("warning: {w}");
     }
-    println!("locked {} abilities from {site} -> {}", kept.len(), LOCK);
+    println!("locked {} abilities from {site} -> {lock_rel}", kept.len());
     Ok(())
 }
 
@@ -192,11 +194,13 @@ fn endpoint(site: &str) -> Result<url::Url, String> {
 
 /// The lock's abilities a site no longer has or has changed: one line each.
 pub(crate) fn drift(project: &Path, listed: &[Value]) -> Result<Vec<String>, String> {
-    let path = project.join(LOCK);
+    let layout = crate::layout::Layout::from_project(project).map_err(|d| d.message)?;
+    let lock_rel = layout.abilities_lock();
+    let path = project.join(&lock_rel);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(Vec::new());
     };
-    let lock: Value = serde_json::from_str(&text).map_err(|e| format!("{LOCK}: {e}"))?;
+    let lock: Value = serde_json::from_str(&text).map_err(|e| format!("{lock_rel}: {e}"))?;
     let mut out = Vec::new();
     for locked in lock["abilities"].as_array().into_iter().flatten() {
         let name = locked["name"].as_str().unwrap_or_default();

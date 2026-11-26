@@ -191,7 +191,7 @@ fn app_source(program: &Program, file: u32) -> bool {
     if module == program.entry {
         return true;
     }
-    path.starts_with(program.root.join(crate::layout::ROOT))
+    path.starts_with(program.layout.root_path(&program.root))
         && !path.components().any(|c| c.as_os_str() == "node_modules")
 }
 

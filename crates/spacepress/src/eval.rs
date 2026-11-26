@@ -7,7 +7,7 @@
 
 use crate::diag::{Diag, Span, suggest};
 use crate::ir::*;
-use crate::loader::{Program, SP_MODULE, WORDPRESS_MODULE};
+use crate::loader::{Program, SERVER_MODULE, SP_MODULE, WORDPRESS_MODULE};
 use crate::num::js_number_to_string;
 use crate::schema::{ColType, RefAction};
 use crate::value::*;
@@ -251,7 +251,7 @@ fn require_static_coercion(value: &Value, span: Span) -> R<()> {
 /// The fields every `wp.posts` kind has: the post row's own columns.
 pub const POST_FIELDS: &[&str] = &["id", "title", "slug", "content", "excerpt", "status", "publishedAt"];
 
-/// Names exported by `"first"`.
+/// Schema, DSL and config names exported by `"spacepress"`.
 pub const SP_EXPORTS: &[&str] = &[
     "collection",
     "table",
@@ -282,24 +282,45 @@ pub const SP_EXPORTS: &[&str] = &[
     "global",
     "ref",
     "defineConfig",
+    "defineRelations",
     "query",
     "mutation",
-    "db",
-    "HttpError",
     "file",
     "files",
     "job",
     "cron",
     "env",
-    "once",
-    "mail",
-    "connectors",
     "definePlugin",
     "adminScreen",
     "adminWidget",
     "adminDashboard",
     "item",
     "wp",
+];
+/// Server-only runtime APIs exported by `"spacepress/server"`.
+pub const SERVER_EXPORTS: &[&str] = &["db", "HttpError", "once", "mail", "connectors"];
+/// Type-only exports of `"spacepress/server"`: importable, erased.
+const SERVER_TYPES: &[&str] = &[
+    "MailAddress",
+    "MailMessage",
+    "HookCtx",
+    "AccessCtx",
+    "FieldAccessCtx",
+    "ValidateCtx",
+    "JobCtx",
+    "FileBucket",
+    "AnyFileBucket",
+    "PrivateFileInfo",
+    "RouteRequest",
+    "RouteResponse",
+    "RouteQuery",
+    "User",
+    "Role",
+    "Id",
+    "Status",
+    "Locale",
+    "EnqueueOptions",
+    "FileRule",
 ];
 /// Type-only exports of `"first"`: importable, erased.
 const SP_TYPES: &[&str] = &[
@@ -659,19 +680,20 @@ impl<'p> Evaluator<'p> {
         self.program
     }
 
-    /// Fills every `"spacepress:db"` binding from `kinds` (registered name → kind), once registration has
+    /// Fills every `"spacepress/server/db"` binding from `kinds` (registered name → kind), once registration has
     /// run. An unknown name is refused at its import, with the closest registered name.
     pub fn bind_db(&mut self, kinds: &IndexMap<String, Value>) -> Result<(), Diag> {
         self.db_kinds = Some(kinds.clone());
+        let dir = self.program.layout.root().to_string();
         for (scope, local, name, span) in std::mem::take(&mut self.db_imports) {
             let Some(value) = kinds.get(&name) else {
-                let mut d = Diag::new(span, format!("\"spacepress:db\" has no kind named `{name}`"));
+                let mut d = Diag::new(span, format!("\"spacepress/server/db\" has no kind named `{name}`"));
                 if let Some(s) = suggest(&name, kinds.keys().map(String::as_str)) {
                     d = d.help(format!("did you mean `{s}`?"));
                 } else {
-                    d = d.help(
-                        "export the kind from a module under sp/, e.g. `export const posts = collection({ ... })`",
-                    );
+                    d = d.help(format!(
+                        "export the kind from a module under {dir}/, e.g. `export const posts = collection({{ ... }})`"
+                    ));
                 }
                 return Err(d);
             };
@@ -1058,6 +1080,9 @@ impl<'p> Evaluator<'p> {
         if source == SP_MODULE {
             return sp_export(name, span);
         }
+        if source == SERVER_MODULE {
+            return server_export(name, span);
+        }
         if let Some(module) = crate::builtins::module(source) {
             return node_crypto_export(module, source, name, span);
         }
@@ -1074,18 +1099,22 @@ impl<'p> Evaluator<'p> {
                 )),
             };
         }
-        if source == crate::loader::CLIENT_MODULE {
-            return crate::client_component::HOOKS
-                .iter()
-                .find(|h| **h == name)
-                .map(|h| Value::Builtin(Builtin::Client(h)))
-                .ok_or_else(|| {
-                    let mut d = Diag::new(span, format!("\"spacepress/client\" has no export named `{name}`"));
-                    if let Some(s) = suggest(name, crate::client_component::HOOKS.iter().copied()) {
-                        d = d.help(format!("did you mean `{s}`?"));
-                    }
-                    Ctl::Err(d)
-                });
+        if source == crate::loader::REACT_MODULE && self.program.modules[from].use_client {
+            return react_client_export(name, span);
+        }
+        if crate::loader::is_client_react_module(source) {
+            return client_react_export(source, name, span);
+        }
+        if crate::loader::is_client_sdk_module(source) {
+            return client_sdk_export(source, name, span);
+        }
+        if crate::loader::is_generated_api_import(
+            &self.program.root,
+            &self.program.layout,
+            &self.program.modules[from].path,
+            source,
+        ) {
+            return Ok(Value::Undef);
         }
         if source == crate::loader::CONTENT_MODULE {
             return crate::compile::CONTENT_EXPORTS
@@ -1165,8 +1194,8 @@ impl<'p> Evaluator<'p> {
                 let ImportName::Named(name) = &spec.imported else {
                     return err_help(
                         spec.span,
-                        "\"spacepress:db\" exports one name per kind",
-                        "import the kinds you use: `import { posts } from \"spacepress:db\"`",
+                        "\"spacepress/server/db\" exports one name per kind",
+                        "import the kinds you use: `import { posts } from \"spacepress/server/db\"`",
                     );
                 };
                 scope.vars.borrow_mut().insert(
@@ -1221,14 +1250,20 @@ impl<'p> Evaluator<'p> {
                     if source == WORDPRESS_MODULE {
                         return err_help(
                             spec.span,
-                            "\"php/wordpress\" can't be imported as a namespace",
-                            "import the names you use: `import { abilities } from \"php/wordpress\"`",
+                            "\"spacepress/server/wp\" can't be imported as a namespace",
+                            "import the names you use: `import { abilities } from \"spacepress/server/wp\"`",
                         );
                     }
                     if source == SP_MODULE {
                         let mut map = IndexMap::new();
                         for n in SP_EXPORTS {
                             map.insert(n.to_string(), sp_export(n, span)?);
+                        }
+                        Value::object(map)
+                    } else if source == SERVER_MODULE {
+                        let mut map = IndexMap::new();
+                        for n in SERVER_EXPORTS {
+                            map.insert(n.to_string(), server_export(n, span)?);
                         }
                         Value::object(map)
                     } else {
@@ -3363,7 +3398,7 @@ impl<'p> Evaluator<'p> {
             Builtin::App(name) => err_help(
                 span,
                 format!("`{name}` from \"spacepress/app\" can't run while the config is built"),
-                "call it in a page, layout or component under sp/app/ or sp/components/",
+                "call it in a page, layout or component under app/ or components/",
             ),
         }
     }
@@ -4489,9 +4524,13 @@ fn sp_export(name: &str, span: Span) -> R<Value> {
                 "import the job and call `notifyLowStock.enqueue({ itemId }, { delay: 60, key: \"low-1\" })`",
             );
         }
-        "once" => Builtin::Once,
-        "mail" => Builtin::Mail,
-        "connectors" => Builtin::Connectors,
+        "db" | "HttpError" | "once" | "mail" | "connectors" => {
+            return err_help(
+                span,
+                format!("`{name}` moved to \"spacepress/server\""),
+                format!("import it from the server runtime module: `import {{ {name} }} from \"spacepress/server\"`"),
+            );
+        }
         "env" => Builtin::Env,
         "select" => Builtin::Field("select"),
         "group" => Builtin::Field("group"),
@@ -4514,8 +4553,6 @@ fn sp_export(name: &str, span: Span) -> R<Value> {
                 "write `export const like = mutation({ access: \"subscriber\" }, async ({ id }: { id: number }) => { ... })`; the input comes from the handler's parameter type",
             );
         }
-        "db" => Builtin::Db,
-        "HttpError" => Builtin::HttpError,
         n if SP_TYPES.contains(&n) => return Ok(Value::Undef),
         "route" => {
             return err_help(
@@ -4546,6 +4583,140 @@ fn sp_export(name: &str, span: Span) -> R<Value> {
             return Err(Ctl::Err(d));
         }
     }))
+}
+
+fn server_export(name: &str, span: Span) -> R<Value> {
+    Ok(Value::Builtin(match name {
+        "db" => Builtin::Db,
+        "HttpError" => Builtin::HttpError,
+        "once" => Builtin::Once,
+        "mail" => Builtin::Mail,
+        "connectors" => Builtin::Connectors,
+        n if SERVER_TYPES.contains(&n) => return Ok(Value::Undef),
+        n if SP_EXPORTS.contains(&n) => {
+            return err_help(
+                span,
+                format!("`{name}` is a schema/config builder exported by \"spacepress\", not \"spacepress/server\""),
+                format!("import it from \"spacepress\": `import {{ {name} }} from \"spacepress\"`"),
+            );
+        }
+        _ => {
+            let mut d = Diag::new(span, format!("\"spacepress/server\" has no export named `{name}`"));
+            if let Some(s) = suggest(name, SERVER_EXPORTS.iter().copied()) {
+                d = d.help(format!("did you mean `{s}`?"));
+            }
+            return Err(Ctl::Err(d));
+        }
+    }))
+}
+
+const REACT_CLIENT_TYPES: &[&str] = &[
+    "ReactNode",
+    "ReactElement",
+    "FC",
+    "FunctionComponent",
+    "ComponentProps",
+    "ComponentPropsWithoutRef",
+    "ComponentPropsWithRef",
+    "PropsWithChildren",
+    "CSSProperties",
+    "RefObject",
+    "MutableRefObject",
+    "Dispatch",
+    "SetStateAction",
+    "FormEvent",
+    "ChangeEvent",
+    "MouseEvent",
+    "KeyboardEvent",
+    "FocusEvent",
+    "PointerEvent",
+    "SyntheticEvent",
+];
+
+fn react_client_export(name: &str, span: Span) -> R<Value> {
+    if let Some(h) = crate::client_component::REACT_HOOKS.iter().find(|h| **h == name) {
+        return Ok(Value::Builtin(Builtin::Client(h)));
+    }
+    if REACT_CLIENT_TYPES.contains(&name) {
+        return Ok(Value::Undef);
+    }
+    if crate::client_component::CLIENT_HOOKS.contains(&name) {
+        return err_help(
+            span,
+            format!("`{name}` is a SpacePress hook, not a \"react\" export"),
+            format!("import it from \"spacepress/react\": `import {{ {name} }} from \"spacepress/react\"`"),
+        );
+    }
+    err_help(
+        span,
+        format!("`{name}` from \"react\" isn't supported in WordPress Interactivity API \"use client\" components"),
+        "supported \"react\" hooks are `useState`, `useEffect`, and `useRef`; for full React APIs (context, portals, third-party React libraries), bundle a browser entry with `@spacepress/frontend`",
+    )
+}
+
+const CLIENT_REACT_TYPES: &[&str] = &[
+    "LiveState",
+    "LiveQueryRef",
+    "ActionRef",
+    "MutationArgs",
+    "UploadedFile",
+    "QueryState",
+    "UseQueryOptions",
+    "UseMutationOptions",
+    "Mutation",
+    "Hooks",
+    "ReactLike",
+    "Apply",
+];
+
+fn client_react_export(source: &str, name: &str, span: Span) -> R<Value> {
+    if let Some(h) = crate::client_component::CLIENT_HOOKS.iter().find(|h| **h == name) {
+        return Ok(Value::Builtin(Builtin::Client(h)));
+    }
+    if CLIENT_REACT_TYPES.contains(&name) {
+        return Ok(Value::Undef);
+    }
+    if crate::client_component::REACT_HOOKS.contains(&name) {
+        return err_help(
+            span,
+            format!("`{name}` comes from \"react\", not \"{source}\""),
+            format!("write `import {{ {name} }} from \"react\"`"),
+        );
+    }
+    if matches!(name, "useQuery" | "createHooks" | "useCart") {
+        return err_help(
+            span,
+            format!("`{name}` is for external React frontends or @spacepress/frontend islands"),
+            "in SpacePress Interactivity API \"use client\" components, use `useLive(api.<kind>.list(...))` and `useMutation(api.actions.<name>)` from \"spacepress/react\"",
+        );
+    }
+    let mut d = Diag::new(span, format!("\"{source}\" has no export named `{name}`"));
+    if let Some(s) = suggest(name, crate::client_component::CLIENT_HOOKS.iter().copied()) {
+        d = d.help(format!("did you mean `{s}`?"));
+    }
+    Err(Ctl::Err(d))
+}
+
+fn client_sdk_export(source: &str, name: &str, span: Span) -> R<Value> {
+    if crate::client_component::REACT_HOOKS.contains(&name) {
+        return err_help(
+            span,
+            format!("`{name}` moved from \"{source}\" to \"react\""),
+            format!("write `import {{ {name} }} from \"react\"`"),
+        );
+    }
+    if crate::client_component::CLIENT_HOOKS.contains(&name) {
+        return err_help(
+            span,
+            format!("`{name}` is exported from \"spacepress/react\", not \"{source}\""),
+            format!("write `import {{ {name} }} from \"spacepress/react\"`"),
+        );
+    }
+    err_help(
+        span,
+        format!("`{name}` from \"{source}\" can't be called directly in an Interactivity API \"use client\" component"),
+        "use `useLive(api.<kind>.list(...))`, `useMutation(api.actions.<name>)`, and `uploadFile` from \"spacepress/react\"; for full client SDK usage, use a `@spacepress/frontend` browser entry or external frontend",
+    )
 }
 
 fn node_crypto_export(module: crate::builtins::BuiltinModule, source: &str, name: &str, span: Span) -> R<Value> {
@@ -4586,7 +4757,7 @@ fn wordpress_export(name: &str, span: Span) -> R<Value> {
         n if crate::wordpress::function(n).is_some() => Builtin::WpFunction(n.into()),
         n if WORDPRESS_TYPES.contains(&n) => return Ok(Value::Undef),
         _ => {
-            let mut d = Diag::new(span, format!("\"php/wordpress\" has no export named `{name}`"));
+            let mut d = Diag::new(span, format!("\"spacepress/server/wp\" has no export named `{name}`"));
             d = match suggest(
                 name,
                 WORDPRESS_EXPORTS

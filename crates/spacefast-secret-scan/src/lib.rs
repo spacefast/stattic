@@ -1095,16 +1095,22 @@ pub fn shannon_entropy(value: &str) -> f64 {
     entropy
 }
 
+/// Shortest match whose preview keeps any of its characters.
+const REDACT_REVEAL_MIN_CHARS: usize = 24;
+
 /// Produces a redacted preview that helps locate a finding without exposing the secret.
+///
+/// Only the first four characters of a match at least 24 characters long are kept,
+/// a sixth of it at most. Those are usually the provider prefix (`ghp_`, `AKIA`, `sk_l`).
+/// Anything shorter shows nothing.
 #[must_use]
 pub fn redact_secret(secret: &str) -> String {
     let chars: Vec<char> = secret.chars().collect();
-    if chars.len() < 12 {
+    if chars.len() < REDACT_REVEAL_MIN_CHARS {
         return "***".to_string();
     }
     let prefix: String = chars[..4].iter().collect();
-    let suffix: String = chars[chars.len() - 2..].iter().collect();
-    format!("{prefix}…{suffix}")
+    format!("{prefix}…")
 }
 
 /// Stable, non-reversible 16-hex-char fingerprint for allowlisting one finding.
@@ -1260,6 +1266,15 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn redacted_previews_keep_at_most_a_sixth_of_a_secret() {
+        assert_eq!(redact_secret("abcdefghijk"), "***");
+        assert_eq!(redact_secret("abcdefghijklmnopqrstuvw"), "***");
+        assert_eq!(redact_secret("ghp_abcdefghijklmnopqrst"), "ghp_…");
+        let long = "AKIA".to_string() + &"Z".repeat(36);
+        assert_eq!(redact_secret(&long), "AKIA…");
+    }
+
+    #[test]
     fn every_vendored_rule_compiles_and_has_explicit_tier() {
         let config = ScanConfig::default_gitleaks();
         assert_eq!(config.rules.len(), 222);
@@ -1318,6 +1333,10 @@ mod tests {
         assert!(outcome.findings.iter().any(|f| {
             f.rule_id == "generic-api-key" && f.severity == Severity::Warn && f.line == 3
         }));
+        assert!(outcome
+            .findings
+            .iter()
+            .all(|f| f.redacted_preview.chars().count() <= 5));
     }
 
     #[test]

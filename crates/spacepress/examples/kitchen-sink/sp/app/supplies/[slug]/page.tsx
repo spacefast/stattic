@@ -1,9 +1,10 @@
-import { Content, Link, notFound, type PageProps } from "spacepress/app";
+import { Content, Link, notFound } from "spacepress/app";
+import type { PageProps } from "./$types";
 
-export const metadata = ({ item }: PageProps<"supplies/[slug]">) => ({ title: item?.name ?? "Kitchen supplies" });
+export const metadata = ({ item }: PageProps) => ({ title: item?.name ?? "Kitchen supplies" });
 
 // The product's own page: WooCommerce links here from the cart, the checkout and order mail.
-export default function Supply({ item }: PageProps<"supplies/[slug]">) {
+export default function Supply({ item }: PageProps) {
   if (!item) notFound();
   return (
     <article>

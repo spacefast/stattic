@@ -45,6 +45,6 @@ read the SQL.
 
 - From a browser or another server: the generated client (`first.tasks.list(...)`) or
   `/wp-json/spacepress/v1/tasks`. Both apply the table's `access` rules.
-- From an action, a hook or a job: `import { tasks } from "spacepress:db"` and call `tasks.list()`,
+- From an action, a hook or a job: `import { tasks } from "spacepress/server/db"` and call `tasks.list()`,
   `tasks.create()` and the rest. An action runs in one transaction with everything it writes, to
   tables and to WordPress content alike; a throw rolls all of it back.

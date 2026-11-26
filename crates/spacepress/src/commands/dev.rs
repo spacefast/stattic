@@ -231,9 +231,10 @@ pub(super) fn run(args: &crate::cli::Args) -> ExitCode {
             // The watcher is a grandchild (npx, a shell, node) that a signal to this process never
             // reaches. It checks that this process still exists, and stops WordPress when it is gone.
             command.env("SP_DEV_PARENT", std::process::id().to_string());
+            let layout = crate::layout::Layout::from_project(&project).unwrap_or_default();
             command
                 .arg(std::env::current_exe().map_err(|e| e.to_string())?)
-                .arg(args.out.clone().unwrap_or_else(|| project.join("sp/dist/wp-content")))
+                .arg(args.out.clone().unwrap_or_else(|| project.join(layout.wp_content())))
                 .arg(args.port.to_string());
             if args.no_watch {
                 command.arg("--no-watch");

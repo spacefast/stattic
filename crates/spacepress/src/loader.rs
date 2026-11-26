@@ -23,28 +23,112 @@ pub(crate) fn email_module(root: &Path, path: &Path) -> bool {
     path.starts_with(root.join(EMAILS_DIR))
 }
 
-/// Page and layout helpers for `sp/app/` and components (docs/spec/rendering.md §2–§4).
+/// Server-only runtime APIs (`db`, `HttpError`, `once`, `mail`, `connectors`).
+pub const SERVER_MODULE: &str = "spacepress/server";
+/// Page and layout helpers for `<dir>/app/` and components (docs/spec/rendering.md §2–§4).
 pub const APP_MODULE: &str = "spacepress/app";
-/// Navigation for a hierarchical kind's pages: `nav`, `pager`, `headings` (src/compile/content.rs).
+/// Navigation and OpenAPI helpers for server pages (src/compile/content.rs).
 pub const CONTENT_MODULE: &str = "spacepress/content";
-/// Hooks for `"use client"` components (docs/decisions/2026-11-08-tsx-to-php.md, generator B).
-pub const CLIENT_MODULE: &str = "spacepress/client";
 /// Opt-in CLI-only destructive migration escape hatch (ADR 2026-11-21 §3).
 pub const DANGER_MODULE: &str = "spacepress/danger";
 /// WordPress core from TypeScript: abilities, hook types and functions (docs/decisions/2026-11-07-wordpress-from-typescript.md).
-pub const WORDPRESS_MODULE: &str = "php/wordpress";
-/// The app's kinds, by registered name (docs/spec/spec.md §2.1); typed by `sp/_generated/db.d.ts`.
-pub const DB_MODULE: &str = "spacepress:db";
+pub const WORDPRESS_MODULE: &str = "spacepress/server/wp";
+/// The app's kinds, by registered name (docs/spec/spec.md §2.1); typed by `<dir>/_generated/db.d.ts`.
+pub const DB_MODULE: &str = "spacepress/server/db";
+/// Standard React hooks in `"use client"` components (`useState`, `useEffect`, `useRef`).
+pub const REACT_MODULE: &str = "react";
+/// SpacePress client React hooks (`useLive`, `useMutation`, `useMount`, `useEvent`, `sharedState`, `uploadFile`).
+pub const SP_REACT_MODULE: &str = "spacepress/react";
+/// SpacePress typed client SDK (`bind`, `createClient`, `SpacePressError`, ...).
+pub const SP_CLIENT_MODULE: &str = "spacepress/client";
+/// Standalone browser client package aliases (`@spacepress/client` and `@spacepress/client/react`).
+pub const CLIENT_REACT_MODULE: &str = "@spacepress/client/react";
+pub const CLIENT_SDK_MODULE: &str = "@spacepress/client";
 
-/// Modules the compiler provides itself; nothing is loaded for them. Node built-ins come from the
-/// one lookup, `builtins::module`.
+/// Whether `spec` is a server-only SpacePress module (`spacepress/server` or `spacepress/server/*`).
+pub fn is_server_module(spec: &str) -> bool {
+    spec == SERVER_MODULE || spec.starts_with("spacepress/server/")
+}
+
+/// Whether `spec` is compiled server-only in SpacePress (refused inside `"use client"` components).
+pub fn is_server_only_module(spec: &str) -> bool {
+    is_server_module(spec) || spec == APP_MODULE || spec == CONTENT_MODULE
+}
+
+/// Whether `spec` is SpacePress's React hooks module (`spacepress/react` or `@spacepress/client/react`).
+pub fn is_client_react_module(spec: &str) -> bool {
+    spec == SP_REACT_MODULE || spec == CLIENT_REACT_MODULE
+}
+
+/// Whether `spec` is SpacePress's client SDK module (`spacepress/client` or `@spacepress/client`).
+pub fn is_client_sdk_module(spec: &str) -> bool {
+    spec == SP_CLIENT_MODULE || spec == CLIENT_SDK_MODULE
+}
+
+/// Whether `spec` is a browser/client module recognized in `"use client"` components.
+pub fn client_builtin_module(spec: &str) -> bool {
+    spec == REACT_MODULE || is_client_react_module(spec) || is_client_sdk_module(spec)
+}
+
+/// Whether a relative import `spec` from `from_file` targets `<dir>/_generated/api` (the zero-server-code
+/// generated client/island API bridge).
+pub fn is_generated_api_import(
+    project_root: &Path,
+    layout: &crate::layout::Layout,
+    from_file: &Path,
+    spec: &str,
+) -> bool {
+    if !spec.starts_with('.') {
+        return false;
+    }
+    let Some(parent) = from_file.parent() else {
+        return false;
+    };
+    let joined = normalize_path(&parent.join(spec));
+    let base = normalize_path(&project_root.join(layout.generated()).join("api"));
+    if joined == base {
+        return true;
+    }
+    for ext in ["js", "mjs", "ts", "d.ts"] {
+        let mut with_ext = base.as_os_str().to_os_string();
+        with_ext.push(".");
+        with_ext.push(ext);
+        if joined.as_os_str() == with_ext {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a type-only import targets a generated per-route `./$types` declaration.
+pub fn is_route_types_import(spec: &str) -> bool {
+    matches!(spec, "./$types" | "./$types.ts" | "./$types.d.ts")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Modules the compiler provides itself on the server; nothing is loaded for them. Node built-ins
+/// come from the one lookup, `builtins::module`.
 pub fn builtin_module(spec: &str) -> bool {
     spec == SP_MODULE
+        || spec == SERVER_MODULE
         || spec == WORDPRESS_MODULE
         || spec == DB_MODULE
         || spec == APP_MODULE
         || spec == CONTENT_MODULE
-        || spec == CLIENT_MODULE
         || spec == DANGER_MODULE
         || crate::builtins::module(spec).is_some()
 }
@@ -161,6 +245,8 @@ impl Fs for Disk {
 pub struct Program {
     /// The directory that holds `spacepress.config.ts`.
     pub root: PathBuf,
+    /// Resolved project directory layout (`defineConfig({ dir })`, default `"sp"`).
+    pub layout: crate::layout::Layout,
     pub modules: Vec<Rc<Module>>,
     /// (module id, specifier) → resolved module id.
     pub resolved: HashMap<(usize, String), usize>,
@@ -216,21 +302,20 @@ pub(crate) fn stylesheet_inputs(project: &Path) -> Result<Vec<String>> {
     let entry = project.join(crate::layout::CONFIG);
     let program = load_with_styles(Rc::new(Disk), &entry, true)
         .map_err(|diagnostics| diagnostics.into_iter().next().expect("failed load has diagnostics"))?;
+    let layout = program.layout.clone();
     let mut styles: Vec<_> = program
         .assets
         .into_values()
-        .filter(|asset| asset.kind == crate::assets::Kind::Css && authored_stylesheet(&asset.source))
+        .filter(|asset| asset.kind == crate::assets::Kind::Css && authored_stylesheet(&asset.source, &layout))
         .map(|asset| asset.source)
         .collect();
     styles.sort_unstable();
     Ok(styles)
 }
 
-fn authored_stylesheet(source: &str) -> bool {
-    source.starts_with("sp/") && !source.split('/').any(|part| part == "node_modules")
+fn authored_stylesheet(source: &str, layout: &crate::layout::Layout) -> bool {
+    layout.is_under_root(source) && !source.split('/').any(|part| part == "node_modules")
 }
-
-pub(crate) const FRONTEND_STYLES: &str = "sp/_generated/frontend-styles.json";
 
 pub(crate) fn frontend_enabled(fs: &dyn Fs, root: &Path) -> Result<bool> {
     let package = match fs.read_to_string(&root.join("package.json")) {
@@ -254,7 +339,9 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         .canonicalize(entry)
         .map_err(|e| vec![Diag::new(Span::NONE, format!("{}: {e}", entry.display())).code(diag::Code::Import)])?;
     let root = entry.parent().expect("entry has a directory").to_path_buf();
-    let manifest = root.join(FRONTEND_STYLES);
+    let layout = crate::layout::Layout::from_fs(&*fs, &entry).map_err(|diag| vec![diag])?;
+    let frontend_styles_rel = layout.frontend_styles();
+    let manifest = root.join(&frontend_styles_rel);
     // A live project that names the package builds its plain stylesheets with it, and has no
     // manifest before its first build (a fresh clone). A stored capture took its manifest along.
     let frontend = !fs.captured() && frontend_enabled(&*fs, &root).map_err(|diag| vec![diag])?;
@@ -266,13 +353,17 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
                     .map_err(std::io::Error::other)
             })
             .map_err(|error| {
-                vec![Diag::new(Span::NONE, format!("can't read {FRONTEND_STYLES}: {error}")).code(diag::Code::Import)]
+                vec![
+                    Diag::new(Span::NONE, format!("can't read {frontend_styles_rel}: {error}"))
+                        .code(diag::Code::Import),
+                ]
             })?
     } else {
         HashMap::new()
     };
     let mut program = Program {
         root,
+        layout,
         frontend_styles,
         frontend,
         discover_styles,
@@ -294,13 +385,15 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         Ok(id) => program.entry = id,
         Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
     }
-    // A checkout from before `sp/_generated/` (a leftover `sp/client/`, an old lock) is refused
-    // before any module under `sp/` loads, so its message is the move, not whatever the stale
+    // A checkout from before `<dir>/_generated/` (a leftover `sp/client/`, an old lock) is refused
+    // before any module under `<dir>/` loads, so its message is the move, not whatever the stale
     // files fail on.
-    if let Some((message, help)) = crate::layout::old_in_checkout(|p| fs.exists(p), &program.root) {
+    if let Some((message, help)) = crate::layout::old_in_checkout_for(|p| fs.exists(p), &program.root, &program.layout)
+    {
         return Err(vec![Diag::new(Span::NONE, message).help(help).code(diag::Code::Import)]);
     }
-    match app_files(&*fs, &program.root.join(crate::layout::ROOT)) {
+    let sp_dir = program.layout.root_path(&program.root);
+    match app_files(&*fs, &sp_dir) {
         Ok(files) => {
             for path in files {
                 match load_module(&*fs, &path, &mut program, &mut by_path, &mut diagnostics) {
@@ -312,7 +405,7 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
     }
     // An Astro project's `src/content.config.ts`: its glob collections are kinds (crate::astro_content).
-    match crate::astro_content::module(&*fs, &program.root) {
+    match crate::astro_content::module(&*fs, &program.root, &program.layout) {
         Ok(Some((path, source))) => {
             let generated = Generated {
                 inner: fs.clone(),
@@ -333,9 +426,9 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         Ok(None) => {}
         Err(d) => diagnostics.push(d),
     }
-    // Pages beside spacepress.config.ts are from before `sp/app/`: refuse them rather than build a
+    // Pages beside spacepress.config.ts are from before `<dir>/app/`: refuse them rather than build a
     // site without them.
-    if fs.is_dir(&program.root.join("pages")) {
+    if program.layout.is_default() && fs.is_dir(&program.root.join("pages")) {
         let pages = program.root.join("pages");
         let file = diag::register_file(&pages, "");
         diagnostics.push(
@@ -347,10 +440,10 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
             .code(diag::Code::Import),
         );
     }
-    // Handlers beside spacepress.config.ts are from before `sp/wp-hooks/`: refuse them rather than
+    // Handlers beside spacepress.config.ts are from before `<dir>/wp-hooks/`: refuse them rather than
     // build without them, which would drop every filter they register.
     let old = program.root.join("wp-hooks");
-    if fs.exists(&old) {
+    if program.layout.is_default() && fs.exists(&old) {
         let file = diag::register_file(&old, "");
         diagnostics.push(
             Diag::new(
@@ -361,7 +454,7 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
             .code(diag::Code::Import),
         );
     }
-    let dir = program.root.join(WP_HOOKS_DIR);
+    let dir = program.root.join(program.layout.wp_hooks());
     match wp_hook_files(&*fs, &dir) {
         Ok(files) => {
             for (hook, order, path) in files {
@@ -373,7 +466,6 @@ fn load_with_styles(fs: Rc<dyn Fs>, entry: &Path, discover_styles: bool) -> std:
         }
         Err(d) => diagnostics.push(d.phase(diag::Code::Import)),
     }
-    let sp_dir = program.root.join(crate::layout::ROOT);
     match component_files(&*fs, &sp_dir.join(COMPONENTS_DIR)) {
         Ok(files) => {
             for path in files {
@@ -738,11 +830,11 @@ fn load_module(
                 .strip_prefix(&program.root)
                 .is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == "node_modules"));
             diagnostics.push(
-                Diag::new(*span, "\"spacepress:db\" can't be re-exported")
+                Diag::new(*span, "\"spacepress/server/db\" can't be re-exported")
                     .help(if installed {
-                        "a plugin takes the app's kinds as options, e.g. seo({ posts }); it can't import \"spacepress:db\""
+                        "a plugin takes the app's kinds as options, e.g. seo({ posts }); it can't import \"spacepress/server/db\""
                     } else {
-                        "import the kinds where they're used: `import { posts } from \"spacepress:db\"`"
+                        "import the kinds where they're used: `import { posts } from \"spacepress/server/db\"`"
                     })
                     .code(diag::Code::Import),
             );
@@ -766,6 +858,8 @@ fn load_module(
         jsx: path.extension().is_some_and(|e| e == "tsx"),
         use_client,
     }));
+    let is_client = program.modules[id].use_client;
+    let in_node_modules = path.components().any(|c| c.as_os_str() == "node_modules");
     for (index, (spec, span)) in imports.into_iter().enumerate() {
         if is_email {
             if spec == "react-email" {
@@ -779,14 +873,91 @@ fn load_module(
                 continue;
             }
         }
+        // Clean cutover diagnostics for pre-split import specifiers.
+        if let Some((msg, help)) = legacy_specifier_diag(&spec) {
+            diagnostics.push(Diag::new(span, msg).help(help).code(diag::Code::Import));
+            continue;
+        }
+        // Client boundary: "use client" components run in the browser and may never import
+        // server-only modules (`spacepress/server` or `spacepress/server/*`).
+        if is_client {
+            if is_server_only_module(&spec) {
+                diagnostics.push(
+                    Diag::new(
+                        span,
+                        format!("a \"use client\" component can't import \"{spec}\": server APIs run only on the server"),
+                    )
+                    .help(
+                        "move server work into a query() or mutation() action and call it via _generated/api (or spacepress/client / @spacepress/client)",
+                    )
+                    .code(diag::Code::Import),
+                );
+                continue;
+            }
+            if spec == SP_MODULE || spec == DANGER_MODULE {
+                diagnostics.push(
+                    Diag::new(
+                        span,
+                        format!("a \"use client\" component can't import runtime values from \"{spec}\""),
+                    )
+                    .help("use `import type { ... } from \"spacepress\"` for shared types, or move server code into an action")
+                    .code(diag::Code::Import),
+                );
+                continue;
+            }
+            if client_builtin_module(&spec) {
+                continue;
+            }
+            if is_generated_api_import(&program.root, &program.layout, path, &spec) {
+                continue;
+            }
+            if !spec.starts_with('.') {
+                diagnostics.push(
+                    Diag::new(span, format!("a \"use client\" component can't import \"{spec}\""))
+                        .help(
+                            "\"use client\" components compile to the WordPress Interactivity API: import React hooks from \"react\", SpacePress hooks from \"spacepress/react\", generated `api` from \"../_generated/api\", and relative modules",
+                        )
+                        .code(diag::Code::Import),
+                );
+                continue;
+            }
+        } else {
+            if is_client_react_module(&spec) || is_client_sdk_module(&spec) {
+                diagnostics.push(
+                    Diag::new(span, format!("\"{spec}\" runs in the browser, not on the server"))
+                        .help(
+                            "add \"use client\" at the top of a client component, or use \"spacepress/server/db\" and \"spacepress/server\" on the server",
+                        )
+                        .code(diag::Code::Import),
+                );
+                continue;
+            }
+            if spec == REACT_MODULE && !is_email && !in_node_modules && program.modules[id].jsx {
+                diagnostics.push(
+                    Diag::new(
+                        span,
+                        "React hooks from \"react\" run in the browser, not in server components",
+                    )
+                    .help(
+                        "add \"use client\" at the top of this component, or remove the \"react\" import on the server",
+                    )
+                    .code(diag::Code::Import),
+                );
+                continue;
+            }
+            if is_generated_api_import(&program.root, &program.layout, path, &spec) {
+                continue;
+            }
+        }
         if builtin_module(&spec) {
             continue;
         }
-        // Browser code is first-party: an npm package in a client file would need a bundler.
-        if program.modules[id].use_client && !spec.starts_with('.') {
+        if is_server_module(&spec) {
             diagnostics.push(
-                Diag::new(span, format!("a \"use client\" component can't import \"{spec}\""))
-                    .help("client components run in the browser without a bundler: import \"spacepress/client\" and relative modules only")
+                Diag::new(span, format!("\"{spec}\" isn't available"))
+                    .help(
+                        "available server modules: \"spacepress/server\", \"spacepress/server/db\", and \"spacepress/server/wp\" (page and content helpers are \"spacepress/app\" and \"spacepress/content\")",
+                    )
                     .code(diag::Code::Import),
             );
             continue;
@@ -794,7 +965,7 @@ fn load_module(
         if spec == "php" || spec.starts_with("php/") {
             diagnostics.push(
                 Diag::new(span, format!("\"{spec}\" isn't available"))
-                    .help("WordPress core is \"php/wordpress\"; plugin modules (\"php/<plugin>\") and PHP built-ins (\"php\") are not available yet")
+                    .help("WordPress core is \"spacepress/server/wp\"; plugin modules and PHP built-ins (future \"spacepress/server/php/*\") are not available yet")
                     .code(diag::Code::Import),
             );
             continue;
@@ -818,7 +989,7 @@ fn load_module(
         let target = if query != crate::assets::Query::Default {
             let (bare, _) = crate::assets::Query::split(&spec).expect("validated query");
             resolve_query_asset(fs, path, bare, span)
-                .and_then(|target| fence(&program.root, path, bare, target, span))
+                .and_then(|target| fence(&program.root, &program.layout, path, bare, target, span))
                 .and_then(|target| load_query_asset(fs, &target, query, program, by_path, span))
         } else {
             let resolved = if required {
@@ -826,7 +997,7 @@ fn load_module(
             } else {
                 resolve(fs, path, &spec, span)
             }
-            .and_then(|target| fence(&program.root, path, &spec, target, span));
+            .and_then(|target| fence(&program.root, &program.layout, path, &spec, target, span));
             resolved.and_then(|target| match crate::assets::kind(&target) {
                 Some(kind) => load_asset(fs, &target, kind, program, by_path, span),
                 None => load_module(fs, &target, program, by_path, diagnostics),
@@ -1006,7 +1177,7 @@ fn load_asset(
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let authored_css = kind == crate::assets::Kind::Css && authored_stylesheet(&relative);
+    let authored_css = kind == crate::assets::Kind::Css && authored_stylesheet(&relative, &program.layout);
     let bundled_url = authored_css
         .then(|| program.frontend_styles.get(&relative).cloned())
         .flatten();
@@ -1175,7 +1346,7 @@ fn bundle_css(
         let canonical = fs
             .canonicalize(&candidate)
             .map_err(|e| Diag::new(imp_span, e.to_string()).code(diag::Code::Import))?;
-        let target = fence(&program.root, path, &imp.href, canonical, imp_span)?;
+        let target = fence(&program.root, &program.layout, path, &imp.href, canonical, imp_span)?;
         if !matches!(
             crate::assets::kind(&target),
             Some(crate::assets::Kind::Css | crate::assets::Kind::CssModule)
@@ -1318,7 +1489,7 @@ fn bundle_css(
         } else {
             format!("./{decoded}")
         };
-        let target = fence(&program.root, path, &spec, canonical, url_span)?;
+        let target = fence(&program.root, &program.layout, path, &spec, canonical, url_span)?;
         if crate::assets::kind(&target) != Some(crate::assets::Kind::File) {
             css_stack.pop();
             return Err(Diag::new(
@@ -1390,7 +1561,14 @@ fn percent_decode_url(s: &str) -> Option<String> {
 /// `spacepress.config.ts` or from a module under `sp/` must resolve inside `sp/`. Installed packages
 /// keep their own relative imports, and `"first"`, `"php/wordpress"` and npm packages are always
 /// allowed.
-fn fence(root: &Path, from: &Path, spec: &str, target: PathBuf, span: Span) -> Result<PathBuf> {
+fn fence(
+    root: &Path,
+    layout: &crate::layout::Layout,
+    from: &Path,
+    spec: &str,
+    target: PathBuf,
+    span: Span,
+) -> Result<PathBuf> {
     // Installed code is a module under a node_modules directory: below the project root, or above
     // it for a package a workspace hoisted into a parent directory. A project that itself sits under
     // some node_modules is still fenced, since only the path below the root counts there. A module
@@ -1412,22 +1590,38 @@ fn fence(root: &Path, from: &Path, spec: &str, target: PathBuf, span: Span) -> R
     }
     // App code imports email templates to render them with `mail.render()`.
     let template = email_module(root, &target) && target.extension().is_some_and(|e| e == "tsx");
-    if !spec.starts_with('.') || installed(from) || template || target.starts_with(root.join(crate::layout::ROOT)) {
+    if !spec.starts_with('.') || installed(from) || template || target.starts_with(layout.root_path(root)) {
         return Ok(target);
     }
+    let dir = layout.root();
     let importer = from.strip_prefix(root).unwrap_or(from).display().to_string();
     let (shown, destination) = match target.strip_prefix(root) {
-        Ok(rel) => (rel.display().to_string(), format!("sp/{}", rel.display())),
-        Err(_) => (target.display().to_string(), "sp/".to_string()),
+        Ok(rel) => (rel.display().to_string(), format!("{dir}/{}", rel.display())),
+        Err(_) => (target.display().to_string(), format!("{dir}/")),
     };
     Err(Diag::new(
         span,
-        format!("{importer} imports \"{spec}\" ({shown}), which is outside sp/"),
+        format!("{importer} imports \"{spec}\" ({shown}), which is outside {dir}/"),
     )
     .code(diag::Code::ImportFence)
     .help(format!(
-        "SpacePress loads app code only from sp/: move {shown} to {destination} and import it from there, or install it as an npm package"
+        "SpacePress loads app code only from {dir}/: move {shown} to {destination} and import it from there, or install it as an npm package"
     )))
+}
+
+/// Crisp migration diagnostics for pre-split SpacePress import specifiers.
+fn legacy_specifier_diag(spec: &str) -> Option<(String, String)> {
+    match spec {
+        "spacepress:db" => Some((
+            "\"spacepress:db\" moved to \"spacepress/server/db\"".into(),
+            "replace `from \"spacepress:db\"` with `from \"spacepress/server/db\"`".into(),
+        )),
+        "php/wordpress" => Some((
+            "\"php/wordpress\" moved to \"spacepress/server/wp\"".into(),
+            "replace `from \"php/wordpress\"` with `from \"spacepress/server/wp\"`".into(),
+        )),
+        _ => None,
+    }
 }
 
 /// Resolves compatibility spellings for compiler-provided imports, exports and requires.
@@ -1444,11 +1638,12 @@ fn normalize_spacefast_modules(body: &mut [Stmt], commonjs: Option<&mut CommonJs
     for spec in sources.chain(requires) {
         let canonical = match spec.as_str() {
             SPACEFAST_APP_MODULE | "@spacefast/spacepress" => SP_MODULE,
+            "@spacefast/spacepress/server" => SERVER_MODULE,
             "@spacefast/spacepress/app" => APP_MODULE,
-            "@spacefast/spacepress/client" => CLIENT_MODULE,
             "@spacefast/spacepress/content" => CONTENT_MODULE,
+            "@spacefast/spacepress/server/db" => DB_MODULE,
+            "@spacefast/spacepress/server/wp" => WORDPRESS_MODULE,
             "@spacefast/spacepress/danger" => DANGER_MODULE,
-            "@spacefast/spacepress:db" => DB_MODULE,
             _ => continue,
         };
         *spec = canonical.to_owned();
@@ -1462,9 +1657,10 @@ fn import_source(s: &Stmt) -> Option<(String, Span)> {
             type_only,
             span,
         } => {
-            // Type-only imports are erased; they never load code.
+            // Type-only imports are erased; they never load code. Generated `./$types` files may
+            // not exist yet on a fresh clone before `spacepress build`, so skip resolving them.
             if *type_only || (!specs.is_empty() && specs.iter().all(|s| s.type_only)) {
-                if source.starts_with('.') {
+                if source.starts_with('.') && !is_route_types_import(source) {
                     Some((source.clone(), *span))
                 } else {
                     None

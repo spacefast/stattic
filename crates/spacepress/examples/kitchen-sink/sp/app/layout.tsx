@@ -1,4 +1,4 @@
-import { db } from "spacepress";
+import { db } from "spacepress/server";
 import { Image, Link, TemplatePart, type LayoutProps } from "spacepress/app";
 import logo from "./whisk.svg";
 import "./site.css";

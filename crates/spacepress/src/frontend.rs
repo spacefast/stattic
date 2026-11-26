@@ -29,13 +29,15 @@ pub(crate) fn prepare_styles(project: &Path) -> Result<Option<File>> {
     })()
     .map_err(|e| error(format!("can't lock frontend assets for this build: {e}")))?;
     rebuild_entries(project)?;
+    let layout = crate::layout::Layout::from_project(project)?;
     let styles = crate::loader::stylesheet_inputs(project)?;
-    if styles.is_empty() && !project.join(crate::loader::FRONTEND_STYLES).is_file() {
+    if styles.is_empty() && !project.join(layout.frontend_styles()).is_file() {
         // The browser entries were just rebuilt into public/: the lock still covers reading them.
         return Ok(Some(guard));
     }
 
-    let input = serde_json::to_vec(&styles).expect("paths are strings");
+    let input =
+        serde_json::to_vec(&serde_json::json!({ "styles": styles, "dir": layout.root() })).expect("paths are strings");
     let mut child = Command::new("node")
         .current_dir(project)
         .args([
@@ -44,7 +46,8 @@ pub(crate) fn prepare_styles(project: &Path) -> Result<Option<File>> {
             r#"
 import { readFileSync } from 'node:fs';
 import { buildStyles } from '@spacepress/frontend';
-await buildStyles({ root: process.cwd(), styles: JSON.parse(readFileSync(0, 'utf8')) });
+const payload = JSON.parse(readFileSync(0, 'utf8'));
+await buildStyles({ root: process.cwd(), styles: payload.styles, dir: payload.dir });
 "#,
         ])
         .stdin(Stdio::piped())

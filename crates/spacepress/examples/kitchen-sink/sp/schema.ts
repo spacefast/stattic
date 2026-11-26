@@ -1,9 +1,6 @@
-import {
-  blocks, boolean, collection, date, email, file, files, global, HttpError, integer, job, json,
-  media, number, once, ref, repeater, richText, select, slug, table, taxonomy, terms, text, timestamp,
-  url, userProjection, wp, group, db,
-} from "spacepress";
-import { delete_option, update_option } from "php/wordpress";
+import { blocks, boolean, collection, date, email, file, files, global, integer, job, json, media, number, ref, repeater, richText, select, slug, table, taxonomy, terms, text, timestamp, url, userProjection, wp, group } from "spacepress";
+import { HttpError, once, db } from "spacepress/server";
+import { delete_option, update_option } from "spacepress/server/wp";
 
 // Queued by the workshops' afterCreate hook, run by Action Scheduler after the request commits.
 export const recordEvent = job({ retries: 3 }, async ({ eventId }: { eventId: number }, ctx) => {

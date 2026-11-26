@@ -10,7 +10,6 @@
 //! It signs in as every remote command does (`remote::sign_in`); the site answers an administrator
 //! only.
 
-use crate::runtime_schema::LOCK;
 use crate::sync::client::Client;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -72,11 +71,13 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             crate::runtime_schema::FORMAT
         ));
     }
-    let path = project.join(LOCK);
+    let layout = crate::layout::Layout::from_project(&project).map_err(|d| d.message)?;
+    let lock_rel = layout.runtime_schema_lock();
+    let path = project.join(&lock_rel);
     let text = render(lock);
     let current = std::fs::read_to_string(&path).ok();
     if current.as_deref() == Some(text.as_str()) {
-        println!("{LOCK} is at the site's schema version {version}");
+        println!("{lock_rel} is at the site's schema version {version}");
         return Ok(ExitCode::SUCCESS);
     }
     let before = current
@@ -85,7 +86,7 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
         .and_then(|lock| lock["version"].as_u64());
     let was = before.map_or("no lock".to_string(), |v| format!("version {v}"));
     if check {
-        eprintln!("{LOCK} holds {was}; the site is at version {version}. Run `spacepress pull` to update it");
+        eprintln!("{lock_rel} holds {was}; the site is at version {version}. Run `spacepress pull` to update it");
         return Ok(ExitCode::from(1));
     }
     // Compile with the new lock before it replaces the old one: a lock the compiler refuses (the
@@ -97,15 +98,15 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             None => std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?,
         }
         return Err(format!(
-            "the site's schema version {version} does not compile with this project; {LOCK} was left as it was\n{diagnostic}"
+            "the site's schema version {version} does not compile with this project; {lock_rel} was left as it was\n{diagnostic}"
         ));
     }
-    println!("pulled schema version {version} from {site} -> {LOCK} (was {was})");
+    println!("pulled schema version {version} from {site} -> {lock_rel} (was {was})");
     for name in answer["deploy"]["kept"].as_array().into_iter().flatten() {
         if let Some(name) = name.as_str() {
             println!("  {name}: on the site, now also in the project");
         }
     }
-    println!("commit {LOCK} and sp/_generated/, then build and deploy");
+    println!("commit {lock_rel} and {}/, then build and deploy", layout.generated());
     Ok(ExitCode::SUCCESS)
 }

@@ -1,9 +1,10 @@
-import { adminDashboard, adminScreen, adminWidget, cron, db, HttpError, item, mail, mutation, query } from "spacepress";
+import { adminDashboard, adminScreen, adminWidget, cron, item, mutation, query } from "spacepress";
+import { db, HttpError, mail } from "spacepress/server";
 import {
   abilities, get_current_user_id, get_option, get_permalink, get_post, get_userdata, sanitize_text_field,
   wp_insert_post,
-} from "php/wordpress";
-import { events as workshops } from "spacepress:db";
+} from "spacepress/server/wp";
+import { events as workshops } from "spacepress/server/db";
 import Reservation from "../emails/reservation";
 import { registrations } from "./schema";
 
@@ -82,7 +83,7 @@ export const upcoming = query({ access: "editor" }, async () => {
   return { rows };
 });
 
-// The schedule screen's actions use the kind API from "spacepress:db": it runs as the signed-in
+// The schedule screen's actions use the kind API from "spacepress/server/db": it runs as the signed-in
 // editor, under the workshops' own access rules, and answers 404 for a row they may not touch.
 export const closeRegistration = mutation({ access: "editor" }, async ({ id }: { id: number }) => {
   if (!Number.isInteger(id)) throw new HttpError(422, "invalid_input", "id must be an integer", "/id");

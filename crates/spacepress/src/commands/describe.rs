@@ -193,8 +193,8 @@ fn kind(c: &Collection, schema: &Schema) -> Value {
     out
 }
 
-/// `sp/app/`: each page and HTTP route by its URL pattern, most specific first.
-fn routes(app: &App, schema: &Schema) -> Vec<Value> {
+/// `<dir>/app/`: each page and HTTP route by its URL pattern, most specific first.
+fn routes(app: &App, schema: &Schema, dir: &str) -> Vec<Value> {
     app.routes
         .iter()
         .chain(&app.not_found)
@@ -207,7 +207,7 @@ fn routes(app: &App, schema: &Schema) -> Vec<Value> {
                 "type": if route.page.is_some() { "page" } else { "route" },
             });
             if let Some(file) = file {
-                out["file"] = json!(format!("sp/{file}"));
+                out["file"] = json!(format!("{dir}/{file}"));
             }
             if let Some(compiled) = compiled {
                 if !compiled.methods.is_empty() {
@@ -232,7 +232,7 @@ fn routes(app: &App, schema: &Schema) -> Vec<Value> {
                     route
                         .layouts
                         .iter()
-                        .map(|layout| format!("sp/{layout}"))
+                        .map(|layout| format!("{dir}/{layout}"))
                         .collect::<Vec<_>>()
                 );
             }
@@ -246,7 +246,8 @@ fn routes(app: &App, schema: &Schema) -> Vec<Value> {
 }
 
 /// The whole project. `kinds` are keyed by the name the author exported or registered.
-pub(super) fn project(schema: &Schema) -> Value {
+pub(super) fn project_with_layout(schema: &Schema, layout: &crate::layout::Layout) -> Value {
+    let dir = layout.root();
     let app = kebab(&schema.name);
     let kinds: Map<String, Value> = schema
         .collections
@@ -312,11 +313,12 @@ pub(super) fn project(schema: &Schema) -> Value {
         .collect();
     let mut out = json!({
         "name": schema.name,
+        "dir": dir,
         "kinds": kinds,
         "globals": globals,
         "actions": actions,
         "jobs": jobs,
-        "routes": schema.app.as_ref().map(|app| routes(app, schema)).unwrap_or_default(),
+        "routes": schema.app.as_ref().map(|app| routes(app, schema, dir)).unwrap_or_default(),
         "files": files,
         // Lowest to highest: an access rule naming a role admits that role and every one after it.
         "roles": crate::schema::ROLES,

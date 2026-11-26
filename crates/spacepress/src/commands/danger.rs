@@ -94,7 +94,8 @@ pub(crate) fn local_plan(rest: &[String]) -> ExitCode {
 }
 
 pub(crate) fn inspect_project(project: &Path) -> Result<Json, String> {
-    let mig_dir = project.join("sp/_generated/migrations");
+    let layout = crate::layout::Layout::from_project(project).map_err(|d| d.message)?;
+    let mig_dir = project.join(layout.migrations());
     let mut folders: Vec<(String, PathBuf)> = Vec::new();
     if mig_dir.is_dir() {
         for entry in std::fs::read_dir(&mig_dir).map_err(|e| format!("cannot read {}: {e}", mig_dir.display()))? {

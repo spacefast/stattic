@@ -611,7 +611,7 @@
       "code": "F4001",
       "fixture": "tests/fixtures/reject-ability-unknown",
       "message": "unknown ability `acme/site-infos`",
-      "guidance": "abilities.call from \"php/wordpress\" names an ability the build can type: one of the app's own (collections, actions, globals) or one locked in sp/_generated/abilities.json by `spacepress abilities pull --site <url>`. Any other name is refused with the closest known name; pull and commit the lock to call another plugin's ability."
+      "guidance": "abilities.call from \"spacepress/server/wp\" names an ability the build can type: one of the app's own (collections, actions, globals) or one locked in sp/_generated/abilities.json by `spacepress abilities pull --site <url>`. Any other name is refused with the closest known name; pull and commit the lock to call another plugin's ability."
     },
     {
       "id": "wordpress-ability-input",
@@ -680,8 +680,8 @@
       "status": "refused",
       "code": "F2001",
       "fixture": "tests/fixtures/reject-wp-function-unknown",
-      "message": "\"php/wordpress\" has no export named `the_title`",
-      "guidance": "\"php/wordpress\" exports the catalog's WordPress functions only: each is admitted when its PHP signature maps soundly (no by-reference parameters, no echoing template tags, no reliance on request globals). Anything else is refused at the import with the list of admitted functions. Template tags such as the_title echo; use their get_ form (get_the_title, once admitted) or a wp-hooks/ filter."
+      "message": "\"spacepress/server/wp\" has no export named `the_title`",
+      "guidance": "\"spacepress/server/wp\" exports the catalog's WordPress functions only: each is admitted when its PHP signature maps soundly (no by-reference parameters, no echoing template tags, no reliance on request globals). Anything else is refused at the import with the list of admitted functions. Template tags such as the_title echo; use their get_ form (get_the_title, once admitted) or a wp-hooks/ filter."
     },
     {
       "id": "wordpress-function-argument",
@@ -735,8 +735,8 @@
       "status": "refused",
       "code": "F1201",
       "fixture": "tests/fixtures/reject-plugin-db",
-      "message": "plugin \"reach\" can't import \"spacepress:db\": the app's kinds belong to the app",
-      "guidance": "A plugin can't import \"spacepress:db\": the app's kinds are app values, which a plugin receives only through its options, so its lock grant names exactly what the app handed it."
+      "message": "plugin \"reach\" can't import \"spacepress/server/db\": the app's kinds belong to the app",
+      "guidance": "A plugin can't import \"spacepress/server/db\": the app's kinds are app values, which a plugin receives only through its options, so its lock grant names exactly what the app handed it."
     },
     {
       "id": "host-globals",
@@ -1172,7 +1172,7 @@
       "code": "F1003",
       "fixture": "tests/fixtures/reject-client-npm",
       "message": "a \"use client\" component can't import \"dayjs\"",
-      "guidance": "Client components run in the browser without a bundler: import \"spacepress/client\" and relative modules only."
+      "guidance": "Client components run in the browser without a bundler: import \"react\", \"spacepress/react\", \"../_generated/api\", and relative modules only."
     },
     {
       "id": "jsx-use-client-root",

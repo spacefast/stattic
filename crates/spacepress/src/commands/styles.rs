@@ -8,7 +8,6 @@
 //! It never runs on its own: the owner's edits reach code only when the author pulls and commits them.
 
 use super::site::Site;
-use crate::theme::FILE;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -82,18 +81,21 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     let text = render(&answer["data"]);
     crate::theme::parse(&text).map_err(|e| format!("the site's styles aren't a theme.json this build reads: {e}"))?;
-    let path = project.join(FILE);
+    let layout = crate::layout::Layout::from_project(&project).map_err(|d| d.message)?;
+    let theme_rel = layout.theme_file();
+    let tokens_rel = layout.theme_tokens();
+    let path = project.join(&theme_rel);
     let current = std::fs::read_to_string(&path).ok();
     if current.as_deref() == Some(text.as_str()) {
-        println!("{FILE} already holds the site's styles");
+        println!("{theme_rel} already holds the site's styles");
         return Ok(ExitCode::SUCCESS);
     }
     if check {
-        eprintln!("{FILE} differs from the site's styles. Run `spacepress styles pull` to update it");
+        eprintln!("{theme_rel} differs from the site's styles. Run `spacepress styles pull` to update it");
         return Ok(ExitCode::from(1));
     }
     crate::sync::write_atomic(&path, text.as_bytes())?;
-    // Compile once with the new file, so sp/_generated/theme.css follows; a project that does not
+    // Compile once with the new file, so <dir>/_generated/theme.css follows; a project that does not
     // compile keeps its old file.
     if let Err(diagnostic) = super::build::refresh(&project) {
         match &current {
@@ -101,13 +103,10 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
             None => std::fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?,
         }
         return Err(format!(
-            "the project does not compile; {FILE} was left as it was\n{diagnostic}"
+            "the project does not compile; {theme_rel} was left as it was\n{diagnostic}"
         ));
     }
-    println!(
-        "pulled the site's styles -> {FILE} and {}; commit both, then build and deploy",
-        crate::theme::TOKENS
-    );
+    println!("pulled the site's styles -> {theme_rel} and {tokens_rel}; commit both, then build and deploy");
     Ok(ExitCode::SUCCESS)
 }
 

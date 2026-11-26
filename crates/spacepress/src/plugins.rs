@@ -211,7 +211,7 @@ pub fn isolate(program: &Program, plugins: &mut [Plugin]) -> Result<()> {
                     return Err(Diag::new(
                         span,
                         format!(
-                            "plugin \"{}\" can't import \"spacepress:db\": the app's kinds belong to the app",
+                            "plugin \"{}\" can't import \"spacepress/server/db\": the app's kinds belong to the app",
                             plugins[i].name
                         ),
                     )

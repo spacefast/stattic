@@ -125,7 +125,8 @@ add_action('sf_preview_test_job', static function () {
       writeFileSync(
         path.join(project, "spacepress.config.ts"),
         [
-          'import {defineConfig, collection, table, integer, text, richText, mutation, db} from "spacepress";',
+          'import {defineConfig, collection, table, integer, text, richText, mutation} from "spacepress";',
+          'import {db} from "spacepress/server";',
           'export const notes = collection({title: text().max(160), body: richText().optional()}, {title: "title", content: "body", sync: "content/notes/*.md", access: {read: "anyone", create: "editor", update: "editor", delete: "editor"}});',
           `export const votes = table({weight: integer().default(1)${column ? `, ${column}: text().optional()` : ""}});`,
           'export const titles = mutation({access: "anyone"}, async () => { return (await db.query.notes.findMany()).map((note) => note.title).sort(); });',

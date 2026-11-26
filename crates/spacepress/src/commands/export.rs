@@ -61,9 +61,6 @@ const USAGE: &str = "usage: spacepress export [dir] [--out dir] [--site url] [--
 /// WordPress endpoints a page may link or post to that stay on the hosted site with `--site`.
 const HOSTED: &[&str] = &["/wp-login.php", "/wp-comments-post.php", "/wp-admin", "/identity"];
 
-/// The default output, below the project.
-pub const OUT: &str = "sp/dist/static";
-
 struct Flags {
     project: PathBuf,
     out: Option<PathBuf>,
@@ -150,10 +147,15 @@ fn run(flags: Flags) -> Result<(), String> {
                 .into(),
         );
     }
+    let layout = &built.layout;
     if built.schema.app.as_ref().is_none_or(|a| a.routes.is_empty()) {
-        return Err("spacepress export renders sp/app/, and this project has no pages: add sp/app/page.tsx".into());
+        return Err(format!(
+            "spacepress export renders {}/, and this project has no pages: add {}/page.tsx",
+            layout.app(),
+            layout.app()
+        ));
     }
-    let out = output_dir(&project, flags.out.as_deref())?;
+    let out = output_dir(&project, layout, flags.out.as_deref())?;
     // The build the pages render from. Local: this checkout's, written as `spacepress build` writes it.
     let (site, credential, _local) = match &flags.site {
         Some(site) => {
@@ -164,8 +166,9 @@ fn run(flags: Flags) -> Result<(), String> {
             (site, credential, None)
         }
         None => {
-            super::build::emit_project(&project, &built).map_err(|e| format!("couldn't write sp/_generated: {e}"))?;
-            let content = super::build::emit_wp_content(&project, &project.join(crate::layout::WP_CONTENT), &built)
+            super::build::emit_project(&project, &built)
+                .map_err(|e| format!("couldn't write {}: {e}", layout.generated()))?;
+            let content = super::build::emit_wp_content(&project, &project.join(layout.wp_content()), &built)
                 .map_err(|e| format!("couldn't write wp-content: {e}"))?;
             let seeds = crate::bundle::seed_records(&crate::loader::Disk, &project, &built.schema, true)
                 .map_err(|d| crate::diag::render(&d, &project).trim_end().to_string())?;
@@ -1217,9 +1220,11 @@ const MARKER: &str = ".spacepress-export";
 /// Where the export goes, refused when replacing it could lose anything else: it may not be the
 /// project or hold it, sit inside the project outside `sp/dist/`, or be a folder that isn't an
 /// earlier export.
-fn output_dir(project: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
+fn output_dir(project: &Path, layout: &crate::layout::Layout, out: Option<&Path>) -> Result<PathBuf, String> {
+    let default_out = layout.static_out();
+    let dist_rel = layout.dist();
     let out = match out {
-        None => project.join(OUT),
+        None => project.join(&default_out),
         Some(out) => {
             let absolute = if out.is_absolute() {
                 out.to_path_buf()
@@ -1236,23 +1241,22 @@ fn output_dir(project: &Path, out: Option<&Path>) -> Result<PathBuf, String> {
             parent.join(name)
         }
     };
-    let dist = project.join(crate::layout::DIST);
+    let dist = project.join(&dist_rel);
     if project.starts_with(&out) {
         return Err(format!(
-            "--out {} holds the project; choose a folder outside it, or leave --out out for {OUT}",
+            "--out {} holds the project; choose a folder outside it, or leave --out out for {default_out}",
             out.display()
         ));
     }
     if out.starts_with(project) && !out.starts_with(&dist) {
         return Err(format!(
-            "--out {} is inside the project; put the export below {} or outside the project",
+            "--out {} is inside the project; put the export below {dist_rel} or outside the project",
             out.display(),
-            crate::layout::DIST
         ));
     }
-    if out == dist || out == project.join(crate::layout::WP_CONTENT) {
+    if out == dist || out == project.join(layout.wp_content()) {
         return Err(format!(
-            "--out {} is where `spacepress build` writes; choose a folder of its own, like {OUT}",
+            "--out {} is where `spacepress build` writes; choose a folder of its own, like {default_out}",
             out.display()
         ));
     }

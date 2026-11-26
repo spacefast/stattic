@@ -133,8 +133,20 @@ export async function lock(state) {
   }
 }
 
+async function projectAppDir(project) {
+  try {
+    const src = await readFile(join(project, 'spacepress.config.ts'), 'utf8');
+    const match = src.match(/\bdir\s*:\s*["']([^"']+)["']/);
+    if (match?.[1]) return match[1];
+  } catch {
+    // Default to "sp".
+  }
+  return 'sp';
+}
+
 export async function migrationHistory(project) {
-  const directory = join(project, 'sp/_generated/migrations');
+  const appDir = await projectAppDir(project);
+  const directory = join(project, appDir, '_generated/migrations');
   if (!await exists(directory)) return {};
   const history = {};
   const entries = await readdir(directory, { withFileTypes: true });
@@ -428,9 +440,14 @@ export async function forward(host, port, upstream) {
 const IGNORED_NAMES = new Set(['.sp', '.git', 'node_modules']);
 // public/spacepress-assets is the compiler's output too: a build writes the browser entries' bundle
 // there again, which must not read as a source change and start the next build.
-const GENERATED = new Set(['sp/_generated', 'sp/dist', 'public/spacepress-styles', 'public/spacepress-assets']);
-const ignoredPath = (name) => IGNORED_NAMES.has(name.split('/').at(-1)) || GENERATED.has(name);
-const isSource = (name) => /\.(?:[cm]?[jt]sx?|css|svg)$/.test(name) || name.split('/')[0] === 'public' || /^sp\/app\/(.*\/)?page\.md$/.test(name) || name === 'sp/theme.json' || name === 'package.json';
+const generatedFor = (appDir) => new Set([`${appDir}/_generated`, `${appDir}/dist`, 'public/spacepress-styles', 'public/spacepress-assets']);
+const ignoredPathFor = (generated) => (name) => IGNORED_NAMES.has(name.split('/').at(-1)) || generated.has(name);
+const isSourceFor = (appDir) => {
+  const escaped = appDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pageMd = new RegExp(`^${escaped}/app/(?:.*/)?page\\.md$`);
+  const themeJson = `${appDir}/theme.json`;
+  return (name) => /\.(?:[cm]?[jt]sx?|css|svg)$/.test(name) || name.split('/')[0] === 'public' || pageMd.test(name) || name === themeJson || name === 'package.json';
+};
 // Tailwind can scan markup and Vite can read fonts and images referenced from CSS.
 const isFrontendSource = (name) => /\.(?:html?|mdx?|png|jpe?g|gif|webp|avif|woff2?|ttf|otf)$/.test(name);
 
@@ -504,6 +521,10 @@ export async function sourceDigest(project) {
   } catch {
     // The compiler reports a malformed package.json when it builds.
   }
+  const appDir = await projectAppDir(project);
+  const generated = generatedFor(appDir);
+  const ignoredPath = ignoredPathFor(generated);
+  const isSource = isSourceFor(appDir);
   async function visit(directory, prefix = '') {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
@@ -524,6 +545,10 @@ export async function sourceDigest(project) {
 // Native recursive watchers descend into generated trees before event filters run.
 // Watch authored directories individually so rebuild output is never traversed.
 export async function watchSources(project, onChange, onError) {
+  const appDir = await projectAppDir(project);
+  const generated = generatedFor(appDir);
+  const ignoredPath = ignoredPathFor(generated);
+  const isSource = isSourceFor(appDir);
   const watchers = new Map();
   let closed = false, refreshing, refreshAgain = false;
   const close = () => {
@@ -553,7 +578,7 @@ export async function watchSources(project, onChange, onError) {
               const watcher = watch(directory, (event, filename) => {
                 if (closed || !filename) return;
                 const name = relative(project, join(directory, String(filename))).split(sep).join('/');
-                if (ignoredPath(name) || [...GENERATED].some((dir) => name.startsWith(`${dir}/`))) return;
+                if (ignoredPath(name) || [...generated].some((dir) => name.startsWith(`${dir}/`))) return;
                 if (event === 'rename') {
                   // Discover new directories before notifying: files may have been created
                   // before their directory acquired its own watch handle.
@@ -744,9 +769,10 @@ async function main() {
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   let publishedRevision;
   const build = async (allowDestructive = false) => {
+    const appDir = await projectAppDir(project);
     // Before the history check, which would read a moved ledger as changed and point at --allow-destructive.
-    if (await exists(join(project, 'sp/migrations'))) {
-      throw new Error('sp/migrations/ moved to sp/_generated/migrations/; move it with `mkdir -p sp/_generated && rmdir sp/_generated/migrations 2>/dev/null; git mv sp/migrations sp/_generated/migrations`, then start again.');
+    if (await exists(join(project, appDir, 'migrations'))) {
+      throw new Error(`${appDir}/migrations/ moved to ${appDir}/_generated/migrations/; move it with \`mkdir -p ${appDir}/_generated && rmdir ${appDir}/_generated/migrations 2>/dev/null; git mv ${appDir}/migrations ${appDir}/_generated/migrations\`, then start again.`);
     }
     const args = ['build', project, '--out', content, '--diagnostics-file', diagnosticPath];
     if (managed.owner.snapshot && !allowDestructive) {

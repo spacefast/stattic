@@ -93,7 +93,8 @@ pub fn declare(program: &Program, ev: &mut Evaluator<'_>, config: &Value) -> Res
     if !matches!(cfg.borrow().get("runtimeSchema"), Some(Value::Bool(true))) {
         return Ok(None);
     }
-    let path = program.root.join(LOCK);
+    let lock_rel = program.layout.runtime_schema_lock();
+    let path = program.root.join(&lock_rel);
     if !program.fs.exists(&path) {
         return Ok(None);
     }

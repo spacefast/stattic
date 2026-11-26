@@ -49,14 +49,18 @@ impl Compiler<'_, '_> {
         Ty::Obj(props)
     }
 
-    /// Whether `ann` names a props type `"spacepress/app"` exports.
+    /// Whether `ann` names a props type `"spacepress/app"` or generated `"./$types"` exports.
     pub(super) fn app_props_annotation(&self, ann: &TyAnn, module: usize) -> bool {
         let TyAnn::Ref(name, _, _) = ann else { return false };
         self.ev_program().modules[module].body.iter().any(|stmt| match stmt {
-            Stmt::Import { source, specs, .. } if source == crate::loader::APP_MODULE => specs.iter().any(|s| {
-                s.local == *name
-                    && matches!(&s.imported, ImportName::Named(n) if n == "PageProps" || n == "LayoutProps" || n == "LoginProps")
-            }),
+            Stmt::Import { source, specs, .. }
+                if source == crate::loader::APP_MODULE || crate::loader::is_route_types_import(source) =>
+            {
+                specs.iter().any(|s| {
+                    s.local == *name
+                        && matches!(&s.imported, ImportName::Named(n) if n == "PageProps" || n == "LayoutProps" || n == "LoginProps")
+                })
+            }
             _ => false,
         })
     }

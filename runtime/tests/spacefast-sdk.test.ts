@@ -1988,8 +1988,8 @@ test("private SDK bytes require admission before any body", async () => {
         id: "grt_private_sdk_public_page",
         generation: 1,
         audience: { kind: "public" },
-        resources: { include: ["/public"], exclude: [] },
-        capabilities: ["page.view"],
+        resources: { include: ["/public", "/v/abc/**"], exclude: [] },
+        capabilities: ["page.view", "comments.read", "comments.write"],
         constraints: {},
         target: { kind: "live" },
         source: { kind: "system", reference: "test:private-sdk-public-page" },
@@ -2044,6 +2044,8 @@ test("private SDK bytes require admission before any body", async () => {
     files: {
       "index.html": '<script src="/__spacefast/sdk.js"></script>\n',
       "docs/index.html": '<h1>Private docs</h1><script src="/__spacefast/sdk.js"></script>\n',
+      "secret/index.html": '<h1>Secret</h1><script src="/__spacefast/sdk.js"></script>\n',
+      "v/abc/index.html": '<h1>Public path</h1><script src="/__spacefast/sdk.js"></script>\n',
     },
     activate: {
       route_name: "production",
@@ -2069,14 +2071,90 @@ test("private SDK bytes require admission before any body", async () => {
   };
   expect(await answer(RUNTIME_TRACKER_SCRIPT_PATH)).toEqual(await answer("/docs/app.js"));
 
-  const forgedPageContext = await get(runtime, host, "/__spacefast/sdk.js", {
+  // A path-scoped public page on a private Space serves anonymously without a
+  // no-referrer header that would strip its path on same-origin subresources.
+  const publicScopedPage = await get(runtime, host, "/v/abc/");
+  expect(publicScopedPage.status).toBe(200);
+  expect(await publicScopedPage.text()).toContain("Public path");
+  expect(publicScopedPage.headers.get("referrer-policy")).toBeNull();
+
+  // Anonymous subresource fetches from a path-scoped public page succeed with
+  // matching Sec-Fetch-Dest and same-host Referer, while staying strictly out
+  // of shared caches (the edge keys on host+path+query and ignores Referer).
+  for (const [subresourcePath, dest, expectedType] of [
+    ["/__spacefast/sdk.js", "script", "application/javascript"],
+    [RUNTIME_COLLAB_MANIFEST_PATH, "empty", "application/json"],
+    [RUNTIME_COLLAB_THEME_PATH, "style", "text/css"],
+    [RUNTIME_COLLAB_THEME_PATH, "empty", "text/css"],
+    [RUNTIME_TRACKER_SCRIPT_PATH, "script", "application/javascript"],
+  ] as const) {
+    const publicSubresource = await get(runtime, host, subresourcePath, {
+      headers: {
+        referer: `https://${host}/v/abc/`,
+        "sec-fetch-dest": dest,
+        "sec-fetch-site": "same-origin",
+      },
+    });
+    expect(publicSubresource.status, `${subresourcePath} (${dest})`).toBe(200);
+    expect(publicSubresource.headers.get("content-type")).toContain(expectedType);
+    expect(publicSubresource.headers.get("cache-control")).toBe("private, no-store");
+    expect(publicSubresource.headers.get("a8c-edge-cache")).toBe("no-cache");
+    expect(publicSubresource.headers.get("vary")).toContain("Cookie");
+    expect(publicSubresource.headers.get("access-control-allow-origin")).toBeNull();
+    expect(publicSubresource.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    if (subresourcePath === "/__spacefast/sdk.js") {
+      const publicSdkBody = await publicSubresource.text();
+      expect(publicSdkBody).toContain("private-tag-marker");
+      expect(publicSdkBody).toContain(RUNTIME_TRACKER_SCRIPT_PATH);
+      expect(publicSubresource.headers.get("etag") ?? "").toContain("runtime:");
+    } else if (subresourcePath === RUNTIME_COLLAB_MANIFEST_PATH) {
+      expect(collabManifestSchema.parse(await publicSubresource.json()).version).toBe(5);
+    }
+
+    const refusalCases = [
+      ["missing referer", { "sec-fetch-dest": dest }],
+      ["private referer", { referer: `https://${host}/secret/`, "sec-fetch-dest": dest }],
+      [
+        "cross-origin referer",
+        { referer: "https://other.site.test/v/abc/", "sec-fetch-dest": dest },
+      ],
+      ["document dest", { referer: `https://${host}/v/abc/`, "sec-fetch-dest": "document" }],
+      [
+        "cross-origin Origin header",
+        {
+          origin: "https://other.site.test",
+          referer: `https://${host}/v/abc/`,
+          "sec-fetch-dest": dest,
+        },
+      ],
+      [
+        "cross-site Sec-Fetch-Site",
+        {
+          referer: `https://${host}/v/abc/`,
+          "sec-fetch-dest": dest,
+          "sec-fetch-site": "cross-site",
+        },
+      ],
+      [
+        "traversal referer",
+        { referer: `https://${host}/v/abc/../secret/`, "sec-fetch-dest": dest },
+      ],
+    ] satisfies Array<[string, Record<string, string>]>;
+    for (const [label, badHeaders] of refusalCases) {
+      const refused = await get(runtime, host, subresourcePath, { headers: badHeaders });
+      expect(refused.status, `${subresourcePath} (${dest}) ${label}`).toBe(403);
+      expect(refused.headers.get("etag"), `${subresourcePath} (${dest}) ${label}`).toBeNull();
+    }
+  }
+
+  const forgedPrivatePageContext = await get(runtime, host, "/__spacefast/sdk.js", {
     headers: {
-      referer: `https://${host}/public`,
+      referer: `https://${host}/docs/`,
       "sec-fetch-dest": "script",
     },
   });
-  expect(forgedPageContext.status).toBe(403);
-  expect(forgedPageContext.headers.get("etag")).toBeNull();
+  expect(forgedPrivatePageContext.status).toBe(403);
+  expect(forgedPrivatePageContext.headers.get("etag")).toBeNull();
 
   const now = Math.floor(Date.now() / 1000);
   const token = signEd25519Jwt(keyPair.privateKey, issuer.kid, {
@@ -2232,6 +2310,27 @@ test("private SDK bytes require admission before any body", async () => {
     expect((await get(runtime, host, "/docs/", { headers: { cookie } })).status).toBe(200);
     await mintTicket({ cookie });
     expect(exchanges.at(-1)?.["visitorSessionId"]).toBe(visitorSessionId);
+
+    // An anonymous viewer on the path-scoped public grant is admitted cleanly
+    // through `/__spacefast/comments/ticket` too, with an anonymous session.
+    const anonymousPublicTicket = await get(runtime, host, "/__spacefast/comments/ticket", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: `http://${host}`,
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({
+        pagePath: "/v/abc",
+        identity: { name: "Guest", namedByUser: false },
+      }),
+    });
+    expect(anonymousPublicTicket.status).toBe(200);
+    expect(exchanges.at(-1)).toMatchObject({
+      pagePath: "/v/abc",
+      principal: "anonymous",
+      authorities: [],
+    });
   } finally {
     central.stop(true);
   }
@@ -3132,4 +3231,105 @@ test("sdk.js applies per-Space brand override and white-label Space Bar config w
     public: { marker: "spacefast_returning_dev=" },
     mark: { links: [] },
   });
+});
+
+test("broadly public protected Space keeps shared edge caching for anonymous SDK and tracker fetches", async () => {
+  const runtime = await startRuntime({
+    atomicData: { SPACEFAST_CAST_API_URL: "https://cast.example.test" },
+  });
+  runtimes.push(runtime);
+  const host = "broad-public-sdk.site.test";
+  const keyPair = generateKeyPairSync("ed25519");
+  const issuer = visitorIssuer(keyPair.publicKey);
+  const publicJwk = keyPair.publicKey.export({ format: "jwk" });
+  const config = publicAccessConfig({ mode: "website" }, "live_and_all_versions");
+  config.visitor_issuer = "spacefast-api";
+  config.visitor_jwks = {
+    keys: [
+      {
+        kty: "OKP",
+        crv: "Ed25519",
+        kid: issuer.kid,
+        alg: "EdDSA",
+        use: "sig",
+        x: publicJwk.x ?? "",
+      },
+    ],
+  };
+  config.session_version = 0;
+  config.authorization = {
+    generation: 1,
+    sessionVersion: 0,
+    fence: "none",
+    acquireUrl: "https://access.spacefast.test/acquire/broad-public-sdk",
+    spaceClaimed: true,
+    grants: [
+      {
+        id: "grt_site_public",
+        generation: 1,
+        audience: { kind: "public" },
+        resources: { include: ["/**"], exclude: ["/secret/**"] },
+        capabilities: ["page.view"],
+        constraints: {},
+        target: { kind: "live" },
+        source: { kind: "system", reference: "test:site-public-with-carveout" },
+      },
+    ],
+    accessPage: {
+      displayName: "Broad Public SDK",
+      accountUrl: null,
+      connections: [],
+      exchange: null,
+    },
+  };
+  config.sdk = {
+    revision: "sdk-broad-public-1",
+    config: {
+      tracker: {
+        src: RUNTIME_TRACKER_SCRIPT_PATH,
+        endpoint: "https://beacon.example.test",
+        key: "pk_broad_public",
+      },
+    },
+    body: "window.__broadPublicTag=1;",
+  };
+  await deploy(runtime, {
+    spaceId: "spc_broad_public",
+    versionId: "ver_broad_public_1",
+    files: {
+      "index.html":
+        '<html><head><title>Public</title></head><body><script src="/__spacefast/sdk.js"></script></body></html>\n',
+      "secret/index.html": "<h1>Secret</h1>\n",
+    },
+    activate: {
+      route_name: "production",
+      config,
+      production_hostnames: [host],
+      noindex_production_hostnames: [],
+      version_hostnames: [],
+    },
+  });
+
+  // The carve-out stays protected.
+  expect((await get(runtime, host, "/secret/")).status).toBe(403);
+
+  // Anonymous SDK and tracker fetches with Sec-Fetch-Dest + same-origin Referer
+  // are already unconditionally admitted on their own path, so they keep the
+  // shared edge-cache policy instead of being forced to private, no-store.
+  for (const [subresourcePath, dest] of [
+    ["/__spacefast/sdk.js", "script"],
+    [RUNTIME_TRACKER_SCRIPT_PATH, "script"],
+  ] as const) {
+    const res = await get(runtime, host, subresourcePath, {
+      headers: {
+        referer: `https://${host}/`,
+        "sec-fetch-dest": dest,
+        "sec-fetch-site": "same-origin",
+      },
+    });
+    expect(res.status, subresourcePath).toBe(200);
+    expect(res.headers.get("cache-control"), subresourcePath).not.toContain("private");
+    expect(res.headers.get("cache-control"), subresourcePath).not.toContain("no-store");
+    expect(res.headers.get("a8c-edge-cache"), subresourcePath).not.toBe("no-cache");
+  }
 });

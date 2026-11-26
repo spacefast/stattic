@@ -435,7 +435,7 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         _stattic_access_apply_query_token(
             $serving,
             $requestHost,
-            _stattic_spacefast_sdk_access_path($serving, $requestHost, $originalRequestPath)
+            _stattic_spacefast_sdk_access_path($requestHost, $originalRequestPath)
         );
     }
 
@@ -560,17 +560,29 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
         require_once __DIR__ . '/access-rules.php';
         // The SDK, the collaboration manifest, its theme and the tracker the SDK
         // loads are subresources of the page that embedded them and own no
-        // scope, so no page Grant lists them. The authority comes from the
-        // session (_stattic_spacefast_sdk_access_path).
+        // scope, so no path-scoped page Grant lists them. When the subresource
+        // path itself is not already unconditionally admitted anonymously (for
+        // example a site-wide `/` public grant), evaluate the same-origin
+        // referring page's Grants instead and keep the response out of shared
+        // caches because the edge keys on host+path+query and ignores Referer
+        // and Sec-Fetch-Dest.
+        $sdkPathPubliclyAdmitted = _stattic_spacefast_sdk_access_dests($requestPath) !== []
+            && $originalRequestPath === $requestPath
+            && _stattic_access_unfenced($serving, $requestHost, $requestPath)
+            && _stattic_access_anonymous_admits($serving, $requestHost, $requestPath);
         $accessPath = _stattic_spacefast_sdk_access_dests($requestPath) !== []
             && $originalRequestPath === $requestPath
-            ? _stattic_spacefast_sdk_access_path($serving, $requestHost, $requestPath)
+            && !$sdkPathPubliclyAdmitted
+            ? _stattic_spacefast_sdk_access_path($requestHost, $requestPath)
             : $requestPath;
         _stattic_access_enforce_v4(
             $requestHost,
             $accessPath,
             $accessPath === $requestPath ? $originalRequestPath : $accessPath
         );
+        if ($accessPath !== $requestPath) {
+            _stattic_access_private_cache_flag(true);
+        }
         _stattic_access_enforce_preview_terms($serving, $requestHost);
     }
     if (!($storageRequest && !$storageContentEntry)
@@ -2089,33 +2101,54 @@ function _stattic_spacefast_sdk_access_dests(string $requestPath): array
     };
 }
 
-// The session supplies the authority; the Referer only selects which scoped page
-// Grant to evaluate. Never authorize on Referer alone.
-function _stattic_spacefast_sdk_access_path(array $serving, string $requestHost, string $requestPath): string
+// Select the same-origin referring page's canonical path when a protected Space
+// fetches one of its SDK/collab/tracker subresources. Authorization still runs
+// through `_stattic_access_enforce_v4` (both authenticated sessions and
+// path-scoped public Grants); never authorize on Referer alone.
+function _stattic_spacefast_sdk_access_path(string $requestHost, string $requestPath): string
 {
     $dest = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? '')));
     if (!in_array($dest, _stattic_spacefast_sdk_access_dests($requestPath), true)) {
         return $requestPath;
     }
-    require_once __DIR__ . '/access-rules.php';
-    if (_stattic_visitor_cookie_from_request() === '') {
+    $fetchSite = strtolower(trim((string) ($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    if ($fetchSite !== '' && $fetchSite !== 'same-origin') {
         return $requestPath;
     }
-    if (!is_array(_stattic_verify_cookie_identity($serving, $requestHost))) {
-        return $requestPath;
+    $normalizedHost = _stattic_normalize_hostname($requestHost);
+    $origin = trim((string) ($_SERVER['HTTP_ORIGIN'] ?? ''));
+    if ($origin !== '') {
+        $originScheme = parse_url($origin, PHP_URL_SCHEME);
+        $originHost = parse_url($origin, PHP_URL_HOST);
+        if (
+            !is_string($originScheme)
+            || !in_array(strtolower($originScheme), ['http', 'https'], true)
+            || !is_string($originHost)
+            || $originHost === ''
+            || _stattic_normalize_hostname($originHost) !== $normalizedHost
+        ) {
+            return $requestPath;
+        }
     }
     $referer = trim((string) ($_SERVER['HTTP_REFERER'] ?? ''));
+    $refererScheme = $referer === '' ? null : parse_url($referer, PHP_URL_SCHEME);
     $refererHost = $referer === '' ? null : parse_url($referer, PHP_URL_HOST);
     $refererPath = $referer === '' ? null : parse_url($referer, PHP_URL_PATH);
     if (
-        !is_string($refererHost)
+        !is_string($refererScheme)
+        || !in_array(strtolower($refererScheme), ['http', 'https'], true)
+        || !is_string($refererHost)
         || !is_string($refererPath)
         || $refererPath === ''
-        || _stattic_normalize_hostname($refererHost) !== _stattic_normalize_hostname($requestHost)
+        || _stattic_normalize_hostname($refererHost) !== $normalizedHost
     ) {
         return $requestPath;
     }
-    return $refererPath;
+    $canonicalRefererPath = _stattic_canonical_request_path($refererPath);
+    if ($canonicalRefererPath === null) {
+        return $requestPath;
+    }
+    return $canonicalRefererPath;
 }
 
 // Space-scoped and unversioned: every app tier reaches this same handler, and a

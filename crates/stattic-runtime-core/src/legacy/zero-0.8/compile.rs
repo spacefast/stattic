@@ -491,16 +491,10 @@ fn zero_route_path_valid(path: &str) -> bool {
     !matches!(segments.first(), Some(&"identity" | &"storage"))
         && !matches!(
             path,
-            "/" | "/index.html"
-                | "/client.js"
-                | "/auth/callback"
-                | "/__spacefast"
-                | "/__span"
-                | "/__zero"
+            "/" | "/index.html" | "/client.js" | "/auth/callback" | "/__spacefast" | "/__zero"
         )
         && !path.starts_with("/auth/")
         && !path.starts_with("/__spacefast/")
-        && !path.starts_with("/__span/")
         && !path.starts_with("/__zero/")
         && path != "/__stattic"
         && !path.starts_with("/__stattic/")

@@ -76,6 +76,7 @@ const FRAME_ORIGIN = "https://wordpress.example";
 const FRAME_LINK_ID = "lnk_page_frame";
 const FRAME_LINK_REVISION = 2;
 const LINK_TOKEN = `${LINK_PREFIX}aBcD-shareLink_0123456789`;
+const LIMITED_LINK_TOKEN = `${LINK_PREFIX}limited-shareLink_0123456789`;
 const API_TOKEN = "sfa_ownerIntegrationToken123";
 const UNCLAIMED_LINK_TOKEN = `${LINK_PREFIX}unclaimed-shareLink_0123456789`;
 const CHAIN_LINK_TOKEN = `${LINK_PREFIX}chain-shareLink_0123456789`;
@@ -451,6 +452,22 @@ beforeAll(async () => {
         }
         const presented = form.get("token") ?? "";
         if (presented === LINK_TOKEN && !linkRevoked) {
+          const host = form.get("host") ?? "";
+          return Response.json(
+            {
+              action: `https://${host}/__spacefast/in`,
+              fields: {
+                token: handoffToken(host, LANES_SPACE, ["link:lnk_page_share"]),
+                return: "/docs/",
+              },
+            },
+            { headers: { "content-type": "application/vnd.spacefast.access-handoff+json" } },
+          );
+        }
+        if (presented === LIMITED_LINK_TOKEN) {
+          if (form.get("confirmed") === "0") {
+            return problem(403, "confirmation_required");
+          }
           const host = form.get("host") ?? "";
           return Response.json(
             {
@@ -878,51 +895,198 @@ test("a client-set CF-Connecting-IP never reaches the password exchange", async 
   expect(call?.headers["spacefast-visitor-ip"]).not.toBe("203.0.113.7");
 });
 
-// `/__#<token>`: the token stays in the fragment. The trampoline is one
-// cacheable page for every link, and the token reaches the box only in a
-// same-origin POST body.
-test("the /__ trampoline is one cacheable page and the link lands through a POST", async () => {
+// `/__#<token>`: the token stays in the fragment. Unfurlers get the Space's
+// public preview card; browsers get the integrated Space access card, redeem
+// via same-origin POST + `location.replace()` so Back never hits `/__`, and
+// redirect already-signed-in visitors who land on `/__` without a hash.
+test("the /__ trampoline unfurls for chat apps, uses the Space card, and redeems without breaking Back", async () => {
+  const beforeUnfurl = exchangeRequests.length;
+  const unfurled = await get(runtime, LANES_HOST, "/__", {
+    headers: { "user-agent": "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)" },
+  });
+  expect(unfurled.status).toBe(200);
+  expect(unfurled.headers.get("cache-control")).toBe("private, no-store");
+  expect(unfurled.headers.get("vary")).toContain("User-Agent");
+  expect(await unfurled.text()).toContain(`<meta property="og:title" content="${LANES_HOST}">`);
+  expect(exchangeRequests.length).toBe(beforeUnfurl);
+
   const page = await get(runtime, LANES_HOST, "/__");
   expect(page.status).toBe(200);
   expect(page.headers.get("referrer-policy")).toBe("no-referrer");
-  expect(page.headers.get("cache-control")).toBe(
-    "public, max-age=0, s-maxage=600, must-revalidate",
-  );
+  expect(page.headers.get("cache-control")).toBe("private, no-store");
+  expect(page.headers.get("vary")).toContain("User-Agent");
+  expect(page.headers.get("x-spacefast-access-refusal")).toBeNull();
   expect(page.headers.get("set-cookie")).toBeNull();
   const csp = page.headers.get("content-security-policy") ?? "";
   expect(csp).toContain("default-src 'none'");
+  expect(csp).toContain("connect-src 'self'");
   expect(csp).toContain("form-action 'self'");
   const body = await page.text();
-  expect(body).toContain('action="/__spacefast/unlock"');
-  expect(await (await get(runtime, LANES_HOST, "/__")).text()).toBe(body);
+  expect(body).toContain('class="sf-page access');
+  expect(body).toContain('action="/__"');
+  expect(body).toContain(`<h1>${LANES_HOST}</h1>`);
 
   const { Window } = await import("happy-dom");
-  const run = (hash: string) => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const run = async (
+    hash: string,
+    fetchMock: (
+      url: string,
+      init?: RequestInit,
+    ) => Promise<{
+      ok: boolean;
+      json: () => Promise<{
+        redirect?: string;
+        confirm?: boolean;
+        submit?: boolean;
+        data?: { state: string };
+      }>;
+    }>,
+  ) => {
     const window = new Window({ url: `https://${LANES_HOST}/__${hash}` });
     const submitted: string[] = [];
+    const replaced: string[] = [];
+    const fetched: Array<{ url: string; body: string }> = [];
     window.HTMLFormElement.prototype.submit = function (this: HTMLFormElement) {
       submitted.push(String(new window.FormData(this).get("link")));
     };
+    const fakeLocation = {
+      get hash() {
+        return window.location.hash;
+      },
+      get pathname() {
+        return window.location.pathname;
+      },
+      replace(url: string) {
+        replaced.push(url);
+      },
+    };
+    const fakeFetch = async (url: string, init?: RequestInit) => {
+      fetched.push({ url, body: init?.body ? String(init.body) : "" });
+      return fetchMock(url, init);
+    };
     window.document.write(body.replace(/<script>[\s\S]*<\/script>/, ""));
     const script = body.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
-    new Function("location", "history", "document", script)(
-      window.location,
+    new Function("location", "history", "document", "fetch", "URLSearchParams", "FormData", script)(
+      fakeLocation,
       window.history,
       window.document,
+      fakeFetch,
+      window.URLSearchParams,
+      window.FormData,
     );
-    return { window, submitted };
+    await flush();
+    return { window, submitted, replaced, fetched };
   };
-  const unlimited = run(`#${LINK_TOKEN}`);
-  expect(unlimited.submitted).toEqual([LINK_TOKEN]);
+
+  const SHORT_TOKEN = "AbCdEfGhIjKlMnOpQrStUv";
+  // Auto-redeem posts to `/__` with confirmed=0 and uses `location.replace()` so Back skips `/__`.
+  const unlimited = await run(`#${SHORT_TOKEN}`, async () => ({
+    ok: true,
+    json: async () => ({ redirect: "/docs/" }),
+  }));
+  expect(unlimited.fetched).toEqual([{ url: "/__", body: `link=${SHORT_TOKEN}&confirmed=0` }]);
+  expect(unlimited.replaced).toEqual(["/docs/"]);
+  expect(unlimited.submitted).toEqual([]);
   expect(unlimited.window.location.hash).toBe("");
-  const limited = run(`#${LINK_TOKEN}!`);
-  expect(limited.submitted).toEqual([]);
-  expect(limited.window.document.getElementById("sf-link-continue")?.hidden).toBe(false);
-  expect(limited.window.location.hash).toBe("");
-  const broken = run("#nothing-here");
+
+  // A legacy use-limited link returns `{ confirm: true }` on confirmed=0 without spending a use,
+  // reveals Continue, and redeems with confirmed=1 once clicked.
+  const confirmCalls: string[] = [];
+  const confirmedFlow = await run(`#${SHORT_TOKEN}`, async (_url, init) => {
+    const body = String(init?.body ?? "");
+    confirmCalls.push(body);
+    return {
+      ok: true,
+      json: async () => (body.includes("confirmed=0") ? { confirm: true } : { redirect: "/docs/" }),
+    };
+  });
+  expect(confirmCalls).toEqual([`link=${SHORT_TOKEN}&confirmed=0`]);
+  expect(confirmedFlow.replaced).toEqual([]);
+  expect(confirmedFlow.window.document.getElementById("sf-link-continue")?.hidden).toBe(false);
+  confirmedFlow.window.document
+    .getElementById("sf-link")
+    ?.dispatchEvent(new confirmedFlow.window.Event("submit", { bubbles: true, cancelable: true }));
+  await flush();
+  expect(confirmCalls).toEqual([
+    `link=${SHORT_TOKEN}&confirmed=0`,
+    `link=${SHORT_TOKEN}&confirmed=1`,
+  ]);
+  expect(confirmedFlow.replaced).toEqual(["/docs/"]);
+
+  // A failed fetch stops on the platform-owned Continue card so the visitor can
+  // retry cleanly instead of silently auto-submitting.
+  const failedProbe = await run(`#${SHORT_TOKEN}`, async () => ({
+    ok: false,
+    json: async () => ({}),
+  }));
+  expect(failedProbe.submitted).toEqual([]);
+  expect(failedProbe.replaced).toEqual([]);
+  expect(failedProbe.window.document.getElementById("sf-link-continue")?.hidden).toBe(false);
+  expect(
+    failedProbe.window.document.getElementById("sf-link-continue-copy")?.textContent,
+  ).toContain("try again");
+
+  // Explicit `{ submit: true }` submits the form.
+  const emailStep = await run(`#${LINK_TOKEN}`, async () => ({
+    ok: true,
+    json: async () => ({ submit: true }),
+  }));
+  expect(emailStep.submitted).toEqual([LINK_TOKEN]);
+
+  // Legacy seam: older `#sfl_...!` links wait for Continue before spending a use,
+  // and preserve `?r=` return paths when submitted.
+  const legacySuffix = await run(`#${LINK_TOKEN}!?r=%2Fdocs`, async () => ({
+    ok: true,
+    json: async () => ({ redirect: "/docs" }),
+  }));
+  expect(legacySuffix.fetched).toEqual([]);
+  expect(legacySuffix.window.document.getElementById("sf-link-continue")?.hidden).toBe(false);
+  legacySuffix.window.document
+    .getElementById("sf-link")
+    ?.dispatchEvent(new legacySuffix.window.Event("submit", { bubbles: true, cancelable: true }));
+  await flush();
+  expect(legacySuffix.fetched).toEqual([
+    { url: "/__", body: `link=${LINK_TOKEN}&confirmed=1&return=%2Fdocs` },
+  ]);
+  expect(legacySuffix.replaced).toEqual(["/docs"]);
+
+  // Already-signed-in visitor landing on `/__` without a hash redirects cleanly to `/`.
+  const signedInNoHash = await run("", async () => ({
+    ok: true,
+    json: async () => ({ data: { state: "authenticated" } }),
+  }));
+  expect(signedInNoHash.replaced).toEqual(["/"]);
+  expect(signedInNoHash.window.document.getElementById("sf-link-none")?.hidden).toBe(true);
+
+  // Anonymous visitor landing on `/__` with a broken hash sees the incomplete-link message.
+  const broken = await run("#nothing-here", async () => ({
+    ok: true,
+    json: async () => ({ data: { state: "anonymous" } }),
+  }));
   expect(broken.window.document.getElementById("sf-link-none")?.hidden).toBe(false);
 
-  const landed = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+  // Self-contained `POST /__`: accepts both short prefix-free tokens and legacy
+  // `sfl_` tokens, sets the session cookie, and returns `{ redirect }`.
+  const jsonLanded = await get(runtime, LANES_HOST, "/__", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ link: LINK_TOKEN }),
+  });
+  expect(jsonLanded.status).toBe(200);
+  expect(jsonLanded.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await jsonLanded.json()).toEqual({ redirect: "/docs/" });
+  const jsonCookie = sessionCookie(jsonLanded);
+  expect(
+    (await get(runtime, LANES_HOST, "/docs/", { headers: { cookie: jsonCookie } })).status,
+  ).toBe(200);
+
+  // Form POST fallback on `/__` and legacy `POST /__spacefast/unlock` seam both 303-redirect.
+  const landed = await get(runtime, LANES_HOST, "/__", {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -935,7 +1099,17 @@ test("the /__ trampoline is one cacheable page and the link lands through a POST
   expect(landed.headers.get("referrer-policy")).toBe("no-referrer");
   const cookie = sessionCookie(landed);
   expect((await get(runtime, LANES_HOST, "/docs/", { headers: { cookie } })).status).toBe(200);
-  const crossSite = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+  const legacyUnlockPost = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ link: LINK_TOKEN }),
+  });
+  expect(legacyUnlockPost.status).toBe(303);
+  expect(legacyUnlockPost.headers.get("location")).toBe("/docs/");
+  const crossSite = await get(runtime, LANES_HOST, "/__", {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -944,7 +1118,7 @@ test("the /__ trampoline is one cacheable page and the link lands through a POST
     body: new URLSearchParams({ link: LINK_TOKEN }),
   });
   expect(crossSite.status).toBe(403);
-  const dead = await get(runtime, LANES_HOST, "/__spacefast/unlock", {
+  const dead = await get(runtime, LANES_HOST, "/__", {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -955,6 +1129,19 @@ test("the /__ trampoline is one cacheable page and the link lands through a POST
   expect(dead.headers.get("location")).toBe(
     "/__spacefast/unlock?return=%2F&sf_access=link-invalid",
   );
+  const deadJson = await get(runtime, LANES_HOST, "/__", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      origin: `https://${LANES_HOST}`,
+    },
+    body: new URLSearchParams({ link: `${LINK_PREFIX}not-a-real-link-0123456789` }),
+  });
+  expect(deadJson.status).toBe(200);
+  expect(await deadJson.json()).toEqual({
+    redirect: "/__spacefast/unlock?return=%2F&sf_access=link-invalid",
+  });
 });
 
 test("/__spacefast/session reads the session and DELETE signs out of this Space", async () => {

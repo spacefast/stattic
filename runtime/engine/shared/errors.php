@@ -280,7 +280,7 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     $fragment = is_string($context['fragment'] ?? null) ? $context['fragment'] : '';
     // A page that declared no policy is a fault page: nothing may store it.
     $headers['Cache-Control'] ??= STATTIC_CACHE_CONTROL_NO_STORE;
-    if (in_array($pageId, STATTIC_REFUSAL_PAGES, true)) {
+    if ($status >= 400 && in_array($pageId, STATTIC_REFUSAL_PAGES, true)) {
         _stattic_refusal_header_mark($code);
         $headers[STATTIC_REFUSAL_HEADER] = $code;
     }
@@ -293,7 +293,7 @@ function _stattic_serve_page(string $pageId, array $context = []): void
     $ambiguousDefault = in_array($pageId, ['denied', 'access', 'access-route-not-found', 'sign-in-restart', 'sign-out'], true)
         ? 'html'
         : 'text';
-    $negotiable = _stattic_page_may_negotiate($headers);
+    $negotiable = ($context['negotiable'] ?? true) !== false && _stattic_page_may_negotiate($headers);
     $representation = $negotiable ? _stattic_page_representation($ambiguousDefault) : 'html';
     $requestMethod = _stattic_runtime_request_method();
     http_response_code($status);

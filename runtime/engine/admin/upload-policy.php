@@ -19,9 +19,9 @@ const SPACEFAST_UPLOAD_EXECUTION_CONTROL_FILES = ['.htaccess', '.user.ini', 'spa
 // Root-level docroot files this engine installs (from its own engine-manifest.json).
 const SPACEFAST_UPLOAD_RESERVED_ROOT_CONTROL_FILES = ['config-data.php', 'custom-redirects.php', 'engine-manifest.json', 'installer.php'];
 // Whole root segments, exactly the namespaces the front door's control table
-// claims at request time (see SPACEFAST_CONTROL_PATHS in shared/context.php):
-// '__zerox' and '__spanish' are tenant paths, '__zero/x' and '__span/x' are ours.
-const SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS = ['__sf', '__span', '__zero', '__first'];
+// claims at request time (see SPACEFAST_CONTROL_PATHS in shared/control-paths.php):
+// '__zeroish' and '__firsthand' are tenant paths, '__zero/x' and '__first/x' are ours.
+const SPACEFAST_UPLOAD_RESERVED_ROOT_SEGMENTS = ['__sf', '__zero', '__first'];
 // Matched as a segment PREFIX at any depth, which is broader than the front
 // door: it also holds '__spacefast_generated/' and the planned '__stattic/*'.
 const SPACEFAST_UPLOAD_RESERVED_SEGMENT_PREFIXES = ['__spacefast', '__stattic'];

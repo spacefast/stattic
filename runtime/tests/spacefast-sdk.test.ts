@@ -966,7 +966,7 @@ test("same-host Spacefast SDK route restores the in-page Comments module", async
     returningAccountCookie: null,
     features: { picker: true, drawing: true, capture: false, attachments: true },
     uploads: {
-      base: "http://local-sdk.site.test/__stattic/u/",
+      base: "http://local-sdk.site.test/__spacefast/storage/u/",
       key: expect.stringMatching(/^[a-f0-9]{32}$/),
     },
     ui: "default",
@@ -2858,10 +2858,10 @@ test("a routing rule cannot rewrite the reserved SDK route onto tenant bytes", a
     files: {
       "index.html": '<h1>Hijack</h1><script src="/__spacefast/sdk.js"></script>\n',
       "my-own.js": TENANT_JS,
-      "__spanish/page.html": "<h1>ordinary</h1>\n",
+      "__zeroish/page.html": "<h1>ordinary</h1>\n",
       _redirects: [
         "/__spacefast/sdk.js /my-own.js 200",
-        "/__spanish/page /__spanish/page.html 200!",
+        "/__zeroish/page /__zeroish/page.html 200!",
         "/moved /index.html 301",
       ].join("\n"),
     },
@@ -2883,7 +2883,7 @@ test("a routing rule cannot rewrite the reserved SDK route onto tenant bytes", a
     runtime: { live: true, brand: "Spacefast" },
   });
 
-  const nearMiss = await get(runtime, SITE, "/__spanish/page");
+  const nearMiss = await get(runtime, SITE, "/__zeroish/page");
   expect(nearMiss.status).toBe(200);
   expect(await nearMiss.text()).toBe("<h1>ordinary</h1>\n");
 

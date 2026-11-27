@@ -1508,7 +1508,7 @@ test("serves space storage from the PHP runtime without invoking tenant code", a
   };
   expect(object).toMatchObject({ contentType: "text/plain", size: 14, public: false });
   expect(object.id).toMatch(/^[a-f0-9]{32}$/);
-  expect(object.url).toBe(`https://${GENERATED_HOST}/storage/${object.id}`);
+  expect(object.url).toBe(`https://${GENERATED_HOST}/__spacefast/storage/${object.id}`);
   const objectSha = sha256("runtime object");
   const recordPath = path.join(
     spaceRoot(rt, GENERATED_SPACE),
@@ -1526,7 +1526,7 @@ test("serves space storage from the PHP runtime without invoking tenant code", a
   });
   expect(readFileSync(casPath, "utf8")).toBe("runtime object");
 
-  const read = await get(rt, GENERATED_HOST, `/storage/${object.id}`);
+  const read = await get(rt, GENERATED_HOST, `/__spacefast/storage/${object.id}`);
   expect(read.status).toBe(200);
   expect(read.headers.get("content-security-policy")).toContain("sandbox");
   // D132: the validator nginx would derive from the placed file, so a
@@ -1534,6 +1534,10 @@ test("serves space storage from the PHP runtime without invoking tenant code", a
   const etag = read.headers.get("etag");
   expect(etag).toMatch(/^"[0-9a-f]+-[0-9a-f]+"$/);
   expect(await read.text()).toBe("runtime object");
+  // Legacy `/storage/<id>` stays served for deployed Zero 0.8 capsules.
+  const legacyRead = await get(rt, GENERATED_HOST, `/storage/${object.id}`);
+  expect(legacyRead.status).toBe(200);
+  expect(await legacyRead.text()).toBe("runtime object");
 
   const svg = await get(rt, GENERATED_HOST, "/storage", {
     method: "POST",

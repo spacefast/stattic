@@ -1,7 +1,7 @@
 {
-  "revision": "c39cb54c10bd1751ff918b226ccb89553017b12b",
-  "sourceHash": "e1e6a0bc7f6cf37192b96b36ffc3a81afe8e947b5a03ab074f2c85d7d25981e6",
-  "manifestSha256": "0f908a2de46600fcabfe8c4a044ededef36e163a5175605e38d3e9951190bb04",
+  "revision": "86591524d403b6aa09a58ac5f59a3934099c2eb0",
+  "sourceHash": "2ac9cc97e5dfeb8bd6eb1018930251fd1aaa5158b72a64cbe9478c239500901c",
+  "manifestSha256": "38cee3dc55e6ca79d7c2525d21d85da430186866e9ef2a9f458c77d16815b546",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4825aebf38fcb43fabad3853b6bfc4a3500779cbfeea5263b67d3d9eee51b11c"
+      "sha256": "5cff62871199941b5c5211d29c085d0e89ced55ff22a7675902e83807720d24a"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "8023cd42100e005696dd0036795ab11f9d7ed7df7da052d59ecc2f152bbaca81"
+      "sha256": "787f680a4bb6a4d1bf5c5dfdb3251d835bc0134ad0bfbae8dd1fbb037105f8b3"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16381,7 +16381,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/legacy/zero-0.8/compile.rs",
-      "sha256": "d8fdd3b40e01cfc96ffee075d1c8f7d5ae59b1a540b0b36e200033935370ab57"
+      "sha256": "8b2d15daa24ce52fdd794683d7a755e95457ffa899e8ad6c399d0e33781f5337"
     },
     {
       "path": "crates/stattic-runtime-core/src/legacy/zero-0.8/config.rs",
@@ -29881,11 +29881,11 @@
     },
     {
       "path": "runtime/engine/admin/storage.php",
-      "sha256": "089aece4d74268a5076b799bef0c97a2ca9baa49a328d83ffc6625104d1abb83"
+      "sha256": "87d203e345e56fe115c1283a96bf378b55f3151c040031aa57c187b7cdf79088"
     },
     {
       "path": "runtime/engine/admin/upload-policy.php",
-      "sha256": "934f3e2520889764a22ea51366d30011a672843cff6f7def9211a4480c5f5343"
+      "sha256": "a3039917221f47617d8b1dcd42aedd2296ee7014aa8a1be24ec5d3da01ece37e"
     },
     {
       "path": "runtime/engine/admin/upload.php",
@@ -30117,7 +30117,7 @@
     },
     {
       "path": "runtime/engine/runtime/access-rules.php",
-      "sha256": "ea7fe2689f74caeeaa5d9069d11e4c280677de63bb87eb7fac9f9d23eef02cf4"
+      "sha256": "51e5b036e9e579ca9b238dfb79dcde2f9e87dba2fc38a6bc4c76e39848b52493"
     },
     {
       "path": "runtime/engine/runtime/cli-invoke.php",
@@ -30185,7 +30185,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "c85e8a840f7b651affe86133b672057832b518af84b178a396ef2c38c147f2bd"
+      "sha256": "e01b36014701d2b5dee733be51d8e107dc8960060f921f62ec4a71dea9a64d0c"
     },
     {
       "path": "runtime/engine/runtime/sell.php",
@@ -30193,7 +30193,7 @@
     },
     {
       "path": "runtime/engine/runtime/serve.php",
-      "sha256": "833bda62072e33877ed2242dca1c82903e7aacffb76a845b3567695f80f73280"
+      "sha256": "df5ce3fbca7424a6ebe6dc094608b9710dfa5ffc80c0f1baa1b2b4a5defe59e5"
     },
     {
       "path": "runtime/engine/runtime/share-oauth.php",
@@ -30213,11 +30213,11 @@
     },
     {
       "path": "runtime/engine/runtime/spacefast-sdk.php",
-      "sha256": "4c8bc49749d8857965bb276a797593fa5b7107d1475c57c4ef2e738c82507efc"
+      "sha256": "25221943a5dcc1dcbe24fc362acb33e3798239a72c8095e4f6a8d456715d25ba"
     },
     {
       "path": "runtime/engine/runtime/storage.php",
-      "sha256": "03143b75ca2ec5b7a395229cc4c31f59a5866bb8f3b4a2708181a6df706812e8"
+      "sha256": "bb3dfb24631536ad56c6867aed825029357dcf63bd17a9810eb92982531381ac"
     },
     {
       "path": "runtime/engine/runtime/tracker.php",
@@ -30297,11 +30297,11 @@
     },
     {
       "path": "runtime/engine/shared/context.php",
-      "sha256": "ba02430af0a5bd08d1bb6728f18bcd6d25af4cf00945bb91d78732be8effea7a"
+      "sha256": "cf9148428d3a4ede7e734e1e3e96ee60116629e83853c96fa10389154dd4d3a3"
     },
     {
       "path": "runtime/engine/shared/control-paths.php",
-      "sha256": "339bf101e56e065a964a3edb9b9d793e7c2a38afcff042969f5ae8a07184f6f2"
+      "sha256": "3d3ced54cf59c30b14e92dac0b4b376b866ac829885d8dbcd3a3ed3562520d42"
     },
     {
       "path": "runtime/engine/shared/d1-broker.php",
@@ -30329,7 +30329,7 @@
     },
     {
       "path": "runtime/engine/shared/errors.php",
-      "sha256": "652b344857ac2f0ed5c86997adc1778ab21e653301e052fda5981106256cde46"
+      "sha256": "3893a0540e5726e874366a3df5ad0e8891fc5c98018dd865fc3472daca7b93a3"
     },
     {
       "path": "runtime/engine/shared/finalizer-protocol.generated.php",
@@ -30497,7 +30497,7 @@
     },
     {
       "path": "runtime/engine/wordpress/components.json",
-      "sha256": "de6a45e02e6bc32c85701c29e60903647135dc7896c2cc07ff914b1c2eaa177d"
+      "sha256": "570922f3be9f8e67b07a8274debaa148f2aa4a10efac7bb2d5c224f709500828"
     },
     {
       "path": "runtime/engine/wordpress/content-admin-api.php",
@@ -30581,7 +30581,7 @@
     },
     {
       "path": "runtime/tests/access-page.test.ts",
-      "sha256": "2882543125293e7cdd64759e6d5c5355d553826d595c26ef5ef82cd43a58b21b"
+      "sha256": "42d8393067be78bc27ecdc1150b39ef9f0bea17a3435f0ee0d8a460fe7ade1db"
     },
     {
       "path": "runtime/tests/access-rules-digest-parity.test.ts",
@@ -31069,7 +31069,7 @@
     },
     {
       "path": "runtime/tests/spacefast-sdk.test.ts",
-      "sha256": "685f57fbfce057385706940d507d27daed38283cea5ce407bf155c2c8f103ddc"
+      "sha256": "130b35db00ae303a7d720bd45414efad55f233196d2e47548946da92efb34102"
     },
     {
       "path": "runtime/tests/spacepress-preview-parity.test.ts",
@@ -31093,7 +31093,7 @@
     },
     {
       "path": "runtime/tests/storage.test.ts",
-      "sha256": "f3981011f96f59334189360b1fc9c5de3915f67056fca1767f7582c871398fd8"
+      "sha256": "56b00a322ffed699ce326cc0d9a05b129f1d7ad8b35ad4f43c3b6afe4767ecc0"
     },
     {
       "path": "runtime/tests/subprocess-cli.php",
@@ -31113,7 +31113,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "634406a946353bba2f532b9ea78d174518b306638dc828e7103fb09fde87126d"
+      "sha256": "e74af2c784d3347f719c84c5761dc17cd8e1460b060b343352ef3cb7977ecdf5"
     },
     {
       "path": "runtime/tests/uploads.test.ts",
@@ -31165,7 +31165,7 @@
     },
     {
       "path": "runtime/tests/zero-rust-runner.test.ts",
-      "sha256": "a548caa1c446a0b3a5c9c753a0593b94280b63b274d8def2edf47dc01a5f08eb"
+      "sha256": "feae800bd6c3de6750767bd297e0e1cfed04e899b0248f93ae1fdee393648a36"
     },
     {
       "path": "runtime/tests/zero-v2-cordon.test.ts",

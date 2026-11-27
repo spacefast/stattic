@@ -254,7 +254,19 @@ const STATTIC_ZERO_AUTH_CONTROL_ROUTES = [
 // serves routes here, every path under it refuses like an unknown `/__zero/*`.
 const STATTIC_FIRST_NAMESPACE_PATH = '/__first';
 
-// The ONE stable visitor URL of a public uploads-store object.
+// Canonical Space-origin runtime storage under `/__spacefast/storage/*`:
+// - `POST /__spacefast/storage` (?public=true|false) and `/__spacefast/storage/private`
+// - `GET|HEAD|DELETE /__spacefast/storage/<id>` (authenticated)
+// - `GET|HEAD /__spacefast/storage/u/<id>?k=<read-key>` (public keyed read)
+// The TS mirrors live in packages/common/src/utils/runtime-paths.ts.
+const STATTIC_STORAGE_PATH = STATTIC_RUNTIME_NAMESPACE_PATH . '/storage';
+const STATTIC_STORAGE_PRIVATE_PATH = STATTIC_STORAGE_PATH . '/private';
+const STATTIC_STORAGE_PUBLIC_URL_PREFIX = STATTIC_STORAGE_PATH . '/u/';
+
+// Legacy compatibility storage prefixes kept for pre-cutover Spaces, cached
+// comments, Zero 0.8 capsules, and mixed API/Cast/Functions/runtime rollouts.
+const STATTIC_STORAGE_LEGACY_PATH = '/storage';
+const STATTIC_STORAGE_LEGACY_PRIVATE_PATH = '/storage/private';
 const STATTIC_UPLOADS_PUBLIC_URL_PREFIX = '/__stattic/u/';
 
 // A version's connector roles, served to its own pages:
@@ -288,8 +300,8 @@ function _stattic_path_is_internal_artifact(string $path): bool
 // Ordered: the walk takes the first matching row whose `admit` passes, so
 // specific rows precede the namespace they sit in, and `entry`-stage order IS
 // serve.php's dispatch ladder order.
-// `match`: exact | prefix | namespace (whole-segment, so `/__spanish/page` is a
-// tenant path and `/__span/x` is ours). `fold` compares case-insensitively.
+// `match`: exact | prefix | namespace (whole-segment, so `/__zeroish/page` is a
+// tenant path and `/__zero/x` is ours). `fold` compares case-insensitively.
 // `admit` narrows a row to the exact set its handler can answer.
 // Health needs only engine constants; route registration stays lazy.
 function _stattic_control_path_rows(): array
@@ -1611,9 +1623,13 @@ function _stattic_canonical_request_path(string $path): ?string
         }
     }
     $normalized = _stattic_nfc_string($decoded);
-    return is_string($normalized) && strlen($normalized) <= STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES
-        ? $normalized
-        : null;
+    if (!is_string($normalized)) {
+        return null;
+    }
+    if (strlen($normalized) <= STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
+        return $normalized;
+    }
+    return _stattic_access_in_token($normalized) !== null ? $normalized : null;
 }
 
 function _stattic_path_has_residual_dot_segment(string $path): bool

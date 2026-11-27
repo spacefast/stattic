@@ -328,8 +328,8 @@ function _stattic_uploads_owner_object(string $id, array $record, string $readKe
         // Path-relative and fresh at response time; the caller absolutizes
         // against whichever of the space's hostnames it is presenting.
         'url' => $record['public']
-            ? STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id . '?k=' . $readKey
-            : '/storage/' . $id,
+            ? STATTIC_STORAGE_PUBLIC_URL_PREFIX . $id . '?k=' . $readKey
+            : STATTIC_STORAGE_PATH . '/' . $id,
     ];
 }
 

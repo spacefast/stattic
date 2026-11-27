@@ -279,7 +279,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     // fall-through to the 404 tail: the path demonstrably exists.
     $GLOBALS['SPACEFAST_METHOD_DECLINED_ALLOW'] = [];
     $functionsMachineRoute = (_stattic_control_path_row($originalRequestPath)['stage'] ?? null) === 'functions';
-    $storageRequest = $requestPath === '/storage' || str_starts_with($requestPath, '/storage/');
+    $canonicalStorageRequest = ($requestPath === STATTIC_STORAGE_PATH || str_starts_with($requestPath, STATTIC_STORAGE_PATH . '/'))
+        && !str_starts_with($requestPath, STATTIC_STORAGE_PUBLIC_URL_PREFIX);
+    $legacyStorageRequest = $requestPath === STATTIC_STORAGE_LEGACY_PATH
+        || str_starts_with($requestPath, STATTIC_STORAGE_LEGACY_PATH . '/');
+    $storageRequest = $canonicalStorageRequest || $legacyStorageRequest;
 
     // ---- host-level routes (mounts, sub-path redirects and proxies) ------
     // Machine lanes are exempt from visitor edge fences. Keep their original
@@ -488,9 +492,11 @@ function _stattic_serve_request(string $privateRoot, string $requestMethod, stri
     $rulesFirst = $entry === null
         || !empty($entry[STATTIC_RUNTIME_RESPONSE_ENTRY_RULES_FIRST]);
     $redirectRules = _stattic_v4_rule_section($rulesEntry, 'redirects');
-    // `/storage` is shared: an exact authored read stays in content routing,
-    // while every other request keeps its original path in the object API.
-    $storageContentEntry = $storageRequest
+    // Legacy `/storage` is shared: an exact authored read stays in content
+    // routing, while every other request keeps its original path in the object
+    // API. Canonical `/__spacefast/storage` is platform-reserved so authored
+    // content never shadows it.
+    $storageContentEntry = $legacyStorageRequest
         && is_array($entry)
         && in_array($requestMethod, ['GET', 'HEAD'], true);
     // Resolved once per request: whether the edge already answers this
@@ -1769,7 +1775,7 @@ function _stattic_dispatch_control_path(array $serving, string $requestPath, str
         'access_logout' => _stattic_access_handle_logout($requestHost),
         'access_password' => _stattic_access_handle_password($serving, $requestHost, $privateRoot),
         'access_unlock' => _stattic_access_handle_unlock($serving, $requestHost, $privateRoot),
-        'access_link_trampoline' => _stattic_access_handle_link_trampoline(),
+        'access_link_trampoline' => _stattic_access_handle_link_trampoline($serving, $requestHost, $privateRoot),
         'access_email' => _stattic_access_handle_email_verification($serving, $requestHost, $privateRoot),
         'access_request' => _stattic_access_handle_request_invite($serving, $requestHost, $privateRoot),
         'comments_exchange' => _stattic_comments_handle_exchange($privateRoot, $serving, $requestHost, $requestPath),

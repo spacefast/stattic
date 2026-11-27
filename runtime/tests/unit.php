@@ -1223,6 +1223,10 @@ check(
 check(_stattic_scope_path(_stattic_canonical_request_path('/caf%C3%A9') ?? '') === '/café', 'access path uses decoded UTF-8');
 check(_stattic_scope_path(_stattic_canonical_request_path('/%252e%252e/secret') ?? '') === '/%2e%2e/secret', 'access path never decodes twice');
 check(_stattic_canonical_request_path('/' . str_repeat('a', 2047)) !== null, 'request boundary accepts its 2048-byte path limit');
+check(_stattic_canonical_request_path('/' . str_repeat('a', 2048)) === null, 'request boundary rejects non-handoff paths over 2048 bytes');
+$longHandoffPath = '/__spacefast/in/' . str_repeat('a', 64) . '.' . str_repeat('b', 2200) . '.' . str_repeat('c', 86);
+check(_stattic_canonical_request_path($longHandoffPath) === $longHandoffPath, 'request boundary accepts /__spacefast/in/ handoff JWTs over 2048 bytes');
+check(_stattic_canonical_request_path('/__spacefast/in/' . str_repeat('a', 2100)) === null, 'request boundary rejects non-JWT /__spacefast/in/ paths over 2048 bytes');
 check(_stattic_canonical_request_path('/' . str_repeat("\u{0301}", 1024)) === null, 'request boundary rejects oversized combining-mark input before normalization');
 foreach ([' relative', '//host/path', '/%2fsecret', '/%5csecret', '/%3fsecret', '/%23secret', '/%00secret', '/%zz'] as $invalidAccessPath) {
     check(_stattic_canonical_request_path($invalidAccessPath) === null, 'request boundary rejects ambiguous input: ' . $invalidAccessPath);
@@ -2726,7 +2730,7 @@ check(!isset($fxHeadersNoUsage['sf-fx-usage']), 'dispatch: no usage intake witho
 check($fxHeadersNoUsage['sf-fx-bundle'] === 'https://shop.example/b/x/t/bundle.json', 'dispatch: a config without usage still dispatches');
 
 // The platform's own surfaces are never the worker's to answer.
-foreach (['/identity', '/identity/session', '/__spacefast/functions/relay', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__span/y', '/__spacefast', '/__spacefast/callback', '/__spacefast/oauth'] as $reserved) {
+foreach (['/identity', '/identity/session', '/__spacefast/functions/relay', '/__spacefast/storage', '/__spacefast/storage/123', '/__spacefast/storage/u/123', '/__spacefast/zero/run', '/__zero/run', '/__zero', '/__stattic/x', '/__spacefast', '/__spacefast/callback', '/__spacefast/oauth'] as $reserved) {
     check(!_stattic_functions_dispatchable($reserved, 'GET'), 'dispatch: refuses reserved path ' . $reserved);
 }
 foreach (['/', '/api/orders', '/posts/1', '/identity-kit', '/storage', '/storage/123', '/storagebox/file', '/Storage/report.pdf', '/Identity/logo.svg', '/__spacefastish/ok', '/__spacefast/oauth/app'] as $ordinary) {
@@ -3014,7 +3018,19 @@ check(!_stattic_control_path_admits_visitor('/__spacefast/functions'), 'front do
 check(_stattic_path_is_reserved('/__spacefast/functions/relay'), 'front door: control paths stay reserved from tenant code');
 check(_stattic_path_is_reserved('/__SPACEFAST/callback'), 'front door: a case-folded control namespace is still reserved');
 check(_stattic_path_is_reserved('/__SF/notes'), 'front door: the old handoff namespace stays reserved while /__sf/redeem answers');
-check(!_stattic_path_is_reserved('/__spanish/page'), 'front door: reservation is whole-segment, not a string prefix');
+check(!_stattic_path_is_reserved('/__zeroish/page'), 'front door: reservation is whole-segment, not a string prefix');
+// Canonical storage routes live under `/__spacefast/storage/*` and are
+// admitted at the front door while staying reserved from tenant code.
+check(_stattic_control_path_admits_visitor('/__spacefast/storage'), 'front door: canonical storage root is reachable');
+check(_stattic_control_path_admits_visitor('/__spacefast/storage/private'), 'front door: canonical private storage upload is reachable');
+check(_stattic_control_path_admits_visitor('/__spacefast/storage/' . str_repeat('a', 32)), 'front door: canonical authenticated storage object is reachable');
+check(_stattic_control_path_admits_visitor('/__spacefast/storage/u/' . str_repeat('a', 32)), 'front door: canonical public storage object is reachable');
+check(_stattic_control_path_entry_handler('/__spacefast/storage/u/' . str_repeat('a', 32)) === 'uploads_object', 'front door: canonical public storage maps to uploads_object');
+check(_stattic_control_path_entry_handler('/__stattic/u/' . str_repeat('a', 32)) === 'uploads_object', 'front door: legacy public storage alias maps to uploads_object');
+check(_stattic_control_path_entry_handler('/__spacefast/storage/' . str_repeat('a', 32)) === null, 'front door: canonical authenticated storage does not match uploads_object');
+check(!_stattic_control_path_admits_visitor('/__SPACEFAST/storage'), 'front door: case-folded storage path refuses at the private namespace');
+check(_stattic_path_is_reserved('/__spacefast/storage'), 'front door: canonical storage is reserved from tenant code');
+check(_stattic_path_is_reserved('/__spacefast/storage/u/' . str_repeat('a', 32)), 'front door: canonical public storage is reserved from tenant code');
 
 // The canonical Zero namespace admits exactly the control routes, on both
 // spellings, and unknown paths under it stay refused and reserved.
@@ -3061,7 +3077,7 @@ foreach (['/__first/.htaccess', '/__first/__spacefast/x', '/__first/a./b', '/__f
     check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: other path rules still hold under First ' . substr($destination, 0, 40));
 }
 check(_stattic_runtime_redirect_target_safe('/__first/' . str_repeat('x', 1016), 'redirect'), 'destination: the path length limit under First is the ordinary one');
-foreach (['/__zero/x', 'https://example.com/__zero/api', '/__spacefast/x', 'https://example.com/__spacefast/x', '/__SPACEFAST/x', '/__span/x', '/__stattic/x'] as $destination) {
+foreach (['/__zero/x', 'https://example.com/__zero/api', '/__spacefast/x', 'https://example.com/__spacefast/x', '/__SPACEFAST/x', '/__stattic/x'] as $destination) {
     check(!_stattic_runtime_redirect_target_safe($destination, 'redirect'), 'destination: a redirect may not target ' . $destination);
     check(!$hostRedirectCompiles($destination), 'destination: a host redirect route may not target ' . $destination);
 }

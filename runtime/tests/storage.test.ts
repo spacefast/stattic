@@ -196,7 +196,7 @@ function keyOnDisk(runtime: Runtime, spaceId = SPACE): string {
 test("the keyed visitor URL is the only public read, and a wrong key answers exactly like a missing id", async () => {
   const object = await upload("keyed bytes");
   const url = new URL(object.url);
-  expect(url.pathname).toBe(`/__stattic/u/${object.id}`);
+  expect(url.pathname).toBe(`/__spacefast/storage/u/${object.id}`);
   const key = url.searchParams.get("k") ?? "";
   expect(key).toMatch(/^[a-f0-9]{32}$/);
   // The composed URL carries the key file's current value.
@@ -210,11 +210,16 @@ test("the keyed visitor URL is the only public read, and a wrong key answers exa
   expect(served.headers.get("a8c-edge-cache")).toBe("cache");
   expect(await served.text()).toBe("keyed bytes");
 
+  // Legacy `/__stattic/u/` stays served as a compatibility alias for already-shared URLs.
+  const legacyServed = await get(rt, HOST, `/__stattic/u/${object.id}${url.search}`);
+  expect(legacyServed.status).toBe(200);
+  expect(await legacyServed.text()).toBe("keyed bytes");
+
   // Wrong key, absent key, unknown id: three identical 404s, so the lane leaks
   // neither which ids exist nor whether a key was close.
   const wrongKey = await get(rt, HOST, `${url.pathname}?k=${"f".repeat(32)}`);
   const noKey = await get(rt, HOST, url.pathname);
-  const unknownId = await get(rt, HOST, `/__stattic/u/${"0".repeat(32)}${url.search}`);
+  const unknownId = await get(rt, HOST, `/__spacefast/storage/u/${"0".repeat(32)}${url.search}`);
   expect(wrongKey.status).toBe(404);
   expect(noKey.status).toBe(404);
   expect(unknownId.status).toBe(404);
@@ -223,20 +228,32 @@ test("the keyed visitor URL is the only public read, and a wrong key answers exa
   expect(await noKey.text()).toBe(wrongKeyBody);
 });
 
-test("/storage/<id> is the authenticated lane: read without a key, uploader-only delete, idempotent", async () => {
+test("/__spacefast/storage/<id> (and legacy /storage/<id>) is the authenticated lane: read without a key, uploader-only delete, idempotent", async () => {
   const object = await upload("authed bytes", "text/plain", undefined, false);
   expect(object.public).toBe(false);
+  expect(new URL(object.url).pathname).toBe(`/__spacefast/storage/${object.id}`);
+  expect(
+    (await get(rt, HOST, `/__spacefast/storage/u/${object.id}?k=${keyOnDisk(rt)}`)).status,
+  ).toBe(404);
   expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${keyOnDisk(rt)}`)).status).toBe(404);
-  const read = await get(rt, HOST, `/storage/${object.id}`);
+  const read = await get(rt, HOST, `/__spacefast/storage/${object.id}`);
   expect(read.status).toBe(200);
   // The keyless URL is authenticated per request, so no shared cache may
   // answer for it, including a browser cache after sign-out.
   expect(read.headers.get("cache-control")).toBe("private, no-store");
   expect(read.headers.get("a8c-edge-cache")).toBe("no-cache");
   expect(await read.text()).toBe("authed bytes");
+  const legacyRead = await get(rt, HOST, `/storage/${object.id}`);
+  expect(legacyRead.status).toBe(200);
+  expect(await legacyRead.text()).toBe("authed bytes");
 
-  expect((await get(rt, HOST, `/storage/${object.id}`, { method: "DELETE" })).status).toBe(204);
-  expect((await get(rt, HOST, `/storage/${object.id}`, { method: "DELETE" })).status).toBe(204);
+  expect(
+    (await get(rt, HOST, `/__spacefast/storage/${object.id}`, { method: "DELETE" })).status,
+  ).toBe(204);
+  expect(
+    (await get(rt, HOST, `/__spacefast/storage/${object.id}`, { method: "DELETE" })).status,
+  ).toBe(204);
+  expect((await get(rt, HOST, `/__spacefast/storage/${object.id}`)).status).toBe(404);
   expect((await get(rt, HOST, `/storage/${object.id}`)).status).toBe(404);
   const url = new URL(object.url);
   expect((await get(rt, HOST, `${url.pathname}${url.search}`)).status).toBe(404);
@@ -246,6 +263,38 @@ test("/storage/<id> is the authenticated lane: read without a key, uploader-only
   const purges = edgePurgeCalls(rt).filter((r) => r.reason === "storage_object_deleted");
   expect(purges.length).toBe(1);
   expect(purges[0]?.hostname).toBe(HOST);
+});
+
+test("canonical /__spacefast/storage accepts public and private uploads without colliding with authored /storage files", async () => {
+  const pubResponse = await get(rt, HOST, "/__spacefast/storage?public=true", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: "canonical public",
+  });
+  expect(pubResponse.status).toBe(201);
+  // SAFETY: the 201 above is the upload lane's success, whose body is one object.
+  const pub = (await pubResponse.json()) as Uploaded;
+  expect(pub.public).toBe(true);
+  expect(new URL(pub.url).pathname).toBe(`/__spacefast/storage/u/${pub.id}`);
+  expect(
+    (await get(rt, HOST, `${new URL(pub.url).pathname}${new URL(pub.url).search}`)).status,
+  ).toBe(200);
+
+  const privResponse = await get(rt, HOST, "/__spacefast/storage/private?public=true", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: "canonical private",
+  });
+  expect(privResponse.status).toBe(201);
+  // SAFETY: the 201 above is the upload lane's success, whose body is one object.
+  const priv = (await privResponse.json()) as Uploaded;
+  expect(priv.public).toBe(false);
+  expect(new URL(priv.url).pathname).toBe(`/__spacefast/storage/${priv.id}`);
+  const privRead = await get(rt, HOST, `/__spacefast/storage/${priv.id}`);
+  expect(privRead.status).toBe(200);
+  expect(await privRead.text()).toBe("canonical private");
+  // GET /__spacefast/storage is never shadowed by authored /storage/index.html.
+  expect((await get(rt, HOST, "/__spacefast/storage")).status).toBe(405);
 });
 
 test("without a session, a surface without Comments refuses uploads", async () => {
@@ -287,15 +336,17 @@ test("the admin surface lists keyed URLs and serves the Space's own read key", a
     { space_id: ANON_SPACE },
   );
   expect(neighbourKey.key).not.toBe(keyResponse.key);
-  const ownUrl = `/__stattic/u/${object.id}?k=${keyResponse.key}`;
+  const ownUrl = `/__spacefast/storage/u/${object.id}?k=${keyResponse.key}`;
   expect((await get(rt, HOST, ownUrl)).status).toBe(200);
-  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${neighbourKey.key}`)).status).toBe(404);
+  expect(
+    (await get(rt, HOST, `/__spacefast/storage/u/${object.id}?k=${neighbourKey.key}`)).status,
+  ).toBe(404);
   // A box hosts exactly one Space, so the legacy box secret reads only this
   // Space's own objects: URLs issued before per-Space derivation keep working,
   // while the manifest and new URLs carry the derived key.
-  expect((await get(rt, HOST, `/__stattic/u/${object.id}?k=${boxSecretOnDisk(rt)}`)).status).toBe(
-    200,
-  );
+  expect(
+    (await get(rt, HOST, `/__spacefast/storage/u/${object.id}?k=${boxSecretOnDisk(rt)}`)).status,
+  ).toBe(200);
 
   const listed = await apiJson<{ objects: Array<{ id: string; url: string; sha256: string }> }>(
     rt,
@@ -305,7 +356,7 @@ test("the admin surface lists keyed URLs and serves the Space's own read key", a
     { space_id: SPACE },
   );
   const row = listed.objects.find((candidate) => candidate.id === object.id);
-  expect(row?.url).toBe(`/__stattic/u/${object.id}?k=${keyResponse.key}`);
+  expect(row?.url).toBe(`/__spacefast/storage/u/${object.id}?k=${keyResponse.key}`);
 });
 
 // The name is presentation, so the id stays the identity: it survives the round

@@ -5317,16 +5317,24 @@ function _stattic_render_access_route_not_found(): never
  *
  * @return array{status:int,body:?array,fields:?array,handoff:string,exchange:array,host:string}|null
  */
-function _stattic_access_exchange_link_token(array $serving, string $requestHost, string $token): ?array
-{
+function _stattic_access_exchange_link_token(
+    array $serving,
+    string $requestHost,
+    string $token,
+    bool $confirmed = true
+): ?array {
     $exchange = _stattic_access_page_exchange($serving);
     if ($exchange === null || !is_string($exchange['linkUrl'] ?? null)) {
         return null;
     }
     $host = _stattic_canonicalize_host($requestHost);
+    $payload = ['host' => $host, 'token' => $token];
+    if (!$confirmed) {
+        $payload['confirmed'] = '0';
+    }
     $result = _stattic_access_exchange_post(
         $exchange['linkUrl'],
-        ['host' => $host, 'token' => $token],
+        $payload,
         _stattic_access_exchange_headers(
             $exchange,
             [
@@ -5347,6 +5355,47 @@ function _stattic_access_exchange_link_token(array $serving, string $requestHost
         'exchange' => $exchange,
         'host' => $host,
     ];
+}
+
+/**
+ * Where a redeemed link lands: the caller's requested path, else the exchange's
+ * safe `return` field, else the fallback.
+ */
+function _stattic_access_redeemed_return_path(
+    ?array $redeemed,
+    ?string $requestedReturn,
+    ?string $fallbackReturn
+): ?string {
+    $fields = is_array($redeemed) ? $redeemed['fields'] : null;
+    return $requestedReturn ?? (is_array($fields) && is_string($fields['return'] ?? null)
+        ? _stattic_safe_return_path($fields['return'])
+        : null) ?? $fallbackReturn;
+}
+
+/**
+ * Shared link-handoff redemption: consumes the handoff token, sets the
+ * host-only session cookie, and returns the resolved safe landing path (or null
+ * when the exchange did not issue a usable handoff).
+ */
+function _stattic_access_apply_redeemed_link(
+    array $serving,
+    ?array $redeemed,
+    ?string $requestedReturn = null,
+    ?string $fallbackReturn = null
+): ?string {
+    if (!is_array($redeemed) || $redeemed['status'] !== 200 || $redeemed['handoff'] === '') {
+        return null;
+    }
+    $returnPath = _stattic_access_redeemed_return_path($redeemed, $requestedReturn, $fallbackReturn);
+    if ($returnPath === null) {
+        return null;
+    }
+    $credential = _stattic_access_consume_handoff_token($serving, $redeemed['host'], $redeemed['handoff']);
+    if ($credential === null) {
+        return null;
+    }
+    _stattic_access_set_session_cookie($credential);
+    return $returnPath;
 }
 
 // `/__spacefast`: the door. It shows the Space's gate with every lane this
@@ -5477,27 +5526,17 @@ function _stattic_access_redeem_link_entry(
     if ($redeemed === null) {
         $deadLink();
     }
-    $host = $redeemed['host'];
-    $body = $redeemed['body'];
-    $fields = $redeemed['fields'];
-    $exchange = $redeemed['exchange'];
-    $returnPath = $requestedReturn ?? (is_array($fields) && is_string($fields['return'] ?? null)
-        ? _stattic_safe_return_path($fields['return'])
-        : null);
-    if ($redeemed['status'] === 200 && $redeemed['handoff'] !== '' && $returnPath !== null) {
-        // A link says what its holder may do, never who they are, and they stay
-        // a guest until they choose to sign in: no silent account probe here.
-        $credential = _stattic_access_consume_handoff_token($serving, $host, $redeemed['handoff']);
-        if ($credential !== null) {
-            _stattic_access_set_session_cookie($credential);
-            _stattic_access_redirect($returnPath, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-        }
+    // A link says what its holder may do, never who they are, and they stay a
+    // guest until they choose to sign in: no silent account probe here.
+    $returnPath = _stattic_access_apply_redeemed_link($serving, $redeemed, $requestedReturn);
+    if ($returnPath !== null) {
+        _stattic_access_redirect($returnPath, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
     }
     _stattic_access_gate_email_verification(
         $serving,
         $requestHost,
-        $body,
-        $exchange['emailUrl'] ?? null,
+        $redeemed['body'],
+        $redeemed['exchange']['emailUrl'] ?? null,
         $requestedReturn ?? '/'
     );
     $deadLink();
@@ -5791,28 +5830,19 @@ function _stattic_access_redeem_query_link_token(
     if ($redeemed === null) {
         return;
     }
-    $body = $redeemed['body'];
-    $exchange = $redeemed['exchange'];
-    if ($redeemed['status'] === 200 && $redeemed['handoff'] !== '') {
-        $storedRecord = null;
-        $credential = _stattic_access_consume_handoff_token($serving, $redeemed['host'], $redeemed['handoff'], $storedRecord);
-        if ($credential !== null) {
-            // The cookie is the whole point: the token drops out of every URL
-            // the visitor navigates to next, and the page's own subresources
-            // present the session instead of the secret. `_stattic_set_cookie`
-            // updates $_COOKIE too, so the enforcement below this call resolves
-            // the identity this response just handed out.
-            _stattic_access_set_session_cookie($credential);
-            _stattic_access_redirect_query_token();
-        }
+    if (_stattic_access_apply_redeemed_link($serving, $redeemed, '/') !== null) {
+        // The cookie is the whole point: the token drops out of every URL the
+        // visitor navigates to next, and `_stattic_set_cookie` updates $_COOKIE
+        // so enforcement below resolves the identity this response handed out.
+        _stattic_access_redirect_query_token();
         return;
     }
     // One lane still has to be answered rather than served.
     _stattic_access_gate_email_verification(
         $serving,
         $requestHost,
-        $body,
-        $exchange['emailUrl'] ?? null,
+        $redeemed['body'],
+        $redeemed['exchange']['emailUrl'] ?? null,
         _stattic_access_clean_return_path()
     );
 }
@@ -6436,26 +6466,15 @@ function _stattic_access_render_unlock_card(
 
 function _stattic_access_handle_unlock_post(array $serving, string $requestHost, string $privateRoot): never
 {
+    // Legacy seam: `/__` tabs loaded before `/__` became self-contained still
+    // POST `link` here. Remove once rolled out everywhere.
+    if (is_string($_POST['link'] ?? null) && trim($_POST['link']) !== '') {
+        _stattic_access_redeem_link_post($serving, $requestHost, $privateRoot);
+    }
     $host = _stattic_canonicalize_host($requestHost);
     $returnTo = _stattic_safe_return_path(
         is_string($_POST['return'] ?? null) ? (string) $_POST['return'] : '/'
     ) ?? '/';
-    // A share link from the `/__#<token>` trampoline: the same exchange the
-    // query lane uses, here from a POST body so the token never sat in a URL.
-    $link = is_string($_POST['link'] ?? null) ? trim((string) $_POST['link']) : '';
-    if ($link !== '') {
-        _stattic_visitor_lane_begin($privateRoot);
-        if (!_stattic_access_same_origin_post($requestHost)) {
-            _stattic_render_json_or_deny('access_origin_invalid', 'Cross-origin access submissions are not accepted.');
-        }
-        if (preg_match('/\A(?:sfl|sfc)_[A-Za-z0-9_-]{16,512}\z/D', $link) !== 1) {
-            _stattic_render_access_route_not_found();
-        }
-        // Trampoline links carry their own return: the link's landing path
-        // decides when the page named none beyond `/`.
-        $requested = ($_POST['return'] ?? null) === null ? null : $returnTo;
-        _stattic_access_redeem_link_entry_post($serving, $requestHost, $link, $requested);
-    }
     if (!_stattic_unlock_csrf_valid($serving, $host, $_POST['csrf'] ?? null)) {
         _stattic_render_json_or_deny('access_csrf_invalid', 'Reload the page and try again.');
     }
@@ -6464,65 +6483,180 @@ function _stattic_access_handle_unlock_post(array $serving, string $requestHost,
     _stattic_access_handle_password($serving, $requestHost, $privateRoot, STATTIC_ACCESS_UNLOCK_PATH);
 }
 
-// ---- `/__` and `/__#<token>`: the share-link trampoline ----
-//
-// A share link is `https://<host>/__#sfl_…`. The token never leaves the
-// browser in a request line, a Referer or a CDN log; mail scanners and link
-// unfurlers fetch `/__` and get the same small, cacheable page as everyone
-// else, so a limited link is never spent by a robot. The page reads the
-// fragment, scrubs it from the address bar, and POSTs the token to
-// `/__spacefast/unlock`. A link with a use limit or an email check (`!` after
-// the token, `/__#sfl_…!`) waits for one click on Continue instead.
-function _stattic_access_handle_link_trampoline(): never
+/**
+ * `POST /__`: redeems a share link (or Space key) from the `/__#<token>`
+ * trampoline. Same-origin checked; returns JSON `{ redirect }` for fetch
+ * callers (preserving browser Back via `location.replace`) and falls back to
+ * `303` for plain form submits.
+ */
+function _stattic_access_redeem_link_post(array $serving, string $requestHost, string $privateRoot): never
 {
-    $method = _stattic_runtime_request_method();
-    if ($method !== 'GET' && $method !== 'HEAD') {
-        _stattic_method_not_allowed('GET, HEAD');
+    _stattic_visitor_lane_begin($privateRoot);
+    if (!_stattic_access_same_origin_post($requestHost)) {
+        _stattic_render_json_or_deny('access_origin_invalid', 'Cross-origin access submissions are not accepted.');
     }
-    $script = '(function(){'
-        . 'var h=location.hash.slice(1),m=/^((?:sfl|sfc)_[A-Za-z0-9_-]{16,512})(!?)(?:\?r=([^#]*))?$/.exec(h);'
-        . 'try{history.replaceState(null,"",location.pathname)}catch(e){}'
-        . 'var f=document.getElementById("sf-link"),c=document.getElementById("sf-link-continue"),n=document.getElementById("sf-link-none");'
-        . 'if(!m||!f){if(n)n.hidden=false;return;}'
-        . 'f.elements.link.value=m[1];'
-        . 'var r="/";try{r=decodeURIComponent(m[3]||"/")}catch(e){}'
-        . 'if(/^\/(?![\/\\\\])/.test(r))f.elements["return"].value=r;else f.elements["return"].disabled=true;'
-        . 'if(m[3]===undefined)f.elements["return"].disabled=true;'
-        . 'if(m[2]==="!"){c.hidden=false;return;}'
-        . 'f.submit();'
-        . '})();';
-    $hash = base64_encode(hash('sha256', $script, true));
-    $html = '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        . '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        . '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
-        . '<title>Opening…</title>'
-        . '<style>body{font:16px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#fff;color:#111}'
-        . '@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}'
-        . 'main{max-width:22rem;padding:24px;text-align:center}button{font:inherit;padding:12px 20px;border:0;border-radius:999px;background:#1efe57;color:#030303;cursor:pointer;width:100%}</style>'
-        . '</head><body><main>'
-        . '<form id="sf-link" method="post" action="' . STATTIC_ACCESS_UNLOCK_PATH . '">'
-        . '<input type="hidden" name="link" value=""><input type="hidden" name="return" value="/">'
-        . '<p id="sf-link-continue" hidden>Someone shared a private link with you.<br><br><button type="submit">Continue</button></p>'
-        . '</form>'
-        . '<p id="sf-link-none" hidden>This link is incomplete. Ask whoever sent it for a new one.</p>'
-        . '<noscript><p>Turn on JavaScript to open this link.</p></noscript>'
-        . '</main><script>' . $script . '</script></body></html>';
-    _stattic_response_send(200, $method === 'HEAD' ? '' : $html, 'text/html; charset=utf-8', [
-        // The same bytes for every visitor and every link: the token is never
-        // part of the request, so the edge may keep one copy.
-        'Cache-Control' => STATTIC_DEFAULT_EDGE_CACHE_CONTROL,
+    $link = is_string($_POST['link'] ?? null) ? trim((string) $_POST['link']) : '';
+    if (preg_match('/\A[A-Za-z0-9_-]{16,512}\z/D', $link) !== 1) {
+        _stattic_render_access_route_not_found();
+    }
+    $wantsJson = _stattic_request_is_fetch();
+    $sendJson = static fn (array $payload): never => _stattic_json_response(200, $payload, 'application/json', [
+        'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
         'Referrer-Policy' => 'no-referrer',
         'X-Robots-Tag' => 'noindex, nofollow',
-        'X-Content-Type-Options' => 'nosniff',
-        'Content-Security-Policy' => "default-src 'none'; script-src 'sha256-" . $hash . "'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
     ]);
+    $requested = is_string($_POST['return'] ?? null)
+        ? _stattic_safe_return_path((string) $_POST['return'])
+        : null;
+    $confirmed = ($_POST['confirmed'] ?? null) !== '0';
+    $redeemed = _stattic_access_exchange_link_token($serving, $requestHost, $link, $confirmed);
+    $returnPath = _stattic_access_apply_redeemed_link($serving, $redeemed, $requested, '/');
+    if ($returnPath !== null) {
+        _stattic_access_render_owner_bar_handoff($redeemed['ownerBar'] ?? null, $returnPath);
+        if ($wantsJson) {
+            $sendJson(['redirect' => $returnPath]);
+        }
+        _stattic_access_redirect($returnPath, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
+    }
+    $fallbackReturn = _stattic_access_redeemed_return_path($redeemed, $requested, '/') ?? '/';
+    if (is_array($redeemed)) {
+        $body = $redeemed['body'];
+        $code = is_array($body) ? ($body['code'] ?? null) : null;
+        if ($wantsJson && $code === 'confirmation_required') {
+            $sendJson(['confirm' => true]);
+        }
+        $emailUrl = $redeemed['exchange']['emailUrl'] ?? null;
+        if (
+            $wantsJson
+            && is_string($emailUrl)
+            && $code === 'email_verification_required'
+            && is_string(($body['details'] ?? null)['continuation'] ?? null)
+        ) {
+            $sendJson(['submit' => true]);
+        }
+        _stattic_access_gate_email_verification($serving, $requestHost, $body, $emailUrl, $fallbackReturn);
+    }
+    $exchangeStatus = is_array($redeemed) ? $redeemed['status'] : 0;
+    $failUrl = _stattic_access_url_with_params(STATTIC_ACCESS_UNLOCK_PATH, [
+        'return' => $fallbackReturn,
+        'sf_access' => $exchangeStatus === 429
+            ? 'rate-limited'
+            : ($exchangeStatus === 0 || $exchangeStatus >= 500 ? 'exchange-unavailable' : 'link-invalid'),
+    ]);
+    if ($wantsJson) {
+        $sendJson(['redirect' => $failUrl]);
+    }
+    _stattic_access_redirect($failUrl, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
 }
 
-/**
- * The link lane from a POST body: the exchange, session cookie and clean
- * redirect `_stattic_access_redeem_link_entry` gives a GET, without the GET's
- * method check.
- */
+// ---- `/__` and `/__#<token>`: the share-link trampoline ----
+//
+// A share link is `https://<host>/__#<22-char-token>` — one immutable URL. The
+// token stays in the fragment so no server log, CDN log or Referer sees it;
+// unfurlers receive the Space's public preview card. Browsers render the
+// platform-owned access card, scrub the fragment, and auto-POST to `/__` to
+// redeem in one hop and `location.replace()` to the server's live `landingPath`
+// (preserving browser Back). Legacy `sfl_`/`sfc_` tokens and `!`/`?r=` suffix
+// fragments remain accepted.
+function _stattic_access_handle_link_trampoline(
+    array $serving,
+    string $requestHost,
+    string $privateRoot
+): never {
+    $method = _stattic_runtime_request_method();
+    if ($method === 'POST') {
+        _stattic_access_redeem_link_post($serving, $requestHost, $privateRoot);
+    }
+    if ($method !== 'GET' && $method !== 'HEAD') {
+        _stattic_method_not_allowed('GET, HEAD, POST');
+    }
+    _stattic_access_render_unfurl_card_if_unfurler($serving, $requestHost);
+    $host = _stattic_canonicalize_host($requestHost);
+    $preview = _stattic_access_public_preview($serving, $host);
+    // Tiny legacy seam: strip optional `!` / `?r=<path>` from older fragments.
+    // Both fetch and form submit are pinned to the fixed platform endpoint.
+    $script = '(function(){'
+        . 'var ep="' . STATTIC_ACCESS_LINK_TRAMPOLINE_PATH . '";'
+        . 'var h=location.hash.slice(1),m=/^([A-Za-z0-9_-]{16,512})(!?)(?:\?r=([^#]*))?$/.exec(h);'
+        . 'try{history.replaceState(null,"",location.pathname)}catch(e){}'
+        . 'var f=document.getElementById("sf-link"),c=document.getElementById("sf-link-continue"),cp=document.getElementById("sf-link-continue-copy"),l=document.getElementById("sf-link-loading"),n=document.getElementById("sf-link-none");'
+        . 'var showNone=function(){if(l)l.hidden=true;if(n)n.hidden=false;};'
+        . 'var showContinue=function(msg){if(l)l.hidden=true;if(cp&&msg)cp.textContent=msg;if(c)c.hidden=false;};'
+        . 'if(!m||!f){'
+        . 'if(typeof fetch==="function"){'
+        . 'fetch("' . STATTIC_SPACE_SESSION_PATH . '",{credentials:"same-origin",headers:{Accept:"application/json"}})'
+        . '.then(function(r){return r.ok?r.json():null;})'
+        . '.then(function(d){if(d&&d.data&&d.data.state==="authenticated"){location.replace("/");return;}showNone();})'
+        . '.catch(showNone);'
+        . '}else{showNone();}'
+        . 'return;}'
+        . 'f.action=ep;f.elements.link.value=m[1];'
+        . 'if(m[3]!==undefined){var r="/";try{r=decodeURIComponent(m[3])}catch(e){}if(/^\/(?![\/\\\\])/.test(r))f.elements["return"].value=r;else f.elements["return"].disabled=true;}else{f.elements["return"].disabled=true;}'
+        . 'var busy=false;'
+        . 'var redeem=function(confirmed){'
+        . 'if(busy)return;busy=true;'
+        . 'if(c)c.hidden=true;if(l)l.hidden=false;'
+        . 'if(m[1].indexOf("sfc_")===0){f.action=ep;f.submit();return;}'
+        . 'if(typeof fetch!=="function"){busy=false;showContinue();return;}'
+        . 'var body=new URLSearchParams();'
+        . 'body.set("link",m[1]);'
+        . 'body.set("confirmed",confirmed?"1":"0");'
+        . 'if(!f.elements["return"].disabled)body.set("return",f.elements["return"].value);'
+        . 'fetch(ep,{method:"POST",credentials:"same-origin",headers:{Accept:"application/json","Content-Type":"application/x-www-form-urlencoded"},body:body})'
+        . '.then(function(res){return res.ok?res.json():null;})'
+        . '.then(function(d){'
+        . 'if(d&&d.confirm){busy=false;showContinue();return;}'
+        . 'if(d&&d.submit){f.action=ep;f.submit();return;}'
+        . 'if(d&&typeof d.redirect==="string"&&/^\/(?![\/\\\\])/.test(d.redirect)){location.replace(d.redirect);return;}'
+        . 'busy=false;showContinue("We couldn\u2019t open that link right now. Click Continue to try again.");'
+        . '})'
+        . '.catch(function(){busy=false;showContinue("We couldn\u2019t open that link right now. Click Continue to try again.");});'
+        . '};'
+        . 'if(typeof fetch==="function"){f.addEventListener("submit",function(e){e.preventDefault();redeem(true);});}'
+        . 'if(m[2]==="!"||(m[1].indexOf("sfc_")!==0&&typeof fetch!=="function")){showContinue();return;}'
+        . 'redeem(false);'
+        . '})();';
+    $hash = base64_encode(hash('sha256', $script, true));
+    $fragment = '<div class="sf-access-lanes sf-unlock">'
+        . '<form id="sf-link" method="post" action="' . STATTIC_ACCESS_LINK_TRAMPOLINE_PATH . '">'
+        . '<input type="hidden" name="link" value=""><input type="hidden" name="return" value="/"><input type="hidden" name="confirmed" value="1">'
+        . '<p id="sf-link-loading" class="sf-copy" hidden>Opening shared link…</p>'
+        . '<div id="sf-link-continue" hidden>'
+        . '<p id="sf-link-continue-copy" class="sf-copy">Someone shared a private link to this Space with you.</p>'
+        . '<div class="sf-actions"><button class="sf-button" type="submit">Continue</button></div>'
+        . '</div>'
+        . '</form>'
+        . '<div id="sf-link-none" hidden>'
+        . '<p class="sf-copy">This link is incomplete. Ask whoever sent it for a new one.</p>'
+        . '<div class="sf-actions"><a class="sf-button" href="/">Go to the Space</a></div>'
+        . '</div>'
+        . '<noscript><p class="sf-copy">Turn on JavaScript to open this link.</p></noscript>'
+        . '</div><script>' . $script . '</script>';
+    _stattic_serve_page('access', [
+        'status' => 200,
+        'negotiable' => false,
+        'headers' => [
+            // Answers vary by User-Agent (unfurlers receive the public preview
+            // card), and the edge does not key on Vary, so keep it uncached.
+            'Cache-Control' => STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
+            'Vary' => 'User-Agent',
+            'Referrer-Policy' => 'no-referrer',
+            'X-Robots-Tag' => 'noindex, nofollow',
+            'X-Content-Type-Options' => 'nosniff',
+            'Content-Security-Policy' => "default-src 'none'; script-src 'sha256-" . $hash . "'; style-src 'unsafe-inline'; img-src 'self' https: data:; font-src 'self' https: data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        ],
+        // Keep `/__` strictly platform-owned: this document reads the fragment
+        // bearer credential (`sfl_`/`sfc_`), so customer templates must never
+        // control its DOM or bypass `hideDetails` via standalone brand tags.
+        'customizable' => false,
+        'serving' => $serving,
+        'fragment' => $fragment,
+        'title' => $preview['title'],
+        'request_path' => '/',
+    ]);
+    exit;
+}
+
 /**
  * Bridges an anonymous-owner preview redemption to the Space bar frame origin
  * via a short-lived auto-submitting POST form so the frame origin sets its
@@ -6595,48 +6729,6 @@ function _stattic_access_render_owner_bar_handoff(?array $ownerBar, string $retu
         'X-Content-Type-Options' => 'nosniff',
         'Content-Security-Policy' => "default-src 'none'; script-src 'sha256-" . $hash . "'; style-src 'unsafe-inline'; form-action " . $actionOrigin . "; frame-src " . $actionOrigin . "; base-uri 'none'; frame-ancestors 'none'",
     ]);
-}
-
-function _stattic_access_redeem_link_entry_post(
-    array $serving,
-    string $requestHost,
-    string $token,
-    ?string $requestedReturn
-): never {
-    $redeemed = _stattic_access_exchange_link_token($serving, $requestHost, $token);
-    $returnPath = $requestedReturn ?? (is_array($redeemed) && is_array($redeemed['fields'] ?? null)
-        && is_string($redeemed['fields']['return'] ?? null)
-        ? _stattic_safe_return_path($redeemed['fields']['return'])
-        : null) ?? '/';
-    if (is_array($redeemed) && $redeemed['status'] === 200 && $redeemed['handoff'] !== '') {
-        $credential = _stattic_access_consume_handoff_token($serving, $redeemed['host'], $redeemed['handoff']);
-        if ($credential !== null) {
-            _stattic_access_set_session_cookie($credential);
-            _stattic_access_render_owner_bar_handoff($redeemed['ownerBar'] ?? null, $returnPath);
-            _stattic_access_redirect($returnPath, 303, STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE, true);
-        }
-    }
-    if (is_array($redeemed)) {
-        _stattic_access_gate_email_verification(
-            $serving,
-            $requestHost,
-            $redeemed['body'],
-            $redeemed['exchange']['emailUrl'] ?? null,
-            $returnPath
-        );
-    }
-    $exchangeStatus = is_array($redeemed) ? $redeemed['status'] : 0;
-    _stattic_access_redirect(
-        _stattic_access_url_with_params(STATTIC_ACCESS_UNLOCK_PATH, [
-            'return' => $returnPath,
-            'sf_access' => $exchangeStatus === 429
-                ? 'rate-limited'
-                : ($exchangeStatus === 0 || $exchangeStatus >= 500 ? 'exchange-unavailable' : 'link-invalid'),
-        ]),
-        303,
-        STATTIC_CACHE_CONTROL_PRIVATE_NO_STORE,
-        true
-    );
 }
 
 // ---- Link previews of a private Space ----

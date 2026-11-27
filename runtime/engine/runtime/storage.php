@@ -169,10 +169,10 @@ function _stattic_storage_read_key(string $privateRoot, string $spaceId): string
     ), 0, 32);
 }
 
-// The only spelling of an object's URL: origin + public prefix + id + read key.
+// Canonical public object URL: origin + `/__spacefast/storage/u/` + id + read key.
 function _stattic_uploads_public_url(string $privateRoot, string $spaceId, string $origin, string $id): string
 {
-    return $origin . STATTIC_UPLOADS_PUBLIC_URL_PREFIX . $id
+    return $origin . STATTIC_STORAGE_PUBLIC_URL_PREFIX . $id
         . '?k=' . _stattic_storage_read_key($privateRoot, $spaceId);
 }
 
@@ -239,11 +239,17 @@ function _stattic_uploads_serve(string $privateRoot, string $spaceId, string $re
     }
     // This lane re-matches the prefix the dispatcher matched: a helper that
     // trusts its caller's routing is one refactor away from the wrong record.
-    if (!str_starts_with($requestPath, STATTIC_UPLOADS_PUBLIC_URL_PREFIX)) {
+    // Both canonical `/__spacefast/storage/u/` and legacy `/__stattic/u/` land here.
+    $publicPrefix = match (true) {
+        str_starts_with($requestPath, STATTIC_STORAGE_PUBLIC_URL_PREFIX) => STATTIC_STORAGE_PUBLIC_URL_PREFIX,
+        str_starts_with($requestPath, STATTIC_UPLOADS_PUBLIC_URL_PREFIX) => STATTIC_UPLOADS_PUBLIC_URL_PREFIX,
+        default => null,
+    };
+    if ($publicPrefix === null) {
         _stattic_render_not_found();
         exit;
     }
-    $id = rawurldecode(substr($requestPath, strlen(STATTIC_UPLOADS_PUBLIC_URL_PREFIX)));
+    $id = rawurldecode(substr($requestPath, strlen($publicPrefix)));
     $record = _stattic_uploads_get($privateRoot, $spaceId, $id);
     // The record is the gate: deleted record, deleted object.
     if ($record === null || !$record['public']) {
@@ -404,7 +410,16 @@ function _stattic_storage_handle(
         _stattic_problem_refused(403, 'storage_origin_forbidden', 'Storage writes must come from this Space.');
     }
 
-    if ($requestPath === '/storage' || $requestPath === '/storage/private') {
+    $storagePrefix = match (true) {
+        $requestPath === STATTIC_STORAGE_PATH || str_starts_with($requestPath, STATTIC_STORAGE_PATH . '/') => STATTIC_STORAGE_PATH,
+        $requestPath === STATTIC_STORAGE_LEGACY_PATH || str_starts_with($requestPath, STATTIC_STORAGE_LEGACY_PATH . '/') => STATTIC_STORAGE_LEGACY_PATH,
+        default => null,
+    };
+    if ($storagePrefix === null) {
+        _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
+    }
+    $subPath = substr($requestPath, strlen($storagePrefix));
+    if ($subPath === '' || $subPath === '/private') {
         if ($requestMethod !== 'POST') {
             _stattic_method_not_allowed('POST');
         }
@@ -418,11 +433,11 @@ function _stattic_storage_handle(
             $uploaderId,
             $anonymousCommenter,
             $auth,
-            $requestPath === '/storage/private' ? false : _stattic_uploads_request_public()
+            $subPath === '/private' ? false : _stattic_uploads_request_public()
         );
     }
 
-    $id = rawurldecode(substr($requestPath, strlen('/storage/')));
+    $id = rawurldecode(ltrim($subPath, '/'));
     if (!_stattic_uploads_id_valid($id)) {
         _stattic_problem_refused(404, 'storage_object_not_found', 'Storage object not found.');
     }
@@ -581,7 +596,7 @@ function _stattic_uploads_upload(
         // rotates, whatever route the upload arrived on.
         'url' => $public
             ? _stattic_uploads_public_url($privateRoot, $spaceId, 'https://' . $requestHost, $id)
-            : 'https://' . $requestHost . '/storage/' . $id,
+            : 'https://' . $requestHost . STATTIC_STORAGE_PATH . '/' . $id,
     ]);
 }
 

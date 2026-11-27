@@ -26,6 +26,7 @@ import {
   finalize,
   finalizeRaw,
   get,
+  holdAdmissionSlots,
   publicAccessConfig,
   putRoute,
   type Runtime,
@@ -939,7 +940,10 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
   });
 
   const edgeRt = await startRuntime({
-    env: { SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret" },
+    env: {
+      SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-dispatch-secret",
+      SPACEFAST_PHP_CONNS: "10",
+    },
     phpIni: { log_errors: "1", error_log: runtimeLogPath },
   });
   try {
@@ -1000,38 +1004,34 @@ test("a reachable edge receives the dispatch: the origin forwards to exactly the
     const shell = await get(edgeRt, host, "/");
     expect(shell.status).toBe(200);
 
-    // A Space whose Worker dispatch slots are all held answers 503 at once and
-    // never reaches the edge: a dispatch that waited would hold the FPM worker
-    // its own callbacks need. The slots free again when the holders finish.
-    const counterPath = path.join(
-      edgeRt.storageRoot,
-      "runtime/admission/spc_fx_edge.functions-dispatch.json",
-    );
-    const generation = z
-      .object({ generation: z.string() })
-      .parse(JSON.parse(readFileSync(`${counterPath}.generation`, "utf8"))).generation;
-    const setHeld = (count: number) =>
-      writeFileSync(
-        `${counterPath}.${generation}`,
-        `${JSON.stringify({
-          count,
-          started_at: Math.floor(Date.now() / 1000),
-          updated_at: Math.floor(Date.now() / 1000),
-        })}\n`,
-      );
+    // A Space whose shared blocking slots (default 6) are all held answers 429
+    // at once and never reaches the edge: a dispatch that waited would hold the
+    // FPM worker its own callbacks need. The slots free again as soon as a
+    // holder releases or exits.
+    const slotDir = path.join(edgeRt.storageRoot, "runtime/admission/blocking/spc_fx_edge");
     const attempts = connections.length;
-    setHeld(3);
-    const busy = await get(edgeRt, host, "/api/hello", { headers: { accept: "application/json" } });
-    expect(busy.status).toBe(503);
-    expect(busy.headers.get("retry-after")).toBe("2");
-    expect(await errorCode(busy)).toBe("functions_dispatch_busy");
-    expect(connections.length).toBe(attempts);
-    setHeld(2);
-    const admitted = await get(edgeRt, host, "/api/hello", {
-      headers: { accept: "application/json" },
-    });
-    expect(admitted.status).toBe(502);
-    expect(connections.length).toBeGreaterThan(attempts);
+    const full = await holdAdmissionSlots(slotDir, 6);
+    try {
+      const busy = await get(edgeRt, host, "/api/hello", {
+        headers: { accept: "application/json" },
+      });
+      expect(busy.status).toBe(429);
+      expect(busy.headers.get("retry-after")).toBe("2");
+      expect(await errorCode(busy)).toBe("functions_dispatch_busy");
+      expect(connections.length).toBe(attempts);
+    } finally {
+      await full.release();
+    }
+    const partial = await holdAdmissionSlots(slotDir, 5);
+    try {
+      const admitted = await get(edgeRt, host, "/api/hello", {
+        headers: { accept: "application/json" },
+      });
+      expect(admitted.status).toBe(502);
+      expect(connections.length).toBeGreaterThan(attempts);
+    } finally {
+      await partial.release();
+    }
   } finally {
     edgeRt.stop();
     await new Promise<void>((resolve) => edge.close(() => resolve()));

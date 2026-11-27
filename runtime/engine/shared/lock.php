@@ -103,6 +103,87 @@ function _stattic_lock_release($handle): void
     fclose($handle);
 }
 
+/**
+ * Non-reentrant non-blocking lock for fixed concurrency slot pools. Unlike
+ * `_stattic_lock_acquire`, separate handles in one PHP process do not share the
+ * re-entrancy registry, and `_stattic_lock_release_all()` leaves slot handles
+ * open until request shutdown (or kernel cleanup on crash).
+ *
+ * Returns a resource handle when acquired, `'busy'` when another holder owns
+ * the lock (`EWOULDBLOCK`), or `'error'` when opening or locking fails for an
+ * I/O or OS reason.
+ *
+ * @return resource|'busy'|'error'
+ */
+function _stattic_lock_try_slot(string $path)
+{
+    _stattic_runtime_assert_private_path($path);
+    $handle = fopen($path, 'c+');
+    if (!is_resource($handle)) {
+        return 'error';
+    }
+    $wouldBlock = 0;
+    if (flock($handle, LOCK_EX | LOCK_NB, $wouldBlock)) {
+        return $handle;
+    }
+    fclose($handle);
+    return $wouldBlock === 1 ? 'busy' : 'error';
+}
+
+/** @param resource|false|null $handle */
+function _stattic_lock_release_slot($handle): void
+{
+    if (!is_resource($handle)) {
+        return;
+    }
+    flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+/**
+ * Non-reentrant non-blocking exclusive (`LOCK_EX | LOCK_NB`) lock on an
+ * already-existing file (`r+`), so a cleanup caller never recreates a file
+ * that another process just unlinked. Returns a resource handle or `false`.
+ *
+ * @return resource|false
+ */
+function _stattic_lock_try_existing_exclusive(string $path)
+{
+    _stattic_runtime_assert_private_path($path);
+    $handle = @fopen($path, 'r+');
+    if (!is_resource($handle)) {
+        return false;
+    }
+    if (flock($handle, LOCK_EX | LOCK_NB)) {
+        return $handle;
+    }
+    fclose($handle);
+    return false;
+}
+
+/**
+ * Non-reentrant non-blocking shared (`LOCK_SH | LOCK_NB`) read lock for
+ * inspection paths (such as the legacy admission bridge) where concurrent
+ * readers must not contend with each other, while an active exclusive writer
+ * (`LOCK_EX`) still reports `'busy'` immediately without waiting.
+ *
+ * @return resource|'busy'|'missing'|'error'
+ */
+function _stattic_lock_try_shared(string $path)
+{
+    _stattic_runtime_assert_private_path($path);
+    $handle = @fopen($path, 'rb');
+    if (!is_resource($handle)) {
+        return _sf_path_verifiably_absent($path) ? 'missing' : 'error';
+    }
+    $wouldBlock = 0;
+    if (flock($handle, LOCK_SH | LOCK_NB, $wouldBlock)) {
+        return $handle;
+    }
+    fclose($handle);
+    return $wouldBlock === 1 ? 'busy' : 'error';
+}
+
 // A response sent with exit from inside a critical callback never unwinds that
 // callback's finally block. Deferred shutdown work can take seconds, so release
 // every completed request mutation before its post-response queue starts.

@@ -94,7 +94,6 @@ function _stattic_comments_handle_exchange(
     if ($pagePath === null || strlen($pagePath) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
         _stattic_render_json_unauthenticated('comments_path_invalid');
     }
-    _stattic_admission_acquire_access_lane($privateRoot, $serving);
     if (_stattic_enforce_scoped_admission($serving, $requestHost, $pagePath, true) === null) {
         _stattic_render_json_unauthenticated('comments_denied');
     }
@@ -215,6 +214,8 @@ function _stattic_comments_handle_exchange(
     }
     $context = _stattic_access_context($serving, $requestHost, $pagePath);
     $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    require_once __DIR__ . '/../shared/admission.php';
+    _stattic_admission_acquire_blocking_lane($privateRoot, $serving, 'comments_exchange', 'rate_limited');
     $result = is_string($encoded)
         ? _stattic_access_exchange_post(
             $exchangeUrl,

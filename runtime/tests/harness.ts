@@ -1637,3 +1637,89 @@ export function enableSpaceMailEndpoint(rt: { baseUrl: string; storageRoot: stri
     ),
   );
 }
+
+/**
+ * Hold real cross-process OS `flock` locks on `count` slot files
+ * (`slot-0.lock` .. `slot-(count-1).lock`) inside `slotDir`.
+ */
+export async function holdAdmissionSlots(
+  slotDir: string,
+  count: number,
+): Promise<{ release: (signal?: NodeJS.Signals) => Promise<void> }> {
+  const script = `
+    $dir = $argv[1];
+    $count = (int) $argv[2];
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+      fwrite(STDERR, "mkdir failed\\n");
+      exit(1);
+    }
+    $handles = [];
+    for ($i = 0; $i < $count; $i++) {
+      $fp = fopen($dir . '/slot-' . $i . '.lock', 'c+');
+      if (!is_resource($fp) || !flock($fp, LOCK_EX | LOCK_NB)) {
+        fwrite(STDERR, "lock failed for slot $i\\n");
+        exit(1);
+      }
+      $handles[] = $fp;
+    }
+    fwrite(STDOUT, "ready\\n");
+    fflush(STDOUT);
+    fgets(STDIN);
+  `;
+  const child = spawn(PHP_BINARY, ["-r", script, slotDir, String(count)], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    const onData = (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("ready\n")) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(
+        new Error(
+          `slot holder exited before ready (code=${String(code)} signal=${String(signal)}): ${stderr}`,
+        ),
+      );
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      child.stdout.off("data", onData);
+      child.off("exit", onExit);
+      child.off("error", onError);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", onData);
+    child.once("exit", onExit);
+    child.once("error", onError);
+  });
+
+  let released = false;
+  return {
+    async release(signal?: NodeJS.Signals) {
+      if (released) return;
+      released = true;
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, "exit");
+      if (signal) {
+        child.kill(signal);
+      } else {
+        child.stdin.end();
+      }
+      await exited;
+    },
+  };
+}

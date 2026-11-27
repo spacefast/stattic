@@ -22,6 +22,7 @@ import { buildCdnModules } from "../../packages/space-client/scripts/browser.mjs
 import {
   deploy,
   get,
+  holdAdmissionSlots,
   PHP_BINARY,
   redeemHandoff,
   publicAccessConfig,
@@ -798,32 +799,23 @@ test("a version with no roles has no credential and answers every role as unknow
   }
 });
 
-test("a call takes a slot from the Space's admission budget before it waits upstream", async () => {
+test("a call takes a slot from the Space's shared blocking pool before it waits upstream", async () => {
   await putRoute(rt, SPACE_ID, "production", {
     version_id: VERSION_ID,
-    config: { ...routeConfig(), admission: { concurrency: 2 } },
+    config: { ...routeConfig(), admission: { concurrency: 2, php_workers: 10 } },
   });
-  // The Space's counter, full: the engine's own generation layout.
-  const counter = path.join(rt.storageRoot, "runtime/admission", `${SPACE_ID}.json`);
-  const generation = randomUUID().replaceAll("-", "");
-  const now = Math.floor(Date.now() / 1000);
-  mkdirSync(path.dirname(counter), { recursive: true });
-  writeFileSync(
-    `${counter}.${generation}`,
-    JSON.stringify({ count: 2, started_at: now, updated_at: now }),
-  );
-  writeFileSync(`${counter}.generation`, JSON.stringify({ generation }));
+  const slotDir = path.join(rt.storageRoot, "runtime/admission/blocking", SPACE_ID);
+  const full = await holdAdmissionSlots(slotDir, 2);
   try {
     forwarded.length = 0;
-    // An anonymous read of the public page costs no slot; its public data does.
+    // Static pages cost no blocking slot; synchronous connector calls do.
     expect((await get(rt, HOST, "/")).status).toBe(200);
     const shed = await get(rt, HOST, "/__spacefast/connectors/inbox/messages.list");
     expect(shed.status).toBe(429);
     expect(shed.headers.get("retry-after")).toBe("2");
     expect(forwarded).toEqual([]);
   } finally {
-    rmSync(`${counter}.${generation}`, { force: true });
-    rmSync(`${counter}.generation`, { force: true });
+    await full.release();
     await putRoute(rt, SPACE_ID, "production", { version_id: VERSION_ID, config: routeConfig() });
   }
 });

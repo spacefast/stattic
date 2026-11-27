@@ -52,7 +52,6 @@ function _stattic_sell_handle_exchange(string $privateRoot, array $serving, stri
     if ($pagePath === null || strlen($pagePath) > STATTIC_ACCESS_SCOPE_PATH_MAX_BYTES) {
         _stattic_sell_refuse(422, 'validation_error', 'Checkout page path is invalid.');
     }
-    _stattic_admission_acquire_access_lane($privateRoot, $serving);
     if (_stattic_enforce_scoped_admission($serving, $requestHost, $pagePath, true) === null) {
         _stattic_sell_refuse(403, 'access_denied', 'This page is private.');
     }
@@ -83,6 +82,8 @@ function _stattic_sell_handle_exchange(string $privateRoot, array $serving, stri
     if (!$isProduct && preg_match('/\A\/[\x21-\x7E]*\z/D', $returnPath) === 1) {
         $headers[] = 'Spacefast-Visitor-Page-Path: ' . $returnPath;
     }
+    require_once __DIR__ . '/../shared/admission.php';
+    _stattic_admission_acquire_blocking_lane($privateRoot, $serving, 'sell', 'rate_limited');
     $result = is_string($payload) ? _stattic_access_exchange_post(
         $url,
         [],
@@ -113,6 +114,11 @@ function _stattic_sell_handle_status(array $serving): never
     if (!is_string($productUrl)) _stattic_sell_refuse(503, 'provider_error', 'Payment status is unavailable.');
     $parts = parse_url($productUrl);
     $origin = ($parts['scheme'] ?? '') . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
+    $privateRoot = _stattic_access_private_root();
+    if ($privateRoot !== '') {
+        require_once __DIR__ . '/../shared/admission.php';
+        _stattic_admission_acquire_blocking_lane($privateRoot, $serving, 'sell', 'rate_limited');
+    }
     $result = _stattic_access_exchange_post($origin . '/sell/checkout/status', [],
         ['Accept: application/json'], json_encode(['sessionId' => $session, 'purchaseToken' => $token]));
     if (!is_array($result) || !is_array($result['body'] ?? null)) _stattic_sell_refuse(503, 'provider_error', 'Payment status is unavailable.');

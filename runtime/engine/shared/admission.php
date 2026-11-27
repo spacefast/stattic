@@ -5,258 +5,385 @@ require_once __DIR__ . '/context.php';
 require_once __DIR__ . '/lock.php';
 require_once __DIR__ . '/storage.php';
 
-const STATTIC_ADMISSION_DEFAULT_LIMIT = 6;
+// Shared concurrency cap across long-blocking requests (Worker dispatches,
+// synchronous connector calls, publish uploads, legacy Zero invocations, and
+// control-plane exchanges). On a synced 10-worker box, 6 covers parallel
+// browser connections while keeping 4 FPM workers free for re-entrant Worker
+// callbacks (env.DB, env.STORAGE, env.ASSETS, env.SPACE, purge, logs).
+const STATTIC_BLOCKING_DEFAULT_LIMIT = 6;
+// Conservative ceiling when neither the route overlay (`admission.php_workers`)
+// nor `SPACEFAST_PHP_CONNS` names the box's worker count (e.g., an un-synced
+// pre-upgrade overlay). `1` keeps at least one callback worker free even on
+// the smallest supported 2-worker box until the control plane projects
+// `php_workers`.
+const STATTIC_BLOCKING_UNKNOWN_CAPACITY_CEILING = 1;
 const STATTIC_ADMISSION_RETRY_AFTER_SECONDS = 2;
-// Crash-recovery self-heal window and maximum generation lifetime. A generation
-// rotates after this bound even while surviving traffic mutates its count, so
-// crashed workers cannot leak capacity forever. Must stay at request-timeout
-// scale: a holder that legitimately outlives the generation releases only into
-// its retired generation and cannot decrement the successor.
-const STATTIC_ADMISSION_STALE_SECONDS_DEFAULT = 120;
+// Legacy JSON counter freshness window read during forward cutover so old-engine
+// in-flight holders are subtracted from the shared blocking budget.
+const STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS = 120;
 
-function _stattic_admission_stale_seconds(): int
-{
-    return _stattic_config_int('SPACEFAST_ADMISSION_STALE_SECONDS', STATTIC_ADMISSION_STALE_SECONDS_DEFAULT);
-}
-
-function _stattic_admission_configured_limit(array $serving): int
-{
-    $limit = _stattic_config_int('SPACEFAST_UNCACHEABLE_CONC_PER_SPACE', STATTIC_ADMISSION_DEFAULT_LIMIT);
-    $admission = is_array($serving['admission'] ?? null) ? $serving['admission'] : [];
-    $override = $admission['concurrency'] ?? null;
-    if (is_int($override) || (is_string($override) && preg_match('/^[0-9]+$/', $override) === 1)) {
-        $limit = (int) $override;
-    }
-    return max(1, $limit);
-}
-
-// Counter keys carry caller-controlled input (space id, bucket id): this
-// allowlist makes them safe as a filesystem path segment.
+// Keys carry caller-controlled input (space id, lane): this allowlist makes
+// them safe as filesystem path segments.
 function _stattic_admission_sanitize_key(string $value): string
 {
     return preg_replace('/[^A-Za-z0-9._-]/', '_', $value);
 }
 
-function _stattic_admission_counter_path(string $privateRoot, string $spaceId): string
+function _stattic_admission_slot_dir(string $privateRoot, string $lane, string $spaceId): string
 {
-    return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.json';
+    return $privateRoot
+        . '/runtime/admission/'
+        . _stattic_admission_sanitize_key($lane)
+        . '/'
+        . _stattic_admission_sanitize_key($spaceId);
 }
 
-function _stattic_admission_counter_generation(mixed $pointerRaw): ?string
+function _stattic_admission_positive_int(mixed $value): ?int
 {
-    $pointer = is_string($pointerRaw) && $pointerRaw !== '' ? json_decode($pointerRaw, true) : null;
-    return is_array($pointer)
-        && is_string($pointer['generation'] ?? null)
-        && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
-            ? $pointer['generation']
-            : null;
-}
-
-// THE windowed concurrency counter: flock-serialized files, shared by every
-// worker that serves the site regardless of pool. Acquire, generation rotation,
-// and release-descriptor binding happen under ONE pointer lock so there is no
-// intermediate acquired-but-unbound state and no compensating decrement path.
-function _stattic_admission_counter_acquire(string $path, int $limit, int $staleSeconds): callable|false
-{
-    _stattic_runtime_mkdir(dirname($path));
-    _stattic_runtime_assert_private_path($path);
-    $pointerPath = $path . '.generation';
-    $pointerHandle = _stattic_lock_acquire($pointerPath, STATTIC_LOCK_WAIT);
-    if ($pointerHandle === false) {
-        return false;
+    if (is_int($value)) {
+        return $value > 0 ? $value : null;
     }
-
-    $countHandle = false;
-    $releasePointer = false;
-    $releaseCounter = false;
-    $rotating = false;
-    $countPath = '';
-
-    try {
-        rewind($pointerHandle);
-        $generation = _stattic_admission_counter_generation(stream_get_contents($pointerHandle));
-
-        $startedAt = 0;
-        $count = 0;
-        if ($generation !== null) {
-            $existingCountPath = $path . '.' . $generation;
-            _stattic_runtime_assert_private_path($existingCountPath);
-            $raw = is_file($existingCountPath) ? file_get_contents($existingCountPath) : false;
-            $decoded = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
-            $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
-            // Generation files created before `started_at` use their last update
-            // as the migration baseline, then gain an explicit lifetime on next write.
-            $startedAt = is_array($decoded) && is_int($decoded['started_at'] ?? null)
-                ? $decoded['started_at']
-                : $updatedAt;
-            $count = is_array($decoded) && is_int($decoded['count'] ?? null) ? max(0, $decoded['count']) : 0;
-        }
-
-        $now = time();
-        $rotating = $generation === null || $startedAt < $now - $staleSeconds;
-        if ($rotating) {
-            $count = 0;
-            $generation = bin2hex(random_bytes(16));
-            $startedAt = $now;
-        }
-
-        if ($count >= $limit) {
-            return false;
-        }
-
-        $countPath = $path . '.' . $generation;
-        _stattic_runtime_assert_private_path($countPath);
-        $countHandle = _stattic_lock_acquire($countPath, STATTIC_LOCK_WAIT);
-        if ($countHandle === false) {
-            return false;
-        }
-
-        // Bind the release descriptors BEFORE committing the charge and before a
-        // PHP handler tightens open_basedir. Release later uses only these FDs,
-        // never a path outside the handler's jail.
-        $releasePointer = fopen($pointerPath, 'r+');
-        $releaseCounter = fopen($countPath, 'r+');
-        if (!is_resource($releasePointer) || !is_resource($releaseCounter)) {
-            if ($rotating && is_file($countPath)) {
-                unlink($countPath);
-            }
-            return false;
-        }
-
-        ftruncate($countHandle, 0);
-        rewind($countHandle);
-        fwrite($countHandle, json_encode([
-            'count' => $count + 1,
-            'started_at' => $startedAt,
-            'updated_at' => $now,
-        ], JSON_UNESCAPED_SLASHES) . "\n");
-        fflush($countHandle);
-        _stattic_lock_release($countHandle);
-        $countHandle = false;
-
-        if ($rotating) {
-            ftruncate($pointerHandle, 0);
-            rewind($pointerHandle);
-            fwrite($pointerHandle, json_encode(['generation' => $generation], JSON_UNESCAPED_SLASHES) . "\n");
-            fflush($pointerHandle);
-
-            // Under the pointer lock: reaps crash-orphaned generations whose
-            // pointer publish or unlink never completed.
-            foreach (glob($path . '.*') ?: [] as $stalePath) {
-                $suffix = substr($stalePath, strlen($path));
-                if (preg_match('/^\.[a-f0-9]{32}$/', $suffix) === 1 && $suffix !== '.' . $generation) {
-                    unlink($stalePath);
-                }
-            }
-            if (is_file($path)) {
-                unlink($path);
-            }
-        }
-
-        $boundPointer = $releasePointer;
-        $boundCounter = $releaseCounter;
-        $boundGeneration = (string) $generation;
-        $releasePointer = false;
-        $releaseCounter = false;
-
-        $released = false;
-        return static function () use ($boundPointer, $boundCounter, $boundGeneration, &$released): void {
-            if ($released) return;
-            $released = true;
-            try {
-                if (!_stattic_lock_flock($boundPointer, LOCK_EX, true)) {
-                    error_log('spacefast admission release lock unavailable');
-                    return;
-                }
-                rewind($boundPointer);
-                if (_stattic_admission_counter_generation(stream_get_contents($boundPointer)) !== $boundGeneration) {
-                    return;
-                }
-                rewind($boundCounter);
-                $value = json_decode((string) stream_get_contents($boundCounter), true);
-                if (!is_array($value) || !is_int($value['count'] ?? null)) {
-                    error_log('spacefast admission release counter unavailable');
-                    return;
-                }
-                $value['count'] = max(0, $value['count'] - 1);
-                $value['updated_at'] = time();
-                $payload = json_encode($value, JSON_UNESCAPED_SLASHES) . "\n";
-                rewind($boundCounter);
-                if (!ftruncate($boundCounter, 0) || fwrite($boundCounter, $payload) !== strlen($payload) || !fflush($boundCounter)) {
-                    error_log('spacefast admission release write failed');
-                }
-            } finally {
-                _stattic_lock_release($boundPointer);
-                fclose($boundCounter);
-            }
-        };
-    } finally {
-        if (is_resource($releasePointer)) fclose($releasePointer);
-        if (is_resource($releaseCounter)) fclose($releaseCounter);
-        if (is_resource($countHandle)) _stattic_lock_release($countHandle);
-        _stattic_lock_release($pointerHandle);
+    if (is_string($value) && preg_match('/^[1-9][0-9]*$/', $value) === 1) {
+        return (int) $value;
     }
-}
-
-// Concurrent Worker dispatches one Space may hold open. Each holds a PHP-FPM
-// worker for up to the dispatch timeout, often streaming, while the Worker's
-// own env.SPACE, D1, purge and log callbacks re-enter the same pool. Below the
-// uncacheable limit so dispatches alone can never take every worker the
-// callbacks need: otherwise a burst of streaming requests waits on callbacks
-// that wait on the requests.
-const STATTIC_FUNCTIONS_DISPATCH_DEFAULT_LIMIT = 3;
-
-function _stattic_admission_functions_dispatch_limit(array $serving): int
-{
-    $configured = _stattic_admission_configured_limit($serving);
-    $baseUncacheable = max(1, _stattic_config_int('SPACEFAST_UNCACHEABLE_CONC_PER_SPACE', STATTIC_ADMISSION_DEFAULT_LIMIT));
-    $defaultDispatch = _stattic_config_int('SPACEFAST_FUNCTIONS_DISPATCH_CONC_PER_SPACE', STATTIC_FUNCTIONS_DISPATCH_DEFAULT_LIMIT);
-    $reserve = max(1, $baseUncacheable - min($defaultDispatch, max(1, $baseUncacheable - 1)));
-    $limit = $configured > $baseUncacheable
-        ? max($defaultDispatch, $configured - $reserve)
-        : $defaultDispatch;
-    // Never as many as the Space's whole uncacheable allowance.
-    return max(1, min($limit, $configured - 1));
-}
-
-function _stattic_admission_functions_dispatch_path(string $privateRoot, string $spaceId): string
-{
-    return $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId) . '.functions-dispatch.json';
+    return null;
 }
 
 /**
- * Take one of the Space's Worker dispatch slots, or answer 503 with
- * Retry-After. Never waits: a dispatch that queued here would hold an FPM
- * worker while it waited, which is the exhaustion this cap prevents.
+ * Effective guaranteed PHP worker count when projected by the control plane
+ * (`admission.php_workers`) or configured via `SPACEFAST_PHP_CONNS`, or null
+ * when unknown (pre-upgrade overlay).
  */
-function _stattic_admission_acquire_functions_dispatch(string $privateRoot, array $serving): void
+function _stattic_admission_php_workers(array $serving): ?int
 {
-    $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
-    if ($spaceId === '') {
+    $admission = is_array($serving['admission'] ?? null) ? $serving['admission'] : [];
+    $projected = _stattic_admission_positive_int($admission['php_workers'] ?? null);
+    if ($projected !== null) {
+        return $projected;
+    }
+    return _stattic_admission_positive_int(_stattic_config_value('SPACEFAST_PHP_CONNS'));
+}
+
+// Always keep a callback reserve below the box's guaranteed PHP worker count:
+// half the pool on tiny boxes (4 -> 2, 2 -> 1), capped at 3 on standard and
+// larger boxes (10 -> 7, 24 -> 21). Unknown box capacity stays at 1 slot so
+// even an un-synced 2-worker box cannot exhaust its callback reserve.
+function _stattic_admission_blocking_ceiling(?int $phpWorkers): int
+{
+    if ($phpWorkers === null) {
+        return STATTIC_BLOCKING_UNKNOWN_CAPACITY_CEILING;
+    }
+    $phpWorkers = max(1, $phpWorkers);
+    $reserve = max(1, min(3, intdiv($phpWorkers, 2)));
+    return max(1, $phpWorkers - $reserve);
+}
+
+function _stattic_admission_blocking_limit(array $serving): int
+{
+    $requested = _stattic_config_int(
+        'SPACEFAST_FUNCTIONS_DISPATCH_CONC_PER_SPACE',
+        STATTIC_BLOCKING_DEFAULT_LIMIT,
+    );
+    $admission = is_array($serving['admission'] ?? null) ? $serving['admission'] : [];
+    $override = _stattic_admission_positive_int($admission['concurrency'] ?? null);
+    if ($override !== null) {
+        $requested = $override;
+    }
+    $ceiling = _stattic_admission_blocking_ceiling(_stattic_admission_php_workers($serving));
+    return max(1, min(max(1, $requested), $ceiling));
+}
+
+/**
+ * Read a Space's admission overlay for upload ingest. Only a verifiably absent
+ * `space.json` (first publish before any route exists) falls back to empty
+ * admission settings; an unreadable/corrupt pointer or a broken/missing overlay
+ * reference returns `null` so callers fail closed with 503 instead of widening
+ * a configured limit.
+ */
+function _stattic_admission_serving_for_space(string $privateRoot, string $spaceId): ?array
+{
+    $empty = ['space_id' => $spaceId, 'admission' => []];
+    if (!_stattic_id_valid($spaceId)) {
+        return $empty;
+    }
+    $spaceRead = _sf_pointer_read(
+        'admission-space:' . $spaceId,
+        _stattic_space_root($privateRoot, $spaceId) . '/space.json',
+    );
+    if ($spaceRead['kind'] === 'absent') {
+        return $empty;
+    }
+    if ($spaceRead['kind'] !== 'present' || !is_array($spaceRead['value'] ?? null)) {
+        return null;
+    }
+    require_once __DIR__ . '/artifacts.php';
+    $read = _stattic_v4_read_overlay($privateRoot, $spaceId, $spaceRead['value']);
+    if ($read['kind'] !== 'present') {
+        return null;
+    }
+    if (is_array($read['overlay']['admission'] ?? null)) {
+        $empty['admission'] = $read['overlay']['admission'];
+    }
+    return $empty;
+}
+
+// Inspect one legacy windowed JSON counter file under a nonblocking SHARED lock
+// (`LOCK_SH | LOCK_NB`) on the `.generation` pointer so concurrent new-engine
+// readers never contend with each other, while an active old-engine writer
+// holding `LOCK_EX` during truncate+rewrite is detected immediately without
+// waiting and tying up FPM workers. Stale legacy files past the bridge window
+// are unlinked under a nonblocking exclusive check so subsequent requests take
+// the zero-lock absent fast path.
+function _stattic_admission_legacy_counter_count(string $basePath, int $now): ?int
+{
+    $pointerPath = $basePath . '.generation';
+    if (!file_exists($pointerPath) && !is_link($pointerPath)) {
+        return 0;
+    }
+    if (!is_file($pointerPath)) {
+        return null;
+    }
+    $pointerHandle = _stattic_lock_try_shared($pointerPath);
+    if ($pointerHandle === 'missing') {
+        return 0;
+    }
+    if (!is_resource($pointerHandle)) {
+        return null;
+    }
+    $shouldUnlink = false;
+    $countPathToUnlink = null;
+    try {
+        rewind($pointerHandle);
+        $pointerRaw = stream_get_contents($pointerHandle);
+        $pointerMtime = @filemtime($pointerPath);
+        $stalePointer = is_int($pointerMtime)
+            && $pointerMtime > 0
+            && $pointerMtime < $now - STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS;
+        if (!is_string($pointerRaw) || trim($pointerRaw) === '') {
+            if ($stalePointer) {
+                $shouldUnlink = true;
+                return 0;
+            }
+            return null;
+        }
+        $pointer = json_decode($pointerRaw, true);
+        $generation = is_array($pointer) && is_string($pointer['generation'] ?? null)
+            && preg_match('/^[a-f0-9]{32}$/', $pointer['generation']) === 1
+            ? $pointer['generation']
+            : null;
+        if ($generation === null) {
+            if ($stalePointer) {
+                $shouldUnlink = true;
+                return 0;
+            }
+            return null;
+        }
+        $countPath = $basePath . '.' . $generation;
+        if (!is_file($countPath)) {
+            if ($stalePointer) {
+                $shouldUnlink = true;
+                return 0;
+            }
+            return null;
+        }
+        $countRaw = @file_get_contents($countPath);
+        $decoded = is_string($countRaw) && $countRaw !== '' ? json_decode($countRaw, true) : null;
+        if (!is_array($decoded) || !is_int($decoded['count'] ?? null) || $decoded['count'] < 0) {
+            $countMtime = @filemtime($countPath);
+            $staleCount = is_int($countMtime)
+                && $countMtime > 0
+                && $countMtime < $now - STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS;
+            if ($stalePointer || $staleCount) {
+                $shouldUnlink = true;
+                $countPathToUnlink = $countPath;
+                return 0;
+            }
+            return null;
+        }
+        $updatedAt = is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
+        if ($updatedAt <= 0 || $updatedAt < $now - STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS) {
+            $shouldUnlink = true;
+            $countPathToUnlink = $countPath;
+            return 0;
+        }
+        return $decoded['count'];
+    } finally {
+        _stattic_lock_release_slot($pointerHandle);
+        if ($shouldUnlink) {
+            _stattic_admission_legacy_unlink_stale($pointerPath, $countPathToUnlink, $now);
+        }
+    }
+}
+
+// Best-effort cleanup of stale legacy counter files under a nonblocking
+// exclusive lock so we never remove a pointer an old-engine process just
+// refreshed.
+function _stattic_admission_legacy_unlink_stale(string $pointerPath, ?string $countPath, int $now): void
+{
+    if (!is_file($pointerPath)) {
         return;
     }
-    $limit = _stattic_admission_functions_dispatch_limit($serving);
-    $release = _stattic_admission_counter_acquire(
-        _stattic_admission_functions_dispatch_path($privateRoot, $spaceId),
-        $limit,
-        _stattic_admission_stale_seconds(),
-    );
-    if ($release === false) {
-        require_once __DIR__ . '/errors.php';
-        _stattic_admission_record_shed($privateRoot, $spaceId, $limit, 'functions_dispatch');
-        _stattic_serve_page('tier-unavailable', [
-            'status' => 503,
-            'headers' => [
-                'Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE,
-                'Retry-After' => (string) STATTIC_ADMISSION_RETRY_AFTER_SECONDS,
-            ],
-            'message' => 'This Space is answering as many Worker requests as it can. Try again in a moment.',
-            'code' => 'functions_dispatch_busy',
-            'customizable' => true,
-        ]);
-        exit;
+    $exclusive = _stattic_lock_try_existing_exclusive($pointerPath);
+    if (!is_resource($exclusive)) {
+        return;
     }
-    register_shutdown_function($release);
+    try {
+        clearstatcache(true, $pointerPath);
+        $lockedStat = fstat($exclusive);
+        $pathStat = @stat($pointerPath);
+        if (
+            !is_array($lockedStat)
+            || !is_array($pathStat)
+            || ($lockedStat['ino'] ?? null) !== ($pathStat['ino'] ?? null)
+            || ($lockedStat['dev'] ?? null) !== ($pathStat['dev'] ?? null)
+        ) {
+            return;
+        }
+        $pointerMtime = is_int($lockedStat['mtime'] ?? null) ? $lockedStat['mtime'] : 0;
+        $stillStale = $pointerMtime > 0
+            && $pointerMtime < $now - STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS;
+        if ($countPath !== null && is_file($countPath)) {
+            $countRaw = @file_get_contents($countPath);
+            $decoded = is_string($countRaw) && $countRaw !== '' ? json_decode($countRaw, true) : null;
+            $updatedAt = is_array($decoded) && is_int($decoded['updated_at'] ?? null) ? $decoded['updated_at'] : 0;
+            if ($updatedAt >= $now - STATTIC_ADMISSION_LEGACY_BRIDGE_SECONDS) {
+                return;
+            }
+            @unlink($countPath);
+            $stillStale = true;
+        }
+        if ($stillStale) {
+            @unlink($pointerPath);
+        }
+    } finally {
+        _stattic_lock_release_slot($exclusive);
+    }
+}
+
+// Count fresh in-flight requests held by pre-cutover engine workers so forward
+// chroot cutover accounts for old-engine holders cleanly. In the old engine,
+// every blocking request incremented `<spaceId>.json` (and Worker dispatches
+// also incremented `<spaceId>.functions-dispatch.json`), so max() counts every
+// distinct in-flight holder without double-counting dispatches. Returns `null`
+// if a present legacy counter could not be locked or decoded.
+function _stattic_admission_legacy_inflight(string $privateRoot, string $spaceId): ?int
+{
+    $prefix = $privateRoot . '/runtime/admission/' . _stattic_admission_sanitize_key($spaceId);
+    $now = time();
+    $general = _stattic_admission_legacy_counter_count($prefix . '.json', $now);
+    if ($general === null) {
+        return null;
+    }
+    $dispatch = _stattic_admission_legacy_counter_count($prefix . '.functions-dispatch.json', $now);
+    if ($dispatch === null) {
+        return null;
+    }
+    return max($general, $dispatch);
+}
+
+/**
+ * Claim one slot from a fixed kernel-managed flock pool, or return immediately
+ * with `'busy'` (all slots contended) or `'unavailable'` (lock directory or
+ * slot files failed due to storage I/O). Also accounts for any active holders
+ * on higher-index slot files left over from before a limit reduction so a
+ * shrink cannot over-admit while those holders drain.
+ *
+ * @return array{status: 'acquired', release: callable}|array{status: 'busy'|'unavailable'}
+ */
+function _stattic_admission_slot_acquire(string $dir, int $limit): array
+{
+    if ($limit <= 0) {
+        return ['status' => 'busy'];
+    }
+    _stattic_runtime_assert_private_path($dir);
+    if (!is_dir($dir) && !_stattic_runtime_mkdir_soft($dir)) {
+        return ['status' => 'unavailable'];
+    }
+    $entries = _stattic_runtime_directory_entries($dir);
+    if ($entries === null) {
+        return ['status' => 'unavailable'];
+    }
+    $overflowPaths = [];
+    foreach ($entries as $slotPath) {
+        if (preg_match('/\/slot-([0-9]+)\.lock$/', $slotPath, $match) !== 1) {
+            continue;
+        }
+        if ((int) $match[1] >= $limit) {
+            $overflowPaths[] = $slotPath;
+        }
+    }
+    // Fast path: no higher-index slot files exist from before a limit shrink.
+    if ($overflowPaths === []) {
+        for ($slot = 0; $slot < $limit; $slot++) {
+            $result = _stattic_lock_try_slot($dir . '/slot-' . $slot . '.lock');
+            if ($result === 'error') {
+                return ['status' => 'unavailable'];
+            }
+            if (is_resource($result)) {
+                $released = false;
+                return [
+                    'status' => 'acquired',
+                    'release' => static function () use ($result, &$released): void {
+                        if ($released) {
+                            return;
+                        }
+                        $released = true;
+                        _stattic_lock_release_slot($result);
+                    },
+                ];
+            }
+        }
+        return ['status' => 'busy'];
+    }
+
+    // Shrink/drain path: higher-index slot files exist. Claim the first free
+    // slot in [0, $limit), count every other held slot across BOTH [0, $limit)
+    // and overflow indices, and release the candidate if total held > $limit.
+    $sawError = false;
+    $candidate = null;
+    $heldOthers = 0;
+    for ($slot = 0; $slot < $limit; $slot++) {
+        $result = _stattic_lock_try_slot($dir . '/slot-' . $slot . '.lock');
+        if (is_resource($result)) {
+            if ($candidate === null) {
+                $candidate = $result;
+            } else {
+                _stattic_lock_release_slot($result);
+            }
+        } elseif ($result === 'busy') {
+            $heldOthers++;
+        } else {
+            $sawError = true;
+        }
+    }
+    if ($candidate === null) {
+        return ['status' => $sawError ? 'unavailable' : 'busy'];
+    }
+    foreach ($overflowPaths as $slotPath) {
+        $probe = _stattic_lock_try_slot($slotPath);
+        if (is_resource($probe)) {
+            _stattic_lock_release_slot($probe);
+        } elseif ($probe === 'busy') {
+            $heldOthers++;
+        } else {
+            $sawError = true;
+        }
+    }
+    if ($sawError || 1 + $heldOthers > $limit) {
+        _stattic_lock_release_slot($candidate);
+        return ['status' => $sawError ? 'unavailable' : 'busy'];
+    }
+    $released = false;
+    return [
+        'status' => 'acquired',
+        'release' => static function () use ($candidate, &$released): void {
+            if ($released) {
+                return;
+            }
+            $released = true;
+            _stattic_lock_release_slot($candidate);
+        },
+    ];
 }
 
 function _stattic_admission_record_shed(string $privateRoot, string $spaceId, int $limit, string $reason): void
@@ -269,65 +396,133 @@ function _stattic_admission_record_shed(string $privateRoot, string $spaceId, in
         'space_id' => $spaceId,
         'limit' => $limit,
         'reason' => $reason,
-    ]);
+    ], false);
 }
 
-function _stattic_admission_acquire_or_shed(string $privateRoot, array $serving, string $reason): void
-{
+function _stattic_admission_acquire_blocking_lane(
+    string $privateRoot,
+    array $serving,
+    string $reason,
+    string $code,
+    string $message = 'Too Many Requests',
+): void {
+    if (!empty($GLOBALS['SPACEFAST_BLOCKING_ADMISSION_ACQUIRED'])) {
+        return;
+    }
     $spaceId = is_string($serving['space_id'] ?? null) ? $serving['space_id'] : '';
     if ($spaceId === '') {
         return;
     }
-    $limit = _stattic_admission_configured_limit($serving);
-    $release = _stattic_admission_counter_acquire(
-        _stattic_admission_counter_path($privateRoot, $spaceId),
-        $limit,
-        _stattic_admission_stale_seconds(),
+    $limit = _stattic_admission_blocking_limit($serving);
+    $legacyInflight = _stattic_admission_legacy_inflight($privateRoot, $spaceId);
+    if ($legacyInflight === null) {
+        require_once __DIR__ . '/errors.php';
+        _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+    }
+    $effectiveLimit = max(0, $limit - $legacyInflight);
+    $acquired = _stattic_admission_slot_acquire(
+        _stattic_admission_slot_dir($privateRoot, 'blocking', $spaceId),
+        $effectiveLimit,
     );
-    if ($release === false) {
+    if ($acquired['status'] === 'unavailable') {
+        require_once __DIR__ . '/errors.php';
+        _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+    }
+    if ($acquired['status'] !== 'acquired') {
         require_once __DIR__ . '/errors.php';
         _stattic_admission_record_shed($privateRoot, $spaceId, $limit, $reason);
-        // Ingest gets its own stable code (D25); every other lane keeps the
-        // generic visitor-facing rate_limited.
-        _stattic_render_admission_shed(
-            STATTIC_ADMISSION_RETRY_AFTER_SECONDS,
-            $reason === 'ingest' ? 'ingest_admission_exceeded' : 'rate_limited'
-        );
+        _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS, $code, $message);
     }
-    if (is_callable($release)) {
-        register_shutdown_function($release);
-    }
+    $GLOBALS['SPACEFAST_BLOCKING_ADMISSION_ACQUIRED'] = true;
+    register_shutdown_function($acquired['release']);
 }
 
-// One slot per request, whichever lane charges it first: the once-guard lives
-// here instead of at each caller.
-function _stattic_admission_acquire_once(string $privateRoot, array $serving, string $lane): void
+/**
+ * Take one of the box's shared blocking slots for a Worker dispatch, or answer
+ * 429 with Retry-After. Never waits: a dispatch that queued here would hold the
+ * FPM worker its own callbacks need.
+ */
+function _stattic_admission_acquire_functions_dispatch(string $privateRoot, array $serving): void
 {
-    if (!empty($GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'])) {
-        return;
-    }
-    _stattic_admission_acquire_or_shed($privateRoot, $serving, $lane);
-    $GLOBALS['SPACEFAST_ADMISSION_ACQUIRED'] = true;
-    _stattic_admission_test_hold_if_requested();
+    _stattic_admission_acquire_blocking_lane(
+        $privateRoot,
+        $serving,
+        'functions_dispatch',
+        'functions_dispatch_busy',
+        'This Space is answering as many Worker requests as it can. Try again in a moment.',
+    );
 }
 
-// The access lane exempts OPTIONS: a preflight never runs identity work.
-function _stattic_admission_acquire_access_lane(string $privateRoot, array $serving): void
+/**
+ * Take one of the box's shared blocking slots before a synchronous upstream
+ * connector call (up to 30 s) so connector bursts cannot starve Worker
+ * callbacks on the same box.
+ */
+function _stattic_admission_acquire_connector(string $privateRoot, array $serving): void
 {
-    if (_stattic_runtime_request_method() === 'OPTIONS') {
-        return;
-    }
-    _stattic_admission_acquire_once($privateRoot, $serving, 'access_rule');
+    _stattic_admission_acquire_blocking_lane(
+        $privateRoot,
+        $serving,
+        'connectors',
+        'rate_limited',
+    );
 }
 
-function _stattic_admission_test_hold_if_requested(): void
+/**
+ * Bound concurrent publish uploads with both the per-space ingest cap and the
+ * box's shared blocking pool so uploads plus active Worker dispatches still
+ * leave PHP-FPM workers free for callbacks and live traffic.
+ */
+function _stattic_admission_acquire_ingest(string $privateRoot, string $spaceId, int $limit): void
 {
-    if (_stattic_config_value('SPACEFAST_RUNTIME_TEST_ADMISSION_HOLD') !== '1') {
+    if ($spaceId === '') {
         return;
     }
-    $raw = $_SERVER['HTTP_X_SPACEFAST_TEST_ADMISSION_HOLD_US'] ?? '';
-    if (!is_string($raw) || preg_match('/^[0-9]{1,7}$/', $raw) !== 1) {
-        return;
+    $serving = _stattic_admission_serving_for_space($privateRoot, $spaceId);
+    if ($serving === null) {
+        require_once __DIR__ . '/errors.php';
+        _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
     }
-    usleep(min(5_000_000, (int) $raw));
+    $blockingLimit = _stattic_admission_blocking_limit($serving);
+    $legacyInflight = _stattic_admission_legacy_inflight($privateRoot, $spaceId);
+    if ($legacyInflight === null) {
+        require_once __DIR__ . '/errors.php';
+        _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+    }
+    $effectiveBlockingLimit = max(0, $blockingLimit - $legacyInflight);
+    $ingestLimit = max(0, min(max(1, $limit), $effectiveBlockingLimit));
+    $ingest = _stattic_admission_slot_acquire(
+        _stattic_admission_slot_dir($privateRoot, 'ingest', $spaceId),
+        $ingestLimit,
+    );
+    if ($ingest['status'] === 'unavailable') {
+        require_once __DIR__ . '/errors.php';
+        _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+    }
+    if ($ingest['status'] !== 'acquired') {
+        require_once __DIR__ . '/errors.php';
+        _stattic_admission_record_shed($privateRoot, $spaceId, $blockingLimit, 'ingest');
+        _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS, 'ingest_admission_exceeded');
+    }
+
+    $blocking = _stattic_admission_slot_acquire(
+        _stattic_admission_slot_dir($privateRoot, 'blocking', $spaceId),
+        $effectiveBlockingLimit,
+    );
+    if ($blocking['status'] !== 'acquired') {
+        ($ingest['release'])();
+        require_once __DIR__ . '/errors.php';
+        if ($blocking['status'] === 'unavailable') {
+            _stattic_render_runtime_unavailable('admission_storage_unavailable', STATTIC_ADMISSION_RETRY_AFTER_SECONDS);
+        }
+        _stattic_admission_record_shed($privateRoot, $spaceId, $blockingLimit, 'ingest');
+        _stattic_render_admission_shed(STATTIC_ADMISSION_RETRY_AFTER_SECONDS, 'ingest_admission_exceeded');
+    }
+
+    $releaseIngest = $ingest['release'];
+    $releaseBlocking = $blocking['release'];
+    register_shutdown_function(static function () use ($releaseBlocking, $releaseIngest): void {
+        $releaseBlocking();
+        $releaseIngest();
+    });
 }

@@ -388,9 +388,9 @@ function _stattic_render_runtime_invariant_error(string $code, string $message):
     _stattic_serve_page('runtime-error', ['status' => 500, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'X-Spacefast-Runtime-Error' => $code], 'message' => $message, 'code' => $code, 'customizable' => true]);
 }
 
-function _stattic_render_admission_shed(int $retryAfterSeconds, string $code = 'rate_limited'): void
+function _stattic_render_admission_shed(int $retryAfterSeconds, string $code = 'rate_limited', string $message = 'Too Many Requests'): void
 {
-    _stattic_serve_page('rate-limited', ['status' => 429, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => 'Too Many Requests', 'code' => $code, 'customizable' => true]);
+    _stattic_serve_page('rate-limited', ['status' => 429, 'headers' => ['Cache-Control' => STATTIC_CACHE_CONTROL_NO_STORE, 'Retry-After' => (string) $retryAfterSeconds], 'message' => $message, 'code' => $code, 'customizable' => true]);
 }
 
 // A pointer/artifact that EXISTS could not be read this instant. Deliberately

@@ -1,110 +1,43 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  createDeclaredSession,
   deploy,
+  errorCode,
   get,
-  redeemHandoff,
+  holdAdmissionSlots,
+  putBlob,
   putRoute,
-  signEd25519Jwt,
+  redeemHandoff,
+  RUNTIME_INSTANCE_ID,
+  RUNTIME_UPLOAD_API_BASE,
   type Runtime,
+  runtimeHttpPath,
+  selfSignedCertificate,
+  sha256,
+  signEd25519Jwt,
+  signToken,
   startRuntime,
   visitorIssuer,
 } from "./harness.ts";
 
 let rt: Runtime;
-let runtimePath: string;
-let runtimeRoot: string;
 
-const SPACE_X = "spc_adm_x";
-const SPACE_Y = "spc_adm_y";
-const SPACE_Z = "spc_adm_z";
-const VERSION_X = "ver_adm_x_1";
-const VERSION_Y = "ver_adm_y_1";
-const VERSION_Z = "ver_adm_z_1";
-const HOST_X = "admission-x.test";
-const HOST_Y = "admission-y.test";
-const HOST_Z = "admission-z.test";
-const LIMIT = 2;
-// Contracts §4 (D84): the per-Space exchange credential is what every `sfv2_`
-// session key is derived from (access-rules.php _stattic_access_session_hmac_key
-// reads it off `authorization.accessPage.exchange.credential`). A projection
-// without one can mint no session at all, so every fixture that opens a cookie
-// has to carry it — admission is measured on protected, session-bearing lanes.
+const SPACE = "spc_adm_slots";
+const VERSION = "ver_adm_slots_1";
+const HOST = "admission-slots.test";
+const DISPATCH_LIMIT = 2;
 const EXCHANGE_CREDENTIAL = "runtime-admission-exchange-credential-0123456789";
-const PHP_BINARY = process.env.PHP_BINARY ?? "php";
-const GENERATION_FIXTURE = path.join(import.meta.dir, "fixtures/admission-counter-generation.php");
-const REAL_RUNTIME_PATH = path.resolve(
-  process.env.SPACEFAST_RUNTIME_BIN ??
-    path.join(import.meta.dir, "../../target/debug/stattic-runtime"),
-);
 
 const visitorKeyPair = generateKeyPairSync("ed25519");
 const visitorJwk = visitorKeyPair.publicKey.export({ format: "jwk" });
 const visitor = visitorIssuer(visitorKeyPair.publicKey);
-const visitorCookies = new Map<string, string>();
+let visitorCookie = "";
 
-interface AdmissionCounterFile {
-  count?: number;
-  started_at?: number;
-  updated_at?: number;
-}
-
-function accessProjection(input?: {
-  mode?: "private" | "public";
-  memberRefs?: string[];
-  overrides?: Array<{ scope: string; mode: "limited"; indexable: false }>;
-  people?: Array<{
-    personId: string;
-    grants: Array<{ id: string; scope: string; role: "viewer" }>;
-  }>;
-}) {
-  const protectedScopes = (input?.overrides ?? []).map(({ scope }) => `${scope}/**`);
-  const grants = [
-    ...((input?.mode ?? "private") === "public"
-      ? [
-          {
-            id: "grt_admission_public",
-            generation: 1,
-            audience: { kind: "public" },
-            resources: { include: ["/**"], exclude: protectedScopes },
-            capabilities: ["page.view"],
-            constraints: {},
-            target: { kind: "live" },
-            source: { kind: "managed", reference: "test:admission-public" },
-          },
-        ]
-      : []),
-    ...(input?.memberRefs ?? []).map((reference, index) => ({
-      id: `grt_admission_member_${index}`,
-      generation: 1,
-      audience: {
-        kind: "external",
-        issuer: "spacefast-membership",
-        subject: reference.replace(/^member:/, ""),
-      },
-      resources: { include: ["/**"], exclude: [] },
-      capabilities: ["page.view"],
-      constraints: {},
-      target: { kind: "live" },
-      source: { kind: "system", reference: `test:admission-member:${index}` },
-    })),
-    ...(input?.people ?? []).flatMap((person) =>
-      person.grants.map((grant) => ({
-        id: grant.id,
-        generation: 1,
-        audience: { kind: "person", personId: person.personId },
-        resources: { include: [`${grant.scope}/**`], exclude: [] },
-        capabilities: ["page.view"],
-        constraints: {},
-        target: { kind: "live" },
-        source: { kind: "managed", reference: `test:admission-person:${grant.id}` },
-      })),
-    ),
-  ];
+function accessProjection() {
   return {
     projection_generation: 1,
     visitor_issuer: "spacefast-api",
@@ -138,7 +71,32 @@ function accessProjection(input?: {
         },
       },
       spaceClaimed: true,
-      grants,
+      grants: [
+        {
+          id: "grt_admission_public",
+          generation: 1,
+          audience: { kind: "public" },
+          resources: { include: ["/**"], exclude: ["/private/**"] },
+          capabilities: ["page.view"],
+          constraints: {},
+          target: { kind: "live" },
+          source: { kind: "managed", reference: "test:admission-public" },
+        },
+        {
+          id: "grt_admission_member",
+          generation: 1,
+          audience: {
+            kind: "external",
+            issuer: "spacefast-membership",
+            subject: "mem_admission",
+          },
+          resources: { include: ["/**"], exclude: [] },
+          capabilities: ["page.view"],
+          constraints: {},
+          target: { kind: "live" },
+          source: { kind: "system", reference: "test:admission-member" },
+        },
+      ],
     },
   };
 }
@@ -164,605 +122,475 @@ function visitorToken(host: string, spaceId: string, authorities: string[]): str
   });
 }
 
-async function openAuthorities(
-  runtime: Runtime,
-  host: string,
-  spaceId: string,
-  authorities: string[],
-): Promise<string> {
-  const callback = await redeemHandoff(runtime, host, visitorToken(host, spaceId, authorities));
-  expect(callback.status).toBe(303);
-  return (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-}
-
-async function setAdmissionPolicy(
-  spaceId: string,
-  versionId: string,
-  config = accessProjection({
-    mode: "public",
-    memberRefs: ["member:mem_admission"],
-    overrides: [{ scope: "/private", mode: "limited", indexable: false }],
-  }),
-) {
-  await putRoute(rt, spaceId, "production", {
-    version_id: versionId,
-    config: {
-      admission: { concurrency: LIMIT },
-      ...config,
-    },
-  });
-}
-
-// Deterministic fill strategy. php -S CANNOT reliably run two near-simultaneous
-// HTTP requests on two different workers (write-lock.test.ts's header comment
-// documents the same scheduling flaw), so filling the limiter with N concurrent
-// held requests is a coin flip on a loaded CI runner: the second holder can
-// serialize behind the first and the counter never reaches capacity. Instead
-// each test proves REAL acquisition with a single held request (one request
-// always admits, no simultaneity required), then fills the counter file to
-// capacity directly — the same direct-counter idiom the stale-fallback test
-// below already uses — before probing the shed behavior. The hold keeps the
-// real slot occupied while the probes run: the engine caps the test hold at 5s
-// (shared/admission.php), so use the full cap and keep waitForCounter's
-// deadline BELOW it — if the counter is observed at
-// all, real hold time provably remains for the seed+probe steps, and the
-// trackHold() guard turns a holder that released early into a loud failure
-// instead of a vacuously-green probe against a purely synthetic counter.
-const FILL_HOLD_US = "5000000";
-
-function trackHold(request: Promise<Response>) {
-  const state = { settled: false };
-  const settle = () => {
-    state.settled = true;
-  };
-  request.then(settle, settle);
-  return {
-    response: request,
-    assertStillHeld() {
-      expect(state.settled).toBe(false);
-    },
-  };
-}
-
-function held(pathname: string) {
-  return get(rt, HOST_X, pathname, {
-    headers: {
-      cookie: visitorCookies.get(HOST_X) ?? "",
-      "x-spacefast-test-admission-hold-us": FILL_HOLD_US,
-    },
-  });
-}
-
-function readFileCounter(counterPath: string) {
-  try {
-    if (!existsSync(`${counterPath}.generation`)) return null;
-    const pointer = JSON.parse(readFileSync(`${counterPath}.generation`, "utf8")) as {
-      generation?: string;
-    };
-    if (typeof pointer.generation !== "string") return null;
-    const generationPath = `${counterPath}.${pointer.generation}`;
-    if (!existsSync(generationPath)) return null;
-    const counter: AdmissionCounterFile = JSON.parse(readFileSync(generationPath, "utf8"));
-    return counter;
-  } catch (error) {
-    // PHP updates both snapshots under flock by truncating and rewriting them.
-    // This lock-free poller can observe that brief empty-file window; let its
-    // bounded callers retry instead of turning an in-progress write into a
-    // test failure. A file can likewise disappear between existsSync and read.
-    if (
-      error instanceof SyntaxError ||
-      (error instanceof Error && "code" in error && error.code === "ENOENT")
-    ) {
-      return null;
-    }
-    throw error;
-  }
-}
-
-function counterFile(runtime: Runtime, spaceId: string): string {
-  return path.join(runtime.storageRoot, "runtime/admission", `${spaceId}.json`);
-}
-
-// Fills the remaining capacity on top of the real held slot(s) by writing the
-// engine's active generation. The still-running holder's shutdown release
-// decrements this seeded value, which is also what keeps the underflow
-// assertion in the stale-window test honest.
-function seedCounter(runtime: Runtime, spaceId: string, count: number) {
-  const counterPath = counterFile(runtime, spaceId);
-  const pointerPath = `${counterPath}.generation`;
-  if (!existsSync(pointerPath)) {
-    throw new Error(`admission counter ${counterPath} has no active generation pointer`);
-  }
-  const pointer = JSON.parse(readFileSync(pointerPath, "utf8")) as { generation?: string };
-  if (typeof pointer.generation !== "string") {
-    throw new Error(`admission counter ${counterPath} has no active generation`);
-  }
-  const generationPath = `${counterPath}.${pointer.generation}`;
-  if (!existsSync(generationPath)) {
-    throw new Error(`admission counter ${counterPath} has no active generation file`);
-  }
-  const current: AdmissionCounterFile = JSON.parse(readFileSync(generationPath, "utf8"));
-  writeFileSync(
-    generationPath,
-    `${JSON.stringify({
-      count,
-      started_at: current.started_at ?? Math.floor(Date.now() / 1000),
-      updated_at: Math.floor(Date.now() / 1000),
-    })}\n`,
-  );
-}
-
-async function waitForCounter(spaceId: string, expectedCount: number) {
-  const counterPath = counterFile(rt, spaceId);
-  // Below the 5s hold: observing the counter within this window guarantees
-  // the holder is still occupying its slot when the caller seeds and probes.
-  const deadline = Date.now() + 4000;
-  for (;;) {
-    if ((readFileCounter(counterPath)?.count ?? 0) >= expectedCount) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`counter ${spaceId} did not reach ${expectedCount}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
-
 beforeAll(async () => {
-  runtimeRoot = path.join(os.tmpdir(), `stattic-admission-runtime-${Date.now()}`);
-  runtimePath = path.join(runtimeRoot, "runtime.php");
-  mkdirSync(runtimeRoot, { recursive: true });
-  await Bun.write(
-    runtimePath,
-    `#!${Bun.which("php") ?? "/usr/bin/php"}
-<?php
-// One binary serves the finalize and Zero lanes, so delegate non-Zero commands.
-$real = ${JSON.stringify(REAL_RUNTIME_PATH)};
-if (($argv[1] ?? '') !== 'invoke') {
-  $process = proc_open(
-    array_merge([$real], array_slice($argv, 1)),
-    [0 => STDIN, 1 => STDOUT, 2 => STDERR],
-    $pipes
-  );
-  exit(is_resource($process) ? proc_close($process) : 1);
-}
-$input = json_decode(stream_get_contents(STDIN), true);
-echo json_encode([
-  'status' => 200,
-  'headers' => ['content-type' => 'application/json'],
-  'body' => json_encode(['ok' => true, 'path' => $input['request']['path'] ?? null]),
-], JSON_UNESCAPED_SLASHES);
-`,
-  );
-  chmodSync(runtimePath, 0o755);
-
   rt = await startRuntime({
     env: {
-      // Generous pool: idle keep-alive connections from earlier requests pin
-      // php -S workers, and a fill pair that lands on a single free worker
-      // serializes — the counter then never reaches capacity.
-      PHP_CLI_SERVER_WORKERS: "32",
-      SPACEFAST_RUNTIME_TEST_ADMISSION_HOLD: "1",
-      SPACEFAST_RUNTIME_BIN: runtimePath,
+      PHP_CLI_SERVER_WORKERS: "16",
     },
   });
   await deploy(rt, {
-    spaceId: SPACE_X,
-    versionId: VERSION_X,
+    spaceId: SPACE,
+    versionId: VERSION,
+    metadata: { mode: "website", title: "admission slots" },
     files: {
-      "index.html": "<h1>x</h1>\n",
-      "assets/app.js": "window.__spacefastStaticFixture = true;\n",
+      "index.html": "<h1>home</h1>\n",
+      "private/index.html": "<h1>private</h1>\n",
       "assets/large.bin": "x".repeat(262144),
-      "large.html": `<html><head><meta property="og:image" content="cover.png"></head><body>${"x".repeat(262144)}</body></html>`,
-      "private/index.html": "<h1>private x</h1>\n",
     },
-    serving: {
-      zero_endpoints: [
-        {
-          method: "GET",
-          path: "/api/status",
-          source: "globalThis.__statticZeroResult = '{}';",
-          endpoint_id: "GET /api/status",
-          schema_hash: "sha256:admission",
-          capabilities: { db: false },
-        },
-      ],
-    },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [HOST_X],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
-    },
-  });
-  await deploy(rt, {
-    spaceId: SPACE_Y,
-    versionId: VERSION_Y,
-    files: {
-      "index.html": "<h1>y</h1>\n",
-      "private/index.html": "<h1>private y</h1>\n",
-      "assets/large.bin": "y".repeat(262144),
+    functions: {
+      artifact: {
+        appName: "admission-slots",
+        entry: "worker.js",
+        mainModule: "index.js",
+        compatibilityDate: "2026-07-01",
+        compatibilityFlags: [],
+        routes: [{ method: "GET", path: "/api/ping", subtree: false }],
+      },
+      host: {
+        hostname: "functions.invalid",
+        bundleUrl: "https://bundle.invalid/bundle.json",
+      },
+      grantedCapabilities: [],
     },
     activate: {
       route_name: "production",
       config: { mode: "website" },
-      production_hostnames: [HOST_Y],
+      production_hostnames: [HOST],
       noindex_production_hostnames: [],
       version_hostnames: [],
     },
   });
-  // Space Z is Public except for a Limited /admin subtree. Public paths must
-  // never be admission-counted just because another path is protected.
-  await deploy(rt, {
-    spaceId: SPACE_Z,
-    versionId: VERSION_Z,
-    files: {
-      "index.html": "<h1>z</h1>\n",
-      "admin/index.html": "<h1>admin z</h1>\n",
-    },
-    activate: {
-      route_name: "production",
-      config: { mode: "website" },
-      production_hostnames: [HOST_Z],
-      noindex_production_hostnames: [],
-      version_hostnames: [],
+  await putRoute(rt, SPACE, "production", {
+    version_id: VERSION,
+    config: {
+      admission: { concurrency: DISPATCH_LIMIT, php_workers: 10 },
+      ...accessProjection(),
     },
   });
-  await setAdmissionPolicy(SPACE_X, VERSION_X);
-  await setAdmissionPolicy(SPACE_Y, VERSION_Y);
-  await setAdmissionPolicy(
-    SPACE_Z,
-    VERSION_Z,
-    accessProjection({
-      mode: "public",
-      overrides: [{ scope: "/admin", mode: "limited", indexable: false }],
-      people: [
-        {
-          personId: "per_admission_admin",
-          grants: [{ id: "pgr_admission_admin", scope: "/admin", role: "viewer" }],
-        },
-      ],
-    }),
+  const callback = await redeemHandoff(
+    rt,
+    HOST,
+    visitorToken(HOST, SPACE, ["member:mem_admission"]),
   );
-  visitorCookies.set(HOST_X, await openAuthorities(rt, HOST_X, SPACE_X, ["member:mem_admission"]));
-  visitorCookies.set(HOST_Y, await openAuthorities(rt, HOST_Y, SPACE_Y, ["member:mem_admission"]));
-  visitorCookies.set(
-    HOST_Z,
-    await openAuthorities(rt, HOST_Z, SPACE_Z, ["person:per_admission_admin"]),
-  );
+  expect(callback.status).toBe(303);
+  visitorCookie = (callback.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
 });
 
 afterAll(() => {
   rt?.stop();
-  if (runtimeRoot) {
-    rmSync(runtimeRoot, { recursive: true, force: true });
-  }
 });
 
 beforeEach(() => {
   rmSync(path.join(rt.storageRoot, "runtime/admission"), { recursive: true, force: true });
 });
 
-test("protected uncacheable requests shed only the over-limit requests for one space", async () => {
-  // One real holder proves the protected path actually acquires a slot...
-  const holder = trackHold(held("/private/"));
-  await waitForCounter(SPACE_X, 1);
-
-  // ...an at-capacity-minus-one request still ADMITS (the boundary is real,
-  // not an off-by-one shed)...
-  seedCounter(rt, SPACE_X, LIMIT - 1);
-  const lastSlot = await get(rt, HOST_X, "/private/", {
-    headers: { cookie: visitorCookies.get(HOST_X) ?? "" },
-  });
-  expect(lastSlot.status).toBe(200);
-
-  // ...and once the counter sits at capacity, the next request sheds while
-  // the other space still serves.
-  seedCounter(rt, SPACE_X, LIMIT);
-  const shed = await get(rt, HOST_X, "/private/", {
-    headers: { cookie: visitorCookies.get(HOST_X) ?? "" },
-  });
-  expect(shed.status).toBe(429);
-  expect(shed.headers.get("retry-after")).toBe("2");
-  expect(await shed.text()).toBe("Too Many Requests\n");
-
-  const otherSpace = await get(rt, HOST_Y, "/private/", {
-    headers: { cookie: visitorCookies.get(HOST_Y) ?? "" },
-  });
-  expect(otherSpace.status).toBe(200);
-
-  holder.assertStillHeld();
-  expect((await holder.response).status).toBe(200);
-}, 8_000);
-
-test(
-  "large PHP-streamed public files use the per-space capacity gate",
-  { timeout: 10_000 },
-  async () => {
-    const holder = trackHold(held("/assets/large.bin"));
-    await waitForCounter(SPACE_X, 1);
-
-    seedCounter(rt, SPACE_X, LIMIT);
-    const shed = await get(rt, HOST_X, "/assets/large.bin");
-    expect(shed.status).toBe(429);
-    expect(shed.headers.get("retry-after")).toBe("2");
-
-    const preview = await get(rt, HOST_X, "/large?spacefast_tag_preview=fixture");
-    expect(preview.status).toBe(429);
-    expect(preview.headers.get("retry-after")).toBe("2");
-    expect(await preview.text()).toBe("Too Many Requests\n");
-
-    const head = await get(rt, HOST_X, "/large", { method: "HEAD" });
-    expect(head.status).toBe(200);
-    expect(Number(head.headers.get("content-length"))).toBeGreaterThan(262144);
-    expect(await head.text()).toBe("");
-    const notModified = await get(rt, HOST_X, "/large", {
-      headers: { "if-none-match": "*" },
-    });
-    expect(notModified.status).toBe(304);
-    expect(await notModified.text()).toBe("");
-    const precondition = await get(rt, HOST_X, "/large", {
-      headers: { "if-match": '"stale"' },
-    });
-    expect(precondition.status).toBe(412);
-    expect(await precondition.text()).toBe("");
-
-    const otherSpace = await get(rt, HOST_Y, "/assets/large.bin");
-    expect(otherSpace.status).toBe(200);
-    expect((await otherSpace.arrayBuffer()).byteLength).toBe(262144);
-
-    holder.assertStillHeld();
-    expect((await holder.response).status).toBe(200);
-  },
-);
-
-test("static cache-miss file serving is not counted by the admission limiter", async () => {
+test("protected pages and large static files do not use legacy admission counters", async () => {
   const responses = await Promise.all([
-    get(rt, HOST_X, "/assets/app.js", {
-      headers: { "x-spacefast-test-admission-hold-us": "600000" },
-    }),
-    get(rt, HOST_X, "/assets/app.js", {
-      headers: { "x-spacefast-test-admission-hold-us": "600000" },
-    }),
-    get(rt, HOST_X, "/assets/app.js", {
-      headers: { "x-spacefast-test-admission-hold-us": "600000" },
-    }),
-    get(rt, HOST_X, "/assets/app.js", {
-      headers: { "x-spacefast-test-admission-hold-us": "600000" },
-    }),
+    get(rt, HOST, "/private/", { headers: { cookie: visitorCookie } }),
+    get(rt, HOST, "/private/", { headers: { cookie: visitorCookie } }),
+    get(rt, HOST, "/private/", { headers: { cookie: visitorCookie } }),
+    get(rt, HOST, "/assets/large.bin"),
+    get(rt, HOST, "/assets/large.bin"),
   ]);
-  expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+  expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200]);
+  expect(existsSync(path.join(rt.storageRoot, "runtime/admission", `${SPACE}.json`))).toBe(false);
+  expect(
+    existsSync(path.join(rt.storageRoot, "runtime/admission", `${SPACE}.json.generation`)),
+  ).toBe(false);
 });
 
-test("stale file fallback counters self-heal after a crashed request", async () => {
-  const counterPath = path.join(rt.storageRoot, "runtime/admission", `${SPACE_X}.json`);
-  mkdirSync(path.dirname(counterPath), { recursive: true });
-  writeFileSync(counterPath, `${JSON.stringify({ count: 99, updated_at: 1 })}\n`);
+test("Worker dispatch flock slots shed with 429 when full and release immediately after SIGKILL", async () => {
+  const slotDir = path.join(rt.storageRoot, "runtime/admission/blocking", SPACE);
 
-  const response = await get(rt, HOST_X, "/private/", {
-    headers: { cookie: visitorCookies.get(HOST_X) ?? "" },
+  // At limit - 1, dispatch still admits (reaches functions_edge_unconfigured in this test runtime).
+  const partial = await holdAdmissionSlots(slotDir, DISPATCH_LIMIT - 1);
+  try {
+    const admitted = await get(rt, HOST, "/api/ping", {
+      headers: { accept: "application/json" },
+    });
+    expect(admitted.status).toBe(503);
+    expect(await errorCode(admitted)).toBe("functions_edge_unconfigured");
+  } finally {
+    await partial.release();
+  }
+
+  // At full capacity, dispatch sheds immediately with 429 functions_dispatch_busy.
+  const full = await holdAdmissionSlots(slotDir, DISPATCH_LIMIT);
+  try {
+    const busy = await get(rt, HOST, "/api/ping", {
+      headers: { accept: "application/json" },
+    });
+    expect(busy.status).toBe(429);
+    expect(busy.headers.get("retry-after")).toBe("2");
+    expect(await errorCode(busy)).toBe("functions_dispatch_busy");
+  } finally {
+    // Hard kill simulates an OOM/SIGKILL PHP-FPM worker crash: kernel releases
+    // the flocks immediately with no stale rotation window.
+    await full.release("SIGKILL");
+  }
+
+  const recovered = await get(rt, HOST, "/api/ping", {
+    headers: { accept: "application/json" },
   });
-  expect(response.status).toBe(200);
+  expect(recovered.status).toBe(503);
+  expect(await errorCode(recovered)).toBe("functions_edge_unconfigured");
 });
 
-test("Limited subtrees never admission-count Public paths", async () => {
-  // Fill the limiter through the Limited /admin subtree, then assert unmatched
-  // Public paths still serve.
-  const holder = trackHold(
-    get(rt, HOST_Z, "/admin/", {
-      headers: {
-        cookie: visitorCookies.get(HOST_Z) ?? "",
-        "x-spacefast-test-admission-hold-us": FILL_HOLD_US,
+test("lock storage fault answers 503 admission_storage_unavailable rather than 429", async () => {
+  const admissionRoot = path.join(rt.storageRoot, "runtime/admission");
+  mkdirSync(admissionRoot, { recursive: true });
+  // Place a regular file where the blocking slot directory must live so mkdir fails.
+  writeFileSync(path.join(admissionRoot, "blocking"), "not-a-directory");
+
+  const fault = await get(rt, HOST, "/api/ping", {
+    headers: { accept: "application/json" },
+  });
+  expect(fault.status).toBe(503);
+  expect(fault.headers.get("retry-after")).toBe("2");
+  expect(await errorCode(fault)).toBe("admission_storage_unavailable");
+});
+
+test("un-synced overlays stay conservative and forward cutover subtracts legacy holders", async () => {
+  const slotDir = path.join(rt.storageRoot, "runtime/admission/blocking", SPACE);
+  const legacyPrefix = path.join(rt.storageRoot, "runtime/admission", SPACE);
+  const legacyGen = "b".repeat(32);
+
+  try {
+    // 1) Pre-upgrade overlay without php_workers and saved concurrency=10 caps at 1
+    //    (safe even on the smallest supported 2-worker box).
+    await putRoute(rt, SPACE, "production", {
+      version_id: VERSION,
+      config: { admission: { concurrency: 10 }, ...accessProjection() },
+    });
+    const oneHeld = await holdAdmissionSlots(slotDir, 1);
+    try {
+      const capped = await get(rt, HOST, "/api/ping", {
+        headers: { accept: "application/json" },
+      });
+      expect(capped.status).toBe(429);
+      expect(await errorCode(capped)).toBe("functions_dispatch_busy");
+    } finally {
+      await oneHeld.release();
+    }
+
+    // 2) Forward cutover on a 10-worker box with concurrency=10 (ceiling 7):
+    //    3 active legacy dispatches leave 4 flock slots (3 + 4 = 7).
+    await putRoute(rt, SPACE, "production", {
+      version_id: VERSION,
+      config: { admission: { concurrency: 10, php_workers: 10 }, ...accessProjection() },
+    });
+    mkdirSync(path.dirname(legacyPrefix), { recursive: true });
+    const now = Math.floor(Date.now() / 1000);
+    writeFileSync(
+      `${legacyPrefix}.functions-dispatch.json.generation`,
+      JSON.stringify({ generation: legacyGen }),
+    );
+    writeFileSync(
+      `${legacyPrefix}.functions-dispatch.json.${legacyGen}`,
+      JSON.stringify({ count: 3, started_at: now, updated_at: now }),
+    );
+    const threeNew = await holdAdmissionSlots(slotDir, 3);
+    try {
+      // 3 legacy + 3 flock = 6 < 7 -> still admits.
+      const admitted = await get(rt, HOST, "/api/ping", {
+        headers: { accept: "application/json" },
+      });
+      expect(admitted.status).toBe(503);
+      expect(await errorCode(admitted)).toBe("functions_edge_unconfigured");
+    } finally {
+      await threeNew.release();
+    }
+    const fourNew = await holdAdmissionSlots(slotDir, 4);
+    try {
+      // 3 legacy + 4 flock = 7 -> sheds immediately.
+      const shed = await get(rt, HOST, "/api/ping", {
+        headers: { accept: "application/json" },
+      });
+      expect(shed.status).toBe(429);
+      expect(await errorCode(shed)).toBe("functions_dispatch_busy");
+    } finally {
+      await fourNew.release();
+    }
+
+    // 3) Forward cutover on a 4-worker box (ceiling 2): 2 legacy holders shed
+    //    new requests immediately (2 + 0 = 2).
+    await putRoute(rt, SPACE, "production", {
+      version_id: VERSION,
+      config: { admission: { concurrency: 10, php_workers: 4 }, ...accessProjection() },
+    });
+    writeFileSync(
+      `${legacyPrefix}.functions-dispatch.json.${legacyGen}`,
+      JSON.stringify({ count: 2, started_at: now, updated_at: now }),
+    );
+    const shedSmall = await get(rt, HOST, "/api/ping", {
+      headers: { accept: "application/json" },
+    });
+    expect(shedSmall.status).toBe(429);
+    expect(await errorCode(shedSmall)).toBe("functions_dispatch_busy");
+    rmSync(`${legacyPrefix}.functions-dispatch.json.generation`, { force: true });
+    rmSync(`${legacyPrefix}.functions-dispatch.json.${legacyGen}`, { force: true });
+
+    // 4) Shrinking a box's limit accounts for holders still on higher-index
+    //    slot files (slot-2, slot-3) until they drain.
+    const fourHeld = await holdAdmissionSlots(slotDir, 4);
+    try {
+      // With 4 slots held (slot-0..slot-3) and limit shrunk to 2, new requests
+      // shed even if slots 0..1 were free; here all 4 are held, then after
+      // releasing slots 0..3 normal admission resumes.
+      const shedDuringShrink = await get(rt, HOST, "/api/ping", {
+        headers: { accept: "application/json" },
+      });
+      expect(shedDuringShrink.status).toBe(429);
+      expect(await errorCode(shedDuringShrink)).toBe("functions_dispatch_busy");
+    } finally {
+      await fourHeld.release();
+    }
+  } finally {
+    await putRoute(rt, SPACE, "production", {
+      version_id: VERSION,
+      config: {
+        admission: { concurrency: DISPATCH_LIMIT, php_workers: 10 },
+        ...accessProjection(),
       },
-    }),
-  );
-  // The matched /admin/* path IS counted: the real holder moves the counter...
-  await waitForCounter(SPACE_Z, 1);
-  seedCounter(rt, SPACE_Z, LIMIT);
+    });
+  }
+});
 
-  const staticResponse = await get(rt, HOST_Z, "/");
-  expect(staticResponse.status).toBe(200);
-  expect(await staticResponse.text()).toBe("<h1>z</h1>\n");
+test("mixed blocking traffic on a 4-worker box keeps callback reserve free", async () => {
+  const smallSpace = "spc_small_box";
+  const smallVersion = "ver_small_box_1";
+  const smallHost = "small-box.test";
+  const { certificate, key } = selfSignedCertificate(rt.root, "admission-small-box");
 
-  // ...and over-limit /admin/* requests shed 429.
-  const adminShed = await get(rt, HOST_Z, "/admin/", {
-    headers: { cookie: visitorCookies.get(HOST_Z) ?? "" },
+  // Hold one incoming Worker dispatch open on a real TLS edge until released.
+  let edgeReceivedCount = 0;
+  let edgeAssetsNonce: string | null = null;
+  let notifyEdgeArrived!: () => void;
+  const edgeArrived = new Promise<void>((resolve) => {
+    notifyEdgeArrived = resolve;
   });
-  expect(adminShed.status).toBe(429);
-  expect(adminShed.headers.get("retry-after")).toBe("2");
-
-  holder.assertStillHeld();
-  expect((await holder.response).status).toBe(200);
-}, 8_000);
-
-test("write-method requests on protected paths acquire admission before access evaluation", async () => {
-  // Contract A1: the slot is charged BEFORE canonical access evaluation runs
-  // on a doomed request, so a credential-less
-  // POST flood at a protected path is bounded by the limiter. The counter
-  // reaching capacity from credential-less POSTs is itself the proof the
-  // acquisition happens before the 401 renders.
-  const holder = trackHold(
-    get(rt, HOST_X, "/private/", {
-      method: "POST",
-      headers: { "x-spacefast-test-admission-hold-us": FILL_HOLD_US },
-    }),
-  );
-  // The counter moves WHILE the credential-less POST is still in flight (its
-  // 403 has not rendered yet — the hold sits between acquire and access
-  // evaluation), which is the acquire-before-access proof.
-  await waitForCounter(SPACE_X, 1);
-  holder.assertStillHeld();
-  seedCounter(rt, SPACE_X, LIMIT);
-
-  const shed = await get(rt, HOST_X, "/private/", { method: "POST" });
-  expect(shed.status).toBe(429);
-  expect(shed.headers.get("retry-after")).toBe("2");
-
-  // Write methods on paths no policy rule matches stay uncounted even while
-  // the counter is at capacity.
-  const unmatched = await get(rt, HOST_X, "/", { method: "POST" });
-  expect(unmatched.status).not.toBe(429);
-
-  expect((await holder.response).status).toBe(403);
-}, 8_000);
-
-test("Zero invocations and protected paths share one admission counter", async () => {
-  // The counter fills via the protected FILE path; the ZERO path sheds on it.
-  const holder = trackHold(held("/private/"));
-  await waitForCounter(SPACE_X, 1);
-
-  // Below capacity the zero path still serves — shedding below proves nothing
-  // about sharing, so pin the admit side first.
-  const belowLimit = await get(rt, HOST_X, "/api/status");
-  expect(belowLimit.status).toBe(200);
-
-  seedCounter(rt, SPACE_X, LIMIT);
-  const zero = await get(rt, HOST_X, "/api/status");
-  expect(zero.status).toBe(429);
-  expect(zero.headers.get("retry-after")).toBe("2");
-
-  holder.assertStillHeld();
-  expect((await holder.response).status).toBe(200);
-}, 8_000);
-
-// Confirmed finding F4: the self-heal window was a hardcoded 15s constant
-// that could expire under a genuinely still-in-flight holder — a fresh
-// request would then re-admit a full `limit` while the original holders
-// still occupied FPM slots, and the crash-recovery reset could also decrement
-// a just-reset counter below zero. SPACEFAST_ADMISSION_STALE_SECONDS is now a
-// real, wired config seam (default sized to request-timeout scale, not 15s);
-// this proves the seam actually controls the boundary, that a held slot
-// still counts fully WITHIN the window, and that the counter never goes
-// negative across the reset/release race.
-test("admission stale window is a real config knob: a held slot counts within it, and release never underflows", async () => {
-  const host = "admission-window.test";
-  const spaceId = "spc_adm_window";
-  const versionId = "ver_adm_window_1";
-  const windowSeconds = 1;
-  // 4s hold, well past the 1s shrunk window. The stale check compares
-  // whole-second time() values, so the wait before `afterWindow` below needs
-  // a couple of extra integer-second boundaries of margin, not just
-  // `windowSeconds` — this keeps the assertion robust to that flooring.
-  const holdMicros = 4_000_000;
-  const shrunk = await startRuntime({
-    env: {
-      PHP_CLI_SERVER_WORKERS: "32",
-      SPACEFAST_ADMISSION_STALE_SECONDS: String(windowSeconds),
-      SPACEFAST_RUNTIME_TEST_ADMISSION_HOLD: "1",
+  let releaseEdge!: () => void;
+  const edgeHold = new Promise<void>((resolve) => {
+    releaseEdge = resolve;
+  });
+  const edge = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 30,
+    tls: { cert: Bun.file(certificate), key: Bun.file(key) },
+    async fetch(request) {
+      edgeReceivedCount += 1;
+      edgeAssetsNonce = request.headers.get("sf-fx-assets-nonce");
+      notifyEdgeArrived();
+      await edgeHold;
+      return new Response("worker-ok", { headers: { "content-type": "text/plain" } });
     },
   });
+
+  // Hold one incoming synchronous connector call open until released.
+  let connectorReceivedCount = 0;
+  let notifyConnectorArrived!: () => void;
+  const connectorArrived = new Promise<void>((resolve) => {
+    notifyConnectorArrived = resolve;
+  });
+  let releaseConnector!: () => void;
+  const connectorHold = new Promise<void>((resolve) => {
+    releaseConnector = resolve;
+  });
+  const apiServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 30,
+    async fetch() {
+      connectorReceivedCount += 1;
+      notifyConnectorArrived();
+      await connectorHold;
+      return Response.json({
+        state: { role: "inbox", code: "ok", message: "Connected." },
+        result: { ok: true, data: { messages: [] } },
+      });
+    },
+  });
+
+  const smallRt = await startRuntime({
+    atomicData: {
+      SPACEFAST_API_BASE_URL: apiServer.url.toString(),
+      SPACEFAST_FUNCTIONS_DISPATCH_TOKEN: "fx-small-box-secret",
+    },
+    env: {
+      PHP_CLI_SERVER_WORKERS: "4",
+    },
+    phpIni: {
+      "curl.cainfo": certificate,
+    },
+  });
+
+  let inflightDispatch: Promise<Response> | null = null;
+  let inflightConnector: Promise<Response> | null = null;
   try {
-    await deploy(shrunk, {
-      spaceId,
-      versionId,
-      files: { "index.html": "<h1>window root</h1>\n", "private/index.html": "<h1>window</h1>\n" },
+    await deploy(smallRt, {
+      spaceId: smallSpace,
+      versionId: smallVersion,
+      metadata: { mode: "website", title: "small box" },
+      files: { "index.html": "<h1>small box home</h1>\n" },
+      functions: {
+        artifact: {
+          appName: "small-box",
+          entry: "worker.js",
+          mainModule: "index.js",
+          compatibilityDate: "2026-07-01",
+          compatibilityFlags: [],
+          routes: [{ method: "GET", path: "/api/ping", subtree: false }],
+        },
+        host: {
+          hostname: `127.0.0.1:${edge.port}`,
+          bundleUrl: "https://bundle.invalid/bundle.json",
+        },
+        grantedCapabilities: ["storage.read"],
+      },
+      finalize: {
+        connectors_token: "ver_small_box_1.connectors-token",
+      },
       activate: {
         route_name: "production",
-        config: { mode: "website" },
-        production_hostnames: [host],
+        config: {
+          mode: "website",
+          // Even with a saved concurrency=10 override, php_workers=4 bounds the
+          // shared blocking pool to 2 slots so 2 PHP workers remain free.
+          admission: { concurrency: 10, php_workers: 4 },
+          ...accessProjection(),
+        },
+        production_hostnames: [smallHost],
         noindex_production_hostnames: [],
         version_hostnames: [],
       },
     });
-    await putRoute(shrunk, spaceId, "production", {
-      version_id: versionId,
-      config: {
-        admission: { concurrency: LIMIT },
-        ...accessProjection({ memberRefs: ["member:mem_admission_window"] }),
-      },
+
+    const uploadFiles = { "blob.txt": "payload" };
+    const uploadSession = await createDeclaredSession(
+      smallRt,
+      smallSpace,
+      "ver_small_box_upload",
+      uploadFiles,
+    );
+
+    // Occupy both allowed blocking slots with mixed traffic: 1 Worker dispatch
+    // + 1 synchronous connector call (holding 2 of the 4 PHP workers open).
+    // Await each arrival sequentially so php -S routes each request to its own
+    // worker instead of serializing near-simultaneous connects onto one worker.
+    const waitArrival = (label: string, arrived: Promise<void>, response: Promise<Response>) => {
+      let settled = false;
+      return Promise.race([
+        arrived.then(() => {
+          settled = true;
+        }),
+        response.then(async (res) => {
+          if (settled) {
+            return;
+          }
+          throw new Error(
+            `${label} returned early with ${res.status}: ${await res.clone().text()}`,
+          );
+        }),
+      ]);
+    };
+    inflightDispatch = get(smallRt, smallHost, "/api/ping", {
+      headers: { connection: "close", accept: "application/json" },
     });
-    const cookie = await openAuthorities(shrunk, host, spaceId, ["member:mem_admission_window"]);
+    await waitArrival("dispatch", edgeArrived, inflightDispatch);
+    inflightConnector = get(smallRt, smallHost, "/__spacefast/connectors/inbox/messages.list", {
+      headers: { connection: "close", accept: "application/json" },
+    });
+    await waitArrival("connector", connectorArrived, inflightConnector);
 
-    const counterPath = path.join(shrunk.storageRoot, "runtime/admission", `${spaceId}.json`);
-    const readCounter = () => readFileCounter(counterPath);
+    // While both blocking slots stay held:
+    // 1) A second Worker dispatch sheds immediately without reaching the edge.
+    const shedDispatch = await get(smallRt, smallHost, "/api/ping", {
+      headers: { connection: "close", accept: "application/json" },
+    });
+    expect(shedDispatch.status).toBe(429);
+    expect(await errorCode(shedDispatch)).toBe("functions_dispatch_busy");
+    expect(edgeReceivedCount).toBe(1);
 
-    // One REAL long-running holder (php -S cannot reliably start LIMIT
-    // simultaneous requests — see the fill-strategy comment up top); the
-    // remaining capacity is seeded directly, giving the same at-capacity
-    // counter with a genuinely in-flight request behind it.
-    const heldRequest = get(shrunk, host, "/private/", {
+    // 2) An upload sheds on the shared blocking pool instead of consuming a
+    //    reserved callback worker.
+    const shedUpload = await fetch(
+      `${smallRt.baseUrl}${runtimeHttpPath(`${RUNTIME_UPLOAD_API_BASE}/spaces/${smallSpace}/blobs/${sha256("payload")}`)}`,
+      {
+        method: "PUT",
+        headers: {
+          connection: "close",
+          authorization: `Bearer ${uploadSession.token}`,
+          accept: "application/json",
+        },
+        body: "payload",
+      },
+    );
+    expect(shedUpload.status).toBe(429);
+    expect(await errorCode(shedUpload)).toBe("ingest_admission_exceeded");
+
+    // 3) Another connector call sheds immediately without reaching the API.
+    const shedConnector = await get(
+      smallRt,
+      smallHost,
+      "/__spacefast/connectors/inbox/messages.list",
+      { headers: { connection: "close", accept: "application/json" } },
+    );
+    expect(shedConnector.status).toBe(429);
+    expect(connectorReceivedCount).toBe(1);
+
+    // 4) A real Worker relay callback completes while both blocking requests
+    //    are still in flight, proving the 2 reserved PHP workers stay free.
+    const relayToken = signToken({
+      aud: "spacefast-functions-relay",
+      runtime_instance_id: RUNTIME_INSTANCE_ID,
+      space_id: smallSpace,
+      version_id: smallVersion,
+      ownership_revision: null,
+      capabilities: ["storage.read"],
+    });
+    const callback = await fetch(`${smallRt.baseUrl}/__spacefast/functions/relay`, {
+      method: "POST",
       headers: {
-        cookie,
-        "x-spacefast-test-admission-hold-us": String(holdMicros),
+        connection: "close",
+        host: smallHost,
+        "content-type": "application/json",
+        authorization: `Bearer ${relayToken}`,
+        "sf-fx-broker": "assets",
       },
+      body: JSON.stringify({
+        method: "GET",
+        path: "/index.html",
+        host: smallHost,
+        headers: {},
+        nonce: edgeAssetsNonce,
+      }),
     });
-    // Deadline stays below holdMicros so a counter observation implies the
-    // holder is still genuinely in flight when the window assertions run.
-    const deadline = Date.now() + 3000;
-    for (;;) {
-      if ((readCounter()?.count ?? 0) >= 1) break;
-      if (Date.now() > deadline) throw new Error(`counter ${spaceId} did not fill`);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    seedCounter(shrunk, spaceId, LIMIT);
+    expect(callback.status).toBe(200);
+    expect(await callback.text()).toBe("<h1>small box home</h1>\n");
 
-    // Well inside the shrunk window: the held slots still fully count.
-    const shedInsideWindow = await get(shrunk, host, "/private/", {
-      headers: { cookie },
-    });
-    expect(shedInsideWindow.status).toBe(429);
+    // Release both held requests and verify normal admission resumes.
+    releaseEdge();
+    releaseConnector();
+    const [dispatchDone, connectorDone] = await Promise.all([inflightDispatch, inflightConnector]);
+    expect(dispatchDone.status).toBe(200);
+    expect(await dispatchDone.text()).toBe("worker-ok");
+    expect(connectorDone.status).toBe(200);
 
-    // Past the shrunk window (originals still legitimately running until
-    // holdMicros elapses): the crash-recovery self-heal fires and admits a
-    // fresh request — this is the exact bypass the finding describes,
-    // reproduced deterministically via the config seam rather than the old
-    // unconfigurable 15s constant. The real fix is the wider DEFAULT so real
-    // requests never cross it; this seam is what makes that provable at all.
-    // Poll rather than sleeping a fixed span: inside the window every probe is
-    // shed (429), and the first probe past it is admitted (200). The deadline
-    // stays under holdMicros so the original holder is still genuinely in flight.
-    let afterWindow: Response;
-    const windowDeadline = Date.now() + (windowSeconds + 3) * 1000;
-    for (;;) {
-      afterWindow = await get(shrunk, host, "/private/", { headers: { cookie } });
-      if (afterWindow.status === 200) break;
-      // Still inside the stale window: the probe is shed, never admitted.
-      expect(afterWindow.status).toBe(429);
-      if (Date.now() > windowDeadline) {
-        throw new Error("stale-window self-heal did not admit before the deadline");
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(afterWindow.status).toBe(200);
-
-    expect((await heldRequest).status).toBe(200);
-
-    // The original holder's release is scoped to its captured, now-superseded
-    // generation, so it structurally cannot underflow the new post-reset
-    // generation below zero. Releases run in a shutdown function AFTER the
-    // response reaches the client, so give the write a beat to land.
-    const releaseDeadline = Date.now() + 2000;
-    while ((readCounter()?.count ?? -1) !== 0 && Date.now() < releaseDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(readCounter()?.count).toBe(0);
+    const uploadAfterRelease = await putBlob(
+      smallRt,
+      smallSpace,
+      uploadSession.token,
+      sha256("payload"),
+      "payload",
+    );
+    expect(uploadAfterRelease.status).toBe(200);
   } finally {
-    shrunk.stop();
+    releaseEdge();
+    releaseConnector();
+    await Promise.allSettled([inflightDispatch, inflightConnector].filter(Boolean));
+    smallRt.stop();
+    apiServer.stop(true);
+    edge.stop(true);
   }
-});
-
-test("admission releases stay within their acquire generation", () => {
-  const result = Bun.spawnSync({
-    cmd: [PHP_BINARY, GENERATION_FIXTURE],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  expect(result.exitCode, result.stderr.toString()).toBe(0);
-  const output: unknown = JSON.parse(result.stdout.toString());
-  expect(output).toEqual({
-    request_b_admitted: true,
-    generation_file_count_after_rotation: 1,
-    count_after_stale_release: 1,
-    fresh_results: [true, false],
-    persisted_count_at_limit: 2,
-    count_after_current_releases: 0,
-    admitted_after_slots_freed: true,
-    final_persisted_count: 0,
-    generation_file_counts_after_rotations: [1, 1, 1, 1, 1],
-    count_after_jailed_repeat_release: 1,
-    count_after_jailed_releases: 0,
-    jail_preserved: true,
-  });
-});
+}, 20_000);

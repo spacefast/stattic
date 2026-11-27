@@ -67,7 +67,7 @@ function _stattic_legacy_zero_dispatch_action(array $context, array $action, str
         $action = $endpoint;
     }
     require_once __DIR__ . '/../../shared/admission.php';
-    _stattic_admission_acquire_once((string) $context['private_root'], $serving, 'zero');
+    _stattic_admission_acquire_blocking_lane((string) $context['private_root'], $serving, 'zero', 'rate_limited');
     require_once __DIR__ . '/runtime.php';
     _stattic_invoke_zero(
         $action,
@@ -96,7 +96,7 @@ function _stattic_legacy_zero_dispatch_patterns(array $context, string $requestP
     }
     if (is_array($result['action'] ?? null)) {
         require_once __DIR__ . '/../../shared/admission.php';
-        _stattic_admission_acquire_once((string) $context['private_root'], $context['serving'], 'zero');
+        _stattic_admission_acquire_blocking_lane((string) $context['private_root'], $context['serving'], 'zero', 'rate_limited');
         require_once __DIR__ . '/runtime.php';
         _stattic_invoke_zero(
             $result['action'],
@@ -115,6 +115,11 @@ function _stattic_legacy_zero_control_request(string $versionDir, array $serving
     $authControl = STATTIC_ZERO_CONTROL_ROUTES[trim($requestPath, '/')] ?? null;
     if (is_array($authControl) && in_array($authControl['operation'], ['config', 'auth_start', 'auth_sign_out', 'run'], true)) {
         if (!in_array($requestMethod, $authControl['methods'], true)) _stattic_method_not_allowed(implode(', ', $authControl['methods']));
+        $privateRoot = _stattic_access_private_root();
+        if ($privateRoot !== '' && $authControl['operation'] !== 'config') {
+            require_once __DIR__ . '/../../shared/admission.php';
+            _stattic_admission_acquire_blocking_lane($privateRoot, $serving, 'zero', 'rate_limited');
+        }
         require_once __DIR__ . '/runtime.php';
         _stattic_invoke_zero($authControl, $versionDir, $serving, $requestHost, $requestPath, $requestUri, $requestMethod);
     }

@@ -62,8 +62,6 @@ function _stattic_space_users_prepare(
     if ($spaceId === '' || !is_file($wpLoad)) {
         _stattic_problem_refused(503, 'space_users_unavailable', 'Users is not ready on this Space.');
     }
-    require_once __DIR__ . '/../shared/admission.php';
-    _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_auth');
     $GLOBALS['SPACEFAST_SPACE_USERS_PROVIDER_CONFIGURATION'] = $providerConfiguration;
     $GLOBALS['SPACEFAST_CONTENT_SPACE_ID'] = $spaceId;
     $GLOBALS['SPACEFAST_CONTENT_PRIVATE_ROOT'] = $privateRoot;
@@ -471,10 +469,8 @@ function _stattic_space_users_request_auth(array $serving, string $host, bool $a
     $cookie = _stattic_space_users_session_cookie($serving);
     if ($cookie === null || strlen($cookie) > 512) return null;
     $privateRoot = _stattic_access_private_root();
-    require_once __DIR__ . '/../shared/admission.php';
     require_once __DIR__ . '/../deprecated/zero-v2/zero-v2.php';
     if ($admitOrigin) _stattic_space_users_admit_origin(_stattic_runtime_request_method(), $host);
-    _stattic_admission_acquire_once($privateRoot, $serving, 'space_users_verify');
     _stattic_access_private_cache_flag(true);
     return $GLOBALS['SPACEFAST_SPACE_USERS_AUTH'] = _stattic_space_users_verify_session(
         $privateRoot, (string) $serving['space_id'], $host, $serving['users'], $cookie,

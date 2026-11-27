@@ -248,9 +248,9 @@ function _stattic_connectors_serve(string $privateRoot, string $versionRoot, arr
         _stattic_connectors_refuse(503, 'connectors_unavailable', 'Connections are unavailable. Try again.');
     }
     // Every call below holds this worker on the control plane for up to 30 s,
-    // so it takes a slot from the Space's one uncacheable-work budget first.
+    // so it shares the box's blocking slot pool to preserve callback reserve.
     require_once __DIR__ . '/../shared/admission.php';
-    _stattic_admission_acquire_once($privateRoot, $serving, 'connectors');
+    _stattic_admission_acquire_connector($privateRoot, $serving);
     if (isset($route['operation'])) {
         _stattic_connectors_serve_visitor($serving, $host, $method, $route, $token, $apiUrl);
     }

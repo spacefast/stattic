@@ -5574,17 +5574,274 @@ check(!$identityOrigin('https://app.example.test', '/zero-identity/v1/account'),
 check(!$identityOrigin('https://app.example.test', '/spacefast/v1/account'), 'identity origin: non-identity routes are never opened');
 [$_SERVER['HTTP_ORIGIN'], $_SERVER['HTTP_HOST']] = $savedOrigin;
 
-// --- functions dispatch limit scaling ------------------------------------------
+// --- blocking admission limit and flock slot pool ------------------------------
 require_once __DIR__ . '/../engine/shared/admission.php';
-check(_stattic_admission_functions_dispatch_limit([]) === 3, 'functions dispatch limit: default serving uses 3 slots');
 check(
-    _stattic_admission_functions_dispatch_limit(['admission' => ['concurrency' => 20]]) === 17,
-    'functions dispatch limit: raised per-Space concurrency scales dispatch while keeping callback reserve'
+    _stattic_admission_blocking_limit([]) === 1,
+    'blocking limit: un-synced overlay without php_workers uses conservative 1-slot ceiling'
 );
 check(
-    _stattic_admission_functions_dispatch_limit(['admission' => ['concurrency' => 2]]) === 1,
-    'functions dispatch limit: stays strictly below low Space concurrency'
+    _stattic_admission_blocking_limit(['admission' => ['concurrency' => 10]]) === 1,
+    'blocking limit: un-synced overlay caps saved concurrency=10 at conservative 1-slot ceiling'
 );
+check(
+    _stattic_admission_blocking_limit(['admission' => ['concurrency' => 1]]) === 1,
+    'blocking limit: un-synced overlay honors override at conservative ceiling'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 10]]) === 6,
+    'blocking limit: synced 10-worker serving uses 6 slots'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 10, 'concurrency' => 10]]) === 7,
+    'blocking limit: saved concurrency=10 on 10-worker box keeps 3-worker callback reserve'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 10, 'concurrency' => 20]]) === 7,
+    'blocking limit: high override on 10-worker box is capped at 7'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 10, 'concurrency' => 2]]) === 2,
+    'blocking limit: low per-Space concurrency override is honored'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 4]]) === 2,
+    'blocking limit: 4-worker box caps default below callback reserve (2 slots)'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 4, 'concurrency' => 10]]) === 2,
+    'blocking limit: 4-worker box caps saved concurrency override at 2 slots'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 4, 'concurrency' => 1]]) === 1,
+    'blocking limit: 4-worker box honors override below ceiling'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 2]]) === 1,
+    'blocking limit: 2-worker box leaves 1 worker for callbacks'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 24, 'concurrency' => 20]]) === 20,
+    'blocking limit: larger 24-worker box honors override up to ceiling'
+);
+check(
+    _stattic_admission_blocking_limit(['admission' => ['php_workers' => 24, 'concurrency' => 24]]) === 21,
+    'blocking limit: larger 24-worker box still reserves 3 callback workers'
+);
+$slotBase = realpath(sys_get_temp_dir()) . '/sf-slot-unit-' . bin2hex(random_bytes(5));
+$slotPrivateRoot = $slotBase . '/.stattic/storage';
+mkdir($slotPrivateRoot . '/runtime', 0775, true);
+$slotDir = $slotPrivateRoot . '/runtime/admission/blocking/spc_slot_unit';
+$slotA = _stattic_admission_slot_acquire($slotDir, 2);
+$slotB = _stattic_admission_slot_acquire($slotDir, 2);
+$slotC = _stattic_admission_slot_acquire($slotDir, 2);
+check(
+    ($slotA['status'] ?? null) === 'acquired' && ($slotB['status'] ?? null) === 'acquired',
+    'admission slot pool: acquires up to configured limit'
+);
+check(($slotC['status'] ?? null) === 'busy', 'admission slot pool: reports busy once all slots are held');
+if (is_callable($slotA['release'] ?? null)) {
+    ($slotA['release'])();
+}
+$slotD = _stattic_admission_slot_acquire($slotDir, 2);
+check(($slotD['status'] ?? null) === 'acquired', 'admission slot pool: reuses freed slot immediately');
+if (is_callable($slotB['release'] ?? null)) {
+    ($slotB['release'])();
+}
+if (is_callable($slotD['release'] ?? null)) {
+    ($slotD['release'])();
+}
+check(
+    (_stattic_admission_slot_acquire($slotDir, 0)['status'] ?? null) === 'busy',
+    'admission slot pool: zero effective limit sheds immediately as busy'
+);
+// Shrinking the limit accounts for holders still on higher-index slot files.
+$shrink0 = _stattic_admission_slot_acquire($slotDir, 4);
+$shrink1 = _stattic_admission_slot_acquire($slotDir, 4);
+$shrink2 = _stattic_admission_slot_acquire($slotDir, 4);
+$shrink3 = _stattic_admission_slot_acquire($slotDir, 4);
+if (is_callable($shrink0['release'] ?? null)) ($shrink0['release'])();
+if (is_callable($shrink1['release'] ?? null)) ($shrink1['release'])();
+// Slots 2 and 3 remain held from before shrink -> at new limit 2, 0 slots remain.
+check(
+    (_stattic_admission_slot_acquire($slotDir, 2)['status'] ?? null) === 'busy',
+    'admission slot pool: shrink accounts for active holders on higher-index slots'
+);
+if (is_callable($shrink2['release'] ?? null)) ($shrink2['release'])();
+// Now 1 higher-index slot remains held -> limit 2 allows 1 new slot, then sheds.
+$shrinkAfterOne = _stattic_admission_slot_acquire($slotDir, 2);
+$shrinkBusy = _stattic_admission_slot_acquire($slotDir, 2);
+check(
+    ($shrinkAfterOne['status'] ?? null) === 'acquired' && ($shrinkBusy['status'] ?? null) === 'busy',
+    'admission slot pool: admits as higher-index holders drain while honoring new limit'
+);
+if (is_callable($shrinkAfterOne['release'] ?? null)) ($shrinkAfterOne['release'])();
+if (is_callable($shrink3['release'] ?? null)) ($shrink3['release'])();
+// Shrink release order: hold slots 0, 1, 2 -> release slot 0 (leaving 1 and 2
+// held = 2 total). Requesting at limit 2 must NOT acquire slot 0 and over-admit!
+$mix0 = _stattic_admission_slot_acquire($slotDir, 3);
+$mix1 = _stattic_admission_slot_acquire($slotDir, 3);
+$mix2 = _stattic_admission_slot_acquire($slotDir, 3);
+if (is_callable($mix0['release'] ?? null)) ($mix0['release'])();
+check(
+    (_stattic_admission_slot_acquire($slotDir, 2)['status'] ?? null) === 'busy',
+    'admission slot pool: shrink with slot 1 + slot 2 held sheds even when slot 0 is free'
+);
+if (is_callable($mix1['release'] ?? null)) ($mix1['release'])();
+if (is_callable($mix2['release'] ?? null)) ($mix2['release'])();
+// Unreadable overflow slot during shrink must fail closed as unavailable, not
+// count as free and over-admit.
+$err0 = _stattic_admission_slot_acquire($slotDir, 2);
+$err1 = _stattic_admission_slot_acquire($slotDir, 2);
+if (is_callable($err0['release'] ?? null)) ($err0['release'])();
+chmod($slotDir . '/slot-1.lock', 0444);
+$errAttempt = _stattic_admission_slot_acquire($slotDir, 1);
+check(
+    ($errAttempt['status'] ?? null) === 'unavailable',
+    'admission slot pool: unreadable overflow slot during shrink fails closed as unavailable'
+);
+chmod($slotDir . '/slot-1.lock', 0664);
+if (is_callable($err1['release'] ?? null)) ($err1['release'])();
+// Unreadable slot directory listing must fail closed as unavailable instead of
+// treating overflow as empty and falling through to the fast path.
+if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+    $dirErr1 = _stattic_admission_slot_acquire($slotDir, 2);
+    $dirErr2 = _stattic_admission_slot_acquire($slotDir, 2);
+    if (is_callable($dirErr1['release'] ?? null)) ($dirErr1['release'])();
+    chmod($slotDir, 0111);
+    $dirListingAttempt = _stattic_admission_slot_acquire($slotDir, 1);
+    chmod($slotDir, 0775);
+    check(
+        ($dirListingAttempt['status'] ?? null) === 'unavailable',
+        'admission slot pool: unreadable slot directory fails closed as unavailable'
+    );
+    if (is_callable($dirErr2['release'] ?? null)) ($dirErr2['release'])();
+}
+// Legacy forward-cutover bridge counts fresh old-engine JSON counters and ignores stale ones.
+$legacyGen = str_repeat('a', 32);
+$legacyPrefix = $slotPrivateRoot . '/runtime/admission/spc_slot_unit';
+check(
+    _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit') === 0,
+    'legacy bridge: absent legacy counters report zero in-flight holders'
+);
+file_put_contents($legacyPrefix . '.json.generation', json_encode(['generation' => $legacyGen]));
+file_put_contents($legacyPrefix . '.json.' . $legacyGen, json_encode(['count' => 3, 'updated_at' => time()]));
+file_put_contents($legacyPrefix . '.functions-dispatch.json.generation', json_encode(['generation' => $legacyGen]));
+file_put_contents($legacyPrefix . '.functions-dispatch.json.' . $legacyGen, json_encode(['count' => 2, 'updated_at' => time()]));
+check(
+    _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit') === 3,
+    'legacy bridge: reads fresh old-engine holders under pointer lock without double-counting dispatches'
+);
+// Concurrent readers (LOCK_SH) must never contend with each other on legacy .generation files.
+$legacySharedScript = sprintf(
+    '$fp = fopen(%s, "rb"); flock($fp, LOCK_SH); echo "SHARED\n"; flush(); fgets(STDIN); flock($fp, LOCK_UN); fclose($fp);',
+    var_export($legacyPrefix . '.json.generation', true)
+);
+$legacySharedPipes = [];
+$legacySharedLocker = proc_open(
+    [PHP_BINARY, '-r', $legacySharedScript],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $legacySharedPipes
+);
+check(is_resource($legacySharedLocker), 'legacy bridge: spawned shared lock holder process');
+check(trim((string) fgets($legacySharedPipes[1])) === 'SHARED', 'legacy bridge: shared lock holder acquired generation lock');
+check(
+    _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit') === 3,
+    'legacy bridge: concurrent shared readers do not contend or 503'
+);
+fwrite($legacySharedPipes[0], "done\n");
+fclose($legacySharedPipes[0]);
+fclose($legacySharedPipes[1]);
+fclose($legacySharedPipes[2]);
+proc_close($legacySharedLocker);
+// Exclusive writer contention on the legacy .generation pointer lock must fail immediately without waiting.
+$legacyLockScript = sprintf(
+    '$fp = fopen(%s, "c+"); flock($fp, LOCK_EX); echo "LOCKED\n"; flush(); fgets(STDIN); flock($fp, LOCK_UN); fclose($fp);',
+    var_export($legacyPrefix . '.json.generation', true)
+);
+$legacyLockerPipes = [];
+$legacyLocker = proc_open(
+    [PHP_BINARY, '-r', $legacyLockScript],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $legacyLockerPipes
+);
+check(is_resource($legacyLocker), 'legacy bridge: spawned lock holder process');
+$legacyLockedLine = fgets($legacyLockerPipes[1]);
+check(trim((string) $legacyLockedLine) === 'LOCKED', 'legacy bridge: lock holder acquired generation lock');
+$legacyLockStart = microtime(true);
+$legacyContended = _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit');
+$legacyLockElapsed = microtime(true) - $legacyLockStart;
+fwrite($legacyLockerPipes[0], "done\n");
+fclose($legacyLockerPipes[0]);
+fclose($legacyLockerPipes[1]);
+fclose($legacyLockerPipes[2]);
+proc_close($legacyLocker);
+check(
+    $legacyContended === null && $legacyLockElapsed < 1.0,
+    'legacy bridge: contended generation lock fails closed immediately without waiting'
+);
+file_put_contents($legacyPrefix . '.json.' . $legacyGen, json_encode(['count' => 3, 'updated_at' => time() - 300]));
+file_put_contents($legacyPrefix . '.functions-dispatch.json.' . $legacyGen, json_encode(['count' => 2, 'updated_at' => time() - 300]));
+check(
+    _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit') === 0,
+    'legacy bridge: stale legacy counters past bridge window are ignored'
+);
+check(
+    !is_file($legacyPrefix . '.json.generation') && !is_file($legacyPrefix . '.functions-dispatch.json.generation'),
+    'legacy bridge: stale legacy counter files are unlinked once observed stale'
+);
+// A stale corrupt/empty .generation leftover must return 0 and self-clean rather than permanently 503ing.
+file_put_contents($legacyPrefix . '.json.generation', '');
+touch($legacyPrefix . '.json.generation', time() - 300);
+check(
+    _stattic_admission_legacy_inflight($slotPrivateRoot, 'spc_slot_unit') === 0
+        && !is_file($legacyPrefix . '.json.generation'),
+    'legacy bridge: stale empty generation leftover returns zero and is unlinked'
+);
+// Ingest overlay lookup distinguishes first publish (absent) from unreadable/corrupt or broken overlay reference.
+check(
+    _stattic_admission_serving_for_space($slotPrivateRoot, 'spc_first_publish') === ['space_id' => 'spc_first_publish', 'admission' => []],
+    'ingest overlay: verifiably absent space.json returns empty overlay'
+);
+$corruptSpaceDir = $slotPrivateRoot . '/spaces/spc_corrupt_overlay';
+mkdir($corruptSpaceDir, 0775, true);
+file_put_contents($corruptSpaceDir . '/space.json', '{not-json');
+check(
+    _stattic_admission_serving_for_space($slotPrivateRoot, 'spc_corrupt_overlay') === null,
+    'ingest overlay: corrupt space.json fails closed as null (503) instead of raising limit'
+);
+file_put_contents($corruptSpaceDir . '/space.json', json_encode(['schema' => 4, 'overlay' => 'missing-overlay.php']));
+check(
+    _stattic_admission_serving_for_space($slotPrivateRoot, 'spc_corrupt_overlay') === null,
+    'ingest overlay: broken overlay reference fails closed as null (503) instead of widening limit'
+);
+file_put_contents($corruptSpaceDir . '/space.json', 'null');
+check(
+    _stattic_admission_serving_for_space($slotPrivateRoot, 'spc_corrupt_overlay') === null,
+    'ingest overlay: literal JSON null in space.json fails closed as null (503)'
+);
+@unlink($corruptSpaceDir . '/space.json');
+@rmdir($corruptSpaceDir);
+@rmdir($slotPrivateRoot . '/spaces');
+$blockedSlotParent = $slotPrivateRoot . '/runtime/admission/not-a-dir';
+file_put_contents($blockedSlotParent, 'blocker');
+$slotUnavailable = _stattic_admission_slot_acquire($blockedSlotParent . '/spc_slot_unit', 2);
+check(
+    ($slotUnavailable['status'] ?? null) === 'unavailable',
+    'admission slot pool: reports storage fault as unavailable rather than busy'
+);
+@unlink($blockedSlotParent);
+@unlink($slotDir . '/slot-0.lock');
+@unlink($slotDir . '/slot-1.lock');
+@unlink($slotDir . '/slot-2.lock');
+@unlink($slotDir . '/slot-3.lock');
+@rmdir($slotDir);
+@rmdir(dirname($slotDir));
+@rmdir(dirname(dirname($slotDir)));
+@rmdir(dirname(dirname(dirname($slotDir))));
+@rmdir($slotPrivateRoot);
+@rmdir($slotBase . '/.stattic');
+@rmdir($slotBase);
 
 // --- visitor proof expiry aligns principal lifetime ----------------------------
 $vpNow = time();

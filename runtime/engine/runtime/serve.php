@@ -46,7 +46,6 @@ function _sf_load_generated_config(string $privateRoot): void
     }
 }
 
-const STATTIC_STATIC_STREAM_ADMISSION_BYTES = 262144;
 const STATTIC_PRIVATE_FILE_ALIAS_SUFFIX = ';sf-private';
 const STATTIC_ICON_FILE_ALIAS_SUFFIX = ';sf-icon';
 
@@ -1367,7 +1366,6 @@ function _stattic_v4_send_entry(array $context, array $entry, string $requestPat
         exit;
     }
 
-    _stattic_acquire_static_stream_admission($context, $length);
     $stream = _stattic_v4_open_blob($absolutePath);
     $streamOffset = $normalizedHead === null ? $offset : $sourceHeadLength + max(0, $offset - strlen($normalizedHead));
     if ($streamOffset > 0 && fseek($stream, $streamOffset) !== 0) {
@@ -1701,13 +1699,10 @@ function _stattic_v4_dispatch_functions_routes(array $context, string $requestPa
             _stattic_method_decline($allow === [] ? ['GET', 'HEAD'] : $allow);
         }
         if (is_array($functionsRoute) && ($functionsRoute['action'] ?? null) === 'dispatch_functions') {
-            // A dispatch holds this PHP-FPM worker for up to 30s and its relay
-            // calls re-enter the same pool, so this lane pays the same
-            // uncacheable-concurrency admission the Zero branch above does.
+            // A dispatch holds this PHP-FPM worker while its relay, purge, and
+            // log callbacks re-enter the same pool, so cap concurrent dispatches
+            // below the box's FPM pool size.
             require_once __DIR__ . '/../shared/admission.php';
-            _stattic_admission_acquire_once((string) $context['private_root'], $context['serving'], 'zero');
-            // And one of the Space's Worker dispatch slots, a smaller cap, so
-            // dispatches leave FPM workers free for their own callbacks.
             _stattic_admission_acquire_functions_dispatch((string) $context['private_root'], is_array($context['serving']) ? $context['serving'] : []);
             _stattic_functions_dispatch(
                 $versionDir,
@@ -2166,8 +2161,6 @@ function _stattic_dispatch_storage(
     string $requestPath,
     string $requestMethod
 ): void {
-    require_once __DIR__ . '/../shared/admission.php';
-    _stattic_admission_acquire_once($privateRoot, $serving, 'storage');
     require_once __DIR__ . '/storage.php';
     _stattic_storage_handle(
         $privateRoot,
@@ -2225,19 +2218,6 @@ function _stattic_render_content_type_blocked(array $policy): never
         'Cache-Control' => 'no-store',
         'X-Robots-Tag' => 'noindex, nofollow',
     ]);
-}
-
-function _stattic_acquire_static_stream_admission(array $context, int $bytes): void
-{
-    if ($bytes < STATTIC_STATIC_STREAM_ADMISSION_BYTES) {
-        return;
-    }
-    require_once __DIR__ . '/../shared/admission.php';
-    _stattic_admission_acquire_once(
-        (string) $context['private_root'],
-        is_array($context['serving']) ? $context['serving'] : [],
-        'static_stream'
-    );
 }
 
 // Call for an existing successful GET/HEAD representation, after transformations

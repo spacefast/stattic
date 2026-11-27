@@ -15,7 +15,6 @@ require_once __DIR__ . '/../shared/errors.php';
 require_once __DIR__ . '/../shared/egress.php';
 require_once __DIR__ . '/../shared/lock.php';
 require_once __DIR__ . '/../shared/record-store.php';
-require_once __DIR__ . '/../shared/admission.php';
 require_once __DIR__ . '/../shared/space-roles.php';
 
 // Country and IP come ONLY from values a client cannot set (contracts §16, live
@@ -2499,15 +2498,6 @@ function _stattic_enforce_scoped_admission(
         }
     }
 
-    // Contract A1, charged HERE: the request is now known to need identity work,
-    // and this is still before any credential is resolved and before any matching
-    // rule (bcrypt included) can render a decision, so a credential-less POST
-    // flood at a protected path is bounded. A URL an unconstrained Public Grant
-    // already admitted returned above and costs no slot. Probes charge nothing.
-    if (!$probeOnly) {
-        _stattic_admission_acquire_access_lane(_stattic_access_private_root(), $serving);
-    }
-
     $identity = _stattic_current_session_identity($serving, $requestHost);
     if (
         ($projection['fence'] ?? 'none') === 'none'
@@ -4149,6 +4139,15 @@ function _stattic_access_exchange_post(string $url, array $fields, array $header
     if (!_stattic_platform_destination_allowed($url)) {
         return null;
     }
+    // Every outbound control-plane exchange can block PHP for up to 5 s; charge
+    // one shared blocking slot before dialing so fast local access checks stay
+    // lock-free while exchange bursts cannot starve Worker callbacks.
+    $exchangePrivateRoot = _stattic_access_private_root();
+    $exchangeServing = is_array($GLOBALS['SPACEFAST_PAGE_SERVING'] ?? null) ? $GLOBALS['SPACEFAST_PAGE_SERVING'] : [];
+    if ($exchangePrivateRoot !== '' && $exchangeServing !== []) {
+        require_once __DIR__ . '/../shared/admission.php';
+        _stattic_admission_acquire_blocking_lane($exchangePrivateRoot, $exchangeServing, 'access_exchange', 'rate_limited');
+    }
     $requestUrl = $url;
     // Test-only: preserve the logical access-origin Host while dialing the
     // control-plane over its private compose address. Production has no
@@ -5332,6 +5331,11 @@ function _stattic_access_exchange_link_token(
     if (!$confirmed) {
         $payload['confirmed'] = '0';
     }
+    $privateRoot = _stattic_access_private_root();
+    if ($privateRoot !== '') {
+        require_once __DIR__ . '/../shared/admission.php';
+        _stattic_admission_acquire_blocking_lane($privateRoot, $serving, 'access_link_exchange', 'rate_limited');
+    }
     $result = _stattic_access_exchange_post(
         $exchange['linkUrl'],
         $payload,
@@ -5683,10 +5687,6 @@ function _stattic_access_apply_query_token(
     if (!in_array(_stattic_runtime_request_method(), ['GET', 'HEAD'], true)) {
         return;
     }
-    // Contract A1, charged once a lane has claimed the token and real work is
-    // about to happen. A refusal above costs no slot, so appending nonsense to a
-    // public URL cannot spend the Space's access lane.
-    _stattic_admission_acquire_access_lane(_stattic_access_private_root(), $serving);
     $token = (string) _stattic_access_query_token();
     if ($kind === 'link') {
         // A browser opening a share link goes through the one way in, carrying

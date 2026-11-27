@@ -714,10 +714,7 @@ function _stattic_runtime_reusable_version_total_bytes(string $privateRoot, stri
 // per handler, so it stays explicit rather than a shared prologue hook.
 function _stattic_runtime_upload_admit(string $privateRoot, string $spaceId): void
 {
-    _stattic_admission_acquire_or_shed($privateRoot, [
-        'space_id' => $spaceId,
-        'admission' => ['concurrency' => STATTIC_RUNTIME_INGEST_CONCURRENCY_PER_SPACE],
-    ], 'ingest');
+    _stattic_admission_acquire_ingest($privateRoot, $spaceId, STATTIC_RUNTIME_INGEST_CONCURRENCY_PER_SPACE);
 }
 
 function _stattic_runtime_declared_upload_file(array $session, string $filePath): ?array

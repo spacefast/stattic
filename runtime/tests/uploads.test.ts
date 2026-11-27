@@ -29,6 +29,7 @@ import {
   errorCode,
   finalize,
   getBlob,
+  holdAdmissionSlots,
   journalRecords,
   managementToken,
   PHP_BINARY,
@@ -56,7 +57,7 @@ const ADMISSION_SPACE = "spc_up_adm";
 const INGEST_LIMIT = 4;
 
 beforeAll(async () => {
-  rt = await startRuntime();
+  rt = await startRuntime({ env: { SPACEFAST_PHP_CONNS: "10" } });
 });
 
 afterAll(() => rt?.stop());
@@ -1113,107 +1114,83 @@ test("finalize adds a generated Functions bundle the control plane wrote to the 
   expect(await catalogFiles(lazyVersionId)).toEqual(await catalogFiles(session.versionId));
 });
 
-test("ingest sheds above four concurrent uploads per space", async () => {
-  const files = { "a.txt": "a", "b.txt": "bb", "c.txt": "ccc" };
+test("ingest sheds above four concurrent uploads per space and shares the blocking pool", async () => {
+  const files = { "a.txt": "a", "b.txt": "bb", "c.txt": "ccc", "d.txt": "dddd" };
   const session = await createDeclaredSession(rt, ADMISSION_SPACE, "ver_adm", files);
-  // The upload's slot is released in the request's shutdown, which can outlive
-  // the response the client already has. Settling back to the count the seeding
-  // left behind — a release gives back one slot, not the seeded ones — is what
-  // makes the next seeded value the one the engine reads.
-  const put = async (sha: string, body: string, seeded: number) => {
-    const response = await putBlob(rt, ADMISSION_SPACE, session.token, sha, body);
-    await response.text();
-    await waitForIngestCounter(ADMISSION_SPACE, seeded);
-    return response;
-  };
+  const ingestSlotDir = path.join(rt.storageRoot, "runtime/admission/ingest", ADMISSION_SPACE);
+  const blockingSlotDir = path.join(rt.storageRoot, "runtime/admission/blocking", ADMISSION_SPACE);
 
-  expect((await put(sha256("a"), "a", 0)).status).toBe(200);
+  expect((await putBlob(rt, ADMISSION_SPACE, session.token, sha256("a"), "a")).status).toBe(200);
 
-  seedIngestCounter(ADMISSION_SPACE, INGEST_LIMIT - 1);
-  expect((await put(sha256("bb"), "bb", INGEST_LIMIT - 1)).status).toBe(200);
-
-  seedIngestCounter(ADMISSION_SPACE, INGEST_LIMIT);
-  const shed = await fetch(uploadUrl(`/spaces/${ADMISSION_SPACE}/blobs/${sha256("ccc")}`), {
-    method: "PUT",
-    headers: { authorization: `Bearer ${session.token}`, accept: "application/json" },
-    body: "ccc",
-  });
-  expect(shed.status).toBe(429);
-  expect(shed.headers.get("retry-after")).toBe("2");
-  expect(await errorCode(shed)).toBe("ingest_admission_exceeded");
-
-  seedIngestCounter(ADMISSION_SPACE, 0);
-  expect((await put(sha256("ccc"), "ccc", 0)).status).toBe(200);
-}, 15_000);
-
-function ingestCounterPath(spaceId: string): string {
-  return path.join(rt.storageRoot, "runtime/admission", `${spaceId}.json`);
-}
-
-function ingestCounterGenerationFile(spaceId: string): string | null {
-  const counterPath = ingestCounterPath(spaceId);
-  const pointerPath = `${counterPath}.generation`;
-  if (!existsSync(pointerPath)) {
-    return null;
-  }
-  const raw = readFileSync(pointerPath, "utf8");
-  if (raw.trim() === "") {
-    return null;
-  }
-  const pointer = JSON.parse(raw) as { generation?: string };
-  return typeof pointer.generation === "string" ? `${counterPath}.${pointer.generation}` : null;
-}
-
-function seedIngestCounter(spaceId: string, count: number): void {
-  const generationFile = ingestCounterGenerationFile(spaceId);
-  if (generationFile === null || !existsSync(generationFile)) {
-    throw new Error(`ingest admission counter for ${spaceId} has no active generation`);
-  }
-  writeFileSync(
-    generationFile,
-    `${JSON.stringify({ count, updated_at: Math.floor(Date.now() / 1000) })}\n`,
-  );
-}
-
-function readIngestCounter(spaceId: string): number | null {
+  const almostFull = await holdAdmissionSlots(ingestSlotDir, INGEST_LIMIT - 1);
   try {
-    const generationFile = ingestCounterGenerationFile(spaceId);
-    if (generationFile === null) {
-      return null;
-    }
-    const raw = readFileSync(generationFile, "utf8");
-    if (raw.trim() === "") {
-      return null;
-    }
-    return (JSON.parse(raw) as { count?: number }).count ?? null;
-  } catch (error) {
-    // PHP rewrites both snapshots under flock by truncating first, so this
-    // lock-free reader can catch an empty or half-written file. A file can also
-    // vanish between the existsSync and the read.
-    if (error instanceof SyntaxError) {
-      return null;
-    }
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
+    expect((await putBlob(rt, ADMISSION_SPACE, session.token, sha256("bb"), "bb")).status).toBe(
+      200,
+    );
+  } finally {
+    await almostFull.release();
   }
-}
 
-async function waitForIngestCounter(spaceId: string, expected: number): Promise<void> {
-  const deadline = Date.now() + 5000;
-  for (;;) {
-    if (readIngestCounter(spaceId) === expected) {
-      return;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `ingest admission counter for ${spaceId} never settled at ${expected} (last read ${readIngestCounter(spaceId)})`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+  const full = await holdAdmissionSlots(ingestSlotDir, INGEST_LIMIT);
+  try {
+    const shed = await fetch(uploadUrl(`/spaces/${ADMISSION_SPACE}/blobs/${sha256("ccc")}`), {
+      method: "PUT",
+      headers: { authorization: `Bearer ${session.token}`, accept: "application/json" },
+      body: "ccc",
+    });
+    expect(shed.status).toBe(429);
+    expect(shed.headers.get("retry-after")).toBe("2");
+    expect(await errorCode(shed)).toBe("ingest_admission_exceeded");
+  } finally {
+    await full.release();
   }
-}
+
+  // Even when ingest slots are free, a full shared blocking pool sheds uploads
+  // and releases its ingest slot immediately so callback reserve stays intact.
+  const blockingFull = await holdAdmissionSlots(blockingSlotDir, 6);
+  try {
+    const shedByBlocking = await fetch(
+      uploadUrl(`/spaces/${ADMISSION_SPACE}/blobs/${sha256("dddd")}`),
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${session.token}`, accept: "application/json" },
+        body: "dddd",
+      },
+    );
+    expect(shedByBlocking.status).toBe(429);
+    expect(shedByBlocking.headers.get("retry-after")).toBe("2");
+    expect(await errorCode(shedByBlocking)).toBe("ingest_admission_exceeded");
+  } finally {
+    await blockingFull.release();
+  }
+
+  expect((await putBlob(rt, ADMISSION_SPACE, session.token, sha256("ccc"), "ccc")).status).toBe(
+    200,
+  );
+  expect((await putBlob(rt, ADMISSION_SPACE, session.token, sha256("dddd"), "dddd")).status).toBe(
+    200,
+  );
+
+  // A corrupt space pointer fails closed with 503 instead of silently widening
+  // the upload limit on a smaller box.
+  const spacePointer = storagePath(rt, "spaces", ADMISSION_SPACE, "space.json");
+  mkdirSync(path.dirname(spacePointer), { recursive: true });
+  writeFileSync(spacePointer, "{corrupt");
+  try {
+    const unavailable = await fetch(
+      uploadUrl(`/spaces/${ADMISSION_SPACE}/blobs/${sha256("ccc")}`),
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${session.token}`, accept: "application/json" },
+        body: "ccc",
+      },
+    );
+    expect(unavailable.status).toBe(503);
+    expect(await errorCode(unavailable)).toBe("admission_storage_unavailable");
+  } finally {
+    rmSync(spacePointer, { force: true });
+  }
+}, 15_000);
 
 test("manifest declaration is where upload path policy is enforced", async () => {
   const rejected: Array<[string, string]> = [

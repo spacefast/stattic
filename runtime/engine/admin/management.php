@@ -1239,6 +1239,15 @@ function _stattic_runtime_functions_capabilities($value): array
     return $capabilities;
 }
 
+function _stattic_runtime_overlay_effective_php_workers(string $privateRoot, string $spaceId): ?int
+{
+    $overlay = _stattic_runtime_current_space_overlay($privateRoot, $spaceId);
+    $raw = is_array($overlay) && is_array($overlay['admission'] ?? null)
+        ? ($overlay['admission']['php_workers'] ?? null)
+        : null;
+    return is_int($raw) && $raw > 0 ? $raw : null;
+}
+
 function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string $routeName, array $claims): void
 {
     $body = _stattic_json_body();
@@ -1256,6 +1265,7 @@ function _stattic_runtime_put_route(string $privateRoot, string $spaceId, string
         'space_id' => $spaceId,
         'route_name' => $routeName,
         'version_id' => $versionId,
+        'effective_php_workers' => _stattic_runtime_overlay_effective_php_workers($privateRoot, $spaceId),
         ...($pointer['unchanged'] ? ['unchanged' => true] : []),
         ...(is_string($pointer['activation_event_id'] ?? null)
             ? ['activation_event_id' => $pointer['activation_event_id']]
@@ -1312,14 +1322,24 @@ function _stattic_runtime_put_space_config(string $privateRoot, string $spaceId,
             _stattic_runtime_store_unified_access_from_config($privateRoot, $spaceId, $body['config']);
         }
         _stattic_runtime_update_route_index($privateRoot, $spaceId);
-        _stattic_json_response(200, ['space_id' => $spaceId, 'unchanged' => true]);
+        _stattic_json_response(200, [
+            'space_id' => $spaceId,
+            'unchanged' => true,
+            'production_owned' => $productionOwned,
+            'effective_php_workers' => _stattic_runtime_overlay_effective_php_workers($privateRoot, $spaceId),
+        ]);
     }
     // Writers race (a finalize against an access sync). The access tuple only
     // moves forward, so an older config never replaces a newer one.
     // The writer's goal (the box holds at least this access) is already met.
     if ($previous !== null && _stattic_runtime_space_config_access_tuple($config) < _stattic_runtime_space_config_access_tuple($previous['config'])) {
         _stattic_runtime_update_route_index($privateRoot, $spaceId);
-        _stattic_json_response(200, ['space_id' => $spaceId, 'unchanged' => true]);
+        _stattic_json_response(200, [
+            'space_id' => $spaceId,
+            'unchanged' => true,
+            'production_owned' => $productionOwned,
+            'effective_php_workers' => _stattic_runtime_overlay_effective_php_workers($privateRoot, $spaceId),
+        ]);
     }
     $hostnames = _stattic_runtime_space_sweep_hostnames($spaceRoot);
     _stattic_runtime_prepare_purge($privateRoot, $spaceId, $hostnames, 'space_config_updated');
@@ -1338,6 +1358,8 @@ function _stattic_runtime_put_space_config(string $privateRoot, string $spaceId,
     ]);
     _stattic_json_response(200, [
         'space_id' => $spaceId,
+        'production_owned' => $productionOwned,
+        'effective_php_workers' => _stattic_runtime_overlay_effective_php_workers($privateRoot, $spaceId),
         'purge' => _stattic_runtime_purge_space_now($privateRoot, $spaceId, 'space_config_updated', $hostnames, true),
     ]);
 }
@@ -2104,9 +2126,24 @@ function _stattic_runtime_route_config(mixed $raw): array
         $config['email'] = $email === null ? null : ['senderDomain' => $domain];
     }
     if (is_array($raw['admission'] ?? null)) {
+        $admissionConfig = [];
         $concurrency = $raw['admission']['concurrency'] ?? null;
         if (is_int($concurrency) || (is_string($concurrency) && preg_match('/^[0-9]+$/', $concurrency) === 1)) {
-            $config['admission'] = ['concurrency' => max(1, (int) $concurrency)];
+            $admissionConfig['concurrency'] = max(1, (int) $concurrency);
+        }
+        $phpWorkers = $raw['admission']['php_workers'] ?? null;
+        if (is_int($phpWorkers) && $phpWorkers > 0) {
+            $admissionConfig['php_workers'] = $phpWorkers;
+        } elseif (
+            is_string($phpWorkers)
+            && preg_match('/^[1-9][0-9]*$/', $phpWorkers) === 1
+            && ($parsedWorkers = filter_var($phpWorkers, FILTER_VALIDATE_INT)) !== false
+            && $parsedWorkers > 0
+        ) {
+            $admissionConfig['php_workers'] = (int) $parsedWorkers;
+        }
+        if ($admissionConfig !== []) {
+            $config['admission'] = $admissionConfig;
         }
     }
     if (array_key_exists('brand', $raw)) {

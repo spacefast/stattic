@@ -1,7 +1,7 @@
 {
-  "revision": "a34f72e0564e659967ac63d3453cb169885bb8f9",
-  "sourceHash": "5813e6da5015c99145ddf8fc1595fa3cb14d192b0b04177242f18d27a872d4ac",
-  "manifestSha256": "0992635cba1e09fec21e7efe4033fad5a49ecfb8d28c8174076f1f294598d25e",
+  "revision": "c39cb54c10bd1751ff918b226ccb89553017b12b",
+  "sourceHash": "e1e6a0bc7f6cf37192b96b36ffc3a81afe8e947b5a03ab074f2c85d7d25981e6",
+  "manifestSha256": "0f908a2de46600fcabfe8c4a044ededef36e163a5175605e38d3e9951190bb04",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "0751182ef665702d6f9e773b257ba41d6bb68d0551800708e7908e2c92d734ba"
+      "sha256": "4825aebf38fcb43fabad3853b6bfc4a3500779cbfeea5263b67d3d9eee51b11c"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "7ec6e0f43a540a933a4ffba2fec0d36cfe3fa5bdfe71a933106bc5f7a0fcc342"
+      "sha256": "8023cd42100e005696dd0036795ab11f9d7ed7df7da052d59ecc2f152bbaca81"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -29809,7 +29809,7 @@
     },
     {
       "path": "runtime/engine-manifest.json",
-      "sha256": "b474c7f1e51d7598bdf30c64f575f6adaffbd01909130cdf549a0923bb7c0aa3"
+      "sha256": "f898799fd6fce96ba87d24feb796fe5ecf9a94b0d85c833584a43987e3ea62d2"
     },
     {
       "path": "runtime/engine/admin/api.php",
@@ -30524,8 +30524,12 @@
       "sha256": "21a53e7a222ef1bcc86688d1415f50315941803e8b00de2587bd65f311f8d14e"
     },
     {
+      "path": "runtime/engine/wordpress/preview-db-driver.php",
+      "sha256": "8df7faf31c4dc24a2675f6fd0a8f29b41e822ef0bd2ec6aee0898be2abceb484"
+    },
+    {
       "path": "runtime/engine/wordpress/preview-db.php",
-      "sha256": "04b5b10af06bb995120d54c612f7e183ac8426d95b85849bcbaf1497c59d4db4"
+      "sha256": "167c62dd6ef0d1596ae5995137b45846f75b5069fe7769e2bc97d9b2076cd0bc"
     },
     {
       "path": "runtime/engine/wordpress/space-role.php",
@@ -30841,7 +30845,7 @@
     },
     {
       "path": "runtime/tests/fixtures/spacepress-preview-parity.php",
-      "sha256": "c86c1fb4d6e93b56ddd58e16733eaccb66877e803d98f87b60f45b387eaa3f05"
+      "sha256": "01e754e7eaa2d11ab6f6e44c1650dc5211fc1ca288985ad911f2300cd0b2d4a0"
     },
     {
       "path": "runtime/tests/fixtures/without-intl-prepend.php",
@@ -31069,7 +31073,7 @@
     },
     {
       "path": "runtime/tests/spacepress-preview-parity.test.ts",
-      "sha256": "4124291da14486ae29929c28e535f1b0fc837d607d73ca710b1dcb96a6684ec3"
+      "sha256": "6532940b16a96c5234853af64da7e89f3dd30053dabac1edaab26c26286b6a93"
     },
     {
       "path": "runtime/tests/spacepress-preview-sign-in.test.ts",
@@ -31077,7 +31081,7 @@
     },
     {
       "path": "runtime/tests/spacepress-preview.test.ts",
-      "sha256": "d93784fc598839af72a5903a925600004ff72964645886b620cc21396423896a"
+      "sha256": "169169746fe6b01a1e2000d7aafc5878f2ecc6b908cba72c08e9566eafbbeada"
     },
     {
       "path": "runtime/tests/spacepress-runtime.test.ts",
@@ -31109,7 +31113,7 @@
     },
     {
       "path": "runtime/tests/unit.php",
-      "sha256": "3477308a373c33dffc9eefb749fb7c7780e5fddac59e2e8a38a6677514816131"
+      "sha256": "634406a946353bba2f532b9ea78d174518b306638dc828e7103fb09fde87126d"
     },
     {
       "path": "runtime/tests/uploads.test.ts",

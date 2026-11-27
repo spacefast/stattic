@@ -19,6 +19,10 @@ import {
 import { WORDPRESS_IMAGE } from "./zero-wordpress.ts";
 
 const DRIVER = path.resolve(import.meta.dir, "fixtures/spacepress-preview-parity.php");
+const PREVIEW_DB_DRIVER = path.resolve(
+  import.meta.dir,
+  "../engine/wordpress/preview-db-driver.php",
+);
 const ZERO_RUNTIME = path.resolve(import.meta.dir, "../../crates/zero/runtime/Zero");
 const CONTAINER_PREFIX = "spacefast-preview-parity";
 const ROOT_PASSWORD = "disposable-preview-parity";
@@ -80,20 +84,23 @@ beforeAll(async () => {
   for (const engine of ENGINES) {
     mkdirSync(path.join(work, engine, "wp-content"), { recursive: true });
   }
-  // The preview connection as the engine opens it: the stock plugin's WP_SQLite_DB, from the
-  // plugin's own files, with no collation or functions of ours (spacefast/monorepo#5951).
+  // The preview connection as the engine opens it: Spacefast_SQLite_DB from
+  // runtime/engine/wordpress/preview-db-driver.php over the pinned plugin 3.1.3.
   const plugin = JSON.stringify(sqlitePlugin);
+  const parityDriver = JSON.stringify(PREVIEW_DB_DRIVER);
   writeFileSync(
     path.join(work, "sqlite", "wp-content", "db.php"),
     `<?php
 define('DB_ENGINE', 'sqlite');
 define('SQLITE_JOURNAL_MODE', 'WAL');
+define('SQLITE_BUSY_TIMEOUT', 50000);
 require_once ${plugin} . '/wp-includes/database/version.php';
 require_once ${plugin} . '/constants.php';
 require_once ${plugin} . '/wp-includes/database/load.php';
 require_once ${plugin} . '/wp-includes/sqlite/class-wp-sqlite-db.php';
 require_once ${plugin} . '/wp-includes/sqlite/install-functions.php';
-new WP_SQLite_DB(DB_NAME);
+require_once ${parityDriver};
+new Spacefast_SQLite_DB(DB_NAME);
 `,
   );
 
@@ -114,13 +121,13 @@ afterAll(() => {
 
 // ============================================================ known differences
 
-// Where the stock preview driver answers differently from live today. Each
-// entry names the statement, both answers, the root cause and the fix: an
-// engine-side registration on the preview connection (proven by the reference
-// patch on spacefast/monorepo#6002) or a change upstream. The parity tests
-// below compare everything else and leave out exactly these paths, which are
-// asserted here with each side's exact answer, so a fix (or a regression) on
-// either side fails a test instead of passing silently.
+// Where the preview driver still answers differently from live today because
+// the fix belongs in an upstream component (sqlite-database-integration or
+// Zero). Each entry names the statement, both answers, the root cause and the
+// upstream fix. The parity tests below compare everything else — including
+// Unicode/accent/PAD SPACE collation & LIKE, 50s lock wait budget, Action
+// Scheduler unique keys, MySQL insert_id & affected_rows, LAST_INSERT_ID(),
+// and flock-backed GET_LOCK/RELEASE_LOCK/IS_FREE_LOCK/IS_USED_LOCK.
 type KnownDifference = {
   row: number;
   what: string;
@@ -133,130 +140,6 @@ type KnownDifference = {
 const duplicate = { result: false, error: "duplicate" };
 const inserted = { result: 1, error: null };
 const KNOWN_DIFFERENCES: KnownDifference[] = [
-  // Rows 1-3, 5-7. Cause: the plugin declares every text column COLLATE NOCASE, which folds ASCII
-  // case only, without PAD SPACE. Fix (engine): register NOCASE as ICU root at primary strength
-  // over right-trimmed strings, and a matching `like`, on the Pdo\Sqlite before the driver
-  // configures it. Every connection that writes the file must register them.
-  {
-    row: 1,
-    what: "unicode case variant of a UNIQUE email",
-    case: "unique",
-    path: ["unicodeCase", "emailCaseVariant"],
-    live: duplicate,
-    sqlite: inserted,
-  },
-  {
-    row: 1,
-    what: "unicode case variant of a UNIQUE slug",
-    case: "unique",
-    path: ["unicodeCase", "slugCaseVariant"],
-    live: duplicate,
-    sqlite: inserted,
-  },
-  {
-    row: 2,
-    what: "accent variant of a UNIQUE email",
-    case: "unique",
-    path: ["accent", "emailAccentVariant"],
-    live: duplicate,
-    sqlite: inserted,
-  },
-  {
-    row: 2,
-    what: "accent variant of a UNIQUE slug",
-    case: "unique",
-    path: ["accent", "slugAccentVariant"],
-    live: duplicate,
-    sqlite: inserted,
-  },
-  {
-    row: 2,
-    what: "WHERE email = an accent variant",
-    case: "unique",
-    path: ["accent", "emailLookup"],
-    live: ["chloé@example.com"],
-    sqlite: ["chloe@example.com"],
-  },
-  {
-    row: 3,
-    what: "trailing-space variant of a UNIQUE email",
-    case: "unique",
-    path: ["trailingSpace", "emailPaddedVariant"],
-    live: duplicate,
-    sqlite: inserted,
-  },
-  {
-    row: 3,
-    what: "WHERE email = the value with trailing spaces",
-    case: "unique",
-    path: ["trailingSpace", "emailLookup"],
-    live: ["pad@example.com"],
-    sqlite: [],
-  },
-  {
-    row: 5,
-    what: "LIKE folds unicode case",
-    case: "search",
-    path: ["wordpressUnicode", "likeUnicodeLower"],
-    live: ["Émile Zola"],
-    sqlite: [],
-  },
-  {
-    row: 5,
-    what: "= folds unicode case",
-    case: "search",
-    path: ["wordpressUnicode", "equalsUnicodeCase"],
-    live: ["Émile Zola"],
-    sqlite: [],
-  },
-  {
-    row: 5,
-    what: "LIKE folds accents",
-    case: "search",
-    path: ["wordpressAccent", "likeAccent"],
-    live: ["Émile Zola"],
-    sqlite: [],
-  },
-  {
-    row: 5,
-    what: "= folds accents",
-    case: "search",
-    path: ["wordpressAccent", "equalsAccent"],
-    live: ["Émile Zola"],
-    sqlite: [],
-  },
-  {
-    row: 6,
-    what: "ORDER BY a text column",
-    case: "search",
-    path: ["wordpressOrder"],
-    live: [
-      "100% sure",
-      "ADA BYRON",
-      "Ada Lovelace",
-      "Émile Zola",
-      "Grace Hopper",
-      "under_score",
-      "underXscore",
-    ],
-    sqlite: [
-      "100% sure",
-      "ADA BYRON",
-      "Ada Lovelace",
-      "Grace Hopper",
-      "under_score",
-      "underXscore",
-      "Émile Zola",
-    ],
-  },
-  {
-    row: 7,
-    what: "= ignores trailing spaces (PAD SPACE)",
-    case: "search",
-    path: ["wordpressTrailingSpace"],
-    live: ["Grace Hopper"],
-    sqlite: [],
-  },
   // Cause: the plugin ignores a column's declared collation, so utf8mb4_bin text is NOCASE too.
   // Fix (upstream plugin): honor the column collation (its "@TODO: Respect the actual column and
   // index collation" in WP_MySQL_On_SQLite), mapping *_bin to BINARY.
@@ -285,128 +168,6 @@ const KNOWN_DIFFERENCES: KnownDifference[] = [
     path: ["zeroAccent", "ilikeAccent"],
     live: ["Émile Zola"],
     sqlite: [],
-  },
-  // Cause: the plugin's busy timeout defaults to 10 s; InnoDB waits 50 s for a row lock, so a
-  // wait live rides out fails on the preview with "database is locked". Fix (engine): define
-  // SQLITE_BUSY_TIMEOUT 50000 before the connection opens.
-  {
-    row: 9,
-    what: "seconds a session waits for a held lock",
-    case: "lock-wait-budget",
-    path: ["seconds"],
-    live: 50,
-    sqlite: 10,
-  },
-  // Rows 10-15. Cause: the translator reports PDO SQLite's last_insert_rowid() and changes(): an
-  // INSERT that stores nothing keeps the previous id, and upserts and UPDATEs count matched
-  // rows. Fix (engine): report MySQL's numbers from the driver (insert_id 0 when nothing was
-  // inserted; 2 per changed upserted row with that row's id; 0 per unchanged row), observing
-  // changed rows with a temporary AFTER UPDATE trigger. Rows 10-11 break Action Scheduler's
-  // unique actions: a duplicate enqueue returns another action's id, and a new action is lost.
-  {
-    row: 10,
-    what: "a duplicate unique Action Scheduler enqueue returns",
-    case: "action-scheduler",
-    path: ["scheduled", "uniqueAgain"],
-    live: 0,
-    sqlite: 2,
-  },
-  {
-    row: 11,
-    what: "a unique action after a terminal row kept its key is stored",
-    case: "action-scheduler",
-    path: ["staleUniqueKey"],
-    live: {
-      secondIsNew: true,
-      rows: [
-        { status: "canceled", keyed: "0" },
-        { status: "pending", keyed: "1" },
-      ],
-    },
-    sqlite: { secondIsNew: true, rows: [{ status: "canceled", keyed: "1" }] },
-  },
-  {
-    row: 12,
-    what: "insert_id after INSERT IGNORE of a duplicate",
-    case: "misc",
-    path: ["insertIgnoreDuplicate", "write", "insertId"],
-    live: 0,
-    sqlite: 1,
-  },
-  {
-    row: 12,
-    what: "insert_id after INSERT ... SELECT of no rows",
-    case: "misc",
-    path: ["insertSelectNothing", "insertId"],
-    live: 0,
-    sqlite: 6,
-  },
-  {
-    row: 13,
-    what: "affected rows of an upsert that updates",
-    case: "misc",
-    path: ["onDuplicateKeyUpdate", "updated", "result"],
-    live: 2,
-    sqlite: 1,
-  },
-  {
-    row: 13,
-    what: "affected rows of an upsert after another insert",
-    case: "misc",
-    path: ["onDuplicateKeyUpdate", "updatedAfterOtherInsert", "result"],
-    live: 2,
-    sqlite: 1,
-  },
-  {
-    row: 13,
-    what: "insert_id of an upsert names the updated row",
-    case: "misc",
-    path: ["onDuplicateKeyUpdate", "updatedAfterOtherInsert", "insertIdIsUpdatedRow"],
-    live: true,
-    sqlite: false,
-  },
-  {
-    row: 14,
-    what: "affected rows of an upsert that changes nothing",
-    case: "misc",
-    path: ["onDuplicateKeyUpdate", "unchanged", "result"],
-    live: 0,
-    sqlite: 1,
-  },
-  {
-    row: 14,
-    what: "insert_id of an upsert that changes nothing",
-    case: "misc",
-    path: ["onDuplicateKeyUpdate", "unchanged", "insertId"],
-    live: 0,
-    sqlite: 3,
-  },
-  {
-    row: 15,
-    what: "affected rows of an UPDATE that changes nothing",
-    case: "misc",
-    path: ["updateAffectedRows", "unchanged", "result"],
-    live: 0,
-    sqlite: 1,
-  },
-  // Cause: the translator has no LAST_INSERT_ID(). Fix (engine): register it on the connection.
-  {
-    row: 16,
-    what: "SELECT LAST_INSERT_ID()",
-    case: "misc",
-    path: ["insert", "lastInsertId"],
-    live: { value: 1, error: null },
-    sqlite: { value: null, error: "error" },
-  },
-  // Cause: the plugin answers GET_LOCK with the text '1=1' and locks nothing. Fix (engine):
-  // register GET_LOCK/RELEASE_LOCK backed by flock files beside DB_PATH (1, or 0 on timeout).
-  {
-    row: 17,
-    what: "GET_LOCK, then the same lock from a second session",
-    case: "misc",
-    path: ["namedLock"],
-    live: { first: "1", secondSession: "0" },
-    sqlite: { first: "1=1", secondSession: "1=1" },
   },
   // Cause: SQLite TEXT has no length. Fix (upstream plugin): truncate in non-strict mode, or
   // reject in strict mode, a value longer than the declared VARCHAR length.
@@ -510,6 +271,15 @@ describe("LIKE and search", () => {
 // ============================================================ case 3
 
 describe("transactions with SELECT ... FOR UPDATE", () => {
+  test.each(LIVE)("lock-wait-budget: SQLite preview matches %s (50 s)", async (live) => {
+    const [preview, server] = await Promise.all([
+      result("lock-wait-budget")("sqlite"),
+      result("lock-wait-budget")(live),
+    ]);
+    expect(preview).toEqual({ seconds: 50 });
+    expect(preview).toEqual(server);
+  });
+
   test.each(ENGINES)(
     "%s: a second read-modify-write waits for the first and reads its commit",
     async (engine) => {
@@ -634,9 +404,10 @@ describe("transactions with SELECT ... FOR UPDATE", () => {
 // ============================================================ case 4
 
 describe("Action Scheduler 4.2.0", () => {
-  test("live installs its tables, enqueues, claims and runs", async () => {
-    for (const live of LIVE) {
-      const scheduler = await result("action-scheduler")(live);
+  test.each(ENGINES)(
+    "%s installs its tables, deduplicates unique actions, claims and runs",
+    async (engine) => {
+      const scheduler = await result("action-scheduler")(engine);
       expect(at(scheduler, "tablesExist")).toBe(true);
       expect(at(scheduler, "createdTables")).toEqual([
         "actionscheduler_actions",
@@ -644,10 +415,18 @@ describe("Action Scheduler 4.2.0", () => {
         "actionscheduler_groups",
         "actionscheduler_logs",
       ]);
+      expect(at(scheduler, "scheduled", "uniqueAgain")).toBe(0);
       expect(at(scheduler, "claimed")).toEqual(["parity_due", "parity_unique"]);
       expect(at(scheduler, "ran")).toEqual(["parity_due:7", "parity_unique"]);
-    }
-  });
+      expect(at(scheduler, "staleUniqueKey")).toEqual({
+        secondIsNew: true,
+        rows: [
+          { status: "canceled", keyed: "0" },
+          { status: "pending", keyed: "1" },
+        ],
+      });
+    },
+  );
 
   parity("action-scheduler", [
     "createdTables",
@@ -669,19 +448,51 @@ describe("Action Scheduler 4.2.0", () => {
 // ============================================================ case 5
 
 describe("write reporting, defaults and locks", () => {
-  test("live reports MySQL's affected rows", async () => {
-    for (const live of LIVE) {
-      const misc = await result("misc")(live);
+  test.each(ENGINES)(
+    "%s reports MySQL affected rows, LAST_INSERT_ID(), and flock/server named locks",
+    async (engine) => {
+      const misc = await result("misc")(engine);
+      expect(at(misc, "insert", "lastInsertId")).toEqual({ value: 1, error: null });
+      expect(at(misc, "insertIgnoreDuplicate", "write", "insertId")).toBe(0);
+      expect(at(misc, "insertSelectNothing", "insertId")).toBe(0);
       expect(at(misc, "onDuplicateKeyUpdate", "updated", "result")).toBe(2);
+      expect(at(misc, "onDuplicateKeyUpdate", "unchanged", "result")).toBe(0);
+      expect(at(misc, "onDuplicateKeyUpdate", "unchanged", "insertId")).toBe(0);
+      expect(
+        at(misc, "onDuplicateKeyUpdate", "updatedAfterOtherInsert", "insertIdIsUpdatedRow"),
+      ).toBe(true);
       expect(at(misc, "updateAffectedRows", "unchanged", "result")).toBe(0);
-      expect(at(misc, "namedLock")).toEqual({ first: "1", secondSession: "0" });
-    }
-  });
+      const firstRow = { error: null, insertIdIsFirstRow: true, lastInsertIdIsFirstRow: true };
+      expect(at(misc, "replaceAndMultiRow")).toEqual({
+        replaceNew: { result: 1, ...firstRow },
+        replaceOverwrite: { result: 2, ...firstRow },
+        replaceOverwriteTwo: { result: 3, ...firstRow },
+        insertValues: { result: 3, ...firstRow },
+        insertSelect: { result: 3, ...firstRow },
+        replaceRows: { result: 3, ...firstRow },
+        keys: ["a", "m1", "m2", "m3", "r1", "sm1", "sm2", "sm3"],
+      });
+      expect(at(misc, "namedLock")).toEqual({
+        freeBefore: "1",
+        usedBeforeIsNull: true,
+        first: "1",
+        freeWhileHeld: "0",
+        usedWhileHeldIsId: true,
+        secondSession: "0",
+        otherReleaseWhileHeld: "0",
+        released: "1",
+        freeAfter: "1",
+        usedAfterIsNull: true,
+        secondAfterRelease: "1",
+      });
+    },
+  );
 
   parity("misc", [
     "insert",
     "insertIgnoreDuplicate",
     "insertSelectNothing",
+    "replaceAndMultiRow",
     "onDuplicateKeyUpdate",
     "updateAffectedRows",
     "nonStrictCoercion",
@@ -697,6 +508,22 @@ test("the SQLite preview database passes PRAGMA integrity_check", async () => {
   expect(await driver("sqlite", { action: "case", case: "integrity" })).toEqual({
     integrity: ["ok"],
   });
+});
+
+test("a preview indexed under SQLite's built-in NOCASE reopens in order", async () => {
+  expect(await driver("sqlite", { action: "case", case: "legacy-nocase" })).toEqual({
+    integrity: ["ok"],
+    stamped: true,
+    found: ["widget_block", "theme_mods_a", "a_b", "-x"],
+    duplicate: "duplicate",
+  });
+});
+
+test("the SQLite parity driver guards its plugin 3.1.3 seams against silent upgrades", async () => {
+  const guard = await driver("sqlite", { action: "case", case: "driver-guard" });
+  expect(at(guard, "wpdbClass")).toBe("Spacefast_SQLite_DB");
+  expect(at(guard, "driverClass")).toBe("Spacefast_MySQL_On_SQLite");
+  expect(at(guard, "bypassedError")).toEqual(expect.stringContaining("execute_sqlite_query"));
 });
 
 // ============================================================ harness

@@ -16,12 +16,14 @@ if (defined('DB_PATH') && DB_PATH !== $spacefastPreview['database']) {
 }
 if (!defined('DB_ENGINE')) define('DB_ENGINE', 'sqlite');
 if (!defined('DB_PATH')) define('DB_PATH', $spacefastPreview['database']);
-define('SQLITE_JOURNAL_MODE', 'WAL');
+if (!defined('SQLITE_JOURNAL_MODE')) define('SQLITE_JOURNAL_MODE', 'WAL');
+if (!defined('SQLITE_BUSY_TIMEOUT')) define('SQLITE_BUSY_TIMEOUT', 50000);
 require_once $spacefastSqlite . '/wp-includes/database/version.php';
 require_once $spacefastSqlite . '/constants.php';
 require_once $spacefastSqlite . '/wp-includes/database/load.php';
 require_once $spacefastSqlite . '/wp-includes/sqlite/class-wp-sqlite-db.php';
 require_once $spacefastSqlite . '/wp-includes/sqlite/install-functions.php';
+require_once __DIR__ . '/preview-db-driver.php';
 
 /**
  * Core starts the object cache under the global table prefix. This keeps the
@@ -29,7 +31,7 @@ require_once $spacefastSqlite . '/wp-includes/sqlite/install-functions.php';
  * preview's tables and cache keys, and remembers the box's prefix for the one
  * read of its plugin list.
  */
-final class Spacefast_Preview_SQLite_DB extends WP_SQLite_DB
+final class Spacefast_Preview_SQLite_DB extends Spacefast_SQLite_DB
 {
     public string $spacefast_box_prefix = '';
 

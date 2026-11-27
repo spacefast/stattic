@@ -191,7 +191,8 @@
     "engine/runtime/zero-v2-realtime.php",
     "engine/shared/spacepress-preview.php",
     "engine/shared/wordpress-cache-scope.php",
-    "engine/wordpress/preview-db.php"
+    "engine/wordpress/preview-db.php",
+    "engine/wordpress/preview-db-driver.php"
   ],
   "executables": ["bin/stattic-runtime"],
   "trees": [

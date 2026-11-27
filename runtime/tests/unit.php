@@ -5691,6 +5691,137 @@ if ($savedAccessPrivateRoot === null) {
 @rmdir($vpBase . '/.stattic');
 @rmdir($vpBase);
 
+// --- SpacePress preview SQLite parity helpers ----------------------------------------
+
+require_once __DIR__ . '/../engine/wordpress/preview-db-driver.php';
+
+check(SPACEFAST_PREVIEW_SQLITE_BUSY_TIMEOUT === 50000, 'preview SQLite busy timeout matches InnoDB 50s budget');
+check(spacefast_sqlite_like('%émile%', 'Émile Zola') === 1, 'preview SQLite LIKE folds Unicode case');
+check(spacefast_sqlite_like('%emile%', 'Émile Zola') === 1, 'preview SQLite LIKE folds accents');
+check(spacefast_sqlite_like('100\\%%', '100% sure', '\\', true) === 1, 'preview SQLite LIKE honors escaped percent');
+check(spacefast_sqlite_like('under\\_%', 'under_score', '\\', true) === 1, 'preview SQLite LIKE honors escaped underscore');
+check(spacefast_sqlite_like('under\\_%', 'underXscore', '\\', true) === 0, 'preview SQLite LIKE does not treat escaped underscore as wildcard');
+check(spacefast_sqlite_like('a', null) === null && spacefast_sqlite_like(null, 'a') === null, 'preview SQLite LIKE returns NULL on NULL input');
+check(spacefast_sqlite_like('a', 'a', null, true) === null, 'preview SQLite LIKE returns NULL on NULL escape');
+check(spacefast_sqlite_like('_', '한') === 1, 'preview SQLite LIKE matches one Hangul syllable with _');
+check(spacefast_sqlite_like('_', "\u{1100}\u{1161}\u{11AB}") === 1, 'preview SQLite LIKE matches decomposed Hangul jamo as one character');
+check(spacefast_sqlite_like('caf_', 'Café') === 1, 'preview SQLite LIKE _ matches an accented Latin letter');
+check(spacefast_sqlite_like('cafe', "Cafe\u{0301}") === 1, 'preview SQLite LIKE folds a combining accent');
+
+$sqliteParityPdo = PHP_VERSION_ID >= 80400 ? new Pdo\Sqlite('sqlite::memory:') : new PDO('sqlite::memory:');
+spacefast_sqlite_register_collation($sqliteParityPdo);
+spacefast_sqlite_register_like($sqliteParityPdo);
+$sqliteParityPdo->exec('CREATE TABLE t (v TEXT COLLATE NOCASE UNIQUE)');
+$sqliteParityPdo->exec("INSERT INTO t (v) VALUES ('Émile@example.com'), ('chloé@example.com'), ('pad@example.com')");
+check(
+    $sqliteParityPdo->query("SELECT v FROM t WHERE v = 'émile@example.com'")->fetchColumn() === 'Émile@example.com',
+    'preview SQLite NOCASE collation folds Unicode case'
+);
+check(
+    $sqliteParityPdo->query("SELECT v FROM t WHERE v = 'chloe@example.com'")->fetchColumn() === 'chloé@example.com',
+    'preview SQLite NOCASE collation folds accents'
+);
+check(
+    $sqliteParityPdo->query("SELECT v FROM t WHERE v = 'pad@example.com   '")->fetchColumn() === 'pad@example.com',
+    'preview SQLite NOCASE collation ignores trailing spaces (PAD SPACE)'
+);
+check(
+    (int) $sqliteParityPdo->query("SELECT 'Émile Zola' LIKE '%emile%' ESCAPE '\\'")->fetchColumn() === 1,
+    'preview SQLite 3-arg LIKE UDF overrides built-in SQLite LIKE'
+);
+check(
+    (int) $sqliteParityPdo->query("SELECT 'Émile Zola' LIKE '%emile%'")->fetchColumn() === 1,
+    'preview SQLite 2-arg LIKE UDF overrides built-in SQLite LIKE'
+);
+$contractFailedCleanly = false;
+try {
+    spacefast_sqlite_assert_plugin_contract();
+} catch (RuntimeException $e) {
+    $contractFailedCleanly = str_contains($e->getMessage(), 'WP_SQLite_DB');
+}
+check($contractFailedCleanly, 'preview SQLite plugin contract guard fails cleanly when plugin classes are absent');
+unset($sqliteParityPdo, $contractFailedCleanly);
+
+// A preview seeded before the parity collation built its NOCASE indexes in
+// SQLite's built-in order (ASCII lowercase, then bytes), where `_` sorts after
+// `-`, `.` and digits; ICU sorts it before them.
+$sqliteNocaseDir = sys_get_temp_dir() . '/sf-nocase-' . bin2hex(random_bytes(6));
+mkdir($sqliteNocaseDir);
+$sqliteNocaseOpen = static fn (string $path): PDO => PHP_VERSION_ID >= 80400
+    ? new Pdo\Sqlite('sqlite:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION])
+    : new PDO('sqlite:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$sqliteNocaseLegacy = static function (string $path, array $values) use ($sqliteNocaseOpen): void {
+    $pdo = $sqliteNocaseOpen($path);
+    $pdo->exec('CREATE TABLE o (id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE)');
+    $insert = $pdo->prepare('INSERT INTO o (name) VALUES (?)');
+    foreach ($values as $value) {
+        $insert->execute([$value]);
+    }
+};
+$sqliteNocaseRows = ['widget_block', 'theme_mods_a', 'a_b', '-x', 'a-b', 'a.b', 'a1', 'widget-x', 'theme.mods', '_z', 'Zed'];
+
+$legacyPath = $sqliteNocaseDir . '/legacy.sqlite';
+$sqliteNocaseLegacy($legacyPath, $sqliteNocaseRows);
+$stale = $sqliteNocaseOpen($legacyPath);
+spacefast_sqlite_register_collation($stale);
+check(
+    $stale->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) !== ['ok'],
+    'preview SQLite parity NOCASE over a built-in NOCASE index is out of order without a reindex'
+);
+$stale = null;
+$reopened = $sqliteNocaseOpen($legacyPath);
+check(spacefast_sqlite_prepare_nocase($reopened, $legacyPath, 1000), 'preview SQLite reindexes a built-in NOCASE database to the parity collation');
+check($reopened->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) === ['ok'], 'preview SQLite reindexed database passes integrity_check');
+check(
+    (int) $reopened->query('PRAGMA user_version')->fetchColumn() === spacefast_sqlite_nocase_marker(),
+    'preview SQLite stamps the NOCASE marker after reindexing'
+);
+$lookup = $reopened->prepare('SELECT name FROM o WHERE name = ?');
+$found = [];
+foreach (['WIDGET_BLOCK', 'theme_mods_a', 'A_B', '-X'] as $value) {
+    $lookup->execute([$value]);
+    $found[] = $lookup->fetchColumn();
+}
+check($found === ['widget_block', 'theme_mods_a', 'a_b', '-x'], 'preview SQLite reindexed NOCASE lookups find every row');
+$duplicate = null;
+try {
+    $reopened->exec("INSERT INTO o (name) VALUES ('Widget_Block')");
+} catch (PDOException $e) {
+    $duplicate = $e->getMessage();
+}
+check(is_string($duplicate) && str_contains($duplicate, 'UNIQUE constraint failed'), 'preview SQLite reindexed UNIQUE NOCASE index rejects a duplicate widget_block');
+$reopened = null;
+
+$second = $sqliteNocaseOpen($legacyPath);
+check(spacefast_sqlite_prepare_nocase($second, $legacyPath, 1000), 'preview SQLite reopens a stamped database with the parity collation');
+check($second->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) === ['ok'], 'preview SQLite stamped database stays in order on reopen');
+$second = null;
+
+$freshPath = $sqliteNocaseDir . '/fresh.sqlite';
+$fresh = $sqliteNocaseOpen($freshPath);
+check(spacefast_sqlite_prepare_nocase($fresh, $freshPath, 1000), 'preview SQLite new database uses the parity collation');
+check((int) $fresh->query('PRAGMA user_version')->fetchColumn() === spacefast_sqlite_nocase_marker(), 'preview SQLite new database is stamped at once');
+$fresh = null;
+
+// Rows distinct in SQLite's order but equal under the parity collation keep
+// the built-in order rather than lose a row to fit a UNIQUE index.
+$collidingPath = $sqliteNocaseDir . '/colliding.sqlite';
+$sqliteNocaseLegacy($collidingPath, ['cafe', 'café']);
+$colliding = $sqliteNocaseOpen($collidingPath);
+check(!spacefast_sqlite_prepare_nocase($colliding, $collidingPath, 1000), 'preview SQLite keeps built-in NOCASE when stored rows collide under the parity collation');
+check($colliding->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN) === ['ok'], 'preview SQLite colliding database stays in order');
+check((int) $colliding->query('SELECT COUNT(*) FROM o')->fetchColumn() === 2, 'preview SQLite colliding database keeps every row');
+$colliding = null;
+$collidingAgain = $sqliteNocaseOpen($collidingPath);
+check(!spacefast_sqlite_prepare_nocase($collidingAgain, $collidingPath, 1000), 'preview SQLite remembers a database that keeps built-in NOCASE');
+$collidingAgain = null;
+
+foreach (glob($sqliteNocaseDir . '/*') ?: [] as $file) {
+    @unlink($file);
+}
+@rmdir($sqliteNocaseDir);
+unset($sqliteNocaseDir, $sqliteNocaseOpen, $sqliteNocaseLegacy, $sqliteNocaseRows, $legacyPath, $stale, $reopened, $lookup, $found, $duplicate, $second, $freshPath, $fresh, $collidingPath, $colliding, $collidingAgain);
+
 if ($failures !== []) {
     fwrite(STDERR, "unit.php FAILED:\n");
     foreach ($failures as $failure) {

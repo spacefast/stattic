@@ -75,11 +75,55 @@ test("a SpacePress preview seeds its own SQLite database and promote initializes
         "f6ce35e8419d0b9326221a907627d905e25c2a5ba2afc86492811f14c851efe0",
       ),
     );
-    // Reports the database a request's WordPress booted on.
+    // Reports the database a request's WordPress booted on, and exercises
+    // Action Scheduler enqueue/dedup/claim/run on the preview's SQLite DB.
     mkdirSync(path.join(rt.root, "wp-content/mu-plugins"), { recursive: true });
     writeFileSync(
       path.join(rt.root, "wp-content/mu-plugins/test-database-probe.php"),
-      "<?php add_action('rest_api_init', static function (): void { register_rest_route('spacepress/v1', '/test-database', ['methods' => 'POST', 'permission_callback' => '__return_true', 'callback' => static fn (): array => ['database' => get_class($GLOBALS['wpdb']), 'guarded' => isset($GLOBALS['SPACEFAST_PREVIEW_GUARD'])]]); });\n",
+      `<?php
+add_action('rest_api_init', static function (): void {
+    register_rest_route('spacepress/v1', '/test-database', [
+        'methods' => 'POST',
+        'permission_callback' => '__return_true',
+        'callback' => static fn (): array => [
+            'database' => get_class($GLOBALS['wpdb']),
+            'guarded' => isset($GLOBALS['SPACEFAST_PREVIEW_GUARD']),
+        ],
+    ]);
+    register_rest_route('spacepress/v1', '/test-action-scheduler', [
+        'methods' => 'POST',
+        'permission_callback' => '__return_true',
+        'callback' => static function (): array {
+            $ran = [];
+            add_action('sf_preview_as_due', static function (int $n) use (&$ran): void {
+                $ran[] = "due:$n";
+            });
+            add_action('sf_preview_as_unique', static function () use (&$ran): void {
+                $ran[] = 'unique';
+            });
+            $dueId = as_schedule_single_action(time() - 60, 'sf_preview_as_due', [7], 'preview');
+            $uniqueId = as_enqueue_async_action('sf_preview_as_unique', [], 'preview', true);
+            $uniqueAgain = as_enqueue_async_action('sf_preview_as_unique', [], 'preview', true);
+            $store = ActionScheduler::store();
+            $claim = $store->stake_claim(10, null, ['sf_preview_as_due', 'sf_preview_as_unique']);
+            $claimed = array_map(static fn ($id): string => $store->fetch_action((string) $id)->get_hook(), $claim->get_actions());
+            sort($claimed);
+            $store->release_claim($claim);
+            $processed = ActionScheduler_QueueRunner::instance()->run('Preview');
+            sort($ran);
+            return [
+                'database' => get_class($GLOBALS['wpdb']),
+                'dueScheduled' => $dueId > 0,
+                'uniqueScheduled' => $uniqueId > 0,
+                'uniqueAgain' => $uniqueAgain,
+                'claimed' => $claimed,
+                'processedAtLeast' => $processed >= 2,
+                'ran' => $ran,
+            ];
+        },
+    ]);
+});
+`,
     );
     // The drop-in is the site's. The engine installs none, and a preview opens
     // its own database even beside one that, like Query Monitor's, replaces
@@ -322,6 +366,38 @@ add_action('sf_preview_test_job', static function () {
     assert.match(body, /SpacePress preview page/);
     assert.ok(existsSync(path.join(previewDir("ver_next"), "ready.json")));
     assert.deepEqual(await titles(versionHost("ver_next")), ["Preview note"]);
+    // Action Scheduler enqueue, unique deduplication, claim, and run work end-to-end
+    // on the preview's SQLite database without touching live MySQL tables.
+    const asProbe = await get(
+      rt,
+      versionHost("ver_next"),
+      "/wp-json/spacepress/v1/test-action-scheduler",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    const asProbeBody = await asProbe.text();
+    assert.equal(asProbe.status, 200, asProbeBody + rt.diagnostics());
+    assert.deepEqual(JSON.parse(asProbeBody), {
+      database: "Spacefast_Preview_SQLite_DB",
+      dueScheduled: true,
+      uniqueScheduled: true,
+      uniqueAgain: 0,
+      claimed: ["sf_preview_as_due", "sf_preview_as_unique"],
+      processedAtLeast: true,
+      ran: ["due:7", "unique"],
+    });
+    assert.equal(
+      String(
+        wp(
+          "eval",
+          `global $wpdb; echo (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}actionscheduler_actions WHERE hook LIKE 'sf_preview_as_%'");`,
+        ),
+      ),
+      "0",
+    );
     // A version's Functions call SpacePress through the relay, which arrives on
     // the Space's default hostname: a preview's calls still run on its own
     // database, and live's on the site's.

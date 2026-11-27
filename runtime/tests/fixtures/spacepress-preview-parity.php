@@ -453,12 +453,17 @@ UNIQUE KEY k (k)");
         'insertIdIsUpdatedRow' => $odkuAfterOther['insertId'] === (int) $value('id', 'b'),
     ];
     $selectNothing = parity_write("INSERT INTO $t (k, v) SELECT 'z', 1 FROM DUAL WHERE 1 = 0");
+    $replaceAndMultiRow = parity_replace_and_multi_row($lastInsertId);
 
     $stamped = (string) $value('stamped', 'a');
     $now = (string) $wpdb->get_var('SELECT NOW()');
 
-    // A second session, for named-lock exclusivity.
+    // A second session, for named-lock exclusivity, inspection and release.
+    $freeBefore = (string) $wpdb->get_var("SELECT IS_FREE_LOCK('parity-lock')");
+    $usedBefore = $wpdb->get_var("SELECT IS_USED_LOCK('parity-lock')");
     $first = (string) $wpdb->get_var("SELECT GET_LOCK('parity-lock', 0)");
+    $freeWhileHeld = (string) $wpdb->get_var("SELECT IS_FREE_LOCK('parity-lock')");
+    $usedWhileHeld = $wpdb->get_var("SELECT IS_USED_LOCK('parity-lock')");
     $primary = $wpdb;
     // The drop-in's deprecated PDO global would make a second connection warn.
     unset($GLOBALS['@pdo']);
@@ -466,12 +471,19 @@ UNIQUE KEY k (k)");
     $other = $request['engine'] === 'mysql' ? new wpdb(DB_USER, DB_PASSWORD, DB_NAME, DB_HOST) : new $class(DB_NAME);
     $GLOBALS['wpdb'] = $primary;
     $second = (string) $other->get_var("SELECT GET_LOCK('parity-lock', 0)");
-    $wpdb->get_var("SELECT RELEASE_LOCK('parity-lock')");
+    $otherReleaseWhileHeld = (string) $other->get_var("SELECT RELEASE_LOCK('parity-lock')");
+    $released = (string) $wpdb->get_var("SELECT RELEASE_LOCK('parity-lock')");
+    $freeAfter = (string) $wpdb->get_var("SELECT IS_FREE_LOCK('parity-lock')");
+    $usedAfter = $wpdb->get_var("SELECT IS_USED_LOCK('parity-lock')");
+    $secondAfterRelease = (string) $other->get_var("SELECT GET_LOCK('parity-lock', 0)");
+    $other->get_var("SELECT RELEASE_LOCK('parity-lock')");
+    $other->close();
 
     return [
         'insert' => $insert,
         'insertIgnoreDuplicate' => ['write' => $ignored, 'kept' => $value('v', 'a')],
         'insertSelectNothing' => $selectNothing,
+        'replaceAndMultiRow' => $replaceAndMultiRow,
         'onDuplicateKeyUpdate' => [
             'inserted' => $odkuInsert,
             'updated' => $odkuUpdate,
@@ -503,7 +515,136 @@ UNIQUE KEY k (k)");
             'total' => $wpdb->get_var('SELECT FOUND_ROWS()'),
         ],
         'literalComparisonIgnoresCase' => $wpdb->get_var("SELECT 'abc' = 'ABC'"),
-        'namedLock' => ['first' => $first, 'secondSession' => $second],
+        'namedLock' => [
+            'freeBefore' => $freeBefore,
+            'usedBeforeIsNull' => $usedBefore === null,
+            'first' => $first,
+            'freeWhileHeld' => $freeWhileHeld,
+            'usedWhileHeldIsId' => is_numeric($usedWhileHeld) && (int) $usedWhileHeld > 0,
+            'secondSession' => $second,
+            'otherReleaseWhileHeld' => $otherReleaseWhileHeld,
+            'released' => $released,
+            'freeAfter' => $freeAfter,
+            'usedAfterIsNull' => $usedAfter === null,
+            'secondAfterRelease' => $secondAfterRelease,
+        ],
+    ];
+}
+
+/**
+ * REPLACE counts each row it deletes; a multi-row INSERT or INSERT ... SELECT
+ * reports the FIRST id it generated. Ids are compared to the rows they name,
+ * because InnoDB may leave auto-increment gaps after a bulk insert.
+ */
+function parity_replace_and_multi_row(callable $lastInsertId): array
+{
+    global $wpdb;
+    $t = $wpdb->prefix . 'parity_replace';
+    parity_create($t, "id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+k varchar(32) NOT NULL,
+u varchar(32) NOT NULL,
+v int(11) NOT NULL DEFAULT 0,
+PRIMARY KEY  (id),
+UNIQUE KEY k (k),
+UNIQUE KEY u (u)");
+    $id = static fn (string $k): int => (int) $wpdb->get_var($wpdb->prepare("SELECT id FROM $t WHERE k = %s", $k));
+    $write = static function (string $sql, string $firstKey) use ($wpdb, $id, $lastInsertId): array {
+        $result = $wpdb->query($sql);
+        $insertId = (int) $wpdb->insert_id;
+        $last = $lastInsertId();
+
+        return [
+            'result' => $result,
+            'error' => parity_error_kind(parity_error()),
+            'insertIdIsFirstRow' => $insertId > 0 && $insertId === $id($firstKey),
+            'lastInsertIdIsFirstRow' => $last['value'] === $insertId,
+        ];
+    };
+
+    $new = $write("REPLACE INTO $t (k, u, v) VALUES ('a', 'x', 1)", 'a');
+    $overwrite = $write("REPLACE INTO $t (k, u, v) VALUES ('a', 'x', 2)", 'a');
+    parity_must("INSERT INTO $t (k, u, v) VALUES ('b', 'y', 1)");
+    $overwriteTwo = $write("REPLACE INTO $t (k, u, v) VALUES ('a', 'y', 3)", 'a');
+    $values = $write("INSERT INTO $t (k, u, v) VALUES ('m1', 'm1', 1), ('m2', 'm2', 1), ('m3', 'm3', 1)", 'm1');
+    $select = $write("INSERT INTO $t (k, u, v) SELECT CONCAT('s', k), CONCAT('s', u), v FROM $t WHERE k LIKE 'm%' ORDER BY k", 'sm1');
+    $replaceRows = $write("REPLACE INTO $t (k, u, v) VALUES ('r1', 'r1', 1), ('m2', 'r2', 1)", 'r1');
+
+    return [
+        'replaceNew' => $new,
+        'replaceOverwrite' => $overwrite,
+        'replaceOverwriteTwo' => $overwriteTwo,
+        'insertValues' => $values,
+        'insertSelect' => $select,
+        'replaceRows' => $replaceRows,
+        'keys' => parity_column("SELECT k FROM $t ORDER BY k"),
+    ];
+}
+
+/**
+ * A preview database seeded before the parity collation, its UNIQUE NOCASE
+ * index built in SQLite's built-in order, reopened through the preview driver.
+ */
+function parity_case_legacy_nocase(array $request): array
+{
+    $path = dirname((string) $request['dbPath']) . '/legacy-nocase.sqlite';
+    foreach (['', '-wal', '-shm'] as $suffix) {
+        @unlink($path . $suffix);
+    }
+    $seed = PHP_VERSION_ID >= 80400 ? new Pdo\Sqlite('sqlite:' . $path) : new PDO('sqlite:' . $path);
+    $seed->exec('CREATE TABLE wp_options (option_id INTEGER PRIMARY KEY AUTOINCREMENT, option_name TEXT NOT NULL COLLATE NOCASE UNIQUE, option_value TEXT NOT NULL)');
+    $insert = $seed->prepare("INSERT INTO wp_options (option_name, option_value) VALUES (?, '')");
+    foreach (['widget_block', 'theme_mods_a', 'a_b', '-x', 'a-b', 'a.b', 'a1', 'widget-x', '_z'] as $name) {
+        $insert->execute([$name]);
+    }
+    $seed = null;
+
+    $driver = new Spacefast_MySQL_On_SQLite('mysql-on-sqlite:path=' . $path . ';dbname=legacy', null, null, ['spacefast_db_path' => $path]);
+    $found = [];
+    foreach (['WIDGET_BLOCK', 'theme_mods_a', 'A_B', '-X'] as $name) {
+        $found[] = $driver->query("SELECT option_name FROM wp_options WHERE option_name = '$name'")->fetchColumn();
+    }
+    $duplicate = null;
+    try {
+        $driver->query("INSERT INTO wp_options (option_name, option_value) VALUES ('Widget_Block', '')");
+    } catch (Throwable $e) {
+        $duplicate = parity_error_kind($e->getMessage());
+    }
+    $pdo = $driver->get_sqlite_pdo();
+
+    return [
+        'integrity' => array_map('strval', $pdo->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN)),
+        'stamped' => (int) $pdo->query('PRAGMA user_version')->fetchColumn() === spacefast_sqlite_nocase_marker(),
+        'found' => $found,
+        'duplicate' => $duplicate,
+    ];
+}
+
+/** Driver upgrade guard: fails loudly if WP_MySQL_On_SQLite seams break. */
+function parity_case_driver_guard(): array
+{
+    global $wpdb;
+    spacefast_sqlite_assert_plugin_contract();
+
+    $bypassedError = null;
+    $bypass = new class('mysql-on-sqlite:path=:memory:;dbname=guard', null, null, ['spacefast_db_path' => ':memory:']) extends Spacefast_MySQL_On_SQLite {
+        public function execute_sqlite_query(string $sql, array $params = []): PDOStatement
+        {
+            // Simulate an upgraded plugin whose internal write path bypassed
+            // Spacefast_MySQL_On_SQLite::execute_sqlite_query().
+            return WP_MySQL_On_SQLite::execute_sqlite_query($sql, $params);
+        }
+    };
+    $bypass->query('CREATE TABLE guard_t (id bigint(20) unsigned NOT NULL AUTO_INCREMENT, v int(11) NOT NULL, PRIMARY KEY (id))');
+    try {
+        $bypass->query('INSERT INTO guard_t (v) VALUES (1)');
+    } catch (RuntimeException $e) {
+        $bypassedError = $e->getMessage();
+    }
+
+    return [
+        'driverClass' => get_class($wpdb->get_driver()),
+        'wpdbClass' => get_class($wpdb),
+        'bypassedError' => $bypassedError,
     ];
 }
 
@@ -609,6 +750,8 @@ try {
                 'integrity' => ['integrity' => array_map('strval', $wpdb->get_driver()->get_sqlite_pdo()->query('PRAGMA integrity_check')->fetchAll(PDO::FETCH_COLUMN))],
                 'action-scheduler' => parity_case_action_scheduler($parity_created_tables),
                 'misc' => parity_case_misc($request),
+                'driver-guard' => parity_case_driver_guard(),
+                'legacy-nocase' => parity_case_legacy_nocase($request),
             };
             break;
         case 'worker':

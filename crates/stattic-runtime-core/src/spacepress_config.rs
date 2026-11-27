@@ -39,11 +39,15 @@ fn is_spacefast_config_module(spec: &str) -> bool {
     SPACEFAST_CONFIG_MODULES.contains(&spec)
 }
 
-fn is_transparent_wrapper(callee: &Expression<'_>, wrappers: &WrapperImports<'_>) -> bool {
+fn is_transparent_wrapper(
+    callee: &Expression<'_>,
+    wrappers: &WrapperImports<'_>,
+    require_import: bool,
+) -> bool {
     match unwrap_expr(callee) {
         Expression::Identifier(id) => {
-            TRANSPARENT_WRAPPER_NAMES.contains(&id.name.as_str())
-                || wrappers.identifiers.contains(id.name.as_str())
+            wrappers.identifiers.contains(id.name.as_str())
+                || (!require_import && TRANSPARENT_WRAPPER_NAMES.contains(&id.name.as_str()))
         }
         Expression::StaticMemberExpression(member) => {
             if !TRANSPARENT_WRAPPER_NAMES.contains(&member.property.name.as_str()) {
@@ -298,7 +302,7 @@ fn find_inline_app_expr_inner<'a>(
         Expression::CallExpression(call)
             if !app_only
                 || (call.arguments.len() == 1
-                    && is_transparent_wrapper(&call.callee, wrappers)) =>
+                    && is_transparent_wrapper(&call.callee, wrappers, app_only)) =>
         {
             let first = call.arguments.first()?;
             match first {
@@ -397,5 +401,14 @@ mod tests {
         let extracted = extract_inline_app_only_config(aliased).expect("aliased defineConfig");
         assert!(extracted.contains("name: \"blog\""));
         assert!(!extracted.contains("wrap"));
+
+        let local_shadow = r#"
+            function defineConfig(c: { app: { name: string } }) {
+                return { ...c, runtime: { kind: "functions" } };
+            }
+            export default defineConfig({ app: { name: "blog" } });
+        "#;
+        assert!(extract_inline_app_only_config(local_shadow).is_none());
+        assert!(extract_inline_app_config(local_shadow).is_some());
     }
 }

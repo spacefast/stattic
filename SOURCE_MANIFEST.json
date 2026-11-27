@@ -1,7 +1,7 @@
 {
-  "revision": "bbb7e22deec7532506e1fe8c74ba575deeda57c6",
+  "revision": "dd6b70dc2f5a5fef917aff8c2224a51bda7cac57",
   "sourceHash": "563d17ec4b1336365cadf63d47b9293a0575208a5a3318bb60a920541bc44d62",
-  "manifestSha256": "11834633fdbbe865177a976007409940d462646c3664bf68f9504afc9540dcfa",
+  "manifestSha256": "83999f4cdc61b9eecf23356e75b9325f0bd154b9b2c33c300244522bf8e0e6b3",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "4d85224fcbe63f4f0c685ffdbfc77826e07093c6f65b655317ab6286391b3f08"
+      "sha256": "4a8b066d3a3e11b3644210ca1b30173829c4d3bb2b5433cb784b5425882678fc"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "49ecf75daff788fcea76e3499756eae00efc681d872de95e67b2c734c1a8ffcc"
+      "sha256": "1f3a36c3bf06a473eee5ebe34262967b6503be89b4d66a9686f45a37ba27a2a6"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16477,7 +16477,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/spacepress_config.rs",
-      "sha256": "38a9378d9626fc0b8cd288d4336d3b5647b46a3eb524092a969b386a75c09705"
+      "sha256": "4594ee0b0aa0bf44c4199e2656f9c55a5e3bb857cf47e6d56d7f46d1d68c2e7b"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",

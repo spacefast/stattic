@@ -151,7 +151,7 @@ function wp_tempnam(string $filename): string {
 }
 // wp_handle_sideload's contract as this surface depends on it: WordPress owns
 // the allowed-type verdict, and refuses by returning an error entry.
-function wp_handle_sideload(array $file, array $overrides): array {
+function wp_handle_sideload(array &$file, array $overrides): array {
   $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
   $types = ['txt' => 'text/plain', 'png' => 'image/png', 'jpg' => 'image/jpeg'];
   if (!isset($types[$extension])) return ['error' => 'Sorry, you are not allowed to upload this file type.'];

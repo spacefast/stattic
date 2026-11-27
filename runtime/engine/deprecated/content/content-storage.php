@@ -460,10 +460,8 @@ function spacefast_content_storage_upload(mixed $input): mixed
     if (!is_string($temporary) || $temporary === '' || file_put_contents($temporary, $bytes) === false) {
         return spacefast_content_storage_error(503, 'zero_storage_upload_failed', 'The file could not be staged.');
     }
-    $sideloaded = wp_handle_sideload(
-        ['name' => $filename, 'tmp_name' => $temporary, 'size' => strlen($bytes), 'error' => 0],
-        ['test_form' => false]
-    );
+    $file = ['name' => $filename, 'tmp_name' => $temporary, 'size' => strlen($bytes), 'error' => 0];
+    $sideloaded = wp_handle_sideload($file, ['test_form' => false]);
     if (!is_array($sideloaded) || isset($sideloaded['error']) || !isset($sideloaded['file'])) {
         if (file_exists($temporary)) {
             unlink($temporary);

@@ -21,7 +21,7 @@ edition = "2021"
 [workspace.dependencies]
 lol_html = "3.0.0"
 mime_guess = "2"
-pulldown-cmark = "0.13.4"
+pulldown-cmark = "0.13.6"
 regex = "1"
 serde_yaml = "0.9"
 # PNG raster output only: no animation codecs, no rayon. `woff2` decodes the

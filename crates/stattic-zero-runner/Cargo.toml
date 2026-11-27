@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 base64 = "0.22"
 libc = "0.2"
-mysql = "26"
+mysql = "28"
 rquickjs = "0.12.2"
 # Ed25519, HMAC and randomness for ctx.jwt / ctx.crypto. Already compiled in
 # through rustls, so the runner gains no new crate.

@@ -988,7 +988,7 @@ fn database_opts_from_url(url: &str, source: DatabaseUrlSource) -> Result<Opts, 
         ));
     }
 
-    // mysql v26 uses the same host for TCP resolution and TLS identity. It
+    // mysql v28 uses the same host for TCP resolution and TLS identity. It
     // cannot dial a validated IP while preserving the original hostname for
     // SNI and certificate verification. Connecting with the hostname reopens
     // DNS rebinding; connecting with the IP changes TLS identity; accepting no

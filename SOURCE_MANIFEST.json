@@ -1,7 +1,7 @@
 {
-  "revision": "cbbd4abaaefff5d1edd91350d32b1c4d1819d1f6",
-  "sourceHash": "a32b5f2fb20dc0934967f734f92aea06b8c12e03b3ba8f5406bbe772be1890c1",
-  "manifestSha256": "76cf3e5c03b69dc569c2e673004c5014208b309dadb83d66a1468fd6a4d7ecf0",
+  "revision": "0d592383dc7e5082e65d8d0bd7015146a70c57e9",
+  "sourceHash": "88d2e09e775a2157a5e7f16339dcbe4e003376ec8226ec4b3f5030e50bbcc773",
+  "manifestSha256": "38d4c52393306fdd2789feb6324e047a35f440988bd24a0e257defa10ea441f9",
   "files": [
     {
       "path": ".gitignore",
@@ -9,19 +9,19 @@
     },
     {
       "path": "Cargo.lock",
-      "sha256": "69fdced637bd8eec864fd7ad38b382fe5b85fccd650075b1ec68d33233121b98"
+      "sha256": "8b552e8c33b4abd9d6f2c22e3936aa65260cec5ef63df8e405acac49111eaec2"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "939b7ea9af09d50329936d307ed58a0360d6fa19fb725e3c8fc371852e4c0152"
+      "sha256": "9c8a4e1a6177c02df5e2cca73ebfecbde4b9c56e7ea46286cae182f1497a5a8e"
     },
     {
       "path": "README.md",
-      "sha256": "eed527789ac48de281fa23eedec0c99bd77edc807d007f603788bb5af0419cf3"
+      "sha256": "6198be91a80771c87e86b7bfe9c23a2dbd1db3a4355354907c68fe60c07064d7"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "1cfe623f23d74742c3be22a7b0219875ce7c13c5c9e0f5db57c3be47f5e39019"
+      "sha256": "6c77cafdefc6010952401b8253e9cbc055f3d210af79976ab4504259eadcf33b"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16553,7 +16553,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/Cargo.toml",
-      "sha256": "6f339f845a98d9dc53cd5c2b18b42973210a7954fb58b28f8970d3fe0c922f4c"
+      "sha256": "54281c8acc22c7444be4e62b6731107ebeb68d53b08a0f01b79a5de8e598db68"
     },
     {
       "path": "crates/stattic-zero-runner/src/broker.rs",
@@ -16593,7 +16593,7 @@
     },
     {
       "path": "crates/stattic-zero-runner/src/legacy/zero-0.8/db.rs",
-      "sha256": "8767a68beea3ae67bc2a7f93f1011aa1f2b0f907b0dcdd5a2b1559b9b2990acd"
+      "sha256": "658eb4694496c30cefb80206b56ad436d5153d290606c14bdc1e1e0d302ab017"
     },
     {
       "path": "crates/stattic-zero-runner/src/legacy/zero-0.8/db/legacy.rs",
@@ -30185,7 +30185,7 @@
     },
     {
       "path": "runtime/engine/runtime/sell-client.js",
-      "sha256": "4c206f6c4867b31cfc17767556411da63ef7ff55f1b06a67b95e53713b6bcda6"
+      "sha256": "c85e8a840f7b651affe86133b672057832b518af84b178a396ef2c38c147f2bd"
     },
     {
       "path": "runtime/engine/runtime/sell.php",

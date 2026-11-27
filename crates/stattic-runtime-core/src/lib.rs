@@ -39,6 +39,7 @@ pub(crate) mod responses;
 pub mod routing;
 pub mod secret_scan;
 mod serving_paths;
+mod spacepress_config;
 #[cfg(not(target_family = "wasm"))]
 pub mod storage;
 pub mod transforms;

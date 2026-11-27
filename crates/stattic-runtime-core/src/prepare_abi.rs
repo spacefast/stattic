@@ -52,6 +52,7 @@ enum Operation {
     BuildRuntimePayload(RuntimePayloadInput),
     CompilePage(PageCompileInput),
     ScanSecrets(ScanSecretsInput),
+    ExtractSpacepressApp { source: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +96,9 @@ pub fn dispatch_json(input: &[u8]) -> Vec<u8> {
                     serde_json::to_value(build_runtime_payload(input))
                 }
                 Operation::CompilePage(input) => serde_json::to_value(compile_page(input)),
+                Operation::ExtractSpacepressApp { source } => serde_json::to_value(
+                    crate::spacepress_config::extract_inline_app_only_config(&source),
+                ),
                 Operation::ScanSecrets(input) => {
                     if input.format != SCAN_SECRETS_INPUT_FORMAT {
                         return serde_json::to_vec(&error_response(

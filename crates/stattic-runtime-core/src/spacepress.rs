@@ -20,13 +20,13 @@ use crate::{
     },
     model::SiteFinalizeInput,
     protocol::CONFIG_TYPESCRIPT_FILE,
+    spacepress_config::extract_inline_app_config,
     storage::{blob_path, blob_root},
     zero_v2::{self, Compiled},
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, BindingPattern, CallExpression, ExportDefaultDeclarationKind, Expression,
-    ImportDeclarationSpecifier, ImportOrExportKind, ObjectPropertyKind, PropertyKey, Statement,
+    Argument, CallExpression, Expression, ImportDeclarationSpecifier, ImportOrExportKind, Statement,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -115,188 +115,6 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Inspects `spacefast.config.ts` via Oxc and extracts a standalone SpacePress
-/// config module if its default export carries a top-level `app` property.
-/// Returns `None` for ordinary `spacefast.config.ts` files without `app`.
-pub(crate) fn extract_inline_app_config(source: &str) -> Option<String> {
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
-    if !parsed.diagnostics.is_empty() {
-        return None;
-    }
-
-    // Collect top-level `const x = ...` bindings in case `export default x;` is used.
-    let mut bindings: BTreeMap<&str, &Expression<'_>> = BTreeMap::new();
-    let mut default_expr: Option<&Expression<'_>> = None;
-    let mut default_stmt_span = None;
-
-    for stmt in &parsed.program.body {
-        match stmt {
-            Statement::VariableDeclaration(decl) => {
-                for declarator in &decl.declarations {
-                    if let (BindingPattern::BindingIdentifier(ident), Some(init)) =
-                        (&declarator.id, &declarator.init)
-                    {
-                        bindings.insert(ident.name.as_str(), init);
-                    }
-                }
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                default_stmt_span = Some(export.span);
-                if let Some(expr) = export_default_expression(&export.declaration) {
-                    default_expr = Some(expr);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let app_expr = find_inline_app_expr(default_expr?, &bindings)?;
-    let app_span = app_expr.span();
-    let app_slice = source
-        .get(app_span.start as usize..app_span.end as usize)?
-        .trim();
-    if app_slice.is_empty() {
-        return None;
-    }
-
-    let target_module = compiler::loader::SP_MODULE;
-    let mut out = String::new();
-    let needs_define_wrap = matches!(unwrap_expr(app_expr), Expression::ObjectExpression(_));
-    if needs_define_wrap {
-        out.push_str(&format!(
-            "import {{ defineConfig as __sp_defineConfig }} from \"{target_module}\";\n"
-        ));
-    }
-
-    for stmt in &parsed.program.body {
-        if default_stmt_span.is_some_and(|span| span == stmt.span()) {
-            continue;
-        }
-        match stmt {
-            Statement::ImportDeclaration(import) => {
-                let spec = import.source.value.as_str();
-                if matches!(
-                    spec,
-                    "spacefast" | "@spacefast/config" | "@spacefast/cli" | "@spacefast/common"
-                ) {
-                    continue;
-                }
-                let span = import.span;
-                if let Some(slice) = source.get(span.start as usize..span.end as usize) {
-                    out.push_str(slice);
-                    out.push('\n');
-                }
-            }
-            Statement::VariableDeclaration(decl) => {
-                // Skip the outer config binding itself if `export default config;` referenced it.
-                if let Some(Expression::Identifier(ident)) = default_expr.map(unwrap_expr) {
-                    let declares_default = decl.declarations.iter().any(|d| {
-                        matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == ident.name)
-                    });
-                    if declares_default {
-                        continue;
-                    }
-                }
-                let span = decl.span;
-                if let Some(slice) = source.get(span.start as usize..span.end as usize) {
-                    out.push_str(slice);
-                    out.push('\n');
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if needs_define_wrap {
-        out.push_str(&format!("export default __sp_defineConfig({app_slice});\n"));
-    } else {
-        out.push_str(&format!("export default {app_slice};\n"));
-    }
-    Some(out)
-}
-
-fn export_default_expression<'a>(
-    decl: &'a ExportDefaultDeclarationKind<'a>,
-) -> Option<&'a Expression<'a>> {
-    decl.as_expression()
-}
-
-fn unwrap_expr<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
-    loop {
-        match expr {
-            Expression::ParenthesizedExpression(inner) => expr = &inner.expression,
-            Expression::TSAsExpression(inner) => expr = &inner.expression,
-            Expression::TSSatisfiesExpression(inner) => expr = &inner.expression,
-            Expression::TSNonNullExpression(inner) => expr = &inner.expression,
-            Expression::TSTypeAssertion(inner) => expr = &inner.expression,
-            _ => return expr,
-        }
-    }
-}
-
-fn find_inline_app_expr<'a>(
-    expr: &'a Expression<'a>,
-    bindings: &BTreeMap<&str, &'a Expression<'a>>,
-) -> Option<&'a Expression<'a>> {
-    let mut visited = std::collections::HashSet::new();
-    find_inline_app_expr_inner(expr, bindings, &mut visited, 0)
-}
-
-fn find_inline_app_expr_inner<'a>(
-    expr: &'a Expression<'a>,
-    bindings: &BTreeMap<&str, &'a Expression<'a>>,
-    visited: &mut std::collections::HashSet<&'a str>,
-    depth: usize,
-) -> Option<&'a Expression<'a>> {
-    if depth > 64 {
-        return None;
-    }
-    match unwrap_expr(expr) {
-        Expression::ObjectExpression(obj) => find_app_property(obj),
-        Expression::CallExpression(call) => {
-            let first = call.arguments.first()?;
-            match first {
-                Argument::SpreadElement(_) => None,
-                arg => arg.as_expression().and_then(|inner| {
-                    find_inline_app_expr_inner(inner, bindings, visited, depth + 1)
-                }),
-            }
-        }
-        Expression::Identifier(ident) => {
-            let name = ident.name.as_str();
-            if !visited.insert(name) {
-                return None;
-            }
-            let result = bindings
-                .get(name)
-                .and_then(|bound| find_inline_app_expr_inner(bound, bindings, visited, depth + 1));
-            visited.remove(name);
-            result
-        }
-        _ => None,
-    }
-}
-
-fn find_app_property<'a>(
-    obj: &'a oxc_ast::ast::ObjectExpression<'a>,
-) -> Option<&'a Expression<'a>> {
-    for prop in &obj.properties {
-        let ObjectPropertyKind::ObjectProperty(prop) = prop else {
-            continue;
-        };
-        let is_app = match &prop.key {
-            PropertyKey::StaticIdentifier(id) => id.name == "app",
-            PropertyKey::StringLiteral(lit) => lit.value == "app",
-            _ => false,
-        };
-        if is_app {
-            return Some(&prop.value);
-        }
-    }
-    None
 }
 
 // A released CLI can send a SpacePress envelope containing the TypedPress layout.

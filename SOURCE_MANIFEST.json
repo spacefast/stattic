@@ -1,7 +1,7 @@
 {
-  "revision": "86591524d403b6aa09a58ac5f59a3934099c2eb0",
-  "sourceHash": "2ac9cc97e5dfeb8bd6eb1018930251fd1aaa5158b72a64cbe9478c239500901c",
-  "manifestSha256": "38cee3dc55e6ca79d7c2525d21d85da430186866e9ef2a9f458c77d16815b546",
+  "revision": "bbb7e22deec7532506e1fe8c74ba575deeda57c6",
+  "sourceHash": "563d17ec4b1336365cadf63d47b9293a0575208a5a3318bb60a920541bc44d62",
+  "manifestSha256": "11834633fdbbe865177a976007409940d462646c3664bf68f9504afc9540dcfa",
   "files": [
     {
       "path": ".gitignore",
@@ -17,11 +17,11 @@
     },
     {
       "path": "README.md",
-      "sha256": "5cff62871199941b5c5211d29c085d0e89ced55ff22a7675902e83807720d24a"
+      "sha256": "4d85224fcbe63f4f0c685ffdbfc77826e07093c6f65b655317ab6286391b3f08"
     },
     {
       "path": "SOURCE_PROVENANCE.md",
-      "sha256": "787f680a4bb6a4d1bf5c5dfdb3251d835bc0134ad0bfbae8dd1fbb037105f8b3"
+      "sha256": "49ecf75daff788fcea76e3499756eae00efc681d872de95e67b2c734c1a8ffcc"
     },
     {
       "path": "crates/spacefast-secret-scan/Cargo.toml",
@@ -16257,7 +16257,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/Cargo.toml",
-      "sha256": "c838f3d891daa57dd0e7d97014fb3886cb8d4f9609161e2b3f55ad2545ce05c3"
+      "sha256": "66875d20860df5b1464fb465fad40d4b6e40df33b1aeea8369c99bd7ea000b06"
     },
     {
       "path": "crates/stattic-runtime-core/src/access.rs",
@@ -16405,7 +16405,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/lib.rs",
-      "sha256": "d11780c30602f72d1186c28fbe29b045758a74d8d2b37456ed3516d8eaa4958d"
+      "sha256": "09cad7a3df88c2eb15d55d759769aba57225c58b47ec8d6f75e713c67d576431"
     },
     {
       "path": "crates/stattic-runtime-core/src/metadata.rs",
@@ -16425,7 +16425,7 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/prepare_abi.rs",
-      "sha256": "d436e536c3ed6369484ff051de5b68971e4a6efb7e5e2619089513ac3ff86bcc"
+      "sha256": "cd9764b1d9b4d472c22d8af6bbfb798d1b25a3c659c150a92f85238f476073be"
     },
     {
       "path": "crates/stattic-runtime-core/src/protocol.rs",
@@ -16473,7 +16473,11 @@
     },
     {
       "path": "crates/stattic-runtime-core/src/spacepress.rs",
-      "sha256": "fe7636c9ea9db2947798f4d608b5e143e78e8c5c586242c14ecaf2cd4cb16cd3"
+      "sha256": "85170d45cc3516f83b8d4de3c750a35806b5b3c00e2850ec5707330a012834fd"
+    },
+    {
+      "path": "crates/stattic-runtime-core/src/spacepress_config.rs",
+      "sha256": "38a9378d9626fc0b8cd288d4336d3b5647b46a3eb524092a969b386a75c09705"
     },
     {
       "path": "crates/stattic-runtime-core/src/storage.rs",

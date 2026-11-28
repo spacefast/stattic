@@ -445,20 +445,25 @@ pub fn is_sensitive_upload_path(path: &str) -> bool {
     while let Some(inner) = crate::serving_paths::precompressed_source(effective) {
         effective = inner;
     }
-    let mut segments = effective.trim_start_matches('/').split('/').peekable();
-    while let Some(segment) = segments.next() {
+    let mut segments = effective
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|segment| *segment != ".")
+        .enumerate()
+        .peekable();
+    let mut in_mcp_config_dir = false;
+    let mut prev_segment: Option<&str> = None;
+    while let Some((index, segment)) = segments.next() {
         let is_dir_segment = segments.peek().is_some();
-        if [
-            ".git",
-            ".ssh",
-            ".aws",
-            ".npmrc",
-            ".netrc",
-            ".mcp.json",
-            "mcp.json",
-        ]
-        .iter()
-        .any(|blocked| segment.eq_ignore_ascii_case(blocked))
+        if [".git", ".ssh", ".aws", ".npmrc", ".netrc", ".mcp.json"]
+            .iter()
+            .any(|blocked| segment.eq_ignore_ascii_case(blocked))
+        {
+            return true;
+        }
+        if !is_dir_segment
+            && segment.eq_ignore_ascii_case("mcp.json")
+            && (index == 0 || in_mcp_config_dir)
         {
             return true;
         }
@@ -469,6 +474,19 @@ pub fn is_sensitive_upload_path(path: &str) -> bool {
         {
             return true;
         }
+        if is_dir_segment
+            && ((segment.starts_with('.')
+                && !(index == 0 && segment.eq_ignore_ascii_case(".well-known")))
+                || (segment.eq_ignore_ascii_case("User")
+                    && prev_segment.is_some_and(|dir| {
+                        dir.eq_ignore_ascii_case("Code")
+                            || dir.eq_ignore_ascii_case("Code - Insiders")
+                            || dir.eq_ignore_ascii_case("VSCodium")
+                    })))
+        {
+            in_mcp_config_dir = true;
+        }
+        prev_segment = Some(segment);
         if starts_with_ignore_ascii_case(segment, ".aider") {
             return true;
         }
@@ -2536,9 +2554,37 @@ mod tests {
             ".netrc",
             ".mcp.json",
             "mcp.json",
+            "./mcp.json",
+            "MCP.JSON",
+            "mcp.json.gz",
             "nested/.mcp.json",
             ".claude/settings.json",
             ".cursor/mcp.json",
+            ".vscode/mcp.json",
+            ".VSCODE/MCP.JSON",
+            ".vscode/mcp.json.br",
+            ".factory/mcp.json",
+            ".pi/mcp.json",
+            ".pi/agent/mcp.json",
+            ".warp/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".roo/mcp.json",
+            ".amazonq/mcp.json",
+            ".junie/mcp/mcp.json",
+            ".config/Code/User/mcp.json",
+            "Code/User/mcp.json",
+            "code/user/mcp.json",
+            "Code/User/mcp.json.gz",
+            "Code/User/profiles/work/mcp.json",
+            "Library/Application Support/Code/User/mcp.json",
+            "Library/Application Support/Code/User/profiles/1234/mcp.json",
+            "Library/Application Support/Code - Insiders/User/mcp.json",
+            "Code - Insiders/User/mcp.json",
+            "Library/Application Support/VSCodium/User/mcp.json",
+            "sub/.vscode/mcp.json",
+            ".well-known/.vscode/mcp.json",
+            ".config/.well-known/mcp.json",
+            "sub/.well-known/mcp.json",
             ".codex/config.toml",
             ".windsurf/settings.json",
             ".gemini/settings.json",
@@ -2558,6 +2604,11 @@ mod tests {
             "index.html",
             "assets/app.js",
             "docs/env-guide.md",
+            "api/docs/pages/changelog/packages/mcp.json",
+            "docs/api/docs/pages/changelog/packages/mcp.json",
+            "data/mcp.json",
+            "./data/mcp.json",
+            ".well-known/mcp.json",
             "CLAUDE.md",
             "AGENTS.md",
         ] {
